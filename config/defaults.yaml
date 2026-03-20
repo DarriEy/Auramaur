@@ -1,0 +1,104 @@
+# Auramaur default configuration
+
+execution:
+  live: true
+  paper_initial_balance: 111.0
+  limit_order_ttl_seconds: 300
+  spread_capture_min_bps: 50
+  stop_loss_pct: 30.0
+  profit_target_pct: 50.0
+  edge_erosion_min_pct: 2.0
+  time_decay_hours: 12.0
+
+risk:
+  max_drawdown_pct: 15.0
+  max_stake_per_market: 25.0
+  daily_loss_limit: 200.0
+  max_open_positions: 500
+  min_edge_pct: 5.0
+  min_liquidity: 1000.0
+  max_spread_pct: 5.0
+  confidence_floor: "LOW"
+  implied_prob_min: 0.05
+  implied_prob_max: 0.95
+  category_exposure_cap_pct: 60.0
+  time_to_resolution_min_hours: 24
+  second_opinion_divergence_max: 0.25
+
+kelly:
+  fraction: 0.40
+
+intervals:
+  market_scan_seconds: 300
+  news_poll_seconds: 120
+  analysis_seconds: 180
+  portfolio_check_seconds: 60
+  dashboard_refresh_seconds: 5
+
+nlp:
+  cache_ttl_breaking_seconds: 900
+  cache_ttl_slow_seconds: 7200
+  model: "opus"
+  max_tokens: 4096
+  # API intensity: "low", "medium", or "full_blast"
+  # low:        10 markets, 3 evidence, skip second opinion, 50 calls/day
+  # medium:     10 markets, 3 evidence, keep second opinion, 100 calls/day (default)
+  # full_blast: 50 markets, 10 evidence, keep second opinion, unlimited calls
+  # Individual settings below override the preset when set explicitly.
+  api_intensity: "full_blast"
+  skip_second_opinion: false
+  max_markets_per_cycle: 50
+  evidence_per_source: 10
+  daily_claude_call_budget: 0
+
+calibration:
+  min_samples: 30
+  refit_interval_hours: 6
+
+broker:
+  sync_interval_seconds: 60
+  use_limit_orders: true
+  limit_spread_threshold: 0.03
+  limit_edge_threshold: 20.0
+  limit_price_improvement_ticks: 1
+  max_slippage_bps: 100
+
+kalshi:
+  enabled: false
+  environment: "demo"
+
+ibkr:
+  enabled: false
+  environment: "paper"
+  host: "127.0.0.1"
+  paper_port: 7497
+  live_port: 7496
+  client_id: 1
+  max_contracts_per_symbol: 10
+
+ensemble:
+  enabled: false
+  source_weights_update_hours: 24
+  price_move_threshold_pct: 5.0
+
+llm_ensemble:
+  enabled: true
+  models: ["opus", "sonnet"]
+  min_samples_for_weights: 10
+  default_weight: 0.5
+
+market_maker:
+  enabled: true
+  min_spread_bps: 200       # minimum 2% spread to participate
+  quote_size: 10.0          # tokens per side
+  max_inventory: 50.0       # max directional exposure per market
+  max_markets: 5            # max simultaneous MM markets
+  refresh_seconds: 30       # re-quote frequency
+
+analysis:
+  mode: "strategic"   # "pipeline", "strategic", or "agent"
+
+logging:
+  level: "INFO"
+  json_format: true
+  file: "auramaur.log"

@@ -1,0 +1,161 @@
+"""Smart order router — decides limit vs market and computes optimal price."""
+
+from __future__ import annotations
+
+import structlog
+
+from auramaur.exchange.models import (
+    Market,
+    Order,
+    OrderBook,
+    OrderSide,
+    OrderType,
+    Signal,
+    TokenType,
+)
+
+log = structlog.get_logger()
+
+
+class SmartOrderRouter:
+    """Builds optimally-priced orders by inspecting the order book.
+
+    The router delegates to ``exchange.prepare_order()`` for the base order
+    (which handles Polymarket's always-BUY / token-swap semantics), then
+    refines the price and order type based on current book conditions.
+    """
+
+    def __init__(self, settings, exchange):
+        self._settings = settings
+        self._exchange = exchange
+
+    async def route(
+        self,
+        signal: Signal,
+        market: Market,
+        size_dollars: float,
+        is_live: bool,
+    ) -> Order | None:
+        """Build an optimally-priced order.
+
+        1. Call ``exchange.prepare_order()`` to get the base order (handles
+           Polymarket token swap logic).
+        2. Fetch the order book for the relevant token.
+        3. Decision matrix:
+           - spread >= 0.03 AND edge > 10%  -> LIMIT at best_bid + 0.01
+             (capture spread, patient fill)
+           - spread < 0.03 OR edge > 20%    -> MARKET (cross spread, fast
+             execution)
+        4. Adjust price based on order book depth.
+        5. Return ``Order`` with optimal price and type.
+        """
+        base_order = self._exchange.prepare_order(
+            signal=signal,
+            market=market,
+            position_size=size_dollars,
+            is_live=is_live,
+        )
+        if base_order is None:
+            log.info(
+                "router.no_base_order",
+                market_id=market.id,
+                size_dollars=size_dollars,
+            )
+            return None
+
+        # Fetch live order book for the token we're trading
+        try:
+            book = await self._exchange.get_order_book(base_order.token_id)
+        except Exception:
+            book = OrderBook()  # Empty book — fall back to market order
+
+        edge_pct = abs(signal.edge)
+        spread = book.spread
+
+        # Determine order type via decision matrix
+        # With 0% fees, limit orders are always preferable (better price, no cost)
+        # Only use market orders for very high edge where speed matters
+        has_book = spread is not None and (book.best_bid is not None or book.best_ask is not None)
+
+        if has_book and edge_pct <= 25.0:
+            # Use limit order — better price, 0% maker fee
+            order_type = OrderType.LIMIT
+            limit_price = self._compute_limit_price(
+                book, base_order.side, base_order.token
+            )
+            log.info(
+                "router.limit_order",
+                market_id=market.id,
+                spread=round(spread, 4) if spread else None,
+                edge_pct=round(edge_pct, 2),
+                limit_price=limit_price,
+            )
+        else:
+            # Very high edge (>25%) or no book — cross immediately
+            order_type = OrderType.MARKET
+            limit_price = base_order.price
+            log.info(
+                "router.market_order",
+                market_id=market.id,
+                edge_pct=round(edge_pct, 2),
+                reason="high_edge" if edge_pct > 25.0 else "no_book",
+            )
+
+        # Build the final order with refined price / type
+        routed_order = base_order.model_copy(
+            update={
+                "price": limit_price,
+                "order_type": order_type,
+            }
+        )
+
+        log.info(
+            "router.order_ready",
+            market_id=market.id,
+            token=routed_order.token.value,
+            side=routed_order.side.value,
+            order_type=routed_order.order_type.value,
+            price=routed_order.price,
+            size=routed_order.size,
+        )
+
+        return routed_order
+
+    # ------------------------------------------------------------------
+    # Price helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _compute_limit_price(
+        book: OrderBook,
+        side: OrderSide,
+        token: TokenType,
+    ) -> float:
+        """Compute a limit price one tick inside the book.
+
+        For BUY orders:  best_bid + 0.01 (step ahead of resting bids).
+        For SELL orders: best_ask - 0.01 (step ahead of resting asks).
+
+        Result is clamped to the valid Polymarket tick range [0.01, 0.99].
+        """
+        if side == OrderSide.BUY:
+            if book.best_bid is not None:
+                price = book.best_bid + 0.01
+            elif book.best_ask is not None:
+                # No bids — use ask minus a tick
+                price = book.best_ask - 0.01
+            else:
+                # Empty book — fall back to midpoint of valid range
+                price = 0.50
+        else:
+            # SELL side
+            if book.best_ask is not None:
+                price = book.best_ask - 0.01
+            elif book.best_bid is not None:
+                price = book.best_bid + 0.01
+            else:
+                price = 0.50
+
+        # Clamp to valid Polymarket price range and round to tick
+        price = max(0.01, min(0.99, round(price, 2)))
+        return price
