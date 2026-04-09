@@ -98,12 +98,13 @@ class TestKalshiPrepareOrder:
         assert order.token == TokenType.YES
         assert order.exchange == "kalshi"
 
-    def test_sell_yes_direct(self):
-        """Kalshi supports direct SELL — no token swap."""
+    def test_sell_signal_becomes_buy_no(self):
+        """Kalshi SELL signal becomes BUY NO (can't sell what you don't own)."""
         client = self._make_client()
         market = _make_market()
         market.exchange = "kalshi"
         market.ticker = "KXTEST"
         order = client.prepare_order(_make_signal(OrderSide.SELL), market, 25.0, False)
         assert order is not None
-        assert order.side == OrderSide.SELL  # Direct sell, NOT swapped to BUY NO
+        assert order.side == OrderSide.BUY
+        assert order.token == TokenType.NO

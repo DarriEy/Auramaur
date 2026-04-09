@@ -214,6 +214,34 @@ class PositionReconciler:
             if row:
                 return row["id"]
 
+        # Try matching by slug / ticker
+        if slug:
+            row = await self._db.fetchone(
+                "SELECT id FROM markets WHERE ticker = ?",
+                (slug,),
+            )
+            if row:
+                return row["id"]
+
+        # No match — insert a stub so exits and risk checks can find it
+        if question and condition_id:
+            from datetime import datetime, timezone
+            stub_id = condition_id[:16]
+            try:
+                await self._db.execute(
+                    """INSERT OR IGNORE INTO markets
+                       (id, condition_id, question, last_updated)
+                       VALUES (?, ?, ?, ?)""",
+                    (stub_id, condition_id, question,
+                     datetime.now(timezone.utc).isoformat()),
+                )
+                await self._db.commit()
+                log.info("reconciler.stub_market_created",
+                         market_id=stub_id, question=question[:60])
+            except Exception:
+                pass
+            return stub_id
+
         return None
 
     @staticmethod
@@ -229,6 +257,47 @@ class PositionReconciler:
             elif tok.get("outcome") == "No":
                 no_id = tok.get("token_id", "")
         return yes_id, no_id
+
+    async def repair_orphaned_ids(self, reconciled: list[ReconciledPosition]) -> int:
+        """Fix cost_basis/portfolio entries that use truncated condition_ids.
+
+        When the reconciler previously couldn't match a condition_id to a
+        market, it stored condition_id[:16] as the market_id.  Now that we
+        may have the real mapping, update those rows.
+
+        Returns number of rows repaired.
+        """
+        repaired = 0
+        for pos in reconciled:
+            if not pos.market_id or pos.market_id == pos.condition_id[:16]:
+                continue  # Still unresolved
+
+            orphan_id = pos.condition_id[:16]
+            # Check if cost_basis has the orphan ID
+            row = await self._db.fetchone(
+                "SELECT market_id FROM cost_basis WHERE market_id = ?",
+                (orphan_id,),
+            )
+            if row:
+                await self._db.execute(
+                    "UPDATE cost_basis SET market_id = ? WHERE market_id = ?",
+                    (pos.market_id, orphan_id),
+                )
+                await self._db.execute(
+                    "UPDATE portfolio SET market_id = ? WHERE market_id = ?",
+                    (pos.market_id, orphan_id),
+                )
+                await self._db.execute(
+                    "UPDATE fills SET market_id = ? WHERE market_id = ?",
+                    (pos.market_id, orphan_id),
+                )
+                repaired += 1
+                log.info("reconciler.id_repaired",
+                         orphan_id=orphan_id, real_id=pos.market_id)
+
+        if repaired:
+            await self._db.commit()
+        return repaired
 
     def to_live_positions(
         self, reconciled: list[ReconciledPosition],

@@ -7,7 +7,7 @@ from datetime import date, datetime, timezone
 import structlog
 
 from auramaur.db.database import Database
-from auramaur.exchange.models import Fill, LivePosition, OrderSide
+from auramaur.exchange.models import Fill, LivePosition, OrderSide, TokenType
 
 log = structlog.get_logger()
 
@@ -158,6 +158,20 @@ class PnLTracker:
         if row is None:
             return 0.0, 0.0
         return float(row["avg_cost"]), float(row["size"])
+
+    async def get_token_info(self, market_id: str) -> tuple[TokenType, str]:
+        """Return ``(token_type, token_id)`` for a market from cost_basis.
+
+        Returns ``(TokenType.YES, "")`` if no cost basis exists.
+        """
+        row = await self._db.fetchone(
+            "SELECT token, token_id FROM cost_basis WHERE market_id = ?",
+            (market_id,),
+        )
+        if row is None:
+            return TokenType.YES, ""
+        token = TokenType(row["token"]) if row["token"] else TokenType.YES
+        return token, row["token_id"] or ""
 
     # ------------------------------------------------------------------
     # P&L calculations

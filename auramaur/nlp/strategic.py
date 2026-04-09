@@ -40,14 +40,29 @@ _MAX_CALIBRATION_ENTRIES = 50
 _MAX_WORLD_MODEL_CHARS = 8000
 
 
+class EntityRelation(BaseModel):
+    """A tracked entity and its relations to other entities/markets."""
+
+    state: str = ""  # Current understanding of this entity
+    relations: list[str] = Field(default_factory=list)  # How it connects to others
+    market_ids: list[str] = Field(default_factory=list)  # Markets this entity touches
+
+
 class WorldModel(BaseModel):
-    """Persistent world state that evolves across trading cycles."""
+    """Persistent world state that evolves across trading cycles.
+
+    The world model is structured relationally: entities exist through
+    their relations to other entities, not as isolated facts.  The
+    entity_graph is the primary structure; beliefs and patterns are
+    derived from it.
+    """
 
     macro_outlook: str = ""
     geopolitical_state: str = ""
     key_beliefs: list[str] = Field(default_factory=list)
     cross_market_patterns: list[str] = Field(default_factory=list)
     active_themes: list[str] = Field(default_factory=list)
+    entity_graph: dict[str, EntityRelation] = Field(default_factory=dict)
     last_updated: str = ""
     cycle_count: int = 0
 
@@ -55,13 +70,20 @@ class WorldModel(BaseModel):
         """Render a compact summary for the prompt context."""
         parts = []
         if self.macro_outlook:
-            parts.append(f"MACRO OUTLOOK:\n{self.macro_outlook}")
-        if self.geopolitical_state:
-            parts.append(f"GEOPOLITICAL STATE:\n{self.geopolitical_state}")
+            parts.append(f"MACRO STATE:\n{self.macro_outlook}")
+
+        # Entity graph — the primary relational structure
+        if self.entity_graph:
+            entity_lines = []
+            for name, entity in list(self.entity_graph.items())[-12:]:
+                rel_str = "; ".join(entity.relations[-3:]) if entity.relations else "no tracked relations"
+                entity_lines.append(f"- **{name}**: {entity.state[:120]} [{rel_str}]")
+            parts.append("ENTITY GRAPH:\n" + "\n".join(entity_lines))
+
         if self.key_beliefs:
             parts.append("KEY BELIEFS:\n" + "\n".join(f"- {b}" for b in self.key_beliefs[-10:]))
         if self.cross_market_patterns:
-            parts.append("CROSS-MARKET PATTERNS:\n" + "\n".join(f"- {p}" for p in self.cross_market_patterns[-5:]))
+            parts.append("RELATIONAL PATTERNS:\n" + "\n".join(f"- {p}" for p in self.cross_market_patterns[-8:]))
         if self.active_themes:
             parts.append("ACTIVE THEMES: " + ", ".join(self.active_themes[-8:]))
         return "\n\n".join(parts) if parts else "(No world model yet — this is the first cycle.)"
@@ -82,6 +104,7 @@ class StrategicAnalysis(BaseModel):
     """Full output from a strategic batch analysis."""
 
     markets: list[BatchAnalysisResult] = Field(default_factory=list)
+    entity_graph: dict = Field(default_factory=dict)
     world_model_update: str = ""
     new_patterns: list[str] = Field(default_factory=list)
     new_beliefs: list[str] = Field(default_factory=list)
@@ -94,10 +117,9 @@ class StrategicAnalysis(BaseModel):
 # ---------------------------------------------------------------------------
 
 STRATEGIC_BATCH_PROMPT = """\
-You are an elite superforecaster with a persistent memory. You maintain a \
-world model that evolves as you analyze markets and receive feedback. \
-You are being paid for ACCURACY, not for having opinions. Getting calibration \
-right matters more than being interesting.
+You are an elite superforecaster with a persistent memory.  You maintain \
+a relational world model — entities connected by relations, not isolated \
+facts.  You are being paid for ACCURACY, not for having opinions.
 
 === YOUR CURRENT WORLD MODEL ===
 {world_model}
@@ -106,37 +128,46 @@ right matters more than being interesting.
 {calibration_feedback}
 
 === ANALYTICAL FRAMEWORK ===
-For EACH market, apply these steps IN ORDER:
+You analyze markets in THREE PHASES.  The relational phase comes FIRST \
+because reality is relational — probabilities emerge from the web of \
+entities and forces, not from markets considered in isolation.
 
-1. **OUTSIDE VIEW (Base Rate):** Before reading evidence, what's the base rate \
-   for this type of event? Anchor here FIRST. Most people skip this step — \
-   don't. If you can't find a specific base rate, use these defaults:
-   - "Will X happen by date Y?" → typically 10-30% (most things don't happen)
+**PHASE 1 — RELATIONAL MAPPING (do this BEFORE estimating any probability)**
+
+Scan ALL markets in this batch and identify:
+- What ENTITIES appear across multiple markets? (people, institutions, \
+  forces, events)
+- What RELATIONS connect them? (causal, constraining, enabling, opposing)
+- What CLUSTERS of markets share a common entity or root cause?
+- What TENSIONS exist? (if market A implies X but market B implies not-X)
+
+This phase is where your edge comes from.  Markets price each question \
+independently.  Reality is relational.  When the market treats coupled \
+events as independent, one side is mispriced.
+
+**PHASE 2 — EVIDENCE-INFORMED ESTIMATION (per market, informed by Phase 1)**
+
+For each market:
+1. Base rate (outside view) — anchor here FIRST
+   - "Will X happen by date Y?" → typically 10-30%
    - "Will incumbent win?" → typically 60-70%
    - "Will policy/law change?" → typically 15-25%
-   - "Will company do X?" → typically 20-40%
+2. Evidence update — be specific: "this moves me from 20% to 35% because..."
+3. Fermi decomposition — P(A) × P(B|A) × P(C|A,B).  Joint probability is \
+   LOWER than any individual condition.
+4. Relational constraint — does your estimate for THIS market contradict \
+   your estimate for a RELATED market?  Resolve the contradiction.
 
-2. **INSIDE VIEW (Evidence):** Now read the evidence. How much should it \
-   update your base rate? Be specific: "This evidence moves me from 20% to 35% \
-   because..." NOT "the evidence suggests it's likely."
+Evidence quality: Reuters/AP/official > analysis > opinion > social media. \
+Thin evidence = stay closer to base rate.
 
-3. **FERMI DECOMPOSITION:** Break into sub-questions. Example: \
-   "Will X happen?" = P(condition A) × P(condition B|A) × P(condition C|A,B). \
-   If ANY condition is required, the joint probability is LOWER than any \
-   individual condition. Most people forget this.
+**PHASE 3 — COHERENCE CHECK**
 
-4. **EVIDENCE QUALITY CHECK:** Not all sources are equal. \
-   Reuters/AP/official statements > news analysis > opinion pieces > social media. \
-   Thin evidence = stay closer to base rate. One strong source > five weak ones.
-
-5. **CROSS-MARKET REASONING:** How does this market connect to others in \
-   this batch? If you estimate P(Iran war ends) = 20%, that constrains \
-   P(oil below $80) and P(Fed cuts rates).
-
-6. **FINAL CALIBRATION CHECK:**
-   - Is your estimate between 5-95%? If not, you need EXTRAORDINARY evidence.
-   - Would you bet real money at these odds? If not, adjust.
-   - Are you confusing "interesting narrative" with "high probability"?
+Review ALL estimates together:
+- Are they jointly consistent?  (P(war ends) = 70% but P(oil stays high) = 80%?)
+- Would the entity graph support this set of probabilities simultaneously?
+- Are you confusing "interesting narrative" with "high probability"?
+- Would you bet real money at these odds?
 
 === TODAY'S MARKETS ===
 {markets_block}
@@ -144,20 +175,27 @@ For EACH market, apply these steps IN ORDER:
 === YOUR RESPONSE ===
 Respond with valid JSON only (no markdown, no commentary outside JSON):
 {{
+  "entity_graph": {{
+    "<entity_name>": {{
+      "state": "<current understanding of this entity>",
+      "relations": ["<relation to other entity or force>", ...],
+      "market_ids": ["<ids of markets this entity touches>"]
+    }}
+  }},
   "markets": [
     {{
       "market_id": "<id>",
       "probability": <float 0-1>,
       "confidence": "<LOW|MEDIUM|HIGH>",
-      "reasoning": "<step-by-step: base rate → evidence update → decomposition → final>",
+      "reasoning": "<relational: which entities/relations inform this + base rate → update → final>",
       "key_factors": ["<factor>", ...],
-      "cross_market_notes": "<connections to other markets in this batch>"
+      "cross_market_notes": "<how this estimate constrains or is constrained by other estimates>"
     }},
     ...
   ],
   "world_model_update": "<concise update: what has changed since last cycle? \
     Focus on FACTS, not speculation. Include dates.>",
-  "new_patterns": ["<cross-market patterns noticed>", ...],
+  "new_patterns": ["<relational patterns: entity X's relation to Y changed because...>", ...],
   "new_beliefs": ["<updated beliefs — explicitly note if you're REVISING \
     a previous belief and why>", ...],
   "retired_beliefs": ["<beliefs from your world model that are now WRONG or \
@@ -313,29 +351,43 @@ class StrategicAnalyzer:
     def _format_markets_block(
         self, markets: list[Market], evidence_map: dict[str, list[NewsItem]],
     ) -> str:
-        """Format multiple markets with their evidence into a single block."""
+        """Format multiple markets with compressed evidence.
+
+        Instead of raw articles, evidence is compressed into structured
+        signal dimensions: facts, directional signals, temporal dynamics,
+        source consensus, and key excerpts.
+        """
+        from auramaur.nlp.evidence_compressor import compress_evidence
+
         blocks = []
         for i, market in enumerate(markets, 1):
             evidence = evidence_map.get(market.id, [])
-            ev_text = format_evidence(evidence) if evidence else "(No evidence found)"
 
-            # Market microstructure context
+            # Compress evidence into structured dimensions
+            if evidence:
+                ev_text = compress_evidence(
+                    market.question,
+                    market.description,
+                    evidence,
+                    max_chars=1500,  # ~375 tokens per market
+                )
+            else:
+                ev_text = "(No evidence found)"
+
+            # Compact market context
             micro = (
-                f"Current YES price: {market.outcome_yes_price:.1%} | "
-                f"NO price: {market.outcome_no_price:.1%} | "
-                f"Volume: ${market.volume:,.0f} | "
-                f"Liquidity: ${market.liquidity:,.0f} | "
-                f"Spread: {market.spread:.1%}"
+                f"YES: {market.outcome_yes_price:.0%} | "
+                f"Vol: ${market.volume:,.0f} | "
+                f"Liq: ${market.liquidity:,.0f}"
             )
 
             block = (
                 f"--- MARKET {i} (id: {market.id}) ---\n"
-                f"Question: {market.question}\n"
-                f"Description: {market.description[:300]}\n"
-                f"Category: {market.category}\n"
-                f"End date: {market.end_date.isoformat() if market.end_date else 'Unknown'}\n"
-                f"Market data: {micro}\n"
-                f"Evidence ({len(evidence)} items):\n{ev_text}\n"
+                f"Q: {market.question}\n"
+                f"Desc: {market.description[:200]}\n"
+                f"Cat: {market.category} | {micro} | "
+                f"End: {market.end_date.strftime('%Y-%m-%d') if market.end_date else '?'}\n"
+                f"Evidence:\n{ev_text}\n"
             )
             blocks.append(block)
 
@@ -570,6 +622,53 @@ class StrategicAnalyzer:
             wm.macro_outlook = result.world_model_update
             wm.geopolitical_state = ""
 
+        # Merge entity graph — entities are the primary relational structure
+        if result.entity_graph:
+            for name, entity_data in result.entity_graph.items():
+                if isinstance(entity_data, dict):
+                    entity = EntityRelation(
+                        state=entity_data.get("state", ""),
+                        relations=entity_data.get("relations", []),
+                        market_ids=entity_data.get("market_ids", []),
+                    )
+                elif isinstance(entity_data, EntityRelation):
+                    entity = entity_data
+                else:
+                    continue
+
+                if name in wm.entity_graph:
+                    # Update existing entity — merge relations, update state
+                    existing = wm.entity_graph[name]
+                    existing.state = entity.state or existing.state
+                    seen = set(existing.relations)
+                    for rel in entity.relations:
+                        if rel not in seen:
+                            existing.relations.append(rel)
+                    existing.relations = existing.relations[-8:]
+                    seen_ids = set(existing.market_ids)
+                    for mid in entity.market_ids:
+                        if mid not in seen_ids:
+                            existing.market_ids.append(mid)
+                    existing.market_ids = existing.market_ids[-20:]
+                else:
+                    wm.entity_graph[name] = entity
+
+            # Cap entity graph size — keep most recently updated
+            if len(wm.entity_graph) > 30:
+                # Keep the 30 entities with the most market connections
+                sorted_entities = sorted(
+                    wm.entity_graph.items(),
+                    key=lambda x: len(x[1].market_ids),
+                    reverse=True,
+                )
+                wm.entity_graph = dict(sorted_entities[:30])
+
+            log.info(
+                "strategic.entity_graph_updated",
+                entities=len(wm.entity_graph),
+                new_entities=len(result.entity_graph),
+            )
+
         # Retire stale beliefs BEFORE adding new ones
         if result.retired_beliefs:
             retired_lower = {b.lower() for b in result.retired_beliefs}
@@ -586,7 +685,7 @@ class StrategicAnalyzer:
 
         if result.new_patterns:
             wm.cross_market_patterns.extend(result.new_patterns)
-            wm.cross_market_patterns = wm.cross_market_patterns[-10:]
+            wm.cross_market_patterns = wm.cross_market_patterns[-15:]
 
         if result.active_themes:
             wm.active_themes = result.active_themes
@@ -600,6 +699,7 @@ class StrategicAnalyzer:
             cycle=wm.cycle_count,
             beliefs=len(wm.key_beliefs),
             patterns=len(wm.cross_market_patterns),
+            entities=len(wm.entity_graph),
             themes=wm.active_themes,
         )
 
@@ -635,7 +735,6 @@ class StrategicAnalyzer:
                     "--output-format", "text",
                     "--model", use_model,
                     "--effort", "max",
-                    "--max-turns", "3",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )

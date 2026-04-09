@@ -73,33 +73,65 @@ class SmartOrderRouter:
         spread = book.spread
 
         # Determine order type via decision matrix
-        # With 0% fees, limit orders are always preferable (better price, no cost)
-        # Only use market orders for very high edge where speed matters
+        # On 0% fee exchanges (Polymarket reward tier), limit orders are almost
+        # always better — you get price improvement for free.
+        #   - spread < $0.01: limit order (tight market, capture the spread)
+        #   - edge > 40%:     market order (urgency overrides price)
+        #   - otherwise:      limit order with price improvement (+1 tick)
         has_book = spread is not None and (book.best_bid is not None or book.best_ask is not None)
 
-        if has_book and edge_pct <= 25.0:
-            # Use limit order — better price, 0% maker fee
-            order_type = OrderType.LIMIT
-            limit_price = self._compute_limit_price(
-                book, base_order.side, base_order.token
-            )
-            log.info(
-                "router.limit_order",
-                market_id=market.id,
-                spread=round(spread, 4) if spread else None,
-                edge_pct=round(edge_pct, 2),
-                limit_price=limit_price,
-            )
-        else:
-            # Very high edge (>25%) or no book — cross immediately
+        if not has_book:
+            # No book data — fall back to market order
             order_type = OrderType.MARKET
             limit_price = base_order.price
             log.info(
                 "router.market_order",
                 market_id=market.id,
                 edge_pct=round(edge_pct, 2),
-                reason="high_edge" if edge_pct > 25.0 else "no_book",
+                reason="no_book",
             )
+        elif edge_pct > 40.0:
+            # Very high urgency — cross immediately
+            order_type = OrderType.MARKET
+            limit_price = base_order.price
+            log.info(
+                "router.market_order",
+                market_id=market.id,
+                edge_pct=round(edge_pct, 2),
+                reason="high_urgency",
+            )
+        else:
+            # Limit order — prefer price improvement on 0% fee exchange
+            candidate_price = self._compute_limit_price(
+                book, base_order.side, base_order.token
+            )
+
+            # Sanity check: limit price shouldn't deviate >30% from fair price
+            fair_price = base_order.price
+            if fair_price > 0 and abs(candidate_price - fair_price) / fair_price > 0.30:
+                # Book too thin — use market order at fair price
+                order_type = OrderType.MARKET
+                limit_price = fair_price
+                log.info(
+                    "router.market_order",
+                    market_id=market.id,
+                    edge_pct=round(edge_pct, 2),
+                    reason="thin_book",
+                    candidate=candidate_price,
+                    fair=fair_price,
+                )
+            else:
+                order_type = OrderType.LIMIT
+                limit_price = candidate_price
+                reason = "tight_spread" if (spread is not None and spread < 0.01) else "price_improvement"
+                log.info(
+                    "router.limit_order",
+                    market_id=market.id,
+                    spread=round(spread, 4) if spread else None,
+                    edge_pct=round(edge_pct, 2),
+                    limit_price=limit_price,
+                    reason=reason,
+                )
 
         # Build the final order with refined price / type
         routed_order = base_order.model_copy(

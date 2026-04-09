@@ -19,7 +19,7 @@ class Database:
         self._db = await aiosqlite.connect(self.db_path)
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("PRAGMA journal_mode=WAL")
-        await self._db.execute("PRAGMA foreign_keys=ON")
+        await self._db.execute("PRAGMA foreign_keys=OFF")
         await self._init_schema()
         log.info("database.connected", path=self.db_path)
 
@@ -54,6 +54,10 @@ class Database:
             await self._migrate_v3_to_v4()
         if from_version < 5:
             await self._migrate_v4_to_v5()
+        if from_version < 6:
+            await self._migrate_v5_to_v6()
+        if from_version < 7:
+            await self._migrate_v6_to_v7()
 
     async def _migrate_v1_to_v2(self) -> None:
         """Add category to calibration, add new tables."""
@@ -140,6 +144,44 @@ class Database:
         await self._db.execute("UPDATE schema_version SET version = 5")
         await self._db.commit()
         log.info("database.migrated", from_version=4, to_version=5)
+
+    async def _migrate_v5_to_v6(self) -> None:
+        """Add token and token_id columns to portfolio for correct exit pricing."""
+        alterations = [
+            ("portfolio", "token TEXT NOT NULL DEFAULT 'YES'"),
+            ("portfolio", "token_id TEXT DEFAULT ''"),
+        ]
+        for table, column_def in alterations:
+            try:
+                await self._db.execute(f"ALTER TABLE {table} ADD COLUMN {column_def}")
+            except Exception:
+                pass  # Column may already exist
+
+        # Backfill from cost_basis where available
+        try:
+            await self._db.execute("""
+                UPDATE portfolio SET
+                    token = COALESCE((SELECT token FROM cost_basis WHERE cost_basis.market_id = portfolio.market_id), 'YES'),
+                    token_id = COALESCE((SELECT token_id FROM cost_basis WHERE cost_basis.market_id = portfolio.market_id), '')
+            """)
+        except Exception:
+            pass
+
+        await self._db.execute("UPDATE schema_version SET version = 6")
+        await self._db.commit()
+        log.info("database.migrated", from_version=5, to_version=6)
+
+    async def _migrate_v6_to_v7(self) -> None:
+        """Add market_price column to nlp_cache for price-move invalidation."""
+        try:
+            await self._db.execute(
+                "ALTER TABLE nlp_cache ADD COLUMN market_price REAL DEFAULT 0"
+            )
+        except Exception:
+            pass  # Column may already exist
+        await self._db.execute("UPDATE schema_version SET version = 7")
+        await self._db.commit()
+        log.info("database.migrated", from_version=6, to_version=7)
 
     @property
     def db(self) -> aiosqlite.Connection:

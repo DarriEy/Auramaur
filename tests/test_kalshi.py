@@ -29,7 +29,8 @@ class TestKalshiMarketParsing:
         assert market.ticker == "KXFUT24-LSV"
         assert market.id == "KXFUT24-LSV"
         assert market.question == "Will event happen?"
-        assert market.outcome_yes_price == pytest.approx(0.65, abs=0.01)
+        # Midpoint of bid 0.65 and ask 0.68
+        assert market.outcome_yes_price == pytest.approx(0.665, abs=0.01)
         assert market.active is True
 
     def test_parse_market_closed(self):
@@ -96,8 +97,8 @@ class TestKalshiPaperGate:
 
 
 class TestKalshiPrepareOrderDirectSell:
-    def test_no_token_swap(self):
-        """Kalshi should produce a direct SELL order, not swap to BUY NO."""
+    def test_sell_signal_becomes_buy_no(self):
+        """Kalshi SELL signal should become BUY NO (can't sell what you don't own)."""
         client = KalshiClient.__new__(KalshiClient)
         from auramaur.exchange.models import Confidence, Signal
         signal = Signal(
@@ -118,5 +119,6 @@ class TestKalshiPrepareOrderDirectSell:
         )
         order = client.prepare_order(signal, market, 25.0, False)
         assert order is not None
-        assert order.side == OrderSide.SELL
+        assert order.side == OrderSide.BUY
+        assert order.token == TokenType.NO
         assert order.exchange == "kalshi"

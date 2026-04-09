@@ -15,7 +15,7 @@ risk:
   max_stake_per_market: 25.0
   daily_loss_limit: 200.0
   max_open_positions: 500
-  min_edge_pct: 5.0
+  min_edge_pct: 3.5
   min_liquidity: 1000.0
   max_spread_pct: 5.0
   confidence_floor: "LOW"
@@ -23,10 +23,11 @@ risk:
   implied_prob_max: 0.95
   category_exposure_cap_pct: 60.0
   time_to_resolution_min_hours: 24
+  max_correlated_positions: 10
   second_opinion_divergence_max: 0.25
 
 kelly:
-  fraction: 0.40
+  fraction: 0.30
 
 intervals:
   market_scan_seconds: 300
@@ -34,6 +35,14 @@ intervals:
   analysis_seconds: 180
   portfolio_check_seconds: 60
   dashboard_refresh_seconds: 5
+  # Adaptive scheduling — scale intensity by market activity
+  # Peak hours (US market open): full speed
+  # Off-peak (overnight): slow down to conserve Max plan usage
+  adaptive_enabled: true
+  peak_hours_utc: [13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]  # 9am-7pm ET
+  off_peak_multiplier: 4.0     # 4x slower at night (3min -> 12min analysis)
+  quiet_multiplier: 8.0        # 8x slower deep night (3min -> 24min)
+  quiet_hours_utc: [4, 5, 6, 7, 8, 9]  # midnight-5am ET
 
 nlp:
   cache_ttl_breaking_seconds: 900
@@ -45,11 +54,11 @@ nlp:
   # medium:     10 markets, 3 evidence, keep second opinion, 100 calls/day (default)
   # full_blast: 50 markets, 10 evidence, keep second opinion, unlimited calls
   # Individual settings below override the preset when set explicitly.
-  api_intensity: "full_blast"
+  api_intensity: "medium"
   skip_second_opinion: false
-  max_markets_per_cycle: 50
-  evidence_per_source: 10
-  daily_claude_call_budget: 0
+  max_markets_per_cycle: 12
+  evidence_per_source: 5
+  daily_claude_call_budget: 200
 
 calibration:
   min_samples: 30
@@ -64,8 +73,12 @@ broker:
   max_slippage_bps: 100
 
 kalshi:
-  enabled: false
-  environment: "demo"
+  enabled: true
+  environment: "prod"
+
+cryptodotcom:
+  enabled: true
+  environment: "sandbox"
 
 ibkr:
   enabled: false
@@ -82,8 +95,8 @@ ensemble:
   price_move_threshold_pct: 5.0
 
 llm_ensemble:
-  enabled: true
-  models: ["opus", "sonnet"]
+  enabled: false
+  models: ["opus"]
   min_samples_for_weights: 10
   default_weight: 0.5
 
@@ -94,6 +107,16 @@ market_maker:
   max_inventory: 50.0       # max directional exposure per market
   max_markets: 5            # max simultaneous MM markets
   refresh_seconds: 30       # re-quote frequency
+
+arbitrage:
+  enabled: true
+  min_profit_after_fees_pct: 1.5  # minimum % profit after all exchange fees
+  max_arb_size: 25.0              # max $ per leg
+  cross_exchange_auto_execute: true
+  exchange_fees:
+    polymarket: 0.0    # 0% for reward tier accounts
+    kalshi: 0.07       # ~7% on profits
+    cryptodotcom: 0.075  # ~0.075% maker/taker
 
 analysis:
   mode: "strategic"   # "pipeline", "strategic", or "agent"

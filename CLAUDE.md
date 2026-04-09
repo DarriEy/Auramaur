@@ -27,6 +27,9 @@
 - Max drawdown: 15%
 - Max stake per market: $25
 - Daily loss limit: $200
-- Max open positions: 15
+- Max open positions: 500
 - Minimum edge: 5% after fees
-- Kelly fraction: 25%
+- Kelly fraction: 40%
+- Confidence floor: LOW
+- Category exposure cap: 60%
+- Second opinion divergence max: 0.25

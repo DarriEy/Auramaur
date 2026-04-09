@@ -89,7 +89,7 @@ class PipelineAnalyzer:
             if not self._try_claim_market(market.id):
                 continue
             try:
-                queries = extract_search_queries(market.question, market.description)
+                queries = extract_search_queries(market.question, market.description, market.category or "")
                 all_evidence: list = []
                 seen_ids: set[str] = set()
                 for query in queries:
@@ -183,7 +183,7 @@ class PipelineAnalyzer:
         show_analyzing(market.question, market.id)
 
         # 1. Gather evidence
-        queries = extract_search_queries(market.question, market.description)
+        queries = extract_search_queries(market.question, market.description, market.category or "")
         all_evidence: list = []
         seen_ids: set[str] = set()
         per_query_limit = max(1, self.settings.nlp.evidence_per_source // len(queries)) if queries else self.settings.nlp.evidence_per_source

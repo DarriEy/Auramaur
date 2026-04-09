@@ -213,14 +213,28 @@ async def test_category_exposure_exceeded():
 # 13. Correlation
 @pytest.mark.asyncio
 async def test_correlation_few():
-    result = await check_correlation("market1", ["m2", "m3"])
+    result = await check_correlation("market1", 2.0)
     assert result.passed is True
 
 
 @pytest.mark.asyncio
 async def test_correlation_too_many():
-    result = await check_correlation("market1", ["m2", "m3", "m4", "m5", "m6", "m7"])
+    result = await check_correlation("market1", 6.0)
     assert result.passed is False
+
+
+@pytest.mark.asyncio
+async def test_correlation_weighted_category_only():
+    # 11 same-category positions with no semantic links = 11 * 0.3 = 3.3
+    result = await check_correlation("market1", 3.3)
+    assert result.passed is True
+
+
+@pytest.mark.asyncio
+async def test_correlation_weighted_semantic():
+    # 3 semantic relationships at strength 0.8 each = 2.4, plus 5 category-only = 1.5 → 3.9
+    result = await check_correlation("market1", 3.9)
+    assert result.passed is True
 
 
 # 14. Time to resolution

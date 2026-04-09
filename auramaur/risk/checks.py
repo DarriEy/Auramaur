@@ -168,7 +168,13 @@ async def check_max_spread(spread: float, max_spread_pct: float = 5.0) -> CheckR
 # 10. Confidence floor
 # ---------------------------------------------------------------------------
 
-_CONFIDENCE_ORDER = {Confidence.LOW: 0, Confidence.MEDIUM: 1, Confidence.HIGH: 2}
+_CONFIDENCE_ORDER = {
+    Confidence.LOW: 0,
+    Confidence.MEDIUM_LOW: 1,
+    Confidence.MEDIUM: 2,
+    Confidence.MEDIUM_HIGH: 3,
+    Confidence.HIGH: 4,
+}
 
 
 async def check_confidence_floor(
@@ -233,20 +239,24 @@ async def check_category_exposure(
 # ---------------------------------------------------------------------------
 
 async def check_correlation(
-    market_id: str, correlated_markets: list[str]
+    market_id: str, correlation_score: float, max_correlated: int = 5,
 ) -> CheckResult:
-    """Fail if too many correlated positions (>5)."""
-    count = len(correlated_markets)
-    too_many = count > 5
+    """Fail if weighted correlation score exceeds *max_correlated*.
+
+    The score is a weighted sum: semantic relationships count at full
+    strength (0.5–1.0 each), while same-category positions without a
+    semantic link count at 0.3 each.
+    """
+    too_many = correlation_score > max_correlated
     return CheckResult(
         name="correlation",
         passed=not too_many,
         reason=(
-            f"Market {market_id} has {count} correlated positions (max 5)"
+            f"Market {market_id} correlation score {correlation_score:.1f} (max {max_correlated})"
             if too_many
             else ""
         ),
-        value=count,
+        value=correlation_score,
     )
 
 

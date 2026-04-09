@@ -7,7 +7,7 @@ from datetime import date, datetime, timezone
 import structlog
 
 from auramaur.db.database import Database
-from auramaur.exchange.models import ExitReason, OrderSide, Position
+from auramaur.exchange.models import ExitReason, OrderSide, Position, TokenType
 
 log = structlog.get_logger()
 
@@ -26,17 +26,22 @@ class PortfolioTracker:
     async def get_positions(self) -> list[Position]:
         """Return all current open positions."""
         rows = await self.db.fetchall("SELECT * FROM portfolio")
-        return [
-            Position(
+        positions = []
+        for row in rows:
+            # token/token_id columns added in schema v6; handle older DBs
+            token_str = row["token"] if "token" in row.keys() else "YES"
+            token_id = row["token_id"] if "token_id" in row.keys() else ""
+            positions.append(Position(
                 market_id=row["market_id"],
                 side=OrderSide(row["side"]),
                 size=row["size"],
                 avg_price=row["avg_price"],
                 current_price=row["current_price"] or 0.0,
                 category=row["category"] or "",
-            )
-            for row in rows
-        ]
+                token=TokenType(token_str) if token_str else TokenType.YES,
+                token_id=token_id or "",
+            ))
+        return positions
 
     # ------------------------------------------------------------------
     # Category exposure
@@ -67,10 +72,18 @@ class PortfolioTracker:
     # Correlated markets
     # ------------------------------------------------------------------
 
-    async def get_correlated_markets(self, market_id: str) -> list[str]:
-        """Return other open-position market IDs in the same category as
-        *market_id*.  If *market_id* is not yet in the portfolio we look up
-        the category from the markets table instead."""
+    # Weight applied to same-category positions that have no semantic
+    # relationship.  Category alone is weak evidence of correlation.
+    CATEGORY_WEIGHT = 0.3
+
+    async def get_correlated_markets(self, market_id: str) -> float:
+        """Return a *weighted* correlation score for *market_id*.
+
+        Semantic relationships (strength >= 0.5) count at full weight.
+        Same-category positions without a semantic link count at
+        ``CATEGORY_WEIGHT`` (default 0.3) each.  This prevents a large
+        number of unrelated same-category positions from blocking trades.
+        """
         # Determine category
         row = await self.db.fetchone(
             "SELECT category FROM portfolio WHERE market_id = ?", (market_id,)
@@ -80,31 +93,55 @@ class PortfolioTracker:
                 "SELECT category FROM markets WHERE id = ?", (market_id,)
             )
         if row is None or not row["category"]:
-            return []
+            return 0.0
 
         category = row["category"]
-        rows = await self.db.fetchall(
-            "SELECT market_id FROM portfolio WHERE category = ? AND market_id != ?",
-            (category, market_id),
-        )
-        correlated = [r["market_id"] for r in rows]
 
-        # Also check semantic relationships
+        # --- Semantic relationships (full weight) ---
         rel_rows = await self.db.fetchall(
-            """SELECT market_id_a, market_id_b FROM market_relationships
+            """SELECT market_id_a, market_id_b, strength
+               FROM market_relationships
                WHERE (market_id_a = ? OR market_id_b = ?) AND strength >= 0.5""",
             (market_id, market_id),
         )
+        semantic_ids: dict[str, float] = {}
         for r in rel_rows:
-            related_id = r["market_id_b"] if r["market_id_a"] == market_id else r["market_id_a"]
-            # Only count if we have an open position in the related market
-            pos_row = await self.db.fetchone(
-                "SELECT market_id FROM portfolio WHERE market_id = ?", (related_id,)
+            related_id = (
+                r["market_id_b"] if r["market_id_a"] == market_id else r["market_id_a"]
             )
-            if pos_row and related_id not in correlated:
-                correlated.append(related_id)
+            # Only count if we hold a position in the related market
+            pos_row = await self.db.fetchone(
+                "SELECT market_id FROM portfolio WHERE market_id = ?",
+                (related_id,),
+            )
+            if pos_row:
+                # Use the relationship strength as weight (0.5–1.0)
+                semantic_ids[related_id] = max(
+                    semantic_ids.get(related_id, 0.0), float(r["strength"])
+                )
 
-        return correlated
+        # --- Same-category positions (discounted weight) ---
+        cat_rows = await self.db.fetchall(
+            "SELECT market_id FROM portfolio WHERE category = ? AND market_id != ?",
+            (category, market_id),
+        )
+
+        score = 0.0
+        for r in cat_rows:
+            mid = r["market_id"]
+            if mid in semantic_ids:
+                # Already counted at full semantic weight
+                score += semantic_ids[mid]
+            else:
+                # Category-only: weak signal
+                score += self.CATEGORY_WEIGHT
+
+        # Add any semantic relationships outside the category (cross-category)
+        for mid, strength in semantic_ids.items():
+            if not any(r["market_id"] == mid for r in cat_rows):
+                score += strength
+
+        return round(score, 1)
 
     # ------------------------------------------------------------------
     # PnL
@@ -161,9 +198,19 @@ class PortfolioTracker:
 
         Returns a list of (position, reason) tuples for positions that
         should be exited.
+
+        Exit hierarchy (evaluated in order):
+        1. Stop-loss — hard floor, prevent catastrophic loss
+        2. Trailing stop — lock in gains after a peak
+        3. Profit target — take profits at threshold
+        4. Edge erosion — price converging toward resolution boundary
+        5. Time decay — market expiring soon with thin edge remaining
         """
         positions = await self.get_positions()
         exits: list[tuple[Position, ExitReason]] = []
+
+        # Load peak prices for trailing stop calculation
+        peak_prices = await self._get_peak_prices()
 
         for pos in positions:
             # Refresh current price from discovery client
@@ -171,7 +218,15 @@ class PortfolioTracker:
                 market = await discovery_client.get_market(pos.market_id)
                 if market is None:
                     continue
-                pos.current_price = market.outcome_yes_price
+                # Use the correct price for the token we actually hold
+                if pos.token == TokenType.NO:
+                    pos.current_price = (
+                        market.outcome_no_price
+                        if market.outcome_no_price > 0.01
+                        else 1.0 - market.outcome_yes_price
+                    )
+                else:
+                    pos.current_price = market.outcome_yes_price
             except Exception as e:
                 log.debug("check_exits.price_error", market_id=pos.market_id, error=str(e))
                 continue
@@ -183,35 +238,118 @@ class PortfolioTracker:
             # Unrealized PnL percentage of cost basis
             pnl_pct = (pos.unrealized_pnl / cost_basis) * 100.0
 
-            # 1. Stop-loss
+            # Track peak PnL for trailing stop
+            peak_pnl_pct = peak_prices.get(pos.market_id, pnl_pct)
+            if pnl_pct > peak_pnl_pct:
+                peak_pnl_pct = pnl_pct
+                await self._update_peak_price(pos.market_id, pnl_pct)
+
+            # 1. Stop-loss — hard floor
             if pnl_pct <= -settings.execution.stop_loss_pct:
                 exits.append((pos, ExitReason.STOP_LOSS))
                 continue
 
-            # 2. Profit target
-            if pnl_pct >= settings.execution.profit_target_pct:
+            # 2. Trailing stop — if position was up 20%+ but has dropped
+            #    back more than half of peak gains, exit to lock in profit.
+            #    Only activates once position has been meaningfully profitable.
+            if peak_pnl_pct >= 20.0:
+                drawdown_from_peak = peak_pnl_pct - pnl_pct
+                if drawdown_from_peak > peak_pnl_pct * 0.5:
+                    log.info(
+                        "exit.trailing_stop",
+                        market_id=pos.market_id,
+                        peak_pnl=round(peak_pnl_pct, 1),
+                        current_pnl=round(pnl_pct, 1),
+                    )
+                    exits.append((pos, ExitReason.PROFIT_TARGET))
+                    continue
+
+            # 3. Profit target — time-aware: tighten near expiry, widen early
+            profit_target = settings.execution.profit_target_pct  # default +50%
+            if market.end_date is not None:
+                end_dt = market.end_date if market.end_date.tzinfo else market.end_date.replace(tzinfo=timezone.utc)
+                now = datetime.now(timezone.utc)
+                # Look up when position was first entered
+                entry_row = await self.db.fetchone(
+                    "SELECT MIN(timestamp) as first_entry FROM trades WHERE market_id = ?",
+                    (pos.market_id,),
+                )
+                if entry_row and entry_row["first_entry"]:
+                    entry_dt = datetime.fromisoformat(entry_row["first_entry"]).replace(tzinfo=timezone.utc)
+                else:
+                    entry_dt = now  # fallback: assume just entered
+
+                total_lifetime = (end_dt - entry_dt).total_seconds()
+                elapsed = (now - entry_dt).total_seconds()
+
+                if total_lifetime > 0:
+                    lifetime_fraction_remaining = 1.0 - (elapsed / total_lifetime)
+                    if lifetime_fraction_remaining > 0.50:
+                        # Early in position lifetime — let winners run
+                        profit_target = 75.0
+                    elif lifetime_fraction_remaining < 0.10:
+                        # Near expiry — take what you can
+                        profit_target = 25.0
+                    # else: keep default (50%)
+
+            if pnl_pct >= profit_target:
                 exits.append((pos, ExitReason.PROFIT_TARGET))
                 continue
 
-            # 3. Edge erosion: remaining price distance < threshold
+            # 4. Edge erosion — price converging on resolution boundary
+            #    measures how much room is left for the position to pay out
             if pos.side == OrderSide.BUY:
-                remaining_edge = (1.0 - pos.current_price) * 100.0
+                # Bought YES: need price to go to 1.0
+                remaining_upside = (1.0 - pos.current_price) * 100.0
+                # True edge erosion: compare current profit margin to entry
+                entry_upside = (1.0 - pos.avg_price) * 100.0
+                erosion = entry_upside - remaining_upside if entry_upside > 0 else 0
             else:
-                remaining_edge = pos.current_price * 100.0
+                # Bought NO / sold YES: need price to go to 0.0
+                remaining_upside = pos.current_price * 100.0
+                entry_upside = pos.avg_price * 100.0
+                erosion = entry_upside - remaining_upside if entry_upside > 0 else 0
 
-            if remaining_edge < settings.execution.edge_erosion_min_pct:
+            # Exit if remaining upside is tiny (near resolution boundary)
+            if remaining_upside < settings.execution.edge_erosion_min_pct:
                 exits.append((pos, ExitReason.EDGE_EROSION))
                 continue
 
-            # 4. Time decay: market resolves soon AND edge has shrunk below 5%
+            # 5. Time decay — market expiring soon with thin edge
             if market.end_date is not None:
                 end = market.end_date if market.end_date.tzinfo else market.end_date.replace(tzinfo=timezone.utc)
                 hours_left = (end - datetime.now(timezone.utc)).total_seconds() / 3600.0
-                if hours_left <= settings.execution.time_decay_hours and remaining_edge < 5.0:
+                if hours_left <= settings.execution.time_decay_hours and remaining_upside < 5.0:
                     exits.append((pos, ExitReason.TIME_DECAY))
                     continue
 
         return exits
+
+    async def _get_peak_prices(self) -> dict[str, float]:
+        """Load tracked peak PnL percentages for trailing stop."""
+        try:
+            rows = await self.db.fetchall(
+                "SELECT market_id, peak_pnl_pct FROM position_peaks"
+            )
+            return {r["market_id"]: r["peak_pnl_pct"] for r in rows}
+        except Exception:
+            # Table might not exist yet — will be created on first write
+            return {}
+
+    async def _update_peak_price(self, market_id: str, peak_pnl_pct: float) -> None:
+        """Track the highest PnL percentage reached for trailing stop."""
+        try:
+            await self.db.execute(
+                """INSERT INTO position_peaks (market_id, peak_pnl_pct, updated_at)
+                   VALUES (?, ?, datetime('now'))
+                   ON CONFLICT(market_id) DO UPDATE SET
+                       peak_pnl_pct = MAX(excluded.peak_pnl_pct, position_peaks.peak_pnl_pct),
+                       updated_at = excluded.updated_at""",
+                (market_id, peak_pnl_pct),
+            )
+            await self.db.commit()
+        except Exception as e:
+            log.debug("peak_price.update_error", error=str(e))
 
     # ------------------------------------------------------------------
     # Updates
@@ -221,14 +359,16 @@ class PortfolioTracker:
         """Insert or replace a position row in the portfolio table."""
         await self.db.execute(
             """
-            INSERT INTO portfolio (market_id, side, size, avg_price, current_price, category, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO portfolio (market_id, side, size, avg_price, current_price, category, token, token_id, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(market_id) DO UPDATE SET
                 side = excluded.side,
                 size = excluded.size,
                 avg_price = excluded.avg_price,
                 current_price = excluded.current_price,
                 category = excluded.category,
+                token = excluded.token,
+                token_id = excluded.token_id,
                 updated_at = excluded.updated_at
             """,
             (
@@ -238,6 +378,8 @@ class PortfolioTracker:
                 position.avg_price,
                 position.current_price,
                 position.category,
+                position.token.value,
+                position.token_id,
                 datetime.now(timezone.utc).isoformat(),
             ),
         )

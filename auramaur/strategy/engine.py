@@ -20,7 +20,7 @@ _CLAIM_DIR = os.path.join(tempfile.gettempdir(), "auramaur_claims")
 os.makedirs(_CLAIM_DIR, exist_ok=True)
 from auramaur.monitoring.display import (
     show_analysis, show_analyzing, show_cycle_summary,
-    show_evidence, show_order, show_risk_decision, show_scan_results,
+    show_evidence, show_order, show_order_dropped, show_risk_decision, show_scan_results,
 )
 from auramaur.nlp.analyzer import ClaudeAnalyzer
 from auramaur.nlp.cache import NLPCache
@@ -68,8 +68,66 @@ class TradingEngine:
         self.router = router
         self.allocator = allocator
         self.market_analyzer = market_analyzer
+        self.exchange_name = ""  # Set by bot after init (e.g. "polymarket", "kalshi")
         self.strategic = None  # StrategicAnalyzer, set by bot after init
         self._components_pnl = None  # Set by bot after init
+
+    @staticmethod
+    def _get_event_key(market_id: str) -> str:
+        """Extract event base from market ID for grouping."""
+        if market_id.startswith("KX") and market_id.count("-") >= 2:
+            return market_id.rsplit("-", 1)[0]
+        return market_id
+
+    async def _get_available_cash(self) -> float:
+        """Get available cash from syncer, exchange, or paper balance."""
+        syncer = getattr(self, '_components_syncer', None)
+        if syncer:
+            return await syncer.get_cash_balance()
+        # No syncer — try querying the exchange directly (e.g. Kalshi)
+        if hasattr(self.exchange, 'get_balance'):
+            try:
+                return await self.exchange.get_balance()
+            except Exception:
+                pass
+        return self.settings.execution.paper_initial_balance
+
+    async def _get_positions_and_cash(self) -> tuple[list, float]:
+        """Get current positions and cash for allocation."""
+        syncer = getattr(self, '_components_syncer', None)
+        if syncer:
+            positions = await syncer.sync()
+            cash = await syncer.get_cash_balance()
+            return positions, cash
+        # No syncer — get positions from portfolio table for this exchange
+        from auramaur.exchange.models import LivePosition
+        positions: list[LivePosition] = []
+        try:
+            if self.exchange_name:
+                # Join portfolio with markets to filter by exchange
+                rows = await self.db.fetchall(
+                    """SELECT p.market_id, p.size, p.avg_price, p.current_price
+                       FROM portfolio p
+                       JOIN markets m ON p.market_id = m.id
+                       WHERE p.size > 0 AND m.exchange = ?""",
+                    (self.exchange_name,),
+                )
+            else:
+                rows = await self.db.fetchall(
+                    """SELECT market_id, size, avg_price, current_price
+                       FROM portfolio WHERE size > 0"""
+                )
+            for row in rows:
+                positions.append(LivePosition(
+                    market_id=row["market_id"],
+                    size=row["size"],
+                    avg_cost=row.get("avg_price", 0) or 0,
+                    current_price=row.get("current_price", 0) or 0,
+                ))
+        except Exception:
+            pass
+        cash = await self._get_available_cash()
+        return positions, cash
 
     async def scan_and_store_markets(self, limit: int = 300) -> list[Market]:
         """Fetch markets from Gamma API and store in DB."""
@@ -81,11 +139,12 @@ class TradingEngine:
 
             await self.db.execute(
                 """INSERT OR REPLACE INTO markets
-                   (id, condition_id, question, description, category, end_date, active,
+                   (id, exchange, condition_id, question, description, category, end_date, active,
                     outcome_yes_price, outcome_no_price, volume, liquidity, last_updated)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    market.id, market.condition_id, market.question,
+                    market.id, market.exchange or self.exchange_name or "polymarket",
+                    market.condition_id, market.question,
                     market.description, category,
                     market.end_date.isoformat() if market.end_date else None,
                     int(market.active), market.outcome_yes_price, market.outcome_no_price,
@@ -135,6 +194,18 @@ class TradingEngine:
             "highest temperature", "°c on", "°f on",  # exact weather
             "exactly", "be between",  # narrow numeric ranges are noise
         ]
+
+        # Game-outcome sports markets — efficiently priced by sharps,
+        # no informational edge from news analysis.  News-driven sports
+        # questions (trades, draft, firings, playoffs) are kept.
+        _GAME_OUTCOMES = [
+            " vs ", " v ", "win game", "win tonight", "beat the",
+            "cover the spread", "over/under", "total points",
+            "total goals", "moneyline", "score more",
+        ]
+        if market.category in {"sports", "esports"}:
+            if any(p in q for p in _GAME_OUTCOMES):
+                return "game-outcome market — no edge vs sharps"
         if any(p in q for p in _UNRESEARCHABLE):
             return "unresearchable/speculation market"
 
@@ -142,9 +213,14 @@ class TradingEngine:
         if market.outcome_yes_price < 0.03 or market.outcome_yes_price > 0.97:
             return f"price {market.outcome_yes_price:.0%} — already settled"
 
-        # No-edge categories
-        if market.category in {"sports", "weather", "esports", "gambling"}:
-            return f"{market.category} — no informational edge"
+        # No-edge categories — only block gambling (pure chance) and
+        # exact-outcome weather (unresearchable).  Sports, esports, and
+        # general weather are left to the feedback loop: if the bot
+        # loses money on them, the avoid-category system blocks them
+        # dynamically.  News-driven sports questions (trades, firings,
+        # playoff qualification) can have real informational edge.
+        if market.category in {"gambling"}:
+            return f"{market.category} — pure chance, no informational edge"
 
         # Too short-term
         if market.end_date is not None:
@@ -153,7 +229,7 @@ class TradingEngine:
             hours_left = (end - now).total_seconds() / 3600
             if hours_left < 2:
                 return f"resolves in {hours_left:.1f}h — too short-term"
-            if hours_left > 2 * 365 * 24:
+            if hours_left > 10 * 365 * 24:
                 return f"resolves in {hours_left / (24 * 365):.1f}y — too speculative"
 
         return None
@@ -240,11 +316,34 @@ class TradingEngine:
         show_analyzing(market.question, market.id)
 
         # 1. Gather evidence (using decomposed queries for better results)
+        from auramaur.data_sources.base import NewsItem as _NI
         from auramaur.nlp.query_decomposer import extract_search_queries
 
-        queries = extract_search_queries(market.question, market.description)
+        # Enrich market description from CLOB if thin
+        if len(market.description) < 50 and market.condition_id:
+            try:
+                self.exchange._init_clob_client()
+                clob_info = self.exchange._clob_client.get_market(market.condition_id)
+                if clob_info and clob_info.get("description"):
+                    market.description = clob_info["description"][:1000]
+            except Exception:
+                pass
+
+        queries = extract_search_queries(market.question, market.description, market.category or "")
         all_evidence: list = []
         seen_ids: set[str] = set()
+
+        # Add market description as synthetic evidence (resolution criteria)
+        if market.description and len(market.description) > 20:
+            all_evidence.append(_NI(
+                id=f"polymarket_desc:{market.id}",
+                source="polymarket_context",
+                title=f"Resolution criteria: {market.question}",
+                content=market.description[:800],
+                url=f"https://polymarket.com/event/{market.id}",
+            ))
+            seen_ids.add(f"polymarket_desc:{market.id}")
+
         per_query_limit = max(1, self.settings.nlp.evidence_per_source // len(queries)) if queries else self.settings.nlp.evidence_per_source
         for query in queries:
             items = await self.aggregator.gather(query, limit_per_source=per_query_limit)
@@ -252,7 +351,7 @@ class TradingEngine:
                 if item.id not in seen_ids:
                     seen_ids.add(item.id)
                     all_evidence.append(item)
-        evidence = all_evidence[:self.settings.nlp.evidence_per_source * 3]  # Allow more total since we searched broader
+        evidence = all_evidence[:self.settings.nlp.evidence_per_source * 3]
         source_counts: dict[str, int] = {}
         for e in evidence:
             source_counts[e.source] = source_counts.get(e.source, 0) + 1
@@ -296,7 +395,40 @@ class TradingEngine:
             analysis.confidence, analysis.second_opinion_prob, analysis.divergence,
         )
 
-        # 4. Store signal
+        # Debug-log raw market data for suspiciously large edges (>30%)
+        # to help diagnose calibration or inverted-semantics issues.
+        if signal.edge > 30:
+            log.warning(
+                "signal.debug_dump",
+                market_id=market.id,
+                exchange=market.exchange,
+                question=market.question[:200],
+                description=(market.description or "")[:200],
+                category=market.category,
+                yes_price=market.outcome_yes_price,
+                no_price=market.outcome_no_price,
+                volume=market.volume,
+                liquidity=market.liquidity,
+                spread=market.spread,
+                claude_prob=signal.claude_prob,
+                claude_confidence=analysis.confidence,
+                edge_pct=signal.edge,
+                side=signal.recommended_side.value if signal.recommended_side else None,
+                reasoning=(analysis.reasoning or "")[:300],
+            )
+
+        # 4. Ensure market exists in DB then store signal
+        await self.db.execute(
+            """INSERT OR IGNORE INTO markets (id, exchange, condition_id, question, description,
+               category, active, outcome_yes_price, outcome_no_price,
+               volume, liquidity, last_updated)
+               VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))""",
+            (market.id, market.exchange or self.exchange_name or "polymarket",
+             market.condition_id, market.question,
+             market.description[:500], market.category,
+             market.outcome_yes_price, market.outcome_no_price,
+             market.volume, market.liquidity),
+        )
         await self.db.execute(
             """INSERT INTO signals (market_id, claude_prob, claude_confidence, market_prob,
                                      edge, second_opinion_prob, divergence, evidence_summary, action)
@@ -310,8 +442,9 @@ class TradingEngine:
         )
         await self.db.commit()
 
-        # 5. Risk evaluation
-        decision = await self.risk_manager.evaluate(signal, market, price_history=price_history)
+        # 5. Risk evaluation (pass actual cash for correct Kelly sizing)
+        cash = await self._get_available_cash()
+        decision = await self.risk_manager.evaluate(signal, market, price_history=price_history, available_cash=cash)
         checks_passed = sum(1 for c in decision.checks if c.passed)
         checks_failed = sum(1 for c in decision.checks if not c.passed)
         show_risk_decision(decision.approved, decision.reason, checks_passed, checks_failed, decision.position_size)
@@ -342,10 +475,59 @@ class TradingEngine:
             order = self.exchange.prepare_order(signal, market, size_dollars, self.settings.is_live)
 
         if order is None:
+            show_order_dropped(market.id, f"order build failed (${size_dollars:.2f} too small for CLOB minimum)")
+            log.warning(
+                "engine.order_dropped",
+                market_id=market.id,
+                size_dollars=size_dollars,
+                reason="prepare_order returned None (likely below CLOB minimum or router rejection)",
+            )
+            # Block re-evaluation for 24 hours — price won't change enough to matter
+            # and each re-analysis wastes a Claude API call for nothing.
+            try:
+                await self.db.execute(
+                    """INSERT OR REPLACE INTO order_build_drops
+                       (market_id, blocked_until, reason)
+                       VALUES (?, datetime('now', '+24 hours'), ?)""",
+                    (market.id, f"order build failed at ${size_dollars:.2f}"),
+                )
+                await self.db.commit()
+            except Exception:
+                pass  # Table may not exist yet
             return None
 
         result = await self.exchange.place_order(order)
-        show_order(result.status, result.order_id, order.side.value, order.size, order.price, result.is_paper)
+        show_order(result.status, result.order_id, order.side.value, order.size, order.price, result.is_paper, exchange=self.exchange_name, error_message=result.error_message)
+
+        # Cooldown on API errors — retry in 30 min, not every cycle
+        if result.status == "rejected" and result.order_id == "ERROR":
+            try:
+                await self.db.execute(
+                    """INSERT OR REPLACE INTO order_build_drops
+                       (market_id, blocked_until, reason)
+                       VALUES (?, datetime('now', '+30 minutes'), ?)""",
+                    (order.market_id, "place_order API error"),
+                )
+                await self.db.commit()
+            except Exception:
+                pass
+
+        # Log slippage
+        if result.status in ("filled", "paper", "pending") and result.filled_price > 0:
+            slippage_bps = (result.filled_price - order.price) / order.price * 10000
+            if order.side == OrderSide.SELL:
+                slippage_bps = -slippage_bps  # For sells, lower fill = worse
+            try:
+                await self.db.execute(
+                    """INSERT INTO slippage_log (market_id, exchange, side, expected_price, filled_price, slippage_bps, size, order_type)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (order.market_id, order.exchange or self.exchange_name, order.side.value,
+                     order.price, result.filled_price, round(slippage_bps, 2), order.size,
+                     order.order_type.value if hasattr(order, 'order_type') else 'limit'),
+                )
+                await self.db.commit()
+            except Exception:
+                pass
 
         # Record fill for P&L tracking
         if result.status in ("filled", "paper", "pending"):
@@ -372,23 +554,92 @@ class TradingEngine:
 
     async def _record_trade_for_attribution(self, market: Market, signal, decision) -> None:
         """Store trade metadata for later PnL attribution when the market resolves."""
+        # Determine token type based on signal side
+        from auramaur.exchange.models import TokenType
+        if signal.recommended_side == OrderSide.SELL:
+            token = TokenType.NO.value
+            price = market.outcome_no_price if market.outcome_no_price > 0.01 else (1.0 - market.outcome_yes_price)
+        else:
+            token = TokenType.YES.value
+            price = market.outcome_yes_price
+        token_id = market.clob_token_yes if token == "YES" else market.clob_token_no
+
         await self.db.execute(
-            """INSERT OR REPLACE INTO portfolio
-               (market_id, side, size, avg_price, current_price, category, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, datetime('now'))""",
+            """INSERT INTO portfolio
+               (market_id, side, size, avg_price, current_price, category, token, token_id, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+               ON CONFLICT(market_id) DO UPDATE SET
+                   size = excluded.size,
+                   avg_price = excluded.avg_price,
+                   current_price = excluded.current_price,
+                   category = excluded.category,
+                   token = excluded.token,
+                   token_id = excluded.token_id,
+                   updated_at = excluded.updated_at""",
             (
                 market.id,
-                signal.recommended_side.value if signal.recommended_side else "BUY",
+                "BUY",  # Always BUY on Polymarket
                 decision.position_size,
-                market.outcome_yes_price if signal.recommended_side == OrderSide.BUY else market.outcome_no_price,
-                market.outcome_yes_price if signal.recommended_side == OrderSide.BUY else market.outcome_no_price,
+                price, price,
                 market.category,
+                token, token_id,
             ),
         )
         await self.db.commit()
 
-    async def run_cycle(self) -> list[dict]:
-        """Run one full trading cycle."""
+    async def _run_cycle_starved(self) -> list[dict]:
+        """Watch mode when cash-starved: refresh prices only, zero Claude calls.
+
+        No point analyzing markets we can't trade. Just:
+        1. Refresh market prices (API calls to exchanges, not Claude)
+        2. Log a quiet status line
+        3. Return — exits and rebalancing are handled by the bot's
+           portfolio monitor and Kalshi sync, not the trading cycle.
+        """
+        import time
+        from auramaur.monitoring.display import show_cycle_summary
+
+        start = time.monotonic()
+
+        # Refresh prices for held positions — cheap exchange API calls only
+        await self.scan_and_store_markets()
+
+        elapsed = time.monotonic() - start
+        log.debug(
+            "engine.watch_mode",
+            exchange=self.exchange_name,
+            elapsed=round(elapsed, 1),
+        )
+        show_cycle_summary(0, 0, elapsed, exchange=self.exchange_name)
+        return []
+
+    async def run_cycle(self, cash_available: float | None = None) -> list[dict]:
+        """Run one full trading cycle.
+
+        When cash_available is provided and below $5, switches to
+        "starved mode": only re-prices held positions and checks
+        whether any new opportunity is so compelling it's worth
+        liquidating an existing stake.
+
+        When the engine's own exchange balance is below $1 (and there's
+        no syncer, e.g. Kalshi), skip the scan entirely to avoid wasting
+        Claude API calls on signals that can never become orders.
+        """
+        if not getattr(self, '_components_syncer', None):
+            try:
+                own_cash = await self._get_available_cash()
+                if own_cash < 1.0:
+                    log.info(
+                        "engine.skip_no_capital",
+                        exchange=self.exchange_name,
+                        cash=own_cash,
+                    )
+                    return []
+            except Exception:
+                pass
+        if cash_available is not None and cash_available < 5.0:
+            return await self._run_cycle_starved()
+
         import time
         start = time.monotonic()
 
@@ -397,9 +648,16 @@ class TradingEngine:
         candidates = [
             m for m in markets
             if m.active
-            and m.liquidity >= self.settings.risk.min_liquidity
+            # Use the HIGHER of liquidity and volume as the activity measure.
+            # Polymarket reports deep liquidity; Kalshi reports thin top-of-book
+            # liquidity but high volume on active markets. Using max() ensures
+            # active Kalshi markets aren't filtered out by the Polymarket-tuned
+            # min_liquidity threshold.
+            and max(m.liquidity or 0, m.volume or 0) >= self.settings.risk.min_liquidity
             and m.spread <= self.settings.risk.max_spread_pct / 100
             and self.settings.risk.implied_prob_min <= m.outcome_yes_price <= self.settings.risk.implied_prob_max
+            # Skip near-dead markets (no volume = orders won't fill)
+            and m.volume >= 100
         ]
 
         # --- Load avoid-categories from performance feedback ---
@@ -447,7 +705,42 @@ class TradingEngine:
         if not fresh_candidates:
             fresh_candidates = edge_candidates
 
-        show_scan_results(len(markets), len(fresh_candidates), filtered_count)
+        # Block markets whose event was recently rebalanced (prevents buy-sell loops)
+        try:
+            blocked_rows = await self.db.fetchall(
+                "SELECT event_key FROM rebalance_blocks WHERE blocked_until > datetime('now')"
+            )
+            blocked_events = {r["event_key"] for r in blocked_rows}
+            if blocked_events:
+                before = len(fresh_candidates)
+                fresh_candidates = [
+                    m for m in fresh_candidates
+                    if self._get_event_key(m.id) not in blocked_events
+                ]
+                blocked_count = before - len(fresh_candidates)
+                if blocked_count > 0:
+                    log.info("engine.rebalance_blocked", count=blocked_count, events=sorted(blocked_events))
+                    filtered_count += blocked_count
+        except Exception:
+            pass  # Table may not exist yet
+
+        # Block markets whose order build recently failed (e.g. below CLOB minimum)
+        try:
+            drop_rows = await self.db.fetchall(
+                "SELECT market_id FROM order_build_drops WHERE blocked_until > datetime('now')"
+            )
+            dropped_markets = {r["market_id"] for r in drop_rows}
+            if dropped_markets:
+                before = len(fresh_candidates)
+                fresh_candidates = [m for m in fresh_candidates if m.id not in dropped_markets]
+                drop_count = before - len(fresh_candidates)
+                if drop_count > 0:
+                    log.info("engine.order_build_blocked", count=drop_count, markets=sorted(dropped_markets))
+                    filtered_count += drop_count
+        except Exception:
+            pass  # Table may not exist yet
+
+        show_scan_results(len(markets), len(fresh_candidates), filtered_count, exchange=self.exchange_name)
 
         # Smart ranking — prioritize markets most likely to be mispriced
         from auramaur.strategy.market_selector import rank_markets
@@ -456,6 +749,26 @@ class TradingEngine:
         price_history = await self._get_price_history(hours=24)
         ranked = rank_markets(fresh_candidates, price_history=price_history)
         max_markets = self.settings.nlp.max_markets_per_cycle
+
+        # Deduplicate by event — max 2 variants per underlying event
+        # Prevents putting all eggs in one basket (e.g. 5 Taylor Swift bridesmaids)
+        _MAX_PER_EVENT = 2
+        event_counts: dict[str, int] = {}
+        deduped: list = []
+        for market, score in ranked:
+            # Extract event base: "KXNEWPOPE-70-PPIZ" → "KXNEWPOPE-70"
+            # For Polymarket numeric IDs, use question-based grouping
+            mid = market.id
+            if mid[0:2] == "KX" and mid.count("-") >= 2:
+                event_key = mid.rsplit("-", 1)[0]
+            else:
+                # Polymarket: use first 6 words of question as event key
+                event_key = " ".join(market.question.lower().split()[:6])
+            count = event_counts.get(event_key, 0)
+            if count < _MAX_PER_EVENT:
+                deduped.append((market, score))
+                event_counts[event_key] = count + 1
+        ranked = deduped
 
         # Shuffle within similar scores to avoid always picking the same ones
         if len(ranked) > max_markets:
@@ -487,7 +800,7 @@ class TradingEngine:
 
         elapsed = time.monotonic() - start
         trades = [r for r in results if r.get("order")]
-        show_cycle_summary(len(results), len(trades), elapsed)
+        show_cycle_summary(len(results), len(trades), elapsed, exchange=self.exchange_name)
 
         return results
 
@@ -508,6 +821,18 @@ class TradingEngine:
         alloc_candidates: list[CandidateTrade] = []
 
         for tc in trade_candidates:
+            # Ensure market exists in DB (FK requirement)
+            m = tc.market
+            await self.db.execute(
+                """INSERT OR IGNORE INTO markets (id, exchange, condition_id, question, description,
+                   category, active, outcome_yes_price, outcome_no_price,
+                   volume, liquidity, last_updated)
+                   VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))""",
+                (m.id, m.exchange or self.exchange_name or "polymarket",
+                 m.condition_id, m.question, m.description[:500],
+                 m.category, m.outcome_yes_price, m.outcome_no_price,
+                 m.volume, m.liquidity),
+            )
             # Store signal
             await self.db.execute(
                 """INSERT INTO signals (market_id, claude_prob, claude_confidence, market_prob,
@@ -519,9 +844,12 @@ class TradingEngine:
             )
             await self.db.commit()
 
-            # Risk evaluation
+            # Risk evaluation (pass actual cash for correct Kelly sizing)
+            if not hasattr(self, '_cached_cycle_cash'):
+                self._cached_cycle_cash = await self._get_available_cash()
             decision = await self.risk_manager.evaluate(
                 tc.signal, tc.market, price_history=price_history,
+                available_cash=self._cached_cycle_cash,
             )
             checks_passed = sum(1 for c in decision.checks if c.passed)
             checks_failed = sum(1 for c in decision.checks if not c.passed)
@@ -542,13 +870,7 @@ class TradingEngine:
 
         # Allocate and execute
         if alloc_candidates and self.allocator:
-            syncer = getattr(self, '_components_syncer', None)
-            if syncer:
-                positions = await syncer.sync()
-                cash = await syncer.get_cash_balance()
-            else:
-                positions = []
-                cash = self.settings.execution.paper_initial_balance
+            positions, cash = await self._get_positions_and_cash()
 
             allocated = self.allocator.allocate(alloc_candidates, cash, positions)
             for candidate in allocated:
@@ -575,16 +897,20 @@ class TradingEngine:
         from pathlib import Path
         from auramaur.nlp.strategic import StrategicAnalyzer
         from auramaur.exchange.models import Confidence, Signal, OrderSide
-        from auramaur.strategy.signals import POLYMARKET_FEE_PCT
+        from auramaur.strategy.signals import EXCHANGE_FEES
 
         # Kill switch check — halt immediately if active
         if Path("KILL_SWITCH").exists():
             log.warning("engine.kill_switch_active", method="strategic")
             return []
 
-        markets = [m for m, _score in ranked_markets]
+        # Cap batch to 12 markets to keep prompt under context window
+        # (35 markets × 12k chars each = 420k chars → too large for Opus)
+        _MAX_STRATEGIC_BATCH = 12
+        markets = [m for m, _score in ranked_markets[:_MAX_STRATEGIC_BATCH]]
 
         # Gather evidence for all markets first
+        from auramaur.data_sources.base import NewsItem as _NI
         from auramaur.nlp.query_decomposer import extract_search_queries
         evidence_map: dict[str, list] = {}
         for market in markets:
@@ -594,16 +920,40 @@ class TradingEngine:
             if not self._try_claim_market(market.id):
                 continue
             try:
-                queries = extract_search_queries(market.question, market.description)
+                # Enrich market description from CLOB if thin
+                if len(market.description) < 50 and market.condition_id:
+                    try:
+                        self.exchange._init_clob_client()
+                        clob_info = self.exchange._clob_client.get_market(market.condition_id)
+                        if clob_info and clob_info.get("description"):
+                            market.description = clob_info["description"][:1000]
+                    except Exception:
+                        pass
+
+                queries = extract_search_queries(market.question, market.description, market.category or "")
                 all_evidence: list = []
                 seen_ids: set[str] = set()
+
+                # Add market description as synthetic evidence (resolution criteria)
+                if market.description and len(market.description) > 20:
+                    all_evidence.append(_NI(
+                        id=f"polymarket_desc:{market.id}",
+                        source="polymarket_context",
+                        title=f"Resolution criteria: {market.question}",
+                        content=market.description[:800],
+                        url=f"https://polymarket.com/event/{market.id}",
+                    ))
+                    seen_ids.add(f"polymarket_desc:{market.id}")
+
                 for query in queries:
-                    items = await self.aggregator.gather(query, limit_per_source=3)
+                    items = await self.aggregator.gather(query, limit_per_source=8)
                     for item in items:
                         if item.id not in seen_ids:
                             seen_ids.add(item.id)
                             all_evidence.append(item)
-                evidence_map[market.id] = all_evidence[:self.settings.nlp.evidence_per_source * 3]
+                # Cap evidence per market to keep total prompt under context window
+                # 12 markets × 5 items × ~500 chars = ~30k chars of evidence
+                evidence_map[market.id] = all_evidence[:5]
             except Exception as e:
                 log.error("strategic.evidence_error", market_id=market.id, error=str(e))
                 evidence_map[market.id] = []
@@ -639,6 +989,9 @@ class TradingEngine:
                 continue
 
             claude_prob = batch_result.probability
+            # Apply Platt scaling calibration to raw probability
+            if self.calibration:
+                claude_prob = await self.calibration.adjust(claude_prob, market.category or "")
             market_prob = market.outcome_yes_price
 
             # Edge calculation (same as detect_edge)
@@ -649,7 +1002,8 @@ class TradingEngine:
             if abs(raw_edge) < 0.001:
                 continue
             side = OrderSide.BUY if raw_edge > 0 else OrderSide.SELL
-            edge = abs(raw_edge) - (POLYMARKET_FEE_PCT / 100)
+            fee_rate = EXCHANGE_FEES.get(market.exchange or self.exchange_name, 0.0)
+            edge = abs(raw_edge) - fee_rate
 
             signal = Signal(
                 market_id=market.id,
@@ -668,6 +1022,18 @@ class TradingEngine:
                 batch_result.confidence, None, None,
             )
 
+            # Ensure market exists in DB (FK requirement for signals table)
+            await self.db.execute(
+                """INSERT OR IGNORE INTO markets (id, condition_id, question, description,
+                   category, active, outcome_yes_price, outcome_no_price,
+                   volume, liquidity, last_updated)
+                   VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))""",
+                (market.id, market.condition_id, market.question,
+                 market.description[:500], market.category,
+                 market.outcome_yes_price, market.outcome_no_price,
+                 market.volume, market.liquidity),
+            )
+
             # Store signal
             await self.db.execute(
                 """INSERT INTO signals (market_id, claude_prob, claude_confidence, market_prob,
@@ -679,8 +1045,10 @@ class TradingEngine:
             )
             await self.db.commit()
 
-            # Risk evaluation
-            decision = await self.risk_manager.evaluate(signal, market, price_history=price_history)
+            # Risk evaluation (pass actual cash for correct Kelly sizing)
+            if not hasattr(self, '_cached_cycle_cash'):
+                self._cached_cycle_cash = await self._get_available_cash()
+            decision = await self.risk_manager.evaluate(signal, market, price_history=price_history, available_cash=self._cached_cycle_cash)
             from auramaur.monitoring.display import show_risk_decision
             checks_passed = sum(1 for c in decision.checks if c.passed)
             checks_failed = sum(1 for c in decision.checks if not c.passed)
@@ -698,13 +1066,7 @@ class TradingEngine:
 
         # Allocate and execute
         if candidates and self.allocator:
-            syncer = getattr(self, '_components_syncer', None)
-            if syncer:
-                positions = await syncer.sync()
-                cash = await syncer.get_cash_balance()
-            else:
-                positions = []
-                cash = self.settings.execution.paper_initial_balance
+            positions, cash = await self._get_positions_and_cash()
 
             allocated = self.allocator.allocate(candidates, cash, positions)
             for candidate in allocated:
@@ -757,14 +1119,7 @@ class TradingEngine:
             return evaluated
 
         # Phase 2: Allocate capital across candidates
-        # Get current positions and cash from the syncer if available
-        syncer = getattr(self, '_components_syncer', None)
-        if syncer:
-            current_positions = await syncer.sync()
-            cash = await syncer.get_cash_balance()
-        else:
-            current_positions = []
-            cash = self.settings.execution.paper_initial_balance
+        current_positions, cash = await self._get_positions_and_cash()
 
         allocated = self.allocator.allocate(candidates, cash, current_positions)
 

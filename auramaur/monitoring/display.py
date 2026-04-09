@@ -34,8 +34,9 @@ def show_startup(sources: list[str], balance: float) -> None:
     console.print()
 
 
-def show_scan_results(total: int, candidates: int, filtered: int = 0) -> None:
-    msg = f"[dim]{_ts()}[/] Scanned [bold]{total}[/] markets, [cyan]{candidates}[/] candidates"
+def show_scan_results(total: int, candidates: int, filtered: int = 0, exchange: str = "") -> None:
+    ex = f"[magenta]{exchange}[/] " if exchange else ""
+    msg = f"[dim]{_ts()}[/] {ex}Scanned [bold]{total}[/] markets, [cyan]{candidates}[/] candidates"
     if filtered > 0:
         msg += f", [yellow]{filtered}[/] filtered"
     console.print(msg)
@@ -98,21 +99,37 @@ def show_risk_decision(approved: bool, reason: str, passed: int, failed: int, si
         console.print(f"         [red]REJECTED[/] ({passed}/{total}) [dim]{short_reason}[/]")
 
 
-def show_order(status: str, order_id: str, side: str, size: float, price: float, is_paper: bool) -> None:
+def show_order(status: str, order_id: str, side: str, size: float, price: float, is_paper: bool, exchange: str = "", error_message: str = "") -> None:
     mode = "[green]PAPER[/]" if is_paper else "[bold red]LIVE[/]"
     side_color = "green" if side == "BUY" else "red"
+    ex = f"[magenta]{exchange}[/] " if exchange else ""
+
+    if status == "rejected" or order_id == "ERROR":
+        err_suffix = f" [red]{error_message}[/]" if error_message else ""
+        console.print(
+            f"         [bold red]ORDER FAILED[/] {mode} {ex}[{side_color}]{side}[/] "
+            f"${size * price:.2f} ({size:.1f} tokens @ ${price:.3f}){err_suffix}"
+        )
+    else:
+        console.print(
+            f"         [bold]ORDER[/] {mode} {ex}[{side_color}]{side}[/] "
+            f"${size * price:.2f} ({size:.1f} tokens @ ${price:.3f}) "
+            f"[dim]{order_id[:16]}[/]"
+        )
+        _cycle_stats["trades"] = _cycle_stats.get("trades", 0) + 1
+
+
+def show_order_dropped(market_id: str, reason: str) -> None:
     console.print(
-        f"         [bold]ORDER[/] {mode} [{side_color}]{side}[/] "
-        f"${size * price:.2f} ({size:.1f} tokens @ ${price:.3f}) "
-        f"[dim]{order_id[:16]}[/]"
+        f"         [yellow]DROPPED[/] [dim]{market_id}[/] — {reason}"
     )
-    _cycle_stats["trades"] = _cycle_stats.get("trades", 0) + 1
 
 
-def show_cycle_summary(signals: int, trades: int, elapsed: float) -> None:
+def show_cycle_summary(signals: int, trades: int, elapsed: float, exchange: str = "") -> None:
     trade_color = "green" if trades > 0 else "dim"
+    ex = f"[magenta]{exchange}[/] " if exchange else ""
     console.print(
-        f"[dim]{_ts()}[/] Cycle: "
+        f"[dim]{_ts()}[/] {ex}Cycle: "
         f"[cyan]{signals}[/] signals, [{trade_color}]{trades} trades[/] "
         f"[dim]({elapsed:.0f}s)[/]"
     )
@@ -121,7 +138,7 @@ def show_cycle_summary(signals: int, trades: int, elapsed: float) -> None:
     _cycle_stats.update({"signals": 0, "trades": 0, "analyzed": 0})
 
 
-def show_portfolio(balance: float, pnl: float, positions: int, drawdown: float) -> None:
+def show_portfolio(balance: float, pnl: float, positions: int, drawdown: float, schedule_mode: str = "") -> None:
     pnl_color = "green" if pnl >= 0 else "red"
 
     # Build a compact but informative status line
@@ -134,6 +151,15 @@ def show_portfolio(balance: float, pnl: float, positions: int, drawdown: float) 
     if drawdown > 0:
         dd_color = "yellow" if drawdown < 10 else "red"
         parts.append(f"DD:[{dd_color}]{drawdown:.1f}%[/]")
+
+    if schedule_mode:
+        mode_styles = {
+            "peak": "[bold green]PEAK[/]",
+            "off_peak": "[yellow]OFF-PEAK[/]",
+            "quiet": "[dim]QUIET[/]",
+            "starved": "[red]LOW CASH[/]",
+        }
+        parts.append(mode_styles.get(schedule_mode, schedule_mode))
 
     console.print(" | ".join(parts))
 

@@ -9,7 +9,7 @@ from datetime import datetime
 import structlog
 
 from auramaur.db.database import Database
-from auramaur.exchange.models import Order, OrderResult, OrderSide, OrderType, Position
+from auramaur.exchange.models import Order, OrderResult, OrderSide, OrderType, Position, TokenType
 
 log = structlog.get_logger()
 
@@ -31,6 +31,8 @@ class PaperTrader:
             "SELECT * FROM portfolio WHERE 1=1"
         )
         for row in rows:
+            token_str = row["token"] if "token" in row.keys() else "YES"
+            token_id = row["token_id"] if "token_id" in row.keys() else ""
             self.positions[row["market_id"]] = Position(
                 market_id=row["market_id"],
                 side=OrderSide(row["side"]),
@@ -38,6 +40,8 @@ class PaperTrader:
                 avg_price=row["avg_price"],
                 current_price=row["current_price"] or row["avg_price"],
                 category=row["category"] or "",
+                token=TokenType(token_str) if token_str else TokenType.YES,
+                token_id=token_id or "",
             )
 
         # Calculate balance from trade history
@@ -55,6 +59,13 @@ class PaperTrader:
         cost = order.size * order.price
 
         if order.side == OrderSide.BUY and cost > self.balance:
+            log.warning(
+                "paper.insufficient_balance",
+                market_id=order.market_id,
+                cost=round(cost, 2),
+                balance=round(self.balance, 2),
+                shortfall=round(cost - self.balance, 2),
+            )
             return OrderResult(
                 order_id=order_id,
                 market_id=order.market_id,
@@ -86,6 +97,8 @@ class PaperTrader:
                 size=order.size,
                 avg_price=order.price,
                 current_price=order.price,
+                token=order.token if hasattr(order, 'token') else TokenType.YES,
+                token_id=order.token_id if hasattr(order, 'token_id') else "",
             )
 
         # Record trade in DB

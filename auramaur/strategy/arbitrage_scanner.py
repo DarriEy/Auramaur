@@ -91,14 +91,25 @@ class ArbitrageScanner:
        profit on resolution (one side pays $1.00, total cost < $0.97).
     """
 
-    def __init__(self, discoveries: dict[str, MarketDiscovery]) -> None:
+    def __init__(
+        self,
+        discoveries: dict[str, MarketDiscovery],
+        exchange_fees: dict[str, float] | None = None,
+        min_profit_after_fees_pct: float = 1.5,
+    ) -> None:
         """Initialize with the discoveries dict from bot components.
 
         Args:
             discoveries: Mapping of exchange name to MarketDiscovery instance.
                          e.g. {"polymarket": gamma, "kalshi": kalshi_client}
+            exchange_fees: Mapping of exchange name to fee rate (0.0-1.0).
+                          e.g. {"polymarket": 0.0, "kalshi": 0.07}
+            min_profit_after_fees_pct: Minimum profit % after fees to flag
+                                       as an opportunity.
         """
         self._discoveries = discoveries
+        self._exchange_fees = exchange_fees or {}
+        self._min_profit_after_fees_pct = min_profit_after_fees_pct
 
     async def scan(self) -> list[ArbOpportunity]:
         """Scan all exchanges for price mismatches on equivalent markets.
@@ -145,10 +156,26 @@ class ArbitrageScanner:
                     if spread < CROSS_EXCHANGE_MIN_SPREAD:
                         continue
 
-                    # Expected profit: buy cheap YES, buy cheap NO on other side
-                    # Profit = 1.0 - (cheap_yes + (1 - expensive_yes))
-                    # Simplified: profit = spread
-                    profit_pct = spread * 100
+                    # Identify cheap/expensive sides for fee calc
+                    if market_a.outcome_yes_price <= market_b.outcome_yes_price:
+                        cheap_yes, expensive_yes = market_a, market_b
+                        cheap_exchange, expensive_exchange = name_a, name_b
+                    else:
+                        cheap_yes, expensive_yes = market_b, market_a
+                        cheap_exchange, expensive_exchange = name_b, name_a
+
+                    # Fee-aware profit: buy YES cheap, buy NO on expensive side
+                    # Gross profit = spread (one side resolves $1, other $0)
+                    # Fees: each leg's fee applies to the profit from that leg
+                    fee_cheap = self._exchange_fees.get(cheap_exchange, 0.0)
+                    fee_expensive = self._exchange_fees.get(expensive_exchange, 0.0)
+                    # Worst case: profit is taxed at the higher fee on the winning leg
+                    max_fee_rate = max(fee_cheap, fee_expensive)
+                    net_profit = spread * (1.0 - max_fee_rate)
+                    profit_pct = net_profit * 100
+
+                    if profit_pct < self._min_profit_after_fees_pct:
+                        continue
 
                     opp = ArbOpportunity(
                         market_a=market_a,

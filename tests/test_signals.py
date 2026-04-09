@@ -75,13 +75,13 @@ def test_blend_agreement_averages():
     assert abs(result - 0.71) < 0.01
 
 
-def test_blend_divergence_favors_conservative():
-    """When opinions diverge, should favor the one closer to market."""
+def test_blend_divergence_weights_by_confidence():
+    """When opinions diverge, should weight by confidence not market proximity."""
     from auramaur.strategy.signals import _blend_estimates
-    # Primary says 0.80, second says 0.60, market is at 0.50
-    # Second opinion (0.60) is closer to market — more conservative
-    result = _blend_estimates(0.80, 0.60, 0.50)
-    assert result < 0.70  # Should be pulled toward the conservative 0.60
+    # Primary says 0.80 (MEDIUM conf = 0.60 weight), second says 0.60
+    # Result should be 0.80 * 0.60 + 0.60 * 0.40 = 0.72
+    result = _blend_estimates(0.80, 0.60, 0.50, primary_confidence="MEDIUM")
+    assert 0.68 < result < 0.76  # Weighted toward primary
 
 
 def test_blend_both_above_market():
@@ -89,6 +89,38 @@ def test_blend_both_above_market():
     from auramaur.strategy.signals import _blend_estimates
     result = _blend_estimates(0.75, 0.65, 0.50)
     assert result > 0.50  # Both agree it's underpriced
+
+
+def test_inverted_semantics_detected():
+    """Questions with negation patterns should be flagged as inverted."""
+    from auramaur.strategy.signals import _has_inverted_semantics
+    assert _has_inverted_semantics("Will Biden NOT run for re-election?")
+    assert _has_inverted_semantics("Will Tesla fail to reach $300 by 2027?")
+    assert _has_inverted_semantics("Will someone NOT become a trillionaire?")
+    assert not _has_inverted_semantics("Will Biden win the 2024 election?")
+    assert not _has_inverted_semantics("Will Tesla reach $300 by 2027?")
+
+
+def test_inverted_semantics_large_edge_skipped():
+    """Large edge on inverted-semantic market should return no signal."""
+    market = Market(
+        id="test-inv", condition_id="c", question="Will it fail to exceed $30M?",
+        outcome_yes_price=0.86,
+    )
+    analysis = _make_analysis(prob=0.40, confidence="HIGH")
+    signal = detect_edge(market, analysis)
+    assert signal is None  # 46% edge + negation = skip
+
+
+def test_inverted_semantics_small_edge_passes():
+    """Small edges on inverted markets should still produce signals."""
+    market = Market(
+        id="test-inv2", condition_id="c", question="Will X fail to reach the target?",
+        outcome_yes_price=0.60,
+    )
+    analysis = _make_analysis(prob=0.70, confidence="HIGH")  # 10% edge
+    signal = detect_edge(market, analysis)
+    assert signal is not None  # Below 25% threshold, trust the model
 
 
 def test_calibrated_probability_used_in_edge():

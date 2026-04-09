@@ -40,28 +40,38 @@ class KalshiClient:
     def __init__(self, settings, paper_trader: PaperTrader):
         self._settings = settings
         self._paper = paper_trader
-        self._api = None  # Lazy init
+        self._client = None  # KalshiClient (api_client)
+        self._events_api = None
+        self._markets_api = None
+        self._portfolio_api = None
         self._semaphore = asyncio.Semaphore(_RATE_LIMIT)
 
     def _init_api(self):
         """Lazily initialize the kalshi-python client."""
-        if self._api is not None:
+        if self._client is not None:
             return
 
-        from kalshi import KalshiClient as _KalshiSDK
+        from kalshi_python import KalshiClient as _KalshiSDK
+        from kalshi_python import Configuration, EventsApi, MarketsApi, PortfolioApi
 
         cfg = self._settings.kalshi
         host = (
-            "https://demo-api.kalshi.co"
+            "https://demo-api.kalshi.co/trade-api/v2"
             if cfg.environment == "demo"
-            else "https://trading-api.kalshi.com"
+            else "https://api.elections.kalshi.com/trade-api/v2"
         )
 
-        self._api = _KalshiSDK(
-            host=host,
+        configuration = Configuration(host=host)
+        self._client = _KalshiSDK(configuration=configuration)
+        self._client.set_kalshi_auth(
             key_id=cfg.api_key or self._settings.kalshi_api_key,
             private_key_path=cfg.private_key_path or self._settings.kalshi_private_key_path,
         )
+
+        self._events_api = EventsApi(self._client)
+        self._markets_api = MarketsApi(self._client)
+        self._portfolio_api = PortfolioApi(self._client)
+
         log.info("kalshi.initialized", host=host, environment=cfg.environment)
 
     async def _call(self, fn, *args, **kwargs):
@@ -73,17 +83,40 @@ class KalshiClient:
     # MarketDiscovery protocol
     # ------------------------------------------------------------------
 
+    async def _get_events_raw(self, **kwargs) -> list[dict]:
+        """Fetch events and return raw dicts (bypasses SDK model validation)."""
+        import json
+        response = await self._call(
+            self._events_api.get_events_without_preload_content, **kwargs,
+        )
+        data = json.loads(response.data)
+        return data.get("events", [])
+
+    async def _get_market_raw(self, ticker: str) -> dict | None:
+        """Fetch a single market as raw dict."""
+        import json
+        response = await self._call(
+            self._markets_api.get_market_without_preload_content, ticker,
+        )
+        data = json.loads(response.data)
+        return data.get("market")
+
     async def get_markets(self, active: bool = True, limit: int = 100) -> list[Market]:
         """Fetch markets from Kalshi API."""
         self._init_api()
         try:
-            params = {"limit": limit, "status": "open" if active else "closed"}
-            response = await self._call(self._api.get_events, **params)
-            events = response.get("events", []) if isinstance(response, dict) else []
+            # Kalshi API caps events at 200
+            api_limit = min(limit, 200)
+            events = await self._get_events_raw(
+                limit=api_limit,
+                status="open" if active else "closed",
+                with_nested_markets=True,
+            )
 
             markets: list[Market] = []
             for event in events:
-                for m in event.get("markets", [event]):
+                event_markets = event.get("markets", [])
+                for m in event_markets:
                     parsed = self._parse_market(m)
                     if parsed:
                         markets.append(parsed)
@@ -102,9 +135,10 @@ class KalshiClient:
         """Fetch a single market by ticker."""
         self._init_api()
         try:
-            response = await self._call(self._api.get_market, market_id)
-            market_data = response.get("market", response) if isinstance(response, dict) else response
-            return self._parse_market(market_data)
+            raw = await self._get_market_raw(market_id)
+            if raw:
+                return self._parse_market(raw)
+            return None
         except Exception as e:
             log.error("kalshi.market_fetch_error", market_id=market_id, error=str(e))
             return None
@@ -113,16 +147,18 @@ class KalshiClient:
         """Search Kalshi markets by keyword."""
         self._init_api()
         try:
-            response = await self._call(
-                self._api.get_events, limit=limit, status="open",
+            events = await self._get_events_raw(
+                limit=limit,
+                status="open",
+                with_nested_markets=True,
             )
-            events = response.get("events", []) if isinstance(response, dict) else []
 
             markets: list[Market] = []
             query_lower = query.lower()
             for event in events:
-                for m in event.get("markets", [event]):
-                    title = (m.get("title", "") or m.get("question", "")).lower()
+                event_markets = event.get("markets", [])
+                for m in event_markets:
+                    title = (m.get("title", "") or "").lower()
                     if query_lower in title:
                         parsed = self._parse_market(m)
                         if parsed:
@@ -146,15 +182,36 @@ class KalshiClient:
         """Build a Kalshi order from a signal.
 
         Kalshi supports direct BUY/SELL of YES/NO — no token swap needed.
+        Prices aggressively to cross the spread and get fills:
+        - High edge (>10%): pay 2 ticks through the spread
+        - Normal edge: pay 1 tick through the spread
         """
+        edge_pct = abs(signal.edge)
+        # How aggressively to cross the spread (in dollars)
+        aggression = 0.02 if edge_pct > 10 else 0.01
+
         if signal.recommended_side == OrderSide.BUY:
             side = OrderSide.BUY
             token = TokenType.YES
-            exec_price = market.outcome_yes_price
-        else:
-            side = OrderSide.SELL
-            token = TokenType.YES
-            exec_price = market.outcome_yes_price
+            # Cross the spread: pay above the ask to guarantee fill
+            exec_price = market.outcome_yes_price + market.spread / 2 + aggression
+        elif signal.recommended_side == OrderSide.SELL:
+            # Check if this is an exit (selling a held position) vs new short
+            # If the signal has _exit_token set, sell that token type
+            exit_token = getattr(signal, '_exit_token', None)
+            if exit_token:
+                # Selling a held position — SELL the token we own
+                side = OrderSide.SELL
+                token = exit_token
+                if exit_token == TokenType.NO:
+                    exec_price = market.outcome_no_price - market.spread / 2 - aggression
+                else:
+                    exec_price = market.outcome_yes_price - market.spread / 2 - aggression
+            else:
+                # New bearish position → BUY NO
+                side = OrderSide.BUY
+                token = TokenType.NO
+                exec_price = market.outcome_no_price + market.spread / 2 + aggression
 
         exec_price = max(0.01, min(0.99, round(exec_price, 2)))
 
@@ -202,6 +259,39 @@ class KalshiClient:
 
         # === LIVE ORDER PATH ===
         self._init_api()
+
+        # Guard: skip if we already have a resting order on the same market + side
+        try:
+            import json as _json
+            existing = await self._call(
+                self._portfolio_api.get_orders_without_preload_content,
+            )
+            existing_data = _json.loads(existing.data)
+            kalshi_side = "yes" if order.token == TokenType.YES else "no"
+            kalshi_action = "buy" if order.side == OrderSide.BUY else "sell"
+            ticker = order.token_id
+            for o in existing_data.get("orders", []):
+                if (o.get("status") == "resting"
+                        and o.get("ticker") == ticker
+                        and o.get("side") == kalshi_side
+                        and o.get("action") == kalshi_action):
+                    log.info(
+                        "order.skip_duplicate",
+                        exchange="kalshi",
+                        ticker=ticker,
+                        side=kalshi_side,
+                        action=kalshi_action,
+                        reason="resting order already exists on same side",
+                    )
+                    return OrderResult(
+                        order_id="SKIP_DUP",
+                        market_id=order.market_id,
+                        status="rejected",
+                        is_paper=False,
+                    )
+        except Exception as e:
+            log.debug("order.dup_check_error", error=str(e))
+
         log.warning(
             "order.live",
             exchange="kalshi",
@@ -212,18 +302,52 @@ class KalshiClient:
         )
 
         try:
-            kalshi_side = "yes" if order.side == OrderSide.BUY else "no"
-            response = await self._call(
-                self._api.create_order,
+            import json
+            from kalshi_python import CreateOrderRequest
+
+            # Map token type to Kalshi side, and order side to action
+            kalshi_side = "yes" if order.token == TokenType.YES else "no"
+            action = "buy" if order.side == OrderSide.BUY else "sell"
+            # Kalshi API always takes yes_price in cents (1-99)
+            # When buying NO, convert: yes_price = 100 - no_price
+            if order.token == TokenType.NO:
+                yes_price_cents = max(1, min(99, 100 - int(order.price * 100)))
+            else:
+                yes_price_cents = max(1, min(99, int(order.price * 100)))
+
+            req = CreateOrderRequest(
                 ticker=order.token_id,
                 side=kalshi_side,
+                action=action,
                 count=int(order.size),
-                type="market",
-                yes_price=int(order.price * 100),
+                type="limit",
+                yes_price=yes_price_cents,
             )
 
-            order_data = response.get("order", response) if isinstance(response, dict) else {}
+            log.info(
+                "order.live_request",
+                exchange="kalshi",
+                ticker=order.token_id,
+                side=kalshi_side,
+                action=action,
+                count=int(order.size),
+                yes_price=yes_price_cents,
+            )
+
+            response = await self._call(
+                self._portfolio_api.create_order_without_preload_content,
+                create_order_request=req,
+            )
+            data = json.loads(response.data)
+            order_data = data.get("order", {})
             order_id = str(order_data.get("order_id", "unknown"))
+
+            log.info(
+                "order.live_placed",
+                exchange="kalshi",
+                order_id=order_id,
+                status=order_data.get("status"),
+            )
 
             return OrderResult(
                 order_id=order_id,
@@ -234,29 +358,48 @@ class KalshiClient:
                 is_paper=False,
             )
         except Exception as e:
-            log.error("order.live_error", exchange="kalshi", error=str(e))
+            log.error("order.live_error", exchange="kalshi", error=str(e), ticker=order.token_id)
             return OrderResult(
                 order_id="ERROR",
                 market_id=order.market_id,
                 status="rejected",
                 is_paper=False,
+                error_message=str(e)[:200],
             )
 
     async def get_order_book(self, market_id: str) -> OrderBook:
         """Get order book for a Kalshi market."""
         self._init_api()
         try:
-            response = await self._call(self._api.get_orderbook, market_id)
-            book = response.get("orderbook", response) if isinstance(response, dict) else {}
+            import json
+            response = await self._call(
+                self._markets_api.get_market_orderbook_with_http_info, market_id,
+            )
+            data = json.loads(response.raw_data)
+            # API returns orderbook_fp (dollar strings) or orderbook (cents)
+            book = data.get("orderbook_fp", data.get("orderbook", {}))
 
-            bids = [
-                OrderBookLevel(price=float(b[0]) / 100, size=float(b[1]))
-                for b in book.get("yes", [])
-            ]
-            asks = [
-                OrderBookLevel(price=float(a[0]) / 100, size=float(a[1]))
-                for a in book.get("no", [])
-            ]
+            bids = []
+            for level in (book.get("yes_dollars") or book.get("yes") or book.get("var_true") or []):
+                if isinstance(level, list):
+                    # [price_str, size_str] in dollars
+                    bids.append(OrderBookLevel(price=float(level[0]), size=float(level[1])))
+                elif isinstance(level, dict):
+                    price = float(level.get("price", 0))
+                    if price > 1:
+                        price = price / 100
+                    bids.append(OrderBookLevel(price=price, size=float(level.get("count", 0))))
+
+            asks = []
+            for level in (book.get("no_dollars") or book.get("no") or book.get("var_false") or []):
+                if isinstance(level, list):
+                    asks.append(OrderBookLevel(price=float(level[0]), size=float(level[1])))
+                elif isinstance(level, dict):
+                    price = float(level.get("price", 0))
+                    if price > 1:
+                        price = price / 100
+                    asks.append(OrderBookLevel(price=price, size=float(level.get("count", 0))))
+
             return OrderBook(bids=bids, asks=asks)
         except Exception as e:
             log.error("kalshi.orderbook_error", market_id=market_id, error=str(e))
@@ -266,8 +409,8 @@ class KalshiClient:
         """Query order status from Kalshi."""
         self._init_api()
         try:
-            response = await self._call(self._api.get_order, order_id)
-            order_data = response.get("order", response) if isinstance(response, dict) else {}
+            response = await self._call(self._portfolio_api.get_order, order_id)
+            order_data = response.order
 
             status_map = {
                 "resting": "pending",
@@ -275,15 +418,17 @@ class KalshiClient:
                 "executed": "filled",
                 "pending": "pending",
             }
-            raw_status = str(order_data.get("status", "pending")).lower()
+            raw_status = str(getattr(order_data, "status", "pending")).lower()
             status = status_map.get(raw_status, "pending")
 
             return OrderResult(
                 order_id=order_id,
-                market_id=order_data.get("ticker", ""),
+                market_id=getattr(order_data, "ticker", ""),
                 status=status,  # type: ignore[arg-type]
-                filled_size=float(order_data.get("filled_count", 0)),
-                filled_price=float(order_data.get("yes_price", 0)) / 100,
+                filled_size=float(
+                    getattr(order_data, "count", 0) - getattr(order_data, "remaining_count", 0)
+                ),
+                filled_price=float(getattr(order_data, "yes_price", 0)) / 100,
                 is_paper=False,
             )
         except Exception as e:
@@ -294,52 +439,185 @@ class KalshiClient:
         """Cancel a Kalshi order."""
         self._init_api()
         try:
-            await self._call(self._api.cancel_order, order_id)
+            await self._call(self._portfolio_api.cancel_order, order_id)
             log.info("order.cancelled", exchange="kalshi", order_id=order_id)
             return True
         except Exception as e:
             log.error("kalshi.cancel_error", order_id=order_id, error=str(e))
             return False
 
+    async def get_balance(self) -> float:
+        """Get account balance in dollars."""
+        self._init_api()
+        try:
+            response = await self._call(self._portfolio_api.get_balance)
+            # Balance is returned in cents
+            return float(response.balance) / 100
+        except Exception as e:
+            log.error("kalshi.balance_error", error=str(e))
+            return 0.0
+
+    async def sync_positions(self, db) -> int:
+        """Sync live Kalshi positions into the portfolio table.
+
+        Pulls positions from the Kalshi API (ground truth) and upserts
+        into the DB so the allocator and exit checker can see them.
+
+        Returns the number of active positions synced.
+        """
+        import json as _json
+
+        self._init_api()
+        try:
+            resp = await self._call(
+                self._portfolio_api.get_positions_without_preload_content,
+            )
+            data = _json.loads(resp.data)
+            positions = data.get("market_positions", [])
+
+            synced = 0
+            for p in positions:
+                pos_fp = float(p.get("position_fp", 0))
+                if pos_fp == 0:
+                    continue
+
+                ticker = p.get("ticker", "")
+                exposure = float(p.get("market_exposure_dollars", 0))
+                contracts = abs(pos_fp)
+                token = "NO" if pos_fp < 0 else "YES"
+                avg_price = exposure / contracts if contracts > 0 else 0
+
+                # Get current market price for this position
+                try:
+                    market = await self.get_market(ticker)
+                    if market and token == "NO":
+                        current_price = market.outcome_no_price
+                    elif market:
+                        current_price = market.outcome_yes_price
+                    else:
+                        current_price = avg_price
+                except Exception:
+                    current_price = avg_price
+
+                await db.execute(
+                    """INSERT INTO portfolio
+                       (market_id, side, size, avg_price, current_price, token, updated_at)
+                       VALUES (?, 'BUY', ?, ?, ?, ?, datetime('now'))
+                       ON CONFLICT(market_id) DO UPDATE SET
+                           size = excluded.size,
+                           avg_price = excluded.avg_price,
+                           current_price = excluded.current_price,
+                           token = excluded.token,
+                           updated_at = excluded.updated_at""",
+                    (ticker, contracts, round(avg_price, 4),
+                     round(current_price, 4), token),
+                )
+                synced += 1
+
+            await db.commit()
+            if synced > 0:
+                log.info("kalshi.positions_synced", count=synced)
+            return synced
+
+        except Exception as e:
+            log.error("kalshi.sync_positions_error", error=str(e))
+            return 0
+
     async def close(self) -> None:
         """Clean up resources."""
-        self._api = None
+        self._client = None
+        self._events_api = None
+        self._markets_api = None
+        self._portfolio_api = None
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
-    def _parse_market(self, data: dict) -> Market | None:
-        """Parse a Kalshi API market into our Market model."""
+    def _parse_market(self, data) -> Market | None:
+        """Parse a Kalshi market (raw dict or SDK model) into our Market model."""
         try:
-            ticker = data.get("ticker", "")
-            yes_price = float(data.get("yes_bid", data.get("last_price", 50))) / 100
+            # Support both dict and SDK model
+            def _get(key: str, default=None):
+                if isinstance(data, dict):
+                    return data.get(key, default)
+                return getattr(data, key, default)
+
+            ticker = _get("ticker", "")
+
+            # New API uses *_dollars fields (string dollar amounts)
+            # Old API uses yes_bid/yes_ask (int cents)
+            yes_bid_str = _get("yes_bid_dollars")
+            yes_ask_str = _get("yes_ask_dollars")
+            last_price_str = _get("last_price_dollars")
+            volume_str = _get("volume_fp")
+            liquidity_str = _get("liquidity_dollars")
+
+            if yes_bid_str is not None:
+                # New dollar-based API
+                yes_bid = float(yes_bid_str or 0)
+                yes_ask = float(yes_ask_str or 0)
+                last_price = float(last_price_str or 0)
+                volume = float(volume_str or 0)
+                reported_liq = float(liquidity_str or 0)
+            else:
+                # Legacy cents-based API
+                yes_bid = float(_get("yes_bid", 0) or 0) / 100
+                yes_ask = float(_get("yes_ask", 0) or 0) / 100
+                last_price = float(_get("last_price", 50) or 50) / 100
+                volume = float(_get("volume", 0) or 0)
+                reported_liq = float(_get("liquidity", 0) or 0)
+
+            # Compute liquidity from orderbook data when reported liquidity is 0
+            # Priority: top-of-book sizes > open interest > reported liquidity
+            liquidity = reported_liq
+            if liquidity == 0:
+                # Top-of-book depth: contracts available at best bid + ask
+                yes_bid_size = float(_get("yes_bid_size_fp", 0) or 0)
+                yes_ask_size = float(_get("yes_ask_size_fp", 0) or 0)
+                if yes_bid_size > 0 or yes_ask_size > 0:
+                    # Dollar liquidity = bid_contracts * bid_price + ask_contracts * ask_price
+                    liquidity = (yes_bid_size * yes_bid) + (yes_ask_size * yes_ask)
+
+            if liquidity == 0:
+                # Fallback: open interest as proxy (total contracts outstanding)
+                # Each contract is worth $1 at resolution, so OI ≈ dollar liquidity
+                open_interest = float(_get("open_interest_fp", 0) or 0)
+                if open_interest > 0:
+                    liquidity = open_interest
+
+            # Use midpoint for fair price (bid for execution would bias SELL signals)
+            if yes_bid > 0 and yes_ask > 0:
+                yes_price = (yes_bid + yes_ask) / 2
+            elif yes_bid > 0:
+                yes_price = yes_bid
+            else:
+                yes_price = last_price
             no_price = 1.0 - yes_price
 
             end_date = None
-            close_time = data.get("close_time") or data.get("expiration_time")
+            close_time = _get("close_time") or _get("expiration_time")
             if close_time:
-                try:
-                    end_date = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
-                except (ValueError, AttributeError):
-                    pass
+                if isinstance(close_time, datetime):
+                    end_date = close_time
+                elif isinstance(close_time, str):
+                    try:
+                        end_date = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
+                    except (ValueError, AttributeError):
+                        pass
 
-            volume = float(data.get("volume", 0) or 0)
-            liquidity = float(data.get("liquidity", 0) or 0)
-
-            yes_bid = float(data.get("yes_bid", 0) or 0) / 100
-            yes_ask = float(data.get("yes_ask", 0) or 0) / 100
             spread = yes_ask - yes_bid if yes_ask > yes_bid else 0.0
+            status = str(_get("status", "")).lower()
 
             return Market(
                 id=ticker,
                 exchange="kalshi",
                 ticker=ticker,
-                question=data.get("title", data.get("question", "")),
-                description=data.get("subtitle", ""),
-                category=data.get("category", ""),
+                question=_get("title", "") or "",
+                description=_get("subtitle", "") or "",
+                category="",
                 end_date=end_date,
-                active=data.get("status", "").lower() in ("open", "active", ""),
+                active=status in ("open", "active", ""),
                 outcome_yes_price=yes_price,
                 outcome_no_price=no_price,
                 volume=volume,

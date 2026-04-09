@@ -175,19 +175,23 @@ def main():
 
 
 @main.command()
-@click.option("--agent", is_flag=True, default=False, help="Use agentic analyzer (experimental, forces paper trading)")
-def run(agent: bool):
+@click.option("--agent", is_flag=True, default=False, help="Use agentic analyzer (relational reasoning + web search)")
+@click.option("--exchange", default=None, type=click.Choice(["polymarket", "kalshi", "ibkr"]), help="Run only a specific exchange (isolated instance)")
+def run(agent: bool, exchange: str | None):
     """Start the bot."""
     settings = Settings()
 
     if agent:
         settings.analysis.mode = "agent"
-        # Force paper trading — agent mode is experimental
-        settings.auramaur_live = False
-        settings.execution.live = False
-        console.print("[bold yellow]AGENT MODE[/] — experimental, paper trading enforced")
-    console.print("[bold blue]Starting Auramaur bot...[/]")
-    bot = AuramaurBot(settings=settings)
+        if settings.is_live:
+            console.print("[bold red]AGENT MODE[/] — [bold]LIVE TRADING[/]")
+        else:
+            console.print("[bold yellow]AGENT MODE[/] — paper trading")
+    if exchange:
+        console.print(f"[bold blue]Starting Auramaur bot (exchange: {exchange})...[/]")
+    else:
+        console.print("[bold blue]Starting Auramaur bot...[/]")
+    bot = AuramaurBot(settings=settings, exchange_filter=exchange)
     asyncio.run(bot.run())
 
 
@@ -248,6 +252,89 @@ def scan(query: str, limit: int):
             await gamma.close()
 
     asyncio.run(_scan())
+
+
+@main.command()
+def redeem_check():
+    """List Polymarket positions ready to redeem for USDC."""
+
+    async def _check():
+        from auramaur.broker.redeemer import (
+            fetch_redeemable_positions, summarize_redemptions,
+        )
+        settings = Settings()
+        proxy = settings.polymarket_proxy_address
+        if not proxy:
+            console.print("[red]POLYMARKET_PROXY_ADDRESS not set in environment.[/]")
+            return
+
+        console.print(f"Checking redeemable positions for [cyan]{proxy[:10]}…{proxy[-6:]}[/]\n")
+        try:
+            positions = await fetch_redeemable_positions(proxy)
+        except Exception as e:
+            console.print(f"[red]Failed to fetch positions: {e}[/]")
+            return
+
+        if not positions:
+            console.print("[green]No positions to redeem — everything's settled or still open.[/]")
+            return
+
+        summary = summarize_redemptions(positions)
+
+        now = [p for p in positions if p.redeemable_now]
+        pending = [p for p in positions if p.status == "pending_oracle"]
+
+        def _render_table(title: str, items: list) -> None:
+            if not items:
+                return
+            table = Table(title=title, show_lines=False)
+            table.add_column("Market", max_width=55)
+            table.add_column("Side", width=4)
+            table.add_column("Size", justify="right")
+            table.add_column("Cost", justify="right")
+            table.add_column("Payout", justify="right")
+            table.add_column("P&L", justify="right")
+            table.add_column("Type", width=8)
+            for p in sorted(items, key=lambda x: -x.payout):
+                pnl_color = "green" if p.realized_pnl >= 0 else "red"
+                win_marker = "[green]✓[/]" if p.is_winner else "[red]✗[/]"
+                market_type = "NegRisk" if p.neg_risk else "CTF"
+                table.add_row(
+                    f"{win_marker} {p.title[:53]}",
+                    p.outcome,
+                    f"{p.size:.1f}",
+                    f"${p.cost_basis:.2f}",
+                    f"${p.payout:.2f}",
+                    f"[{pnl_color}]{p.realized_pnl:+.2f}[/]",
+                    market_type,
+                )
+            console.print(table)
+            console.print()
+
+        _render_table("Redeemable Now (click Redeem on Polymarket)", now)
+        _render_table("Pending UMA Oracle (resolved, awaiting confirmation)", pending)
+
+        console.print(
+            f"[bold]Redeemable now:[/] {summary['redeemable_now']}  "
+            f"([green]${summary['payout_now_usdc']:.2f}[/] payout, "
+            f"net [{'green' if summary['net_pnl_now'] >= 0 else 'red'}]"
+            f"${summary['net_pnl_now']:+.2f}[/])"
+        )
+        console.print(
+            f"[bold]Pending oracle:[/] {summary['pending_oracle']}  "
+            f"([yellow]${summary['payout_pending_usdc']:.2f}[/] expected)"
+        )
+        if summary['neg_risk_count'] > 0:
+            console.print(
+                f"[yellow]Note:[/] {summary['neg_risk_count']} NegRisk positions — "
+                "these need the NegRiskAdapter contract for on-chain redemption."
+            )
+        console.print()
+        console.print(
+            "[dim]To redeem, open Polymarket → Portfolio → 'Redeem All' button.[/]"
+        )
+
+    asyncio.run(_check())
 
 
 @main.command()

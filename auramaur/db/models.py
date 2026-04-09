@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -81,6 +81,8 @@ CREATE TABLE IF NOT EXISTS portfolio (
     current_price REAL,
     unrealized_pnl REAL DEFAULT 0,
     category TEXT,
+    token TEXT NOT NULL DEFAULT 'YES',
+    token_id TEXT DEFAULT '',
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (market_id) REFERENCES markets(id)
 );
@@ -104,6 +106,7 @@ CREATE TABLE IF NOT EXISTS nlp_cache (
     probability REAL NOT NULL,
     confidence TEXT NOT NULL,
     ttl_seconds INTEGER NOT NULL,
+    market_price REAL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -214,4 +217,35 @@ CREATE TABLE IF NOT EXISTS ensemble_predictions (
 );
 CREATE INDEX IF NOT EXISTS idx_ensemble_model ON ensemble_predictions(model);
 CREATE INDEX IF NOT EXISTS idx_ensemble_market ON ensemble_predictions(market_id);
+
+CREATE TABLE IF NOT EXISTS position_peaks (
+    market_id TEXT PRIMARY KEY,
+    peak_pnl_pct REAL NOT NULL DEFAULT 0.0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS rebalance_blocks (
+    event_key TEXT PRIMARY KEY,
+    blocked_until TEXT NOT NULL,
+    reason TEXT DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS order_build_drops (
+    market_id TEXT PRIMARY KEY,
+    blocked_until TEXT NOT NULL,
+    reason TEXT DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS slippage_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id TEXT NOT NULL,
+    exchange TEXT DEFAULT '',
+    side TEXT NOT NULL,
+    expected_price REAL NOT NULL,
+    filled_price REAL NOT NULL,
+    slippage_bps REAL NOT NULL,
+    size REAL NOT NULL,
+    order_type TEXT DEFAULT 'limit',
+    timestamp TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """

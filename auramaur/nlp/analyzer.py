@@ -117,7 +117,6 @@ class ClaudeAnalyzer:
                     "--output-format", "text",
                     "--model", self._model,
                     "--effort", "max",
-                    "--max-turns", "1",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
@@ -205,8 +204,8 @@ class ClaudeAnalyzer:
 
         from auramaur.monitoring.display import show_cache_hit, show_claude_thinking
 
-        # 1. Check cache
-        cached = await cache.get(cache_key)
+        # 1. Check cache (with price-move invalidation)
+        cached = await cache.get(cache_key, current_price=market.outcome_yes_price)
         if cached is not None:
             show_cache_hit()
             return AnalysisResult(**cached)
@@ -223,8 +222,20 @@ class ClaudeAnalyzer:
                 skipped_reason=f"Primary estimation failed: {e}",
             )
 
-        # 3. Second opinion (skip if configured to save API calls)
-        if not self._settings.nlp.skip_second_opinion:
+        # 3. Second opinion (skip if configured, or smart-skip on slam dunks)
+        edge_pct = abs(primary.probability - market.outcome_yes_price) * 100.0
+        smart_skip = (
+            primary.confidence == "HIGH"
+            and edge_pct > 15.0
+        )
+        if smart_skip:
+            log.info(
+                "analyzer.skip_second_opinion_smart",
+                market_id=market.id,
+                confidence=primary.confidence,
+                edge_pct=round(edge_pct, 1),
+            )
+        if not self._settings.nlp.skip_second_opinion and not smart_skip:
             show_claude_thinking(market.id, "second")
             try:
                 second = await self.get_second_opinion(market, evidence, first_estimate=primary.probability)
@@ -241,8 +252,11 @@ class ClaudeAnalyzer:
             divergence=primary.divergence,
         )
 
-        # 5. Cache the result
+        # 5. Cache the result (with market price for price-move invalidation)
         ttl = self._settings.nlp.cache_ttl_breaking_seconds
-        await cache.put(cache_key, market.id, primary.model_dump(), ttl)
+        await cache.put(
+            cache_key, market.id, primary.model_dump(), ttl,
+            market_price=market.outcome_yes_price,
+        )
 
         return primary

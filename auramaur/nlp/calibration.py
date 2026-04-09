@@ -72,6 +72,40 @@ class CalibrationTracker:
         self._recent_predictions: deque[tuple[float, float]] = deque(
             maxlen=_BRIER_WINDOW
         )
+        self._initialized = False
+
+    async def _ensure_initialized(self) -> None:
+        """Load recent resolved predictions into the Brier window on first use.
+
+        This ensures the moving Brier score is continuous across bot
+        restarts instead of resetting to empty each time.
+        """
+        if self._initialized:
+            return
+        self._initialized = True
+        try:
+            rows = await self._db.fetchall(
+                """SELECT predicted_prob, actual_outcome
+                   FROM calibration
+                   WHERE actual_outcome IS NOT NULL
+                   ORDER BY resolved_at DESC
+                   LIMIT ?""",
+                (_BRIER_WINDOW,),
+            )
+            # Insert oldest-first so the deque is in chronological order
+            for row in reversed(rows):
+                self._recent_predictions.append(
+                    (row["predicted_prob"], float(row["actual_outcome"]))
+                )
+            if rows:
+                brier = self.get_moving_brier_score()
+                log.info(
+                    "calibration.brier_window_loaded",
+                    count=len(rows),
+                    moving_brier=round(brier, 4) if brier is not None else None,
+                )
+        except Exception as e:
+            log.warning("calibration.brier_window_load_failed", error=str(e))
 
     async def record_prediction(
         self, market_id: str, predicted_prob: float, category: str = ""
@@ -83,6 +117,7 @@ class CalibrationTracker:
             predicted_prob: Our predicted probability (0-1).
             category: Market category for per-category calibration.
         """
+        await self._ensure_initialized()
         await self._db.execute(
             """
             INSERT INTO calibration (market_id, predicted_prob, category, created_at)
@@ -109,6 +144,7 @@ class CalibrationTracker:
             market_id: The market identifier.
             actual_outcome: True if the market resolved YES, False otherwise.
         """
+        await self._ensure_initialized()
         outcome_int = 1 if actual_outcome else 0
 
         # Fetch the prediction before marking it resolved so we can run
@@ -139,6 +175,17 @@ class CalibrationTracker:
             predicted_prob = pred_row["predicted_prob"]
             category = pred_row["category"] or ""
             await self.online_update(predicted_prob, float(outcome_int), category)
+
+        # After enough resolutions accumulate, trigger a batch refit
+        # to complement the online SGD with a proper MLE fit.
+        self._resolutions_since_refit = getattr(self, "_resolutions_since_refit", 0) + 1
+        if self._resolutions_since_refit >= 10:
+            self._resolutions_since_refit = 0
+            try:
+                await self.refit_all()
+                log.info("calibration.auto_refit", trigger="10_resolutions")
+            except Exception as e:
+                log.warning("calibration.auto_refit_failed", error=str(e))
 
     async def online_update(
         self, predicted_prob: float, actual_outcome: float, category: str = ""
@@ -175,8 +222,19 @@ class CalibrationTracker:
         for cat in categories_to_update:
             params = await self._load_params(cat)
             if params is None:
-                # No fitted params yet — nothing to update online
-                continue
+                # Seed identity params (a=1, b=0 = no adjustment) so online
+                # learning can begin immediately instead of waiting for
+                # min_samples batch refit.
+                await self._db.execute(
+                    """INSERT OR IGNORE INTO calibration_params
+                       (category, a, b, fitted_at)
+                       VALUES (?, 1.0, 0.0, datetime('now'))""",
+                    (cat,),
+                )
+                await self._db.commit()
+                params = (1.0, 0.0)
+                self._params_cache[cat] = params
+                log.info("calibration.seeded_identity_params", category=cat)
 
             old_a, old_b = params
 

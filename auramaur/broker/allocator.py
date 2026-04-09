@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import structlog
 
 from auramaur.exchange.models import Confidence, Market, Signal
+from auramaur.monitoring.display import show_order_dropped
 from auramaur.risk.manager import RiskDecision
 
 log = structlog.get_logger()
@@ -14,7 +15,9 @@ log = structlog.get_logger()
 # Weights used to discount expected value by confidence tier
 _CONFIDENCE_WEIGHTS: dict[Confidence, float] = {
     Confidence.HIGH: 1.0,
+    Confidence.MEDIUM_HIGH: 0.875,
     Confidence.MEDIUM: 0.75,
+    Confidence.MEDIUM_LOW: 0.625,
     Confidence.LOW: 0.5,
 }
 
@@ -61,6 +64,7 @@ class CapitalAllocator:
         """
         max_positions = self._settings.risk.max_open_positions
         category_cap_pct = self._settings.risk.category_exposure_cap_pct / 100.0
+        _MAX_EVENT_EXPOSURE_PCT = 0.25  # Max 25% of capital in one event
 
         # Markets we already hold
         held_market_ids: set[str] = {
@@ -68,10 +72,25 @@ class CapitalAllocator:
         }
         held_market_ids.discard(None)
 
+        # Compute existing event exposure from held positions
+        event_exposure: dict[str, float] = {}
+        for pos in current_positions:
+            mid = getattr(pos, "market_id", "") or ""
+            size = getattr(pos, "size", 0) or 0
+            price = getattr(pos, "current_price", 0) or getattr(pos, "avg_cost", 0) or 0
+            exposure = size * price
+            # Extract event key
+            if mid.startswith("KX") and mid.count("-") >= 2:
+                event_key = mid.rsplit("-", 1)[0]
+            else:
+                event_key = mid
+            event_exposure[event_key] = event_exposure.get(event_key, 0) + exposure
+
         # Sort best-first
         ranked = sorted(candidates, key=lambda c: c.expected_value, reverse=True)
 
         remaining_capital = available_capital
+        total_capital = available_capital + sum(event_exposure.values())
         open_count = len(current_positions)
         category_allocated: dict[str, float] = {}
         allocated: list[CandidateTrade] = []
@@ -82,14 +101,31 @@ class CapitalAllocator:
 
             # Skip if already holding this market
             if market_id in held_market_ids:
-                log.debug(
+                show_order_dropped(market_id, "already holding position")
+                log.warning(
                     "allocator.skip_held",
                     market_id=market_id,
+                    reason="already holding position in this market",
+                )
+                continue
+
+            # Skip if event is already overconcentrated
+            if market_id.startswith("KX") and market_id.count("-") >= 2:
+                event_key = market_id.rsplit("-", 1)[0]
+            else:
+                event_key = market_id
+            event_total = event_exposure.get(event_key, 0)
+            event_budget = total_capital * _MAX_EVENT_EXPOSURE_PCT
+            if event_total >= event_budget:
+                show_order_dropped(
+                    market_id,
+                    f"event '{event_key}' concentrated (${event_total:.0f}/${event_budget:.0f})",
                 )
                 continue
 
             # Skip if we've hit the position limit
             if open_count >= max_positions:
+                show_order_dropped(market_id, f"position limit reached ({open_count}/{max_positions})")
                 log.info(
                     "allocator.position_limit",
                     open_count=open_count,
@@ -101,11 +137,14 @@ class CapitalAllocator:
             cat_total = category_allocated.get(category, 0.0)
             category_budget = category_cap_pct * available_capital
             if cat_total >= category_budget:
-                log.debug(
+                show_order_dropped(market_id, f"category '{category}' cap reached (${cat_total:.2f}/${category_budget:.2f})")
+                log.warning(
                     "allocator.category_cap",
+                    market_id=market_id,
                     category=category,
                     cat_total=round(cat_total, 2),
                     category_budget=round(category_budget, 2),
+                    reason="category exposure cap reached in this allocation batch",
                 )
                 continue
 
@@ -116,10 +155,14 @@ class CapitalAllocator:
             size = min(desired, remaining_capital, cat_headroom)
 
             if size <= 0:
-                log.debug(
+                show_order_dropped(market_id, f"no capital (${remaining_capital:.2f} remaining, need ${desired:.2f})")
+                log.warning(
                     "allocator.no_capital",
                     market_id=market_id,
                     remaining=round(remaining_capital, 2),
+                    desired=round(desired, 2),
+                    cat_headroom=round(cat_headroom, 2),
+                    reason="no capital or category headroom remaining",
                 )
                 break
 

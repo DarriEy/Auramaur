@@ -221,12 +221,18 @@ class PolymarketClient:
             no_price=market.outcome_no_price,
         )
 
-        # Convert dollar size to token quantity; enforce Polymarket minimum ($1 notional)
+        # Convert dollar size to token quantity; enforce CLOB minimum (5 tokens, $1 notional)
         token_size = position_size / exec_price if exec_price > 0 else 0
         token_size = round(token_size, 2)
-        notional = token_size * exec_price
-        if notional < 1.0:
-            log.info("prepare_order.too_small", token_size=token_size, notional=round(notional, 2))
+        if token_size < 5:
+            log.warning(
+                "prepare_order.too_small",
+                market_id=market.id,
+                token_size=token_size,
+                min_tokens=5,
+                position_size=position_size,
+                exec_price=exec_price,
+            )
             return None
 
         return Order(
@@ -336,6 +342,7 @@ class PolymarketClient:
                 market_id=order.market_id,
                 status="rejected",
                 is_paper=False,
+                error_message=str(e)[:200],
             )
 
     async def get_order_status(self, order_id: str) -> OrderResult:

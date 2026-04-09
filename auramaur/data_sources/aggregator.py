@@ -74,7 +74,9 @@ class Aggregator:
             "bloomberg": 2.5, "ft": 2.5, "wsj": 2.5,
             "web": 1.5, "newsapi": 1.5,
             "rss": 1.0, "reddit": 0.8, "fred": 2.0,
+            "market_data": 2.5, "polymarket_context": 2.0,
             "cointelegraph": 1.0, "coindesk": 1.2,
+            "manifold": 2.0,
         }
 
         def _rank(item: NewsItem) -> float:

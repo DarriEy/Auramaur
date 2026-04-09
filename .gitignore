@@ -18,3 +18,6 @@ venv/
 .DS_Store
 uv.lock
 world_model.json
+private-key.pem
+*.zip
+*.db.backup_*

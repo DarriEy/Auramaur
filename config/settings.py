@@ -46,6 +46,7 @@ class RiskConfig(BaseModel):
     implied_prob_max: float = 0.95
     category_exposure_cap_pct: float = 30.0
     time_to_resolution_min_hours: int = 24
+    max_correlated_positions: int = 5
     second_opinion_divergence_max: float = 0.15
 
 
@@ -59,6 +60,16 @@ class IntervalsConfig(BaseModel):
     analysis_seconds: int = 180
     portfolio_check_seconds: int = 60
     dashboard_refresh_seconds: int = 5
+    # Adaptive scheduling — scale intensity by market activity
+    adaptive_enabled: bool = True
+    peak_hours_utc: list[int] = Field(
+        default_factory=lambda: [13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23],
+    )
+    off_peak_multiplier: float = 4.0
+    quiet_multiplier: float = 8.0
+    quiet_hours_utc: list[int] = Field(
+        default_factory=lambda: [4, 5, 6, 7, 8, 9],
+    )
 
 
 _INTENSITY_PRESETS: dict[str, dict] = {
@@ -148,6 +159,13 @@ class IBKRConfig(BaseModel):
     max_contracts_per_symbol: int = 10
 
 
+class CryptoComConfig(BaseModel):
+    enabled: bool = False
+    api_key: str = ""
+    api_secret: str = ""
+    environment: str = "sandbox"  # "sandbox" | "prod"
+
+
 class EnsembleConfig(BaseModel):
     enabled: bool = False
     source_weights_update_hours: int = 24
@@ -161,6 +179,17 @@ class LLMEnsembleConfig(BaseModel):
     models: list[str] = ["opus", "sonnet"]
     min_samples_for_weights: int = 10  # Min resolved predictions before weighting
     default_weight: float = 0.5  # Starting weight per model (50/50)
+
+
+class ArbitrageConfig(BaseModel):
+    enabled: bool = True
+    min_profit_after_fees_pct: float = 1.5
+    max_arb_size: float = 25.0
+    cross_exchange_auto_execute: bool = True
+    exchange_fees: dict[str, float] = Field(default_factory=lambda: {
+        "polymarket": 0.0,
+        "kalshi": 0.07,
+    })
 
 
 class AnalysisConfig(BaseModel):
@@ -198,6 +227,10 @@ class Settings(BaseSettings):
     kalshi_api_key: str = ""
     kalshi_private_key_path: str = ""
 
+    # Crypto.com
+    cryptodotcom_api_key: str = ""
+    cryptodotcom_api_secret: str = ""
+
     # Safety
     auramaur_live: bool = False
 
@@ -211,9 +244,11 @@ class Settings(BaseSettings):
     broker: BrokerConfig = Field(default_factory=lambda: BrokerConfig(**_DEFAULTS.get("broker", {})))
     kalshi: KalshiConfig = Field(default_factory=lambda: KalshiConfig(**_DEFAULTS.get("kalshi", {})))
     ibkr: IBKRConfig = Field(default_factory=lambda: IBKRConfig(**_DEFAULTS.get("ibkr", {})))
+    cryptodotcom: CryptoComConfig = Field(default_factory=lambda: CryptoComConfig(**_DEFAULTS.get("cryptodotcom", {})))
     ensemble: EnsembleConfig = Field(default_factory=lambda: EnsembleConfig(**_DEFAULTS.get("ensemble", {})))
     llm_ensemble: LLMEnsembleConfig = Field(default_factory=lambda: LLMEnsembleConfig(**_DEFAULTS.get("llm_ensemble", {})))
     market_maker: MarketMakerConfig = Field(default_factory=lambda: MarketMakerConfig(**_DEFAULTS.get("market_maker", {})))
+    arbitrage: ArbitrageConfig = Field(default_factory=lambda: ArbitrageConfig(**_DEFAULTS.get("arbitrage", {})))
     analysis: AnalysisConfig = Field(default_factory=lambda: AnalysisConfig(**_DEFAULTS.get("analysis", {})))
     logging: LoggingConfig = Field(default_factory=lambda: LoggingConfig(**_DEFAULTS.get("logging", {})))
 

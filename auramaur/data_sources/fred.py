@@ -14,10 +14,32 @@ from auramaur.data_sources.base import DataSource, NewsItem
 logger = structlog.get_logger(__name__)
 
 _DEFAULT_SERIES: dict[str, str] = {
+    # Labor
     "UNRATE": "Unemployment Rate",
+    "PAYEMS": "Total Nonfarm Payrolls",
+    "ICSA": "Initial Jobless Claims",
+    "JOLTS": "Job Openings (JOLTS)",
+    # Prices
     "CPIAUCSL": "Consumer Price Index (CPI)",
+    "CPILFESL": "Core CPI (ex Food & Energy)",
+    "PCEPI": "PCE Price Index",
+    "PPIFIS": "Producer Price Index (PPI)",
+    # Growth
     "GDP": "Gross Domestic Product (GDP)",
+    "INDPRO": "Industrial Production Index",
+    "RSAFS": "Retail Sales",
+    # Rates & money
     "FEDFUNDS": "Federal Funds Rate",
+    "DGS10": "10-Year Treasury Yield",
+    "DGS2": "2-Year Treasury Yield",
+    "T10Y2Y": "10Y-2Y Treasury Spread (Yield Curve)",
+    "M2SL": "M2 Money Supply",
+    # Housing
+    "HOUST": "Housing Starts",
+    "CSUSHPINSA": "Case-Shiller Home Price Index",
+    # Confidence & sentiment
+    "UMCSENT": "University of Michigan Consumer Sentiment",
+    "VIXCLS": "CBOE Volatility Index (VIX)",
 }
 
 

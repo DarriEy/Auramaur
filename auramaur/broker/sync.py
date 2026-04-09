@@ -82,32 +82,41 @@ class PositionSyncer:
 
         The cost_basis table is the most reliable source since it tracks
         every fill we've made.  We enrich with current market prices
-        from the portfolio table where available.
+        from the markets table (refreshed each scan cycle).
         """
         positions: list[LivePosition] = []
 
         try:
-            # Cost basis is our ground truth — populated by every recorded fill
+            # Cost basis is our ground truth — populated by every recorded fill.
+            # Join against markets table to get current prices and category.
             rows = await self._db.fetchall(
-                "SELECT market_id, token, token_id, size, avg_cost FROM cost_basis WHERE size > 0"
+                """SELECT cb.market_id, cb.token, cb.token_id, cb.size, cb.avg_cost,
+                          m.outcome_yes_price, m.outcome_no_price, m.category
+                   FROM cost_basis cb
+                   LEFT JOIN markets m ON cb.market_id = m.id
+                   WHERE cb.size > 0"""
             )
 
             for row in rows:
                 market_id = row["market_id"]
+                raw_token = (row["token"] or "YES").upper()
+                token = TokenType(raw_token) if raw_token in ("YES", "NO") else TokenType.YES
 
-                # Look up current price from portfolio table
-                price_row = await self._db.fetchone(
-                    "SELECT current_price, category FROM portfolio WHERE market_id = ?",
-                    (market_id,),
-                )
-                current_price = float(price_row["current_price"] or 0) if price_row else 0.0
-                category = (price_row["category"] or "") if price_row else ""
+                # Use the correct price for the token we hold
+                yes_price = float(row["outcome_yes_price"] or 0)
+                no_price = float(row["outcome_no_price"] or 0)
+                if token == TokenType.NO:
+                    current_price = no_price if no_price > 0.01 else (1.0 - yes_price) if yes_price > 0 else 0.0
+                else:
+                    current_price = yes_price
+
+                category = row["category"] or ""
 
                 positions.append(
                     LivePosition(
                         market_id=market_id,
                         token_id=row["token_id"] or "",
-                        token=TokenType(row["token"]) if row["token"] else TokenType.YES,
+                        token=token,
                         size=float(row["size"]),
                         avg_cost=float(row["avg_cost"]),
                         current_price=current_price,
@@ -148,7 +157,9 @@ class PositionSyncer:
 
         for market_id, pos in self._paper.positions.items():
             # Look up cost basis from PnLTracker for more accurate avg cost
+            # and to get the token type/ID
             avg_cost, cb_size = await self._pnl.get_cost_basis(market_id)
+            token, token_id = await self._pnl.get_token_info(market_id)
             if cb_size <= 0:
                 # Fall back to paper trader's own tracking
                 avg_cost = pos.avg_price
@@ -156,6 +167,8 @@ class PositionSyncer:
             positions.append(
                 LivePosition(
                     market_id=market_id,
+                    token=token,
+                    token_id=token_id,
                     size=pos.size,
                     avg_cost=avg_cost,
                     current_price=pos.current_price,
@@ -169,6 +182,35 @@ class PositionSyncer:
     # ------------------------------------------------------------------
     # Reconciliation
     # ------------------------------------------------------------------
+
+    async def _merge_new_positions(self, positions: list[LivePosition]) -> None:
+        """Add newly discovered positions to the portfolio table.
+
+        This is additive-only — it never deletes existing rows.
+        Used to merge positions found by the reconciler that aren't
+        in cost_basis (e.g. manual buys on Polymarket).
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        for pos in positions:
+            side = OrderSide.BUY.value
+            token = pos.token.value if pos.token else "YES"
+            token_id = pos.token_id or ""
+            await self._db.execute(
+                """INSERT INTO portfolio
+                   (market_id, side, size, avg_price, current_price, category, token, token_id, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(market_id) DO UPDATE SET
+                       size = excluded.size,
+                       avg_price = excluded.avg_price,
+                       current_price = excluded.current_price,
+                       token = excluded.token,
+                       token_id = excluded.token_id,
+                       updated_at = excluded.updated_at""",
+                (pos.market_id, side, pos.size, pos.avg_cost,
+                 pos.current_price, pos.category, token, token_id, now),
+            )
+        await self._db.commit()
+        log.info("sync.merge_new", count=len(positions))
 
     async def _reconcile(self, positions: list[LivePosition]) -> None:
         """Update the ``portfolio`` table to match the live position list.
@@ -196,17 +238,21 @@ class PositionSyncer:
         for pos in positions:
             # Determine side — we always BUY on Polymarket, but keep BUY as default
             side = OrderSide.BUY.value
+            token = pos.token.value if pos.token else "YES"
+            token_id = pos.token_id or ""
 
             await self._db.execute(
                 """INSERT INTO portfolio
-                   (market_id, side, size, avg_price, current_price, category, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   (market_id, side, size, avg_price, current_price, category, token, token_id, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(market_id) DO UPDATE SET
                        side = excluded.side,
                        size = excluded.size,
                        avg_price = excluded.avg_price,
                        current_price = excluded.current_price,
                        category = excluded.category,
+                       token = excluded.token,
+                       token_id = excluded.token_id,
                        updated_at = excluded.updated_at""",
                 (
                     pos.market_id,
@@ -215,6 +261,8 @@ class PositionSyncer:
                     pos.avg_cost,
                     pos.current_price,
                     pos.category,
+                    token,
+                    token_id,
                     now,
                 ),
             )

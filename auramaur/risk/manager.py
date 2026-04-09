@@ -55,6 +55,7 @@ class RiskManager:
         signal: Signal,
         market: Market,
         price_history: dict[str, list[float]] | None = None,
+        available_cash: float | None = None,
     ) -> RiskDecision:
         """Run every risk check and, if all pass, compute position size."""
         rc = self.settings.risk  # RiskConfig shortcut
@@ -92,14 +93,14 @@ class RiskManager:
             await check_daily_loss(abs(daily_pnl), rc.daily_loss_limit),
             await check_max_positions(len(positions), rc.max_open_positions),
             await check_min_edge(signal.edge, rc.min_edge_pct),
-            await check_min_liquidity(market.liquidity, rc.min_liquidity),
+            await check_min_liquidity(max(market.liquidity, market.volume), rc.min_liquidity),
             await check_max_spread(market.spread, rc.max_spread_pct),
             await check_confidence_floor(signal.claude_confidence, rc.confidence_floor),
             await check_implied_prob_bounds(
                 signal.market_prob, rc.implied_prob_min, rc.implied_prob_max
             ),
             await check_category_exposure(market.category, cat_exp, rc.category_exposure_cap_pct),
-            await check_correlation(signal.market_id, correlated),
+            await check_correlation(signal.market_id, correlated, rc.max_correlated_positions),
             await check_time_to_resolution(hours_remaining, rc.time_to_resolution_min_hours),
             await check_second_opinion_divergence(divergence, rc.second_opinion_divergence_max),
         ]
@@ -124,8 +125,17 @@ class RiskManager:
                 )
                 if row and row["kelly_multiplier"] is not None:
                     category_mult = float(row["kelly_multiplier"])
-            except Exception:
-                pass
+                    log.debug(
+                        "risk.category_mult",
+                        category=market.category,
+                        multiplier=round(category_mult, 3),
+                    )
+            except Exception as e:
+                log.warning(
+                    "risk.category_mult_fallback",
+                    category=market.category,
+                    error=str(e),
+                )
 
             # Volatility adjustment from price history
             vol_mult = 1.0
@@ -137,10 +147,10 @@ class RiskManager:
             position_size = self.kelly.calculate(
                 claude_prob=signal.claude_prob,
                 market_prob=signal.market_prob,
-                bankroll=self.settings.execution.paper_initial_balance,
+                bankroll=available_cash or self.settings.execution.paper_initial_balance,
                 heat_mult=KellySizer.heat_multiplier(heat),
                 confidence_mult=KellySizer.confidence_multiplier(signal.claude_confidence),
-                liquidity_mult=KellySizer.liquidity_multiplier(market.liquidity),
+                liquidity_mult=KellySizer.liquidity_multiplier(max(market.liquidity, market.volume)),
                 category_mult=category_mult,
                 volatility_mult=vol_mult,
                 max_stake=rc.max_stake_per_market,

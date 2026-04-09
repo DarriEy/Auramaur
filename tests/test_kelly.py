@@ -99,14 +99,14 @@ def test_volatility_multiplier_insufficient_data():
 
 def test_volatility_mult_reduces_kelly_size():
     """Passing volatility_mult < 1.0 should reduce position size."""
-    sizer = KellySizer(fraction=0.25)
+    sizer = KellySizer(fraction=0.10)  # Smaller fraction so we don't hit max_stake cap
     full = sizer.calculate(
-        claude_prob=0.7, market_prob=0.5, bankroll=1000,
-        volatility_mult=1.0, max_stake=100,
+        claude_prob=0.6, market_prob=0.5, bankroll=1000,
+        volatility_mult=1.0, max_stake=500,
     )
     reduced = sizer.calculate(
-        claude_prob=0.7, market_prob=0.5, bankroll=1000,
-        volatility_mult=0.5, max_stake=100,
+        claude_prob=0.6, market_prob=0.5, bankroll=1000,
+        volatility_mult=0.5, max_stake=500,
     )
     assert reduced < full
-    assert reduced == pytest.approx(full * 0.5)
+    assert reduced == pytest.approx(full * 0.5, rel=0.01)

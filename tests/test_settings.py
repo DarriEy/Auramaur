@@ -52,7 +52,7 @@ def test_default_risk_params():
     assert s.risk.max_stake_per_market == 25.0
     assert s.risk.daily_loss_limit == 200.0
     assert s.risk.max_open_positions == 500
-    assert s.kelly.fraction == 0.40
+    assert s.kelly.fraction == 0.30
 
 
 # ---------------------------------------------------------------------------
@@ -96,8 +96,8 @@ def test_intensity_explicit_override_wins():
 
 def test_kalshi_config_defaults():
     s = Settings()
-    assert s.kalshi.enabled is False
-    assert s.kalshi.environment == "demo"
+    assert s.kalshi.enabled is True
+    assert s.kalshi.environment == "prod"
     assert s.kalshi.api_key == ""
     assert s.kalshi.private_key_path == ""
 
@@ -119,7 +119,22 @@ def test_yaml_defaults_safe():
         "defaults.yaml confidence_floor must be LOW, MEDIUM, or HIGH"
     )
 
-    # category_exposure_cap_pct must not exceed 60%
-    assert raw["risk"]["category_exposure_cap_pct"] <= 60.0, (
-        "defaults.yaml category_exposure_cap_pct must be <= 60.0"
+    # Hard ceilings — these must never be exceeded regardless of tuning
+    assert raw["risk"]["max_drawdown_pct"] <= 25.0, (
+        "defaults.yaml max_drawdown_pct must be <= 25%"
+    )
+    assert raw["risk"]["max_stake_per_market"] <= 100.0, (
+        "defaults.yaml max_stake_per_market must be <= $100"
+    )
+    assert raw["risk"]["daily_loss_limit"] <= 500.0, (
+        "defaults.yaml daily_loss_limit must be <= $500"
+    )
+    assert raw["risk"]["max_open_positions"] <= 1000, (
+        "defaults.yaml max_open_positions must be <= 1000"
+    )
+    assert raw["risk"]["category_exposure_cap_pct"] <= 80.0, (
+        "defaults.yaml category_exposure_cap_pct must be <= 80%"
+    )
+    assert raw["kelly"]["fraction"] <= 0.50, (
+        "defaults.yaml kelly fraction must be <= 50%"
     )

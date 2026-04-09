@@ -17,7 +17,9 @@ class MarketStatus(str, Enum):
 
 class Confidence(str, Enum):
     LOW = "LOW"
+    MEDIUM_LOW = "MEDIUM_LOW"
     MEDIUM = "MEDIUM"
+    MEDIUM_HIGH = "MEDIUM_HIGH"
     HIGH = "HIGH"
 
 
@@ -79,6 +81,7 @@ class OrderResult(BaseModel):
     filled_size: float = 0
     filled_price: float = 0
     is_paper: bool = True
+    error_message: str = ""
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -89,6 +92,8 @@ class Position(BaseModel):
     avg_price: float
     current_price: float = 0
     category: str = ""
+    token: TokenType = TokenType.YES
+    token_id: str = ""
 
     @property
     def unrealized_pnl(self) -> float:
