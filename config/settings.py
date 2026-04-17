@@ -233,6 +233,14 @@ class Settings(BaseSettings):
 
     # Safety
     auramaur_live: bool = False
+    # Separate opt-in for on-chain redemption — real Polygon transactions.
+    # Gated independently of auramaur_live so you can run live-trading without
+    # inadvertently enabling automated redemption submission.
+    auramaur_enable_redemption: bool = False
+
+    # Polygon RPC for on-chain redemption. Defaults to a public endpoint;
+    # override with a paid provider (Alchemy/Infura/QuickNode) for reliability.
+    polygon_rpc_url: str = "https://polygon-bor-rpc.publicnode.com"
 
     # Sub-configs
     execution: ExecutionConfig = Field(default_factory=lambda: ExecutionConfig(**_DEFAULTS.get("execution", {})))

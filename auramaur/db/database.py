@@ -58,6 +58,8 @@ class Database:
             await self._migrate_v5_to_v6()
         if from_version < 7:
             await self._migrate_v6_to_v7()
+        if from_version < 8:
+            await self._migrate_v7_to_v8()
 
     async def _migrate_v1_to_v2(self) -> None:
         """Add category to calibration, add new tables."""
@@ -182,6 +184,30 @@ class Database:
         await self._db.execute("UPDATE schema_version SET version = 7")
         await self._db.commit()
         log.info("database.migrated", from_version=6, to_version=7)
+
+    async def _migrate_v7_to_v8(self) -> None:
+        """Add redemptions table for on-chain CTF redemption tracking."""
+        await self._db.executescript("""
+            CREATE TABLE IF NOT EXISTS redemptions (
+                condition_id TEXT PRIMARY KEY,
+                asset_id TEXT DEFAULT '',
+                title TEXT DEFAULT '',
+                neg_risk INTEGER DEFAULT 0,
+                size REAL NOT NULL,
+                expected_payout REAL NOT NULL,
+                safe_nonce INTEGER,
+                tx_hash TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                submitted_at TEXT,
+                confirmed_at TEXT,
+                error TEXT DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_redemptions_status ON redemptions(status);
+        """)
+        await self._db.execute("UPDATE schema_version SET version = 8")
+        await self._db.commit()
+        log.info("database.migrated", from_version=7, to_version=8)
 
     @property
     def db(self) -> aiosqlite.Connection:

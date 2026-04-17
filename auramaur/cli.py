@@ -683,5 +683,99 @@ def unkill():
         console.print("Kill switch was not active.")
 
 
+@main.command("redeem")
+@click.option("--submit", is_flag=True, default=False,
+              help="Broadcast the Safe transactions. Requires AURAMAUR_LIVE=true, "
+                   "execution.live=true, and AURAMAUR_ENABLE_REDEMPTION=true. "
+                   "Omit to dry-run (build + sign + show calldata, never broadcast).")
+@click.option("--limit", default=10, type=int,
+              help="Maximum number of redemptions to attempt in this run.")
+@click.option("--min-payout", default=1.0, type=float,
+              help="Skip positions with expected payout below this amount (USDC).")
+def redeem_cmd(submit: bool, limit: int, min_payout: float):
+    """Redeem winning conditional tokens to USDC on-chain.
+
+    Without --submit, this is a safe dry-run that prints what would be sent
+    to Polygon but does not broadcast. Review the Safe nonce, calldata size,
+    and target contract before flipping the gates.
+    """
+    async def run():
+        import aiohttp
+        from auramaur.broker.onchain import OnChainRedeemer
+        from auramaur.broker.redeemer import fetch_redeemable_positions
+
+        settings = Settings()
+        if not settings.polymarket_proxy_address:
+            console.print("[red]polymarket_proxy_address not configured[/]")
+            return
+
+        db = Database()
+        await db.connect()
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                positions = await fetch_redeemable_positions(
+                    settings.polymarket_proxy_address,
+                    session=session,
+                    include_pending=False,
+                )
+
+            ready = [p for p in positions
+                     if p.redeemable_now and p.is_winner and p.payout >= min_payout]
+            ready.sort(key=lambda p: p.payout, reverse=True)
+            ready = ready[:limit]
+
+            if not ready:
+                console.print(f"[yellow]Nothing redeemable with payout ≥ ${min_payout:.2f}[/]")
+                return
+
+            total = sum(p.payout for p in ready)
+            console.print(f"[bold]{len(ready)} position(s) redeemable — total payout ${total:.2f}[/]")
+
+            redeemer = OnChainRedeemer(settings, db)
+            gates_open = redeemer._is_live_submission_allowed()
+
+            if submit and not gates_open:
+                console.print("[red]--submit passed but gates are closed. Need all of:[/]")
+                console.print(f"  AURAMAUR_LIVE=true           (now: {settings.auramaur_live})")
+                console.print(f"  execution.live=true          (now: {settings.execution.live})")
+                console.print(f"  AURAMAUR_ENABLE_REDEMPTION=true (now: {settings.auramaur_enable_redemption})")
+                console.print("  KILL_SWITCH absent")
+                console.print("Running as dry-run instead.")
+
+            do_submit = submit and gates_open
+
+            for pos in ready:
+                try:
+                    result = await redeemer.redeem(pos, dry_run=not do_submit)
+                except Exception as e:
+                    console.print(f"[red]ERROR {pos.title[:50]}: {e}[/]")
+                    continue
+
+                if result.status == "built":
+                    console.print(
+                        f"[cyan]built[/]  nonce={result.safe_nonce} "
+                        f"payout=${pos.payout:.2f} {pos.title[:60]}"
+                    )
+                elif result.status == "submitted":
+                    console.print(
+                        f"[green]submitted[/] tx=0x{result.tx_hash.lstrip('0x')[:10]}... "
+                        f"payout=${pos.payout:.2f} {pos.title[:50]}"
+                    )
+                elif result.status == "confirmed":
+                    console.print(
+                        f"[bold green]confirmed[/] tx=0x{result.tx_hash.lstrip('0x')[:10]}... "
+                        f"payout=${pos.payout:.2f} {pos.title[:50]}"
+                    )
+                elif result.status == "skipped":
+                    console.print(f"[dim]skipped[/] (already recorded) {pos.title[:60]}")
+                else:
+                    console.print(f"[red]{result.status}[/] {pos.title[:50]}: {result.error}")
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     main()

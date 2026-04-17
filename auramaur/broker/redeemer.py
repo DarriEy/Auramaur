@@ -4,10 +4,9 @@ Queries Polymarket's data-api for positions held by a proxy wallet and
 identifies those ready to redeem — winning conditional tokens in resolved
 markets that can be converted back to USDC.
 
-On-chain redemption (calling CTF.redeemPositions via the Gnosis Safe proxy)
-is not yet implemented here.  See the TODO at the bottom of this file.
-For now this module surfaces what's redeemable so the user can act on it
-via the Polymarket UI or an on-chain script.
+On-chain redemption (CTF.redeemPositions via the Gnosis Safe proxy) lives in
+``auramaur.broker.onchain.OnChainRedeemer``. This module is responsible for
+*what* is redeemable; that module for *how* to actually redeem.
 """
 
 from __future__ import annotations
@@ -163,23 +162,8 @@ def summarize_redemptions(positions: list[RedeemablePosition]) -> dict:
 
 
 # --------------------------------------------------------------------------
-# TODO: on-chain redemption via Gnosis Safe proxy
-# --------------------------------------------------------------------------
-# The remaining work to make this fully automated:
-#
-# 1. Import web3.py and connect to a Polygon RPC.
-# 2. For regular markets: build a CTF.redeemPositions() call.
-#    Contract: 0x4D97DCd97eC945f40cF65F87097ACe5EA0476045
-#    Args: (collateralToken=USDC, parentCollectionId=bytes32(0),
-#           conditionId, indexSets=[1,2])
-# 3. For NegRisk markets: build a NegRiskAdapter.redeemPositions() call.
-#    Contract: 0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296
-# 4. Because Polymarket uses a Gnosis Safe proxy wallet (signature_type=2),
-#    the call must be wrapped in a Safe transaction:
-#    - build exec_transaction payload
-#    - sign with the EOA private key (settings.polygon_private_key)
-#    - submit to the Safe
-# 5. Group multiple redemptions into a single Safe batch transaction to
-#    save gas (one MultiSend call instead of N individual calls).
-# 6. Verify USDC balance increased after receipt, then mark in DB.
+# On-chain redemption lives in auramaur.broker.onchain.OnChainRedeemer.
+# Implemented for Gnosis Safe v1.3.0 (Polymarket's proxy type) + CTF
+# binary markets. NegRisk adapter path is still TODO — positions with
+# neg_risk=True are skipped by the redeemer with a clear error.
 # --------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -248,4 +248,21 @@ CREATE TABLE IF NOT EXISTS slippage_log (
     order_type TEXT DEFAULT 'limit',
     timestamp TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS redemptions (
+    condition_id TEXT PRIMARY KEY,
+    asset_id TEXT DEFAULT '',
+    title TEXT DEFAULT '',
+    neg_risk INTEGER DEFAULT 0,
+    size REAL NOT NULL,
+    expected_payout REAL NOT NULL,
+    safe_nonce INTEGER,
+    tx_hash TEXT DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    submitted_at TEXT,
+    confirmed_at TEXT,
+    error TEXT DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_redemptions_status ON redemptions(status);
 """
