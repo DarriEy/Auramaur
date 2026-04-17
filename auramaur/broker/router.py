@@ -133,11 +133,20 @@ class SmartOrderRouter:
                     reason=reason,
                 )
 
+        # Post-only on LIMIT orders: we use `best_bid + 1 tick` / `best_ask - 1
+        # tick` as the price, which shouldn't cross — but the book can move in
+        # the gap between fetch and submit. post_only guarantees we don't
+        # accidentally take, which keeps us on the maker-reward side of the
+        # fee schedule and flushes out any router/pricing mistakes loudly
+        # (rejection) instead of quietly (taker fill at a worse price).
+        want_post_only = order_type == OrderType.LIMIT
+
         # Build the final order with refined price / type
         routed_order = base_order.model_copy(
             update={
                 "price": limit_price,
                 "order_type": order_type,
+                "post_only": want_post_only,
             }
         )
 
@@ -168,20 +177,30 @@ class SmartOrderRouter:
         For BUY orders:  best_bid + 0.01 (step ahead of resting bids).
         For SELL orders: best_ask - 0.01 (step ahead of resting asks).
 
+        When 1-tick improvement would cross (1-cent spread markets), fall
+        back to joining the BBO instead — post_only would otherwise reject.
+
         Result is clamped to the valid Polymarket tick range [0.01, 0.99].
         """
         if side == OrderSide.BUY:
-            if book.best_bid is not None:
+            if book.best_bid is not None and book.best_ask is not None:
+                improved = book.best_bid + 0.01
+                # If improvement would touch or cross best_ask, join the bid
+                # queue instead (still a maker post, at the same price as
+                # everyone resting at best_bid).
+                price = book.best_bid if improved >= book.best_ask else improved
+            elif book.best_bid is not None:
                 price = book.best_bid + 0.01
             elif book.best_ask is not None:
-                # No bids — use ask minus a tick
                 price = book.best_ask - 0.01
             else:
-                # Empty book — fall back to midpoint of valid range
                 price = 0.50
         else:
             # SELL side
-            if book.best_ask is not None:
+            if book.best_ask is not None and book.best_bid is not None:
+                improved = book.best_ask - 0.01
+                price = book.best_ask if improved <= book.best_bid else improved
+            elif book.best_ask is not None:
                 price = book.best_ask - 0.01
             elif book.best_bid is not None:
                 price = book.best_bid + 0.01

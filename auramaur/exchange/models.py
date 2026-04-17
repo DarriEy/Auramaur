@@ -68,6 +68,11 @@ class Order(BaseModel):
     price: float
     order_type: OrderType = OrderType.MARKET
     dry_run: bool = True  # Paper trade by default
+    # Post-only: reject rather than cross the spread. Only meaningful for
+    # LIMIT orders. Protects against turning a maker quote into a taker fill
+    # when the book moves between order formation and submission, and keeps
+    # us eligible for Polymarket's maker-reward tier.
+    post_only: bool = False
 
     @property
     def notional(self) -> float:

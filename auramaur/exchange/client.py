@@ -302,7 +302,7 @@ class PolymarketClient:
 
         try:
             from py_clob_client.order_builder.constants import BUY, SELL
-            from py_clob_client.clob_types import OrderArgs, BalanceAllowanceParams, AssetType
+            from py_clob_client.clob_types import OrderArgs, BalanceAllowanceParams, AssetType, OrderType as ClobOrderType
 
             clob_side = BUY if order.side == OrderSide.BUY else SELL
 
@@ -325,16 +325,45 @@ class PolymarketClient:
                     log.warning("clob_client.token_approval_failed",
                                 token_id=order.token_id[:20], error=str(e))
 
-            signed_order = self._clob_client.create_and_post_order(
-                OrderArgs(
-                    token_id=order.token_id,
-                    price=order.price,
-                    size=order.size,
-                    side=clob_side,
-                )
+            # post_only is only meaningful for GTC limit orders. py-clob-client
+            # raises if you pass post_only=True with FOK/market.
+            want_post_only = order.post_only and order.order_type == OrderType.LIMIT
+            ord_args = OrderArgs(
+                token_id=order.token_id,
+                price=order.price,
+                size=order.size,
+                side=clob_side,
             )
+            if want_post_only:
+                # Two-step: build the signed order, then post with post_only=True.
+                signed = self._clob_client.create_order(ord_args)
+                signed_order = self._clob_client.post_order(
+                    signed, orderType=ClobOrderType.GTC, post_only=True
+                )
+            else:
+                signed_order = self._clob_client.create_and_post_order(ord_args)
 
             order_id = str(signed_order.get("orderID", signed_order.get("id", "unknown")))
+
+            # Polymarket returns success=False with errorMsg when a post_only
+            # order would have crossed. Surface that as a rejection so callers
+            # can decide whether to re-quote rather than silently believing
+            # the order is resting.
+            if isinstance(signed_order, dict) and signed_order.get("success") is False:
+                err = str(signed_order.get("errorMsg") or signed_order.get("error") or "post-only rejected")
+                log.info(
+                    "order.post_only_rejected",
+                    market_id=order.market_id,
+                    price=order.price,
+                    reason=err[:200],
+                )
+                return OrderResult(
+                    order_id=order_id or "POST_ONLY_REJECTED",
+                    market_id=order.market_id,
+                    status="rejected",
+                    is_paper=False,
+                    error_message=err[:200],
+                )
 
             self._live_pending[order_id] = order
 

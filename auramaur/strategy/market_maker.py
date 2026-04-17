@@ -350,7 +350,9 @@ class MarketMaker:
         """
         no_price = quote.no_leg_price
 
-        # Build bid leg (BUY YES)
+        # Build bid leg (BUY YES). post_only=True: MM is only profitable as
+        # maker — if our quote somehow crosses (stale book), reject rather
+        # than pay taker and lose the spread.
         bid_order = Order(
             market_id=quote.market_id,
             exchange="polymarket",
@@ -361,6 +363,7 @@ class MarketMaker:
             price=quote.bid_price,
             order_type=OrderType.LIMIT,
             dry_run=not is_live,
+            post_only=True,
         )
 
         # Build ask leg (BUY NO = effectively selling YES)
@@ -374,6 +377,7 @@ class MarketMaker:
             price=no_price,
             order_type=OrderType.LIMIT,
             dry_run=not is_live,
+            post_only=True,
         )
 
         # Place both legs
