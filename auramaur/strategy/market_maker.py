@@ -249,9 +249,20 @@ class MarketMaker:
         if best_bid is None or best_ask is None:
             return None
 
-        # Start with 1-tick price improvement on both sides
-        our_bid = round(best_bid + 0.01, 2)
-        our_ask = round(best_ask - 0.01, 2)
+        # Polymarket has 1-cent ticks. Try to price-improve by one tick on each
+        # side; if the underlying spread is too tight for that (which is the
+        # common case — most liquid markets sit at 2-3 cent spreads), quote at
+        # the BBO instead (join the queue) so we still capture spread as maker.
+        step = 0.01
+        raw_bid = best_bid + step
+        raw_ask = best_ask - step
+        raw_spread_bps = int((raw_ask - raw_bid) * 10000)
+        if raw_spread_bps < self._min_spread_bps:
+            our_bid = round(best_bid, 2)
+            our_ask = round(best_ask, 2)
+        else:
+            our_bid = round(raw_bid, 2)
+            our_ask = round(raw_ask, 2)
 
         # Inventory skew: adjust quotes based on current inventory
         inventory = self._inventory.get(market.id, 0)
@@ -269,12 +280,28 @@ class MarketMaker:
 
         # Sanity: bid must be strictly less than ask
         if our_bid >= our_ask:
+            log.debug(
+                "market_maker.quote_rejected",
+                market_id=market.id,
+                reason="bid_gte_ask",
+                our_bid=our_bid,
+                our_ask=our_ask,
+                best_bid=best_bid,
+                best_ask=best_ask,
+            )
             return None
 
         # Check our spread meets minimum
         our_spread = our_ask - our_bid
         our_spread_bps = int(our_spread * 10000)
         if our_spread_bps < self._min_spread_bps:
+            log.debug(
+                "market_maker.quote_rejected",
+                market_id=market.id,
+                reason="spread_too_narrow",
+                our_spread_bps=our_spread_bps,
+                min_spread_bps=self._min_spread_bps,
+            )
             return None
 
         # Check the NO leg price is valid

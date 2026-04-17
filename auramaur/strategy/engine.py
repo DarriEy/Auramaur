@@ -546,6 +546,32 @@ class TradingEngine:
             if pnl_tracker:
                 await pnl_tracker.record_fill(fill)
 
+            # Mirror into legacy `trades` table so the CLI stats view and
+            # holding-period lookups in risk/portfolio.py stay in sync.
+            # (PnLTracker writes the authoritative row to `fills`.)
+            try:
+                await self.db.execute(
+                    """INSERT INTO trades
+                       (market_id, signal_id, side, size, price, is_paper,
+                        order_id, status, kelly_fraction, exchange)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        order.market_id,
+                        getattr(signal, "id", None),
+                        order.side.value,
+                        fill.size,
+                        fill.price,
+                        1 if fill.is_paper else 0,
+                        result.order_id,
+                        "filled" if result.status in ("filled", "paper") else "pending",
+                        None,
+                        order.exchange or self.exchange_name,
+                    ),
+                )
+                await self.db.commit()
+            except Exception as e:
+                log.debug("engine.trade_mirror_error", error=str(e))
+
         # Record trade metadata for later PnL attribution
         await self._record_trade_for_attribution(market, signal,
             type("D", (), {"position_size": size_dollars}))

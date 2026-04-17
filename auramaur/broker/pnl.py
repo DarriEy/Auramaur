@@ -100,6 +100,24 @@ class PnLTracker:
                 size=fill.size,
             )
 
+            # Update daily_stats so the CLI/risk view sees realized PnL as
+            # soon as exits fire — previously only market resolution wrote
+            # this table, which made the running P&L invisible for weeks.
+            try:
+                today = date.today().isoformat()
+                await self._db.execute(
+                    """INSERT INTO daily_stats (date, total_pnl, trades_count, wins, losses)
+                       VALUES (?, ?, 1, ?, ?)
+                       ON CONFLICT(date) DO UPDATE SET
+                           total_pnl = total_pnl + excluded.total_pnl,
+                           trades_count = trades_count + 1,
+                           wins = wins + excluded.wins,
+                           losses = losses + excluded.losses""",
+                    (today, pnl, 1 if pnl > 0 else 0, 1 if pnl < 0 else 0),
+                )
+            except Exception as e:
+                log.debug("pnl.daily_stats_error", error=str(e))
+
         # Clamp negative sizes to zero (shouldn't happen, but be safe)
         if new_size < 0:
             log.warning("pnl.negative_size_clamped", market_id=fill.market_id, size=new_size)

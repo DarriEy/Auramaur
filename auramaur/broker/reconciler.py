@@ -147,10 +147,17 @@ class PositionReconciler:
             # Match to our DB market_id
             market_id = await self._find_market_id(condition_id, question, slug)
 
-            # Compute avg cost from real trade data
+            # Compute avg cost from real trade data.
+            # Cost basis can go weird (>1.0 or negative) for dust positions
+            # where partial sells made the cost/size ratio meaningless.
+            # Clamp to a sensible range so downstream exit logic doesn't fire
+            # stop-loss on fictitious -98% losses built from rounding artifacts.
             net = pos_data["net"]
             total_cost = pos_data["total_cost"]
             avg_cost = total_cost / net if net > 0 else 0.0
+            if avg_cost <= 0 or avg_cost > 1.0:
+                # Fall back to current price — treats the dust as flat P&L.
+                avg_cost = current_price if current_price > 0 else 0.5
 
             positions.append(ReconciledPosition(
                 market_id=market_id or condition_id[:16],

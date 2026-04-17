@@ -52,6 +52,9 @@ class AuramaurBot:
         self._lock_file = None  # File handle kept open for duration
         self._rebalance_cooldowns: dict[str, float] = {}  # kept for reference, allocator handles concentration
         self._exit_failures: set[str] = set()  # Track failed exit sells to avoid spam
+        # Track attempted cross-exchange arbs so the scanner doesn't re-execute
+        # the same opportunity every 5-minute cycle. Maps arb-key -> expiry ts.
+        self._arb_attempts: dict[str, float] = {}
 
     def _acquire_db_path(self) -> str:
         """Find an available database slot using file locks.
@@ -695,6 +698,15 @@ class AuramaurBot:
                             log.debug("exit.no_token", market_id=pos.market_id)
                             continue
 
+                        # Cancel any stale sell orders on this token first —
+                        # otherwise the balance stays locked and the new sell
+                        # gets rejected with "not enough balance / allowance".
+                        if hasattr(exchange, "cancel_open_orders_for_token"):
+                            try:
+                                await exchange.cancel_open_orders_for_token(token_id)
+                            except Exception as e:
+                                log.debug("exit.pre_cancel_error", error=str(e))
+
                         # Check ACTUAL on-chain balance (not DB which may be stale)
                         sell_size = pos.size
                         try:
@@ -709,6 +721,8 @@ class AuramaurBot:
                                 )
                             )
                             onchain = int(bal.get("balance", 0)) / 1e6
+                            # Stale orders were just cancelled, so balance is free.
+                            # Cap sell_size at what's actually on-chain.
                             if onchain < sell_size:
                                 log.info("exit.size_adjusted",
                                          market_id=pos.market_id,
@@ -1331,12 +1345,60 @@ class AuramaurBot:
         if yes_order.size < 1 or no_order.size < 1:
             return
 
+        # Dedup: don't re-execute the same (question, exchange-pair) for 1 hour.
+        # The scanner runs every 5 min — without this guard we racked up
+        # duplicate half-filled legs on the same opportunity.
+        import time as _time
+        arb_key = f"{opp.question[:80]}|{cheap_exchange}|{expensive_exchange}"
+        now_ts = _time.monotonic()
+        expiry = self._arb_attempts.get(arb_key)
+        if expiry and expiry > now_ts:
+            log.debug(
+                "arb_scanner.cross_dedup_skip",
+                question=opp.question[:60],
+                cheap_exchange=cheap_exchange,
+                expensive_exchange=expensive_exchange,
+            )
+            return
+        self._arb_attempts[arb_key] = now_ts + 3600
+        # GC expired entries
+        if len(self._arb_attempts) > 200:
+            self._arb_attempts = {
+                k: v for k, v in self._arb_attempts.items() if v > now_ts
+            }
+
         try:
             # Execute both legs simultaneously
             yes_result, no_result = await asyncio.gather(
                 cheap_client.place_order(yes_order),
                 expensive_client.place_order(no_order),
             )
+
+            # Atomicity guard: if one leg was rejected while the other was
+            # placed, cancel the successful leg to avoid a naked directional
+            # position. A partially-executed arb is pure speculation.
+            yes_ok = yes_result.status not in ("rejected", "error")
+            no_ok = no_result.status not in ("rejected", "error")
+            if yes_ok != no_ok:
+                rollback_client = cheap_client if yes_ok else expensive_client
+                rollback_result = yes_result if yes_ok else no_result
+                rollback_exchange = cheap_exchange if yes_ok else expensive_exchange
+                log.warning(
+                    "arb_scanner.cross_half_fill_rollback",
+                    question=opp.question[:60],
+                    yes_status=yes_result.status,
+                    no_status=no_result.status,
+                    rollback_exchange=rollback_exchange,
+                    rollback_order_id=rollback_result.order_id,
+                )
+                try:
+                    await rollback_client.cancel_order(rollback_result.order_id)
+                except Exception as e:
+                    log.error(
+                        "arb_scanner.cross_rollback_failed",
+                        question=opp.question[:60],
+                        error=str(e),
+                    )
 
             log.info(
                 "arb_scanner.cross_executed",

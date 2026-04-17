@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import datetime
 
 import aiohttp
@@ -13,12 +14,18 @@ log = structlog.get_logger()
 
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"
 
+# How long (seconds) to remember that a market_id returned 4xx, so we don't
+# re-hit the API every cycle for dead/orphaned IDs.
+_NEGATIVE_CACHE_TTL = 3600.0
+
 
 class GammaClient:
     """Unauthenticated Gamma API for market discovery and filtering."""
 
     def __init__(self):
         self._session: aiohttp.ClientSession | None = None
+        # market_id -> expiry timestamp for ids that returned 4xx
+        self._negative_cache: dict[str, float] = {}
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -68,9 +75,33 @@ class GammaClient:
 
     async def get_market(self, market_id: str) -> Market | None:
         """Fetch a single market by ID."""
+        if not market_id:
+            return None
+
+        # Gamma's /markets/{id} expects a numeric id. Hex condition-id stubs
+        # (e.g. orphaned "0xfac8e82eb828a0" stored by the reconciler when it
+        # couldn't map a condition_id to a numeric market) will always 422.
+        # Skip them silently instead of hammering the API every cycle.
+        if market_id.startswith("0x"):
+            return None
+
+        expiry = self._negative_cache.get(market_id)
+        if expiry is not None:
+            if expiry > time.monotonic():
+                return None
+            self._negative_cache.pop(market_id, None)
+
         session = await self._ensure_session()
         try:
             async with session.get(f"{GAMMA_API_BASE}/markets/{market_id}") as resp:
+                if resp.status == 404 or resp.status == 422:
+                    self._negative_cache[market_id] = time.monotonic() + _NEGATIVE_CACHE_TTL
+                    log.debug(
+                        "gamma.market_not_found",
+                        market_id=market_id,
+                        status=resp.status,
+                    )
+                    return None
                 resp.raise_for_status()
                 data = await resp.json()
                 return self._parse_market(data)
@@ -79,20 +110,41 @@ class GammaClient:
             return None
 
     async def search_markets(self, query: str, limit: int = 50) -> list[Market]:
-        """Search markets by keyword."""
+        """Search markets by keyword.
+
+        Uses the /public-search endpoint, which actually honors the query
+        parameter. /markets?query=... silently ignores the filter and returns
+        the default top-of-volume list, so every headline ends up matching the
+        same handful of meme markets — breaking the news reactor.
+        """
         session = await self._ensure_session()
-        params = {"query": query, "limit": limit, "active": "true", "closed": "false"}
+        params = {
+            "q": query,
+            "limit_per_type": min(limit, 20),
+            "events_status": "active",
+        }
 
         try:
-            async with session.get(f"{GAMMA_API_BASE}/markets", params=params) as resp:
+            async with session.get(
+                f"{GAMMA_API_BASE}/public-search", params=params
+            ) as resp:
                 resp.raise_for_status()
                 data = await resp.json()
 
-            markets = []
-            for item in data:
-                market = self._parse_market(item)
-                if market:
-                    markets.append(market)
+            markets: list[Market] = []
+            seen: set[str] = set()
+            for event in (data.get("events") or []):
+                for item in (event.get("markets") or []):
+                    if not item.get("active") or item.get("closed"):
+                        continue
+                    market = self._parse_market(item)
+                    if market and market.id not in seen:
+                        seen.add(market.id)
+                        markets.append(market)
+                    if len(markets) >= limit:
+                        break
+                if len(markets) >= limit:
+                    break
             return markets
 
         except aiohttp.ClientError as e:

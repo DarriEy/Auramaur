@@ -221,15 +221,27 @@ class PolymarketClient:
             no_price=market.outcome_no_price,
         )
 
-        # Convert dollar size to token quantity; enforce CLOB minimum (5 tokens, $1 notional)
+        # Convert dollar size to token quantity. Polymarket CLOB enforces TWO
+        # minimums and we have to satisfy both:
+        #   * 5 tokens per order (clob_minimum_size)
+        #   * $1 notional (min_size in marketable-order rejection)
+        # The 5-token check alone is insufficient at low prices: 5 tokens at
+        # $0.07 is only $0.35 notional, which Polymarket then rejects with
+        # "invalid amount for a marketable BUY order, min size: $1".
         token_size = position_size / exec_price if exec_price > 0 else 0
         token_size = round(token_size, 2)
-        if token_size < 5:
+        notional = token_size * exec_price
+
+        if token_size < 5 or notional < 1.0:
+            reason = "below_token_min" if token_size < 5 else "below_notional_min"
             log.warning(
                 "prepare_order.too_small",
                 market_id=market.id,
+                reason=reason,
                 token_size=token_size,
+                notional=round(notional, 2),
                 min_tokens=5,
+                min_notional=1.0,
                 position_size=position_size,
                 exec_price=exec_price,
             )
@@ -346,10 +358,32 @@ class PolymarketClient:
             )
 
     async def get_order_status(self, order_id: str) -> OrderResult:
-        """Query the CLOB API for the current status of an order."""
+        """Query the CLOB API for the current status of an order.
+
+        When the CLOB returns None for an order, it means the order no longer
+        exists in the active-order index — either filled-and-settled long ago,
+        or cancelled. We return a terminal "cancelled" result so callers can
+        drop it from their pending-order tracking instead of re-polling forever.
+        """
         self._init_clob_client()
         try:
             raw = self._clob_client.get_order(order_id)
+        except Exception as e:
+            log.error("order_status.error", order_id=order_id, error=str(e))
+            raise
+
+        if raw is None:
+            log.debug("order_status.not_found", order_id=order_id)
+            return OrderResult(
+                order_id=order_id,
+                market_id="",
+                status="cancelled",
+                filled_size=0,
+                filled_price=0,
+                is_paper=False,
+            )
+
+        try:
             status_str = str(raw.get("status", "pending")).lower()
             status = _CLOB_STATUS_MAP.get(status_str, "pending")
             filled = float(raw.get("size_matched", 0))
@@ -365,7 +399,7 @@ class PolymarketClient:
                 is_paper=False,
             )
         except Exception as e:
-            log.error("order_status.error", order_id=order_id, error=str(e))
+            log.error("order_status.parse_error", order_id=order_id, error=str(e))
             raise
 
     async def cancel_order(self, order_id: str) -> bool:
@@ -379,6 +413,40 @@ class PolymarketClient:
         except Exception as e:
             log.error("order_cancel.error", order_id=order_id, error=str(e))
             return False
+
+    async def cancel_open_orders_for_token(self, token_id: str) -> int:
+        """Cancel all open CLOB orders for a specific conditional token.
+
+        Used by the exit path: stale sell orders from a previous run lock the
+        token balance, so a fresh profit-target sell would be rejected with
+        "not enough balance / allowance". Cancelling first releases the balance
+        before we re-post at the current price.
+
+        Returns the number of orders cancelled (0 if none were open).
+        """
+        if not token_id:
+            return 0
+        self._init_clob_client()
+        try:
+            resp = self._clob_client.cancel_market_orders(asset_id=token_id)
+            cancelled = resp.get("canceled", []) if isinstance(resp, dict) else []
+            count = len(cancelled) if isinstance(cancelled, list) else 0
+            if count:
+                log.info(
+                    "order.stale_cancelled",
+                    token_id=token_id[:20],
+                    count=count,
+                )
+                for oid in cancelled if isinstance(cancelled, list) else []:
+                    self._live_pending.pop(str(oid), None)
+            return count
+        except Exception as e:
+            log.warning(
+                "order.stale_cancel_error",
+                token_id=token_id[:20],
+                error=str(e)[:200],
+            )
+            return 0
 
     async def poll_until_terminal(
         self,
