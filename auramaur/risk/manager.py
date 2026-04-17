@@ -30,6 +30,7 @@ from auramaur.risk.checks import (
 )
 from auramaur.risk.kelly import KellySizer
 from auramaur.risk.portfolio import PortfolioTracker
+from auramaur.risk.regime import resolve_regime
 
 log = structlog.get_logger()
 
@@ -67,6 +68,23 @@ class RiskManager:
         category_exposure = await self.portfolio.get_category_exposure()
         correlated = await self.portfolio.get_correlated_markets(signal.market_id)
 
+        # Equity = cash + position notional at current price (falls back to
+        # avg price for positions with no live quote yet). Drives regime
+        # switching: capital-starved books get growth-mode params, mature
+        # books get the preservation-tuned config values.
+        cash = available_cash if available_cash is not None else self.settings.execution.paper_initial_balance
+        position_notional = sum(
+            p.size * (p.current_price or p.avg_price)
+            for p in positions
+        )
+        equity = cash + position_notional
+        regime = resolve_regime(
+            equity=equity,
+            base_kelly=self.settings.kelly.fraction,
+            base_max_stake=rc.max_stake_per_market,
+            base_min_edge_pct=rc.min_edge_pct,
+        )
+
         # Time to resolution
         if market.end_date:
             end = market.end_date if market.end_date.tzinfo else market.end_date.replace(tzinfo=timezone.utc)
@@ -89,10 +107,10 @@ class RiskManager:
             await check_kill_switch(),
             await check_max_drawdown(drawdown, rc.max_drawdown_pct),
             await check_drawdown_heat(drawdown, rc.max_drawdown_pct),
-            await check_max_stake(signal.recommended_size, rc.max_stake_per_market),
+            await check_max_stake(signal.recommended_size, regime.max_stake),
             await check_daily_loss(abs(daily_pnl), rc.daily_loss_limit),
             await check_max_positions(len(positions), rc.max_open_positions),
-            await check_min_edge(signal.edge, rc.min_edge_pct),
+            await check_min_edge(signal.edge, regime.min_edge_pct),
             await check_min_liquidity(max(market.liquidity, market.volume), rc.min_liquidity),
             await check_max_spread(market.spread, rc.max_spread_pct),
             await check_confidence_floor(signal.claude_confidence, rc.confidence_floor),
@@ -147,13 +165,14 @@ class RiskManager:
             position_size = self.kelly.calculate(
                 claude_prob=signal.claude_prob,
                 market_prob=signal.market_prob,
-                bankroll=available_cash or self.settings.execution.paper_initial_balance,
+                bankroll=cash,
                 heat_mult=KellySizer.heat_multiplier(heat),
                 confidence_mult=KellySizer.confidence_multiplier(signal.claude_confidence),
                 liquidity_mult=KellySizer.liquidity_multiplier(max(market.liquidity, market.volume)),
                 category_mult=category_mult,
                 volatility_mult=vol_mult,
-                max_stake=rc.max_stake_per_market,
+                max_stake=regime.max_stake,
+                fraction_override=regime.kelly_fraction,
             )
 
         reason = (
@@ -180,6 +199,11 @@ class RiskManager:
             checks_passed=sum(1 for c in checks if c.passed),
             checks_failed=len(failed),
             reason=decision.reason,
+            equity=round(equity, 2),
+            regime=regime.name,
+            kelly_fraction=round(regime.kelly_fraction, 3),
+            max_stake=round(regime.max_stake, 2),
+            min_edge_pct=round(regime.min_edge_pct, 2),
         )
 
         return decision

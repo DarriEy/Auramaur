@@ -48,6 +48,7 @@ class KellySizer:
         volatility_mult: float = 1.0,
         book_imbalance_mult: float = 1.0,
         max_stake: float = 25.0,
+        fraction_override: float | None = None,
     ) -> float:
         """Return the optimal stake in dollars using geometric Kelly.
 
@@ -81,9 +82,10 @@ class KellySizer:
         if kelly <= 0:
             return 0.0
 
+        fraction = self.fraction if fraction_override is None else fraction_override
         size = (
             kelly
-            * self.fraction
+            * fraction
             * heat_mult
             * confidence_mult
             * liquidity_mult
