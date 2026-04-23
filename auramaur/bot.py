@@ -290,6 +290,7 @@ class AuramaurBot:
                     allocator=allocator,
                 )
                 cdc_engine.strategic = strategic
+                cdc_engine.exchange_name = "cryptodotcom"
                 engines["cryptodotcom"] = cdc_engine
             except ImportError:
                 log.warning("optional.missing", component="CryptoComClient")
@@ -495,18 +496,18 @@ class AuramaurBot:
 
     async def _task_trading_cycle(self, engine: TradingEngine, name: str = "") -> None:
         """Periodically run trading analysis cycle."""
+        # Wait for the portfolio monitor to set _last_known_cash before the
+        # first cycle, otherwise we default to 0 and enter starved mode.
+        for _ in range(15):
+            if getattr(self, '_last_known_cash', 0.0) > 0:
+                break
+            await asyncio.sleep(2)
+
         while self._running:
             if await self._check_kill_switch():
                 return
 
-            # No cash gate — the allocator handles capital limits.
-            # The previous gate was blocking trades due to CLOB balance
-            # returning on-chain USDC (low) vs Polymarket balance (higher).
-
             try:
-                # Use total known cash for starved mode detection
-                # (not per-engine — we want global capital awareness)
-                # Default to 0 (starved) until portfolio monitor sets the real value
                 cash = getattr(self, '_last_known_cash', 0.0)
                 await engine.run_cycle(cash_available=cash)
             except Exception as e:

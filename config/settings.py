@@ -37,7 +37,7 @@ class RiskConfig(BaseModel):
     max_drawdown_pct: float = 15.0
     max_stake_per_market: float = 25.0
     daily_loss_limit: float = 200.0
-    max_open_positions: int = 30
+    max_open_positions: int = 200
     min_edge_pct: float = 5.0
     min_liquidity: float = 1000.0
     max_spread_pct: float = 5.0
