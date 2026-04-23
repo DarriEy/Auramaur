@@ -93,7 +93,9 @@ class PipelineAnalyzer:
                 all_evidence: list = []
                 seen_ids: set[str] = set()
                 for query in queries:
-                    items = await self.aggregator.gather(query, limit_per_source=3)
+                    items = await self.aggregator.gather(
+                        query, limit_per_source=3, category=market.category or None,
+                    )
                     for item in items:
                         if item.id not in seen_ids:
                             seen_ids.add(item.id)
@@ -188,7 +190,9 @@ class PipelineAnalyzer:
         seen_ids: set[str] = set()
         per_query_limit = max(1, self.settings.nlp.evidence_per_source // len(queries)) if queries else self.settings.nlp.evidence_per_source
         for query in queries:
-            items = await self.aggregator.gather(query, limit_per_source=per_query_limit)
+            items = await self.aggregator.gather(
+                query, limit_per_source=per_query_limit, category=market.category or None,
+            )
             for item in items:
                 if item.id not in seen_ids:
                     seen_ids.add(item.id)

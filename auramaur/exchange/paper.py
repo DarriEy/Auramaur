@@ -28,7 +28,7 @@ class PaperTrader:
     async def load_state(self) -> None:
         """Load paper trading state from database."""
         rows = await self.db.fetchall(
-            "SELECT * FROM portfolio WHERE 1=1"
+            "SELECT * FROM portfolio WHERE is_paper = 1"
         )
         for row in rows:
             token_str = row["token"] if "token" in row.keys() else "YES"
@@ -101,13 +101,8 @@ class PaperTrader:
                 token_id=order.token_id if hasattr(order, 'token_id') else "",
             )
 
-        # Record trade in DB
-        await self.db.execute(
-            """INSERT INTO trades (market_id, side, size, price, is_paper, order_id, status, kelly_fraction)
-               VALUES (?, ?, ?, ?, 1, ?, 'filled', ?)""",
-            (order.market_id, order.side.value, order.size, order.price, order_id, None),
-        )
-        await self.db.commit()
+        # Trade row is written by TradingEngine for every fill (paper/live/limit)
+        # so we don't mirror here — doing so would double-count in the `trades` table.
 
         self.trade_count += 1
         log.info("paper.trade", order_id=order_id, side=order.side.value,
@@ -121,6 +116,7 @@ class PaperTrader:
             filled_price=order.price,
             is_paper=True,
         )
+
 
     async def check_fills(self, current_prices: dict[str, float]) -> list[OrderResult]:
         """Check pending limit orders for simulated fills.

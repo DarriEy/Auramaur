@@ -8,6 +8,7 @@ import structlog
 
 from auramaur.db.database import Database
 from auramaur.exchange.models import Fill, LivePosition, OrderSide, TokenType
+from config.settings import Settings
 
 log = structlog.get_logger()
 
@@ -19,10 +20,17 @@ class PnLTracker:
     Every fill is persisted to the ``fills`` table.  A running cost basis
     is maintained in the ``cost_basis`` table so that realized P&L can be
     computed on sells and unrealized P&L can be derived from current prices.
+
+    Queries are scoped to the current mode (paper vs live) via ``settings``
+    so paper cost_basis rows don't bleed into live PnL reporting.
     """
 
-    def __init__(self, db: Database) -> None:
+    def __init__(self, db: Database, settings: Settings) -> None:
         self._db = db
+        self._settings = settings
+
+    def _mode_flag(self) -> int:
+        return 0 if self._settings.is_live else 1
 
     # ------------------------------------------------------------------
     # Fill recording
@@ -84,7 +92,7 @@ class PnLTracker:
                     capped_to=old_size,
                 )
                 sell_size = old_size
-            pnl = (fill.price - old_avg_cost) * sell_size
+            pnl = (fill.price - old_avg_cost) * sell_size - fill.fee
             realized_pnl += pnl
             new_size = old_size - sell_size
             # Average cost stays the same for remaining shares
@@ -129,13 +137,14 @@ class PnLTracker:
         now = datetime.now(timezone.utc).isoformat()
         await self._db.execute(
             """INSERT INTO cost_basis
-               (market_id, token, token_id, size, avg_cost, total_cost, realized_pnl, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               (market_id, token, token_id, size, avg_cost, total_cost, realized_pnl, is_paper, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(market_id) DO UPDATE SET
                    size = excluded.size,
                    avg_cost = excluded.avg_cost,
                    total_cost = excluded.total_cost,
                    realized_pnl = excluded.realized_pnl,
+                   is_paper = excluded.is_paper,
                    updated_at = excluded.updated_at""",
             (
                 fill.market_id,
@@ -145,6 +154,7 @@ class PnLTracker:
                 new_avg_cost,
                 new_total_cost,
                 realized_pnl,
+                1 if fill.is_paper else 0,
                 now,
             ),
         )
@@ -165,13 +175,13 @@ class PnLTracker:
     # ------------------------------------------------------------------
 
     async def get_cost_basis(self, market_id: str) -> tuple[float, float]:
-        """Return ``(avg_cost, size)`` for a market.
+        """Return ``(avg_cost, size)`` for a market in the current mode.
 
         Returns ``(0.0, 0.0)`` if no cost basis exists.
         """
         row = await self._db.fetchone(
-            "SELECT avg_cost, size FROM cost_basis WHERE market_id = ?",
-            (market_id,),
+            "SELECT avg_cost, size FROM cost_basis WHERE market_id = ? AND is_paper = ?",
+            (market_id, self._mode_flag()),
         )
         if row is None:
             return 0.0, 0.0
@@ -183,8 +193,8 @@ class PnLTracker:
         Returns ``(TokenType.YES, "")`` if no cost basis exists.
         """
         row = await self._db.fetchone(
-            "SELECT token, token_id FROM cost_basis WHERE market_id = ?",
-            (market_id,),
+            "SELECT token, token_id FROM cost_basis WHERE market_id = ? AND is_paper = ?",
+            (market_id, self._mode_flag()),
         )
         if row is None:
             return TokenType.YES, ""
@@ -208,19 +218,21 @@ class PnLTracker:
         return total
 
     async def get_realized_pnl(self, start_date: str | None = None) -> float:
-        """Sum ``realized_pnl`` from the cost_basis table.
+        """Sum ``realized_pnl`` from the cost_basis table for the current mode.
 
         If *start_date* is provided (ISO format ``YYYY-MM-DD``), only include
         rows updated on or after that date.
         """
+        flag = self._mode_flag()
         if start_date:
             row = await self._db.fetchone(
-                "SELECT COALESCE(SUM(realized_pnl), 0) as total FROM cost_basis WHERE updated_at >= ?",
-                (start_date,),
+                "SELECT COALESCE(SUM(realized_pnl), 0) as total FROM cost_basis WHERE updated_at >= ? AND is_paper = ?",
+                (start_date, flag),
             )
         else:
             row = await self._db.fetchone(
-                "SELECT COALESCE(SUM(realized_pnl), 0) as total FROM cost_basis",
+                "SELECT COALESCE(SUM(realized_pnl), 0) as total FROM cost_basis WHERE is_paper = ?",
+                (flag,),
             )
         return float(row["total"]) if row else 0.0
 
@@ -240,3 +252,35 @@ class PnLTracker:
         realized_today = await self.get_realized_pnl(start_date=today)
         unrealized = await self.get_unrealized_pnl(positions)
         return realized_today + unrealized
+
+    # ------------------------------------------------------------------
+    # Attribution breakdowns
+    # ------------------------------------------------------------------
+
+    async def get_pnl_by_exchange(self) -> dict[str, float]:
+        """Realized P&L grouped by exchange (joins cost_basis → markets)."""
+        flag = self._mode_flag()
+        rows = await self._db.fetchall(
+            """SELECT COALESCE(m.exchange, 'unknown') as exchange,
+                      SUM(cb.realized_pnl) as total
+               FROM cost_basis cb
+               LEFT JOIN markets m ON cb.market_id = m.id
+               WHERE cb.is_paper = ?
+               GROUP BY m.exchange""",
+            (flag,),
+        )
+        return {r["exchange"]: float(r["total"]) for r in (rows or [])}
+
+    async def get_pnl_by_category(self) -> dict[str, float]:
+        """Realized P&L grouped by market category."""
+        flag = self._mode_flag()
+        rows = await self._db.fetchall(
+            """SELECT COALESCE(m.category, 'unknown') as category,
+                      SUM(cb.realized_pnl) as total
+               FROM cost_basis cb
+               LEFT JOIN markets m ON cb.market_id = m.id
+               WHERE cb.is_paper = ?
+               GROUP BY m.category""",
+            (flag,),
+        )
+        return {r["category"]: float(r["total"]) for r in (rows or [])}

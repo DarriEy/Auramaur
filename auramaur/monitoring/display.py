@@ -104,7 +104,16 @@ def show_order(status: str, order_id: str, side: str, size: float, price: float,
     side_color = "green" if side == "BUY" else "red"
     ex = f"[magenta]{exchange}[/] " if exchange else ""
 
-    if status == "rejected" or order_id == "ERROR":
+    # SKIP_DUP is the sentinel order_id returned when the exchange's duplicate
+    # guard suppresses an order because an equivalent resting order already
+    # exists — the "failure" is actually our own prior request still working.
+    if order_id == "SKIP_DUP":
+        console.print(
+            f"         [yellow]EXIT PENDING[/] {mode} {ex}[{side_color}]{side}[/] "
+            f"${size * price:.2f} ({size:.1f} tokens @ ${price:.3f}) "
+            f"[dim]resting order in flight[/]"
+        )
+    elif status == "rejected" or order_id == "ERROR":
         err_suffix = f" [red]{error_message}[/]" if error_message else ""
         console.print(
             f"         [bold red]ORDER FAILED[/] {mode} {ex}[{side_color}]{side}[/] "

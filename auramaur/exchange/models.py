@@ -92,6 +92,7 @@ class OrderResult(BaseModel):
 
 class Position(BaseModel):
     market_id: str
+    exchange: str = "polymarket"
     side: OrderSide
     size: float
     avg_price: float
@@ -196,4 +197,8 @@ class Signal(BaseModel):
     evidence_summary: str = ""
     recommended_side: OrderSide | None = None
     recommended_size: float = 0
+    # When set on a SELL signal, identifies which held token to exit.
+    # Exchanges like Kalshi that support direct YES/NO sells read this to
+    # build a proper SELL order instead of opening a new opposing position.
+    exit_token: TokenType | None = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS portfolio (
     category TEXT,
     token TEXT NOT NULL DEFAULT 'YES',
     token_id TEXT DEFAULT '',
+    is_paper INTEGER NOT NULL DEFAULT 1,
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (market_id) REFERENCES markets(id)
 );
@@ -189,6 +190,7 @@ CREATE TABLE IF NOT EXISTS cost_basis (
     avg_cost REAL NOT NULL,
     total_cost REAL NOT NULL,
     realized_pnl REAL DEFAULT 0,
+    is_paper INTEGER NOT NULL DEFAULT 1,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

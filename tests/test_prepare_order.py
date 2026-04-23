@@ -108,3 +108,43 @@ class TestKalshiPrepareOrder:
         assert order is not None
         assert order.side == OrderSide.BUY
         assert order.token == TokenType.NO
+
+    def test_sell_with_exit_token_exits_position(self):
+        """SELL + exit_token=YES closes a held YES position (actual SELL)."""
+        client = self._make_client()
+        market = _make_market()
+        market.exchange = "kalshi"
+        market.ticker = "KXTEST"
+        signal = Signal(
+            market_id="test-market",
+            claude_prob=0.5,
+            claude_confidence=Confidence.MEDIUM,
+            market_prob=0.5,
+            edge=10.0,
+            recommended_side=OrderSide.SELL,
+            exit_token=TokenType.YES,
+        )
+        order = client.prepare_order(signal, market, 25.0, False)
+        assert order is not None
+        assert order.side == OrderSide.SELL
+        assert order.token == TokenType.YES
+
+    def test_sell_with_exit_token_no_exits_no_position(self):
+        """SELL + exit_token=NO closes a held NO position."""
+        client = self._make_client()
+        market = _make_market()
+        market.exchange = "kalshi"
+        market.ticker = "KXTEST"
+        signal = Signal(
+            market_id="test-market",
+            claude_prob=0.5,
+            claude_confidence=Confidence.MEDIUM,
+            market_prob=0.5,
+            edge=10.0,
+            recommended_side=OrderSide.SELL,
+            exit_token=TokenType.NO,
+        )
+        order = client.prepare_order(signal, market, 25.0, False)
+        assert order is not None
+        assert order.side == OrderSide.SELL
+        assert order.token == TokenType.NO

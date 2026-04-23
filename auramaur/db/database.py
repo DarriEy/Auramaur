@@ -60,6 +60,8 @@ class Database:
             await self._migrate_v6_to_v7()
         if from_version < 8:
             await self._migrate_v7_to_v8()
+        if from_version < 9:
+            await self._migrate_v8_to_v9()
 
     async def _migrate_v1_to_v2(self) -> None:
         """Add category to calibration, add new tables."""
@@ -208,6 +210,27 @@ class Database:
         await self._db.execute("UPDATE schema_version SET version = 8")
         await self._db.commit()
         log.info("database.migrated", from_version=7, to_version=8)
+
+    async def _migrate_v8_to_v9(self) -> None:
+        """Add is_paper column to cost_basis and portfolio.
+
+        Existing rows are backfilled with is_paper=1 because all prior
+        state in these tables was written before the paper/live split
+        was enforced — it's unsafe to assume any of it is live.
+        """
+        alterations = [
+            ("cost_basis", "is_paper INTEGER NOT NULL DEFAULT 1"),
+            ("portfolio", "is_paper INTEGER NOT NULL DEFAULT 1"),
+        ]
+        for table, column_def in alterations:
+            try:
+                await self._db.execute(f"ALTER TABLE {table} ADD COLUMN {column_def}")
+            except Exception:
+                pass  # Column may already exist
+
+        await self._db.execute("UPDATE schema_version SET version = 9")
+        await self._db.commit()
+        log.info("database.migrated", from_version=8, to_version=9)
 
     @property
     def db(self) -> aiosqlite.Connection:

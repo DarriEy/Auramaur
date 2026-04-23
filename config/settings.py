@@ -105,6 +105,17 @@ class NLPConfig(BaseModel):
     evidence_per_source: int = 3
     daily_claude_call_budget: int = 100
 
+    # Tool-use analyzer — refines strategic-batch results on top-edge markets
+    # by letting Claude Code drive its own web_search / web_fetch. "auto"
+    # fires tool-use only when the strategic batch already showed a strong
+    # edge signal; "tool_use" forces it for every batched market;
+    # "strategic_batch" disables the refinement path entirely.
+    analysis_mode: Literal["strategic_batch", "tool_use", "auto"] = "auto"
+    tool_use_edge_threshold_pct: float = 5.0  # edge % above which tool-use fires in auto mode
+    tool_use_max_budget_usd: float = 0.50  # per-market tool-use budget cap
+    tool_use_max_markets_per_cycle: int = 4  # cap concurrent refinements per cycle
+    tool_use_model: str = "claude-opus-4-7"  # can differ from strategic batch model
+
     def model_post_init(self, __context) -> None:
         """Apply intensity preset as defaults — explicit overrides win."""
         # We only apply the preset when the individual values match
@@ -260,7 +271,14 @@ class Settings(BaseSettings):
     analysis: AnalysisConfig = Field(default_factory=lambda: AnalysisConfig(**_DEFAULTS.get("analysis", {})))
     logging: LoggingConfig = Field(default_factory=lambda: LoggingConfig(**_DEFAULTS.get("logging", {})))
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    # Resolve .env to an absolute path anchored at the repo root so Settings
+    # loads the same secrets regardless of the caller's CWD. A bare ".env"
+    # would be searched relative to CWD, which fails when the bot is
+    # launched from the inner `auramaur/` package directory.
+    model_config = {
+        "env_file": str(Path(__file__).resolve().parent.parent / ".env"),
+        "env_file_encoding": "utf-8",
+    }
 
     @property
     def kill_switch_active(self) -> bool:

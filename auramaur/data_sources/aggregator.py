@@ -28,12 +28,35 @@ class Aggregator:
     def __init__(self, sources: list[DataSource]) -> None:
         self._sources = sources
 
+    @staticmethod
+    def _source_matches_category(source: DataSource, category: str | None) -> bool:
+        """Return True if the source should fire for the given market category.
+
+        Sources with ``categories is None`` (or no attr) fire for every query.
+        Sources with a concrete set only fire when the current query's
+        category is in that set. A query with no category (``None``) falls
+        back to firing only the None-gated sources — i.e. domain sources
+        don't fire on category-less queries.
+        """
+        allowed = getattr(source, "categories", None)
+        if allowed is None:
+            return True
+        if category is None:
+            return False
+        return category in allowed
+
     async def gather(
         self,
         query: str,
         limit_per_source: int = 20,
+        category: str | None = None,
     ) -> list[NewsItem]:
-        """Fetch from all sources concurrently, deduplicate, and rank."""
+        """Fetch from matching sources concurrently, deduplicate, and rank.
+
+        ``category`` is the market category of the query. Domain-specific
+        sources are only invoked when ``category`` matches their
+        ``categories`` set; category-agnostic sources always fire.
+        """
 
         async def _safe_fetch(source: DataSource) -> list[NewsItem]:
             try:
@@ -45,8 +68,9 @@ class Aggregator:
                 )
                 return []
 
+        active_sources = [s for s in self._sources if self._source_matches_category(s, category)]
         results = await asyncio.gather(
-            *(_safe_fetch(src) for src in self._sources),
+            *(_safe_fetch(src) for src in active_sources),
             return_exceptions=False,  # exceptions already caught in _safe_fetch
         )
 
@@ -77,6 +101,9 @@ class Aggregator:
             "market_data": 2.5, "polymarket_context": 2.0,
             "cointelegraph": 1.0, "coindesk": 1.2,
             "manifold": 2.0,
+            "coingecko": 2.0, "espn": 1.5, "usgs": 2.5,
+            "hackernews": 1.0, "gdelt": 1.0, "google_trends": 0.8,
+            "bluesky": 0.8,
         }
 
         def _rank(item: NewsItem) -> float:
@@ -103,6 +130,8 @@ class Aggregator:
             total_raw=len(all_items),
             unique=len(unique),
             query=query,
+            category=category,
+            active_sources=len(active_sources),
         )
         return unique
 

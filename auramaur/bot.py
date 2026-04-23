@@ -140,6 +140,32 @@ class AuramaurBot:
         sources.append(ManifoldSource())
         source_names.append("Manifold")
 
+        # Domain-specific sources — category-gated so they only fire on
+        # relevant markets (see DataSource.categories in data_sources/base.py).
+        from auramaur.data_sources.usgs import USGSSource
+        from auramaur.data_sources.coingecko import CoinGeckoSource
+        from auramaur.data_sources.hackernews import HackerNewsSource
+        from auramaur.data_sources.espn import ESPNSource
+        sources.append(USGSSource())
+        source_names.append("USGS")
+        sources.append(CoinGeckoSource())
+        source_names.append("CoinGecko")
+        sources.append(HackerNewsSource())
+        source_names.append("HN")
+        sources.append(ESPNSource())
+        source_names.append("ESPN")
+
+        # Category-agnostic broad news (fires on every query).
+        from auramaur.data_sources.gdelt import GDELTSource
+        from auramaur.data_sources.google_trends import GoogleTrendsSource
+        sources.append(GDELTSource())
+        source_names.append("GDELT")
+        sources.append(GoogleTrendsSource())
+        source_names.append("Trends")
+        from auramaur.data_sources.bluesky import BlueskySource
+        sources.append(BlueskySource())
+        source_names.append("Bluesky")
+
         aggregator = Aggregator(sources=sources)
 
         # Exchange
@@ -168,7 +194,7 @@ class AuramaurBot:
         from auramaur.broker.pnl import PnLTracker
         from auramaur.broker.allocator import CapitalAllocator
 
-        pnl_tracker = PnLTracker(db=db)
+        pnl_tracker = PnLTracker(db=db, settings=s)
         allocator = CapitalAllocator(settings=s)
 
         # Strategic analyzer for breadth (batch analysis with world model)
@@ -184,6 +210,12 @@ class AuramaurBot:
         # Strategy — per-exchange engines
         engines: dict[str, TradingEngine] = {}
         discoveries: dict[str, MarketDiscovery] = {}
+        exchanges_map: dict[str, ExchangeClient] = {}
+        syncers: list = []
+
+        from auramaur.broker.sync import PositionSyncer, KalshiPositionSyncer
+        from auramaur.broker.router import SmartOrderRouter
+        from auramaur.broker.reconciler import PositionReconciler
 
         # Primary exchange (Polymarket) — only if not filtered to another exchange
         exchange = None
@@ -195,14 +227,12 @@ class AuramaurBot:
             gamma = GammaClient()
             exchange = PolymarketClient(settings=s, paper_trader=paper)
             discoveries["polymarket"] = gamma
-
-            from auramaur.broker.sync import PositionSyncer
-            from auramaur.broker.router import SmartOrderRouter
-            from auramaur.broker.reconciler import PositionReconciler
+            exchanges_map["polymarket"] = exchange
 
             syncer = PositionSyncer(settings=s, db=db, exchange=exchange, paper=paper, pnl=pnl_tracker)
             reconciler = PositionReconciler(exchange=exchange, db=db)
             router = SmartOrderRouter(settings=s, exchange=exchange)
+            syncers.append(syncer)
 
             poly_engine = TradingEngine(
                 settings=s, db=db, discovery=gamma, aggregator=aggregator,
@@ -218,19 +248,27 @@ class AuramaurBot:
 
             engines["polymarket"] = poly_engine
 
-        # Kalshi (optional, guarded import)
+        # Kalshi (optional, guarded import) — same first-class wiring as Polymarket
         if s.kalshi.enabled and (self._exchange_filter is None or self._exchange_filter == "kalshi"):
             try:
                 from auramaur.exchange.kalshi import KalshiClient
                 kalshi = KalshiClient(settings=s, paper_trader=paper)
                 discoveries["kalshi"] = kalshi
+                exchanges_map["kalshi"] = kalshi
+
+                kalshi_syncer = KalshiPositionSyncer(settings=s, db=db, exchange=kalshi)
+                kalshi_router = SmartOrderRouter(settings=s, exchange=kalshi)
+                syncers.append(kalshi_syncer)
+
                 kalshi_engine = TradingEngine(
                     settings=s, db=db, discovery=kalshi, aggregator=aggregator,
                     analyzer=analyzer, cache=cache, risk_manager=risk_manager,
                     exchange=kalshi, calibration=calibration,
                     flow_tracker=flow_tracker,
-                    allocator=allocator,
+                    router=kalshi_router, allocator=allocator,
                 )
+                kalshi_engine._components_pnl = pnl_tracker
+                kalshi_engine._components_syncer = kalshi_syncer
                 kalshi_engine.strategic = strategic
                 kalshi_engine.exchange_name = "kalshi"
                 kalshi_engine._rebalance_cooldowns = self._rebalance_cooldowns
@@ -287,19 +325,16 @@ class AuramaurBot:
         )
 
         # News reactor — monitors RSS for breaking news, triggers fast analysis
-        # Uses polymarket engine if available, otherwise first available engine
+        # on every configured exchange (Polymarket + Kalshi).
         news_reactor = None
-        if engines:
+        if engines and discoveries:
             rss_source = next((s for s in sources if isinstance(s, RSSSource)), RSSSource())
-            primary_discovery = gamma if gamma else next(iter(discoveries.values()), None)
-            primary_engine = engines.get("polymarket") or next(iter(engines.values()))
-            if primary_discovery:
-                news_reactor = NewsReactor(
-                    rss_source=rss_source,
-                    discovery=primary_discovery,
-                    engine=primary_engine,
-                    db=db,
-                )
+            news_reactor = NewsReactor(
+                rss_source=rss_source,
+                discoveries=discoveries,
+                engines=engines,
+                db=db,
+            )
 
         # Attribution (optional)
         attributor = None
@@ -343,7 +378,12 @@ class AuramaurBot:
             except ImportError:
                 log.warning("optional.missing", component="EnsembleEstimator")
 
-        # Market maker (optional, enabled by config — Polymarket only)
+        # Market maker (optional, enabled by config — Polymarket only).
+        # Intentionally not wired for Kalshi: the 7% fee on winnings eats
+        # the maker spread, thin top-of-book liquidity makes adverse
+        # selection worse, and Kalshi has no maker-rebate program
+        # equivalent to Polymarket's. Revisit if Kalshi fees drop or a
+        # rebate tier is introduced.
         market_maker = None
         if s.market_maker.enabled and exchange is not None:
             market_maker = MarketMaker(settings=s, exchange=exchange, db=db)
@@ -365,10 +405,12 @@ class AuramaurBot:
             "db": db, "aggregator": aggregator, "discovery": primary_discovery,
             "discoveries": discoveries,
             "paper": paper, "exchange": primary_exchange, "analyzer": analyzer,
+            "exchanges": exchanges_map,
             "cache": cache, "calibration": calibration,
             "risk_manager": risk_manager, "flow_tracker": flow_tracker,
             "engines": engines, "news_reactor": news_reactor,
-            "pnl_tracker": pnl_tracker, "syncer": syncer, "reconciler": reconciler,
+            "pnl_tracker": pnl_tracker, "syncer": syncer, "syncers": syncers,
+            "reconciler": reconciler,
             "router": router, "allocator": allocator,
             "attributor": attributor, "feedback": feedback,
             "correlator": correlator, "arb_executor": arb_executor,
@@ -470,306 +512,285 @@ class AuramaurBot:
             except Exception as e:
                 show_error(f"Trading cycle failed ({name}): {e}")
 
-            # Kalshi position sync + exit check + rebalance
-            if name == "kalshi" and hasattr(engine.exchange, 'sync_positions'):
+            # Kalshi-only: concentrated-position rebalance (daily cap, intra-event trim).
+            # Position sync + generic exit checks now run in _task_portfolio_monitor
+            # for both exchanges — no Kalshi-specific bolt-on required here.
+            if name == "kalshi":
                 try:
-                    await engine.exchange.sync_positions(engine.db)
-                    await self._check_kalshi_exits(engine)
                     await self._rebalance_concentrated_positions(engine)
                 except Exception as e:
-                    log.debug("kalshi_sync_exit.error", error=str(e))
+                    log.debug("kalshi_rebalance.error", error=str(e))
 
             await asyncio.sleep(self._adaptive_interval(self.settings.intervals.analysis_seconds))
 
-    async def _check_kalshi_exits(self, engine: TradingEngine) -> None:
-        """Check Kalshi positions for stop-loss / profit-target exits.
-
-        Reads positions from the portfolio table and sells any that have
-        hit the configured stop-loss or profit-target thresholds.
-        """
-        from auramaur.exchange.models import Confidence, Signal
-
-        db = engine.db
-        stop_loss = self.settings.execution.stop_loss_pct / 100
-        profit_target = self.settings.execution.profit_target_pct / 100
-
-        rows = await db.fetchall(
-            """SELECT p.market_id, p.token, p.size, p.avg_price, p.current_price,
-                      m.question, m.outcome_yes_price, m.outcome_no_price, m.spread
-               FROM portfolio p
-               JOIN markets m ON p.market_id = m.id
-               WHERE p.size > 0 AND m.exchange = 'kalshi'"""
-        )
-
-        for row in rows:
-            avg = row["avg_price"] or 0
-            cur = row["current_price"] or 0
-            if avg <= 0 or cur <= 0:
-                continue
-
-            pnl_pct = (cur - avg) / avg
-            market_id = row["market_id"]
-            token = row["token"] or "YES"
-            size = row["size"]
-
-            should_exit = False
-            reason = ""
-            if pnl_pct <= -stop_loss:
-                should_exit = True
-                reason = f"stop-loss ({pnl_pct:.0%})"
-            elif pnl_pct >= profit_target:
-                should_exit = True
-                reason = f"profit-target ({pnl_pct:.0%})"
-
-            if not should_exit:
-                continue
-
-            log.info(
-                "kalshi_exit.triggered",
-                market_id=market_id,
-                token=token,
-                pnl_pct=f"{pnl_pct:.0%}",
-                reason=reason,
-            )
-
-            # Build exit signal with _exit_token so prepare_order knows to SELL
-            from auramaur.exchange.models import TokenType as TT
-            exit_token = TT.NO if token == "NO" else TT.YES
-            exit_signal = Signal(
-                market_id=market_id,
-                market_question=row.get("question", ""),
-                claude_prob=0.5,
-                claude_confidence=Confidence.MEDIUM,
-                market_prob=0.5,
-                edge=10.0,
-                evidence_summary=f"Exit: {reason}",
-                recommended_side=OrderSide.SELL,
-            )
-            exit_signal._exit_token = exit_token  # type: ignore[attr-defined]
-
-            from auramaur.exchange.models import Market
-            market = Market(
-                id=market_id,
-                exchange="kalshi",
-                ticker=market_id,
-                question=row.get("question", ""),
-                outcome_yes_price=row["outcome_yes_price"] or 0.5,
-                outcome_no_price=row["outcome_no_price"] or 0.5,
-                spread=row["spread"] or 0,
-            )
-
-            order = engine.exchange.prepare_order(exit_signal, market, size * cur, self.settings.is_live)
-            if order is None:
-                continue
-
-            # Cap sell size to what we actually hold
-            order.size = min(order.size, size)
-            if order.size < 1:
-                continue
-
-            result = await engine.exchange.place_order(order)
-            from auramaur.monitoring.display import show_order
-            show_order(result.status, result.order_id, "SELL", order.size, order.price, result.is_paper, exchange="kalshi", error_message=result.error_message)
-
-            if result.status not in ("rejected",):
-                alerts = self._components.get("alerts")
-                if alerts:
-                    await alerts.send(
-                        f"Kalshi exit ({reason}): {market_id} "
-                        f"size={size:.0f} pnl={pnl_pct:.0%}",
-                        level="warning",
-                    )
-
     async def _task_portfolio_monitor(self) -> None:
-        """Monitor portfolio using the broker syncer for ground truth."""
-        from auramaur.broker.sync import PositionSyncer
+        """Monitor portfolio using the broker syncers for ground truth.
+
+        Runs once per ``portfolio_check_seconds``:
+        1. Sync each exchange's positions into the portfolio table.
+        2. Aggregate cash across exchanges for adaptive throttling.
+        3. Run ``check_exits`` per-exchange and route each exit through
+           the correct exchange-specific executor.
+        """
         from auramaur.broker.pnl import PnLTracker
 
-        syncer: PositionSyncer = self._components["syncer"]
+        syncers: list = self._components.get("syncers", [])
         pnl_tracker: PnLTracker = self._components["pnl_tracker"]
+        discoveries: dict[str, MarketDiscovery] = self._components["discoveries"]
+        exchanges: dict[str, ExchangeClient] = self._components.get("exchanges", {})
+        alerts: AlertManager = self._components["alerts"]
+        portfolio_tracker: PortfolioTracker = self._components["risk_manager"].portfolio
         interval = self.settings.intervals.portfolio_check_seconds
-
-        # Exit failures are tracked per-session — sells will be retried once
-        # per restart with proper token approval now in place.
 
         while self._running:
             try:
-                # Primary sync: cost_basis is the source of truth for
-                # positions the bot has traded.  The reconciler is used
-                # only to discover positions NOT in cost_basis (manual
-                # buys) and merge them in — it never deletes.
-                positions_list = await syncer.sync()
-                cash = await syncer.get_cash_balance()
-                total_pnl = await pnl_tracker.get_total_pnl(positions_list)
+                all_positions = []
+                per_exchange_cash: dict[str, float] = {}
 
-                # If live, try to discover missing positions via reconciler
-                reconciler_comp = self._components.get("reconciler")
-                if self.settings.is_live and reconciler_comp:
+                for syncer in syncers:
+                    name = getattr(syncer, "exchange_name", "polymarket")
                     try:
-                        reconciled = await reconciler_comp.reconcile()
-                        # Repair orphaned hex IDs from earlier reconciler runs
-                        repaired = await reconciler_comp.repair_orphaned_ids(reconciled)
-                        if repaired:
-                            # Re-sync to pick up repaired IDs
-                            positions_list = await syncer.sync()
-
-                        live_from_recon = reconciler_comp.to_live_positions(reconciled)
-                        known_ids = {p.market_id for p in positions_list}
-                        new_positions = [p for p in live_from_recon if p.market_id not in known_ids]
-                        if new_positions:
-                            # Merge newly discovered positions into portfolio
-                            # (additive only — never delete)
-                            await syncer._merge_new_positions(new_positions)
-                            positions_list.extend(new_positions)
-                            log.info("reconciler.new_positions_merged", count=len(new_positions))
+                        positions_list = await syncer.sync()
+                        cash = await syncer.get_cash_balance()
                     except Exception as e:
-                        log.debug("reconciler.enrich_error", error=str(e))
+                        log.debug("portfolio_monitor.sync_error", exchange=name, error=str(e))
+                        continue
 
-                # Track total cash across all exchanges for adaptive throttle
-                total_cash = cash
-                engines = self._components.get("engines", {})
-                kalshi_engine = engines.get("kalshi")
-                if kalshi_engine and hasattr(kalshi_engine.exchange, 'get_balance'):
-                    try:
-                        kalshi_cash = await kalshi_engine.exchange.get_balance()
-                        total_cash += kalshi_cash
-                    except Exception:
-                        pass
+                    per_exchange_cash[name] = cash
+
+                    # Polymarket-only: enrich with reconciler-discovered manual buys
+                    if name == "polymarket":
+                        reconciler_comp = self._components.get("reconciler")
+                        if self.settings.is_live and reconciler_comp:
+                            try:
+                                reconciled = await reconciler_comp.reconcile()
+                                repaired = await reconciler_comp.repair_orphaned_ids(reconciled)
+                                if repaired:
+                                    positions_list = await syncer.sync()
+                                live_from_recon = reconciler_comp.to_live_positions(reconciled)
+                                known_ids = {p.market_id for p in positions_list}
+                                new_positions = [p for p in live_from_recon if p.market_id not in known_ids]
+                                if new_positions:
+                                    await syncer._merge_new_positions(new_positions)
+                                    positions_list.extend(new_positions)
+                                    log.info("reconciler.new_positions_merged", count=len(new_positions))
+                            except Exception as e:
+                                log.debug("reconciler.enrich_error", error=str(e))
+
+                    all_positions.extend(positions_list)
+
+                total_cash = sum(per_exchange_cash.values())
                 self._last_known_cash = total_cash
-                show_portfolio(cash, total_pnl, len(positions_list), 0.0, schedule_mode=self._get_schedule_mode())
+                total_pnl = await pnl_tracker.get_total_pnl(all_positions)
+                poly_cash = per_exchange_cash.get("polymarket", total_cash)
+                show_portfolio(poly_cash, total_pnl, len(all_positions), 0.0, schedule_mode=self._get_schedule_mode())
 
-                # Check exits and attempt sells (with dedup to avoid spam)
-                discovery: MarketDiscovery = self._components["discovery"]
-                exchange: ExchangeClient = self._components["exchange"]
-                alerts: AlertManager = self._components["alerts"]
-                portfolio_tracker: PortfolioTracker = self._components["risk_manager"].portfolio
-                try:
-                    exit_list = await portfolio_tracker.check_exits(self.settings, discovery)
+                # Per-exchange exit checks + execution
+                for name, discovery in discoveries.items():
+                    exchange_client = exchanges.get(name)
+                    if exchange_client is None:
+                        continue
+                    try:
+                        exit_list = await portfolio_tracker.check_exits(
+                            self.settings, discovery, exchange=name,
+                        )
+                    except Exception as e:
+                        log.debug("exit_check.error", exchange=name, error=str(e))
+                        continue
+
                     for pos, reason in exit_list:
-                        fail_key = f"exit_fail:{pos.market_id}"
+                        fail_key = f"exit_fail:{name}:{pos.market_id}"
                         if fail_key in self._exit_failures:
                             continue
-
                         log.info(
                             "exit.triggered",
+                            exchange=name,
                             market_id=pos.market_id,
                             reason=reason.value,
                             pnl=pos.unrealized_pnl,
                         )
-                        # Get the REAL token_id from reconciler (ground truth from CLOB trades)
-                        token_id = ""
-                        reconciler_comp = self._components.get("reconciler")
-                        if reconciler_comp and self.settings.is_live:
-                            try:
-                                # Reconciler has already cached positions from trade history
-                                # Look up the token we actually hold for this market
-                                for rp in await reconciler_comp.reconcile():
-                                    if rp.market_id == pos.market_id or rp.question == pos.market_id:
-                                        token_id = rp.token_id
-                                        log.info("exit.token_from_reconciler",
-                                                 market_id=pos.market_id, token_id=token_id[:20])
-                                        break
-                            except Exception as e:
-                                log.debug("exit.reconciler_error", error=str(e))
-
-                        # Fallback: try cost_basis table
-                        if not token_id:
-                            try:
-                                row = await self._components["db"].fetchone(
-                                    "SELECT token_id FROM cost_basis WHERE market_id = ? AND size > 0",
-                                    (pos.market_id,),
-                                )
-                                if row and row["token_id"]:
-                                    token_id = row["token_id"]
-                            except Exception:
-                                pass
-
-                        # Last resort: Gamma API
-                        if not token_id:
-                            market_data = await discovery.get_market(pos.market_id)
-                            if market_data:
-                                if pos.token == TokenType.NO:
-                                    token_id = market_data.clob_token_no or market_data.clob_token_yes
-                                else:
-                                    token_id = market_data.clob_token_yes or market_data.clob_token_no
-
-                        if not token_id:
-                            self._exit_failures.add(fail_key)
-                            log.debug("exit.no_token", market_id=pos.market_id)
-                            continue
-
-                        # Cancel any stale sell orders on this token first —
-                        # otherwise the balance stays locked and the new sell
-                        # gets rejected with "not enough balance / allowance".
-                        if hasattr(exchange, "cancel_open_orders_for_token"):
-                            try:
-                                await exchange.cancel_open_orders_for_token(token_id)
-                            except Exception as e:
-                                log.debug("exit.pre_cancel_error", error=str(e))
-
-                        # Check ACTUAL on-chain balance (not DB which may be stale)
-                        sell_size = pos.size
                         try:
-                            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
-                            poly_exchange = self._components["exchange"]
-                            poly_exchange._init_clob_client()
-                            bal = poly_exchange._clob_client.get_balance_allowance(
-                                BalanceAllowanceParams(
-                                    asset_type=AssetType.CONDITIONAL,
-                                    token_id=token_id,
-                                    signature_type=2,
-                                )
-                            )
-                            onchain = int(bal.get("balance", 0)) / 1e6
-                            # Stale orders were just cancelled, so balance is free.
-                            # Cap sell_size at what's actually on-chain.
-                            if onchain < sell_size:
-                                log.info("exit.size_adjusted",
-                                         market_id=pos.market_id,
-                                         db_size=sell_size, onchain=onchain)
-                                sell_size = onchain
+                            if name == "polymarket":
+                                ok = await self._execute_poly_exit(pos, reason, discovery, exchange_client, alerts)
+                            elif name == "kalshi":
+                                ok = await self._execute_kalshi_exit(pos, reason, discovery, exchange_client, alerts)
+                            else:
+                                ok = False
                         except Exception as e:
-                            log.debug("exit.balance_check_error", error=str(e))
-
-                        # Skip positions too small to sell (CLOB minimum: 5 tokens)
-                        if sell_size < 5:
+                            log.warning("exit.execute_error", exchange=name, market_id=pos.market_id, error=str(e))
+                            ok = False
+                        if not ok:
                             self._exit_failures.add(fail_key)
-                            log.debug("exit.too_small", market_id=pos.market_id, size=sell_size)
-                            continue
-
-                        # Skip near-zero tokens — not worth selling
-                        if pos.current_price < 0.01:
-                            self._exit_failures.add(fail_key)
-                            log.debug("exit.near_zero", market_id=pos.market_id, price=pos.current_price)
-                            continue
-
-                        # Clamp price to CLOB valid range (0.01 - 0.99)
-                        sell_price = max(0.01, min(0.99, round(pos.current_price, 2)))
-
-                        sell_order = Order(
-                            market_id=pos.market_id,
-                            token_id=token_id,
-                            side=OrderSide.SELL,
-                            size=sell_size,
-                            price=sell_price,
-                            order_type=OrderType.LIMIT,
-                            dry_run=not self.settings.is_live,
-                        )
-                        result = await exchange.place_order(sell_order)
-                        if result.status == "rejected":
-                            self._exit_failures.add(fail_key)
-                            log.warning("exit.sell_failed", market_id=pos.market_id)
-                        else:
-                            await alerts.send(
-                                f"Exit {reason.value}: {pos.market_id[:12]} "
-                                f"size={pos.size:.2f} pnl={pos.unrealized_pnl:+.2f}",
-                                level="warning",
-                            )
-                except Exception as e:
-                    log.debug("exit_check.error", error=str(e))
             except Exception as e:
                 log.debug("portfolio_monitor_error", error=str(e))
             await asyncio.sleep(interval)
+
+    async def _execute_poly_exit(
+        self,
+        pos,
+        reason,
+        discovery: MarketDiscovery,
+        exchange: ExchangeClient,
+        alerts: AlertManager,
+    ) -> bool:
+        """Execute an exit for a Polymarket position.
+
+        Returns True if the sell was accepted (or a retry is worth attempting
+        next cycle), False if we should stop retrying this position.
+        """
+        # Resolve the real token_id: reconciler → cost_basis → Gamma
+        token_id = ""
+        reconciler_comp = self._components.get("reconciler")
+        if reconciler_comp and self.settings.is_live:
+            try:
+                for rp in await reconciler_comp.reconcile():
+                    if rp.market_id == pos.market_id or rp.question == pos.market_id:
+                        token_id = rp.token_id
+                        log.info("exit.token_from_reconciler",
+                                 market_id=pos.market_id, token_id=token_id[:20])
+                        break
+            except Exception as e:
+                log.debug("exit.reconciler_error", error=str(e))
+
+        if not token_id:
+            try:
+                row = await self._components["db"].fetchone(
+                    "SELECT token_id FROM cost_basis WHERE market_id = ? AND size > 0",
+                    (pos.market_id,),
+                )
+                if row and row["token_id"]:
+                    token_id = row["token_id"]
+            except Exception:
+                pass
+
+        if not token_id:
+            market_data = await discovery.get_market(pos.market_id)
+            if market_data:
+                if pos.token == TokenType.NO:
+                    token_id = market_data.clob_token_no or market_data.clob_token_yes
+                else:
+                    token_id = market_data.clob_token_yes or market_data.clob_token_no
+
+        if not token_id:
+            log.debug("exit.no_token", market_id=pos.market_id)
+            return False
+
+        # Cancel stale sell orders so balance is free
+        if hasattr(exchange, "cancel_open_orders_for_token"):
+            try:
+                await exchange.cancel_open_orders_for_token(token_id)
+            except Exception as e:
+                log.debug("exit.pre_cancel_error", error=str(e))
+
+        # On-chain balance ground truth
+        sell_size = pos.size
+        try:
+            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+            exchange._init_clob_client()
+            bal = exchange._clob_client.get_balance_allowance(
+                BalanceAllowanceParams(
+                    asset_type=AssetType.CONDITIONAL,
+                    token_id=token_id,
+                    signature_type=2,
+                )
+            )
+            onchain = int(bal.get("balance", 0)) / 1e6
+            if onchain < sell_size:
+                log.info("exit.size_adjusted",
+                         market_id=pos.market_id,
+                         db_size=sell_size, onchain=onchain)
+                sell_size = onchain
+        except Exception as e:
+            log.debug("exit.balance_check_error", error=str(e))
+
+        if sell_size < 5:
+            log.debug("exit.too_small", market_id=pos.market_id, size=sell_size)
+            return False
+        if pos.current_price < 0.01:
+            log.debug("exit.near_zero", market_id=pos.market_id, price=pos.current_price)
+            return False
+
+        sell_price = max(0.01, min(0.99, round(pos.current_price, 2)))
+        sell_order = Order(
+            market_id=pos.market_id,
+            token_id=token_id,
+            side=OrderSide.SELL,
+            size=sell_size,
+            price=sell_price,
+            order_type=OrderType.LIMIT,
+            dry_run=not self.settings.is_live,
+        )
+        result = await exchange.place_order(sell_order)
+        if result.status == "rejected":
+            log.warning("exit.sell_failed", market_id=pos.market_id)
+            return False
+
+        await alerts.send(
+            f"Exit {reason.value} (poly): {pos.market_id[:12]} "
+            f"size={pos.size:.2f} pnl={pos.unrealized_pnl:+.2f}",
+            level="warning",
+        )
+        return True
+
+    async def _execute_kalshi_exit(
+        self,
+        pos,
+        reason,
+        discovery: MarketDiscovery,
+        exchange: ExchangeClient,
+        alerts: AlertManager,
+    ) -> bool:
+        """Execute an exit for a Kalshi position.
+
+        Kalshi is ticker-based with direct YES/NO sells, so we just build a
+        SELL signal with ``exit_token`` set and let the exchange's
+        ``prepare_order`` do the rest.
+        """
+        from auramaur.exchange.models import Confidence, Market, Signal
+
+        market = await discovery.get_market(pos.market_id)
+        if market is None:
+            log.debug("exit.no_market", market_id=pos.market_id)
+            return False
+
+        exit_signal = Signal(
+            market_id=pos.market_id,
+            market_question=market.question,
+            claude_prob=0.5,
+            claude_confidence=Confidence.MEDIUM,
+            market_prob=0.5,
+            edge=10.0,
+            evidence_summary=f"Exit: {reason.value}",
+            recommended_side=OrderSide.SELL,
+            exit_token=pos.token,
+        )
+
+        # Notional to feed into prepare_order sizing
+        notional = pos.size * max(pos.current_price, 0.01)
+        order = exchange.prepare_order(exit_signal, market, notional, self.settings.is_live)
+        if order is None:
+            return False
+
+        # Never sell more than we hold
+        order.size = min(order.size, pos.size)
+        if order.size < 1:
+            return False
+
+        result = await exchange.place_order(order)
+        from auramaur.monitoring.display import show_order
+        show_order(
+            result.status, result.order_id, "SELL", order.size, order.price,
+            result.is_paper, exchange="kalshi", error_message=result.error_message,
+        )
+        if result.status == "rejected":
+            return False
+
+        await alerts.send(
+            f"Exit {reason.value} (kalshi): {pos.market_id} "
+            f"size={pos.size:.0f} pnl={pos.unrealized_pnl:+.2f}",
+            level="warning",
+        )
+        return True
 
     async def _task_cache_cleanup(self) -> None:
         """Periodically clean expired NLP cache entries."""
@@ -1232,16 +1253,19 @@ class AuramaurBot:
         risk_manager: RiskManager,
         engines: dict[str, TradingEngine],
     ) -> None:
-        """Execute a cross-exchange arb: buy cheap YES on one exchange, buy cheap NO on the other.
+        """Execute a cross-exchange arb: buy cheap YES on one exchange, buy
+        equivalent NO on the other.
 
-        Both legs must pass risk checks independently. Legs are executed
-        concurrently via asyncio.gather to minimize slippage.
+        Both legs go through each exchange's ``prepare_order`` so tick rounding,
+        token-id resolution, and minimum-size checks match what the exchange
+        accepts. Both legs must pass risk checks independently. Execution is
+        concurrent; half-fills trigger a cancel with a critical alert if
+        cancel can't confirm.
         """
         from auramaur.exchange.models import Confidence, Signal
 
-        # Identify which side is cheap
+        # Identify which side is cheap (lower YES price)
         if opp.price_a <= opp.price_b:
-            # Exchange A has cheap YES — buy YES there, buy NO on B
             cheap_market, expensive_market = opp.market_a, opp.market_b
             cheap_exchange, expensive_exchange = opp.exchange_a, opp.exchange_b
         else:
@@ -1261,8 +1285,12 @@ class AuramaurBot:
         alerts: AlertManager = self._components["alerts"]
         max_size = self.settings.arbitrage.max_arb_size
 
-        # Synthetic signals for risk checks
+        # Synthetic signals for risk checks and prepare_order
         edge_pct = opp.expected_profit_pct / 2
+        evidence = (
+            f"Cross-exchange arb: {cheap_exchange} YES@{cheap_market.outcome_yes_price:.3f} "
+            f"vs {expensive_exchange} YES@{expensive_market.outcome_yes_price:.3f}"
+        )
         yes_signal = Signal(
             market_id=cheap_market.id,
             market_question=cheap_market.question,
@@ -1270,13 +1298,11 @@ class AuramaurBot:
             claude_confidence=Confidence.HIGH,
             market_prob=cheap_market.outcome_yes_price,
             edge=edge_pct,
-            evidence_summary=(
-                f"Cross-exchange arb: {cheap_exchange} YES@{cheap_market.outcome_yes_price:.3f} "
-                f"vs {expensive_exchange} YES@{expensive_market.outcome_yes_price:.3f}"
-            ),
+            evidence_summary=evidence,
             recommended_side=OrderSide.BUY,
         )
-
+        # SELL signal → each exchange's prepare_order produces a BUY NO
+        # (Polymarket token-swap, Kalshi new-bearish-position branch).
         no_signal = Signal(
             market_id=expensive_market.id,
             market_question=expensive_market.question,
@@ -1284,17 +1310,13 @@ class AuramaurBot:
             claude_confidence=Confidence.HIGH,
             market_prob=expensive_market.outcome_no_price,
             edge=edge_pct,
-            evidence_summary=(
-                f"Cross-exchange arb: {cheap_exchange} YES@{cheap_market.outcome_yes_price:.3f} "
-                f"vs {expensive_exchange} YES@{expensive_market.outcome_yes_price:.3f}"
-            ),
-            recommended_side=OrderSide.BUY,
+            evidence_summary=evidence,
+            recommended_side=OrderSide.SELL,
         )
 
         # Risk checks on both legs
         yes_decision = await risk_manager.evaluate(yes_signal, cheap_market)
         no_decision = await risk_manager.evaluate(no_signal, expensive_market)
-
         if not yes_decision.approved or not no_decision.approved:
             log.debug(
                 "arb_scanner.cross_risk_rejected",
@@ -1304,7 +1326,6 @@ class AuramaurBot:
             )
             return
 
-        # Balanced position size — min of both legs, capped by config
         position_size = min(
             yes_decision.position_size,
             no_decision.position_size,
@@ -1315,39 +1336,21 @@ class AuramaurBot:
 
         cheap_client = engine_cheap.exchange
         expensive_client = engine_expensive.exchange
+        is_live = self.settings.is_live
 
-        # Leg A: BUY YES on cheap exchange
-        yes_price = cheap_market.outcome_yes_price
-        yes_order = Order(
-            market_id=cheap_market.id,
-            exchange=cheap_exchange,
-            token_id=cheap_market.clob_token_yes or cheap_market.id,
-            side=OrderSide.BUY,
-            token=TokenType.YES,
-            size=position_size / yes_price if yes_price > 0 else 0,
-            price=yes_price,
-            dry_run=not self.settings.is_live,
-        )
-
-        # Leg B: BUY NO on expensive exchange (equivalent to selling YES)
-        no_price = expensive_market.outcome_no_price
-        no_order = Order(
-            market_id=expensive_market.id,
-            exchange=expensive_exchange,
-            token_id=expensive_market.clob_token_no or expensive_market.id,
-            side=OrderSide.BUY,
-            token=TokenType.NO,
-            size=position_size / no_price if no_price > 0 else 0,
-            price=no_price,
-            dry_run=not self.settings.is_live,
-        )
-
-        if yes_order.size < 1 or no_order.size < 1:
+        yes_order = cheap_client.prepare_order(yes_signal, cheap_market, position_size, is_live)
+        no_order = expensive_client.prepare_order(no_signal, expensive_market, position_size, is_live)
+        if yes_order is None or no_order is None:
+            log.debug(
+                "arb_scanner.cross_prepare_failed",
+                question=opp.question[:60],
+                yes_built=yes_order is not None,
+                no_built=no_order is not None,
+            )
             return
 
-        # Dedup: don't re-execute the same (question, exchange-pair) for 1 hour.
-        # The scanner runs every 5 min — without this guard we racked up
-        # duplicate half-filled legs on the same opportunity.
+        # Dedup: 1-hour cooldown per (question, exchange-pair). Set before
+        # placement so concurrent scans don't double-fire on the same arb.
         import time as _time
         arb_key = f"{opp.question[:80]}|{cheap_exchange}|{expensive_exchange}"
         now_ts = _time.monotonic()
@@ -1361,22 +1364,17 @@ class AuramaurBot:
             )
             return
         self._arb_attempts[arb_key] = now_ts + 3600
-        # GC expired entries
         if len(self._arb_attempts) > 200:
             self._arb_attempts = {
                 k: v for k, v in self._arb_attempts.items() if v > now_ts
             }
 
         try:
-            # Execute both legs simultaneously
             yes_result, no_result = await asyncio.gather(
                 cheap_client.place_order(yes_order),
                 expensive_client.place_order(no_order),
             )
 
-            # Atomicity guard: if one leg was rejected while the other was
-            # placed, cancel the successful leg to avoid a naked directional
-            # position. A partially-executed arb is pure speculation.
             yes_ok = yes_result.status not in ("rejected", "error")
             no_ok = no_result.status not in ("rejected", "error")
             if yes_ok != no_ok:
@@ -1391,13 +1389,28 @@ class AuramaurBot:
                     rollback_exchange=rollback_exchange,
                     rollback_order_id=rollback_result.order_id,
                 )
-                try:
-                    await rollback_client.cancel_order(rollback_result.order_id)
-                except Exception as e:
-                    log.error(
-                        "arb_scanner.cross_rollback_failed",
-                        question=opp.question[:60],
-                        error=str(e),
+                cancelled = False
+                # "unknown"/"ERROR" are sentinel IDs the exchange clients
+                # return when they couldn't parse a real order_id — cancel
+                # would no-op. Skip straight to the critical alert path.
+                real_id = rollback_result.order_id not in ("", "unknown", "ERROR", "BLOCKED", "SKIP_DUP")
+                if real_id:
+                    try:
+                        cancelled = bool(await rollback_client.cancel_order(rollback_result.order_id))
+                    except Exception as e:
+                        log.error(
+                            "arb_scanner.cross_rollback_failed",
+                            question=opp.question[:60],
+                            error=str(e),
+                        )
+                if not cancelled:
+                    # Unhedged directional exposure — operator must intervene.
+                    await alerts.send(
+                        f"[CRITICAL] Unhedged arb leg on {rollback_exchange}: "
+                        f"{opp.question[:60]} order_id={rollback_result.order_id} "
+                        f"size={rollback_result.filled_size or 'unknown'} — "
+                        "cancel failed or id unknown. Manual flatten required.",
+                        level="critical",
                     )
 
             log.info(
@@ -1414,14 +1427,15 @@ class AuramaurBot:
                 is_paper=yes_order.dry_run,
             )
 
-            mode = "PAPER" if yes_order.dry_run else "LIVE"
-            await alerts.send(
-                f"[{mode}] Cross-exchange arb executed: {opp.question[:50]} | "
-                f"BUY YES@{yes_price:.2f} on {cheap_exchange}, "
-                f"BUY NO@{no_price:.2f} on {expensive_exchange} | "
-                f"profit: {opp.expected_profit_pct:.1f}%",
-                level="warning",
-            )
+            if yes_ok and no_ok:
+                mode = "PAPER" if yes_order.dry_run else "LIVE"
+                await alerts.send(
+                    f"[{mode}] Cross-exchange arb executed: {opp.question[:50]} | "
+                    f"BUY YES@{yes_order.price:.2f} on {cheap_exchange}, "
+                    f"BUY NO@{no_order.price:.2f} on {expensive_exchange} | "
+                    f"profit: {opp.expected_profit_pct:.1f}%",
+                    level="warning",
+                )
         except Exception as e:
             log.error(
                 "arb_scanner.cross_execution_error",
@@ -1536,8 +1550,8 @@ class AuramaurBot:
                     edge=5.0,
                     evidence_summary=f"Rebalance: {event_key} at {event_pct:.0%}",
                     recommended_side=OrderSide.SELL,
+                    exit_token=exit_token,
                 )
-                exit_signal._exit_token = exit_token  # type: ignore[attr-defined]
 
                 from auramaur.exchange.models import Market
                 market = Market(
@@ -1904,8 +1918,10 @@ class AuramaurBot:
         if db_path != "auramaur.db":
             console.print(f"  [yellow]Instance: {db_path}[/]")
 
-        # Show real balance — use reconciler for live, paper for paper mode
-        startup_balance = self._components["paper"].balance
+        # Show real balance — use reconciler for live, paper for paper mode.
+        # In live mode we never fall back to paper.balance — that would show
+        # paper PnL in a live banner if the reconciler fails to respond.
+        startup_balance = 0.0 if self.settings.is_live else self._components["paper"].balance
         if self.settings.is_live:
             try:
                 total_cash = 0.0

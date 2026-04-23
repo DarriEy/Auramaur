@@ -6,9 +6,11 @@ from datetime import datetime, timezone
 
 import structlog
 
+import asyncio
 import fcntl
 import os
 import tempfile
+import time
 
 from auramaur.data_sources.aggregator import Aggregator
 from auramaur.db.database import Database
@@ -71,6 +73,110 @@ class TradingEngine:
         self.exchange_name = ""  # Set by bot after init (e.g. "polymarket", "kalshi")
         self.strategic = None  # StrategicAnalyzer, set by bot after init
         self._components_pnl = None  # Set by bot after init
+        # News-flagged markets: market_id -> UTC timestamp of flag.
+        # Populated by NewsReactor when a headline matches; read by run_cycle
+        # to boost these markets into the strategic batch without triggering
+        # per-market analyze_market (which would spend 2 Claude calls each).
+        self._news_flagged: dict[str, float] = {}
+        self._news_flag_ttl_seconds: float = 1800.0  # 30 minutes
+
+    async def _maybe_refine_with_tool_use(
+        self,
+        batch_results: list,
+        batch_markets: list,
+    ) -> list:
+        """Refine strategic batch results using tool-use Claude where
+        configured. Returns a list of BatchAnalysisResult with the same
+        length/ordering as ``batch_results`` — refined entries replace
+        their originals; unchanged entries pass through.
+
+        Selection:
+          * ``analysis_mode=strategic_batch`` — skip entirely.
+          * ``analysis_mode=tool_use`` — refine every batch result.
+          * ``analysis_mode=auto`` (default) — refine markets whose
+            |edge| vs market price exceeds the configured threshold,
+            capped at ``tool_use_max_markets_per_cycle``.
+        """
+        mode = self.settings.nlp.analysis_mode
+        if mode == "strategic_batch":
+            return batch_results
+
+        # Pair each result with its Market so we can compute edge.
+        market_by_id = {m.id: m for m in batch_markets}
+
+        candidates: list[tuple[int, float]] = []  # (index, abs_edge)
+        threshold = self.settings.nlp.tool_use_edge_threshold_pct / 100.0
+        for idx, br in enumerate(batch_results):
+            market = market_by_id.get(br.market_id)
+            if market is None:
+                continue
+            market_prob = market.outcome_yes_price or 0.5
+            abs_edge = abs(br.probability - market_prob)
+            if mode == "tool_use" or abs_edge >= threshold:
+                candidates.append((idx, abs_edge))
+
+        if not candidates:
+            return batch_results
+
+        # Sort by edge desc, cap by budget.
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        cap = self.settings.nlp.tool_use_max_markets_per_cycle
+        selected = candidates[:cap]
+
+        log.info(
+            "tool_use.refining",
+            mode=mode,
+            selected=len(selected),
+            threshold_pct=self.settings.nlp.tool_use_edge_threshold_pct,
+        )
+
+        from auramaur.nlp.tool_use_analyzer import ToolUseAnalyzer
+        analyzer = ToolUseAnalyzer(self.settings)
+
+        # Refine concurrently — each call shells out to `claude` and can
+        # take 30-120s. Parallelism keeps wall-clock reasonable.
+        async def _one(idx: int):
+            market = market_by_id[batch_results[idx].market_id]
+            refined = await analyzer.refine(market, batch_results[idx])
+            return idx, refined
+
+        outcomes = await asyncio.gather(
+            *(_one(i) for i, _ in selected), return_exceptions=False,
+        )
+
+        new_results = list(batch_results)
+        for idx, refined in outcomes:
+            if refined is None:
+                continue
+            original = batch_results[idx]
+            log.info(
+                "tool_use.refined",
+                market_id=original.market_id,
+                before=round(original.probability, 3),
+                after=round(refined.probability, 3),
+                delta=round(refined.probability - original.probability, 3),
+            )
+            new_results[idx] = refined
+
+        return new_results
+
+    def flag_market_from_news(self, market_id: str) -> None:
+        """Register a market for priority analysis in the next cycle.
+
+        News-driven hot markets get boosted to the front of the ranked list
+        so the next strategic batch evaluates them — without spending a
+        full per-market Claude+second-opinion pair per headline.
+        """
+        self._news_flagged[market_id] = time.time()
+
+    def _prune_news_flags(self) -> set[str]:
+        """Drop expired flags and return the active set."""
+        now = time.time()
+        ttl = self._news_flag_ttl_seconds
+        self._news_flagged = {
+            mid: ts for mid, ts in self._news_flagged.items() if now - ts < ttl
+        }
+        return set(self._news_flagged.keys())
 
     @staticmethod
     def _get_event_key(market_id: str) -> str:
@@ -346,7 +452,9 @@ class TradingEngine:
 
         per_query_limit = max(1, self.settings.nlp.evidence_per_source // len(queries)) if queries else self.settings.nlp.evidence_per_source
         for query in queries:
-            items = await self.aggregator.gather(query, limit_per_source=per_query_limit)
+            items = await self.aggregator.gather(
+                query, limit_per_source=per_query_limit, category=market.category or None,
+            )
             for item in items:
                 if item.id not in seen_ids:
                     seen_ids.add(item.id)
@@ -642,27 +750,11 @@ class TradingEngine:
     async def run_cycle(self, cash_available: float | None = None) -> list[dict]:
         """Run one full trading cycle.
 
-        When cash_available is provided and below $5, switches to
-        "starved mode": only re-prices held positions and checks
-        whether any new opportunity is so compelling it's worth
-        liquidating an existing stake.
-
-        When the engine's own exchange balance is below $1 (and there's
-        no syncer, e.g. Kalshi), skip the scan entirely to avoid wasting
-        Claude API calls on signals that can never become orders.
+        When ``cash_available`` is below $5, switches to "starved mode":
+        only re-prices held positions and checks whether any new
+        opportunity is compelling enough to justify liquidating an
+        existing stake. Otherwise runs the full scan.
         """
-        if not getattr(self, '_components_syncer', None):
-            try:
-                own_cash = await self._get_available_cash()
-                if own_cash < 1.0:
-                    log.info(
-                        "engine.skip_no_capital",
-                        exchange=self.exchange_name,
-                        cash=own_cash,
-                    )
-                    return []
-            except Exception:
-                pass
         if cash_available is not None and cash_available < 5.0:
             return await self._run_cycle_starved()
 
@@ -801,6 +893,23 @@ class TradingEngine:
             top_batch = ranked[:max_markets * 2]
             random.shuffle(top_batch)
             ranked = top_batch
+
+        # Promote news-flagged markets to the front of the batch so fresh
+        # headlines get evaluated first. News flagging replaces the old
+        # per-market analyze_market path from NewsReactor, which spent two
+        # Claude calls per headline; the flagged markets now ride the single
+        # strategic batch call.
+        flagged_ids = self._prune_news_flags()
+        if flagged_ids:
+            flagged_entries = [(m, s) for m, s in ranked if m.id in flagged_ids]
+            other_entries = [(m, s) for m, s in ranked if m.id not in flagged_ids]
+            if flagged_entries:
+                ranked = flagged_entries + other_entries
+                log.info(
+                    "engine.news_flagged_promoted",
+                    count=len(flagged_entries),
+                    market_ids=[m.id for m, _ in flagged_entries[:5]],
+                )
 
         if self.market_analyzer:
             # Protocol-based path: analyzer returns TradeCandidates,
@@ -972,14 +1081,16 @@ class TradingEngine:
                     seen_ids.add(f"polymarket_desc:{market.id}")
 
                 for query in queries:
-                    items = await self.aggregator.gather(query, limit_per_source=8)
+                    items = await self.aggregator.gather(
+                        query, limit_per_source=8, category=market.category or None,
+                    )
                     for item in items:
                         if item.id not in seen_ids:
                             seen_ids.add(item.id)
                             all_evidence.append(item)
                 # Cap evidence per market to keep total prompt under context window
-                # 12 markets × 5 items × ~500 chars = ~30k chars of evidence
-                evidence_map[market.id] = all_evidence[:5]
+                # 12 markets × 8 items × ~500 chars = ~48k chars of evidence
+                evidence_map[market.id] = all_evidence[:8]
             except Exception as e:
                 log.error("strategic.evidence_error", market_id=market.id, error=str(e))
                 evidence_map[market.id] = []
@@ -996,6 +1107,13 @@ class TradingEngine:
         if not analysis.markets:
             log.warning("strategic.no_market_results", batch_size=len(batch_markets))
             return []
+
+        # Tool-use refinement: for top-edge markets (per settings), re-ask
+        # Claude with WebSearch/WebFetch enabled. Replaces the batch result
+        # for those markets only. Fails open to batch_result on any error.
+        analysis.markets = await self._maybe_refine_with_tool_use(
+            analysis.markets, batch_markets,
+        )
 
         log.info(
             "strategic.processing_results",

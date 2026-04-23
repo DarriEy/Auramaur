@@ -23,16 +23,24 @@ class PortfolioTracker:
     # Positions
     # ------------------------------------------------------------------
 
-    async def get_positions(self) -> list[Position]:
-        """Return all current open positions."""
-        rows = await self.db.fetchall("SELECT * FROM portfolio")
+    async def get_positions(self, exchange: str | None = None) -> list[Position]:
+        """Return all current open positions, optionally filtered by exchange."""
+        if exchange:
+            rows = await self.db.fetchall(
+                "SELECT * FROM portfolio WHERE exchange = ?", (exchange,),
+            )
+        else:
+            rows = await self.db.fetchall("SELECT * FROM portfolio")
         positions = []
         for row in rows:
+            keys = row.keys()
             # token/token_id columns added in schema v6; handle older DBs
-            token_str = row["token"] if "token" in row.keys() else "YES"
-            token_id = row["token_id"] if "token_id" in row.keys() else ""
+            token_str = row["token"] if "token" in keys else "YES"
+            token_id = row["token_id"] if "token_id" in keys else ""
+            exchange_name = row["exchange"] if "exchange" in keys else "polymarket"
             positions.append(Position(
                 market_id=row["market_id"],
+                exchange=exchange_name or "polymarket",
                 side=OrderSide(row["side"]),
                 size=row["size"],
                 avg_price=row["avg_price"],
@@ -193,8 +201,13 @@ class PortfolioTracker:
         self,
         settings,
         discovery_client,
+        exchange: str | None = None,
     ) -> list[tuple[Position, ExitReason]]:
-        """Check all positions for exit conditions.
+        """Check positions for exit conditions.
+
+        If ``exchange`` is provided, only positions on that exchange are
+        evaluated and ``discovery_client`` must correspond to that exchange.
+        Multi-exchange callers should invoke this once per exchange.
 
         Returns a list of (position, reason) tuples for positions that
         should be exited.
@@ -206,7 +219,7 @@ class PortfolioTracker:
         4. Edge erosion — price converging toward resolution boundary
         5. Time decay — market expiring soon with thin edge remaining
         """
-        positions = await self.get_positions()
+        positions = await self.get_positions(exchange=exchange)
         exits: list[tuple[Position, ExitReason]] = []
 
         # Load peak prices for trailing stop calculation
@@ -249,12 +262,11 @@ class PortfolioTracker:
                 exits.append((pos, ExitReason.STOP_LOSS))
                 continue
 
-            # 2. Trailing stop — if position was up 20%+ but has dropped
-            #    back more than half of peak gains, exit to lock in profit.
-            #    Only activates once position has been meaningfully profitable.
-            if peak_pnl_pct >= 20.0:
+            # 2. Trailing stop — if position was up 12%+ but has dropped
+            #    back 45%+ of peak gains, exit to lock in profit.
+            if peak_pnl_pct >= 12.0:
                 drawdown_from_peak = peak_pnl_pct - pnl_pct
-                if drawdown_from_peak > peak_pnl_pct * 0.5:
+                if drawdown_from_peak > peak_pnl_pct * 0.45:
                     log.info(
                         "exit.trailing_stop",
                         market_id=pos.market_id,
@@ -359,9 +371,10 @@ class PortfolioTracker:
         """Insert or replace a position row in the portfolio table."""
         await self.db.execute(
             """
-            INSERT INTO portfolio (market_id, side, size, avg_price, current_price, category, token, token_id, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO portfolio (market_id, exchange, side, size, avg_price, current_price, category, token, token_id, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(market_id) DO UPDATE SET
+                exchange = excluded.exchange,
                 side = excluded.side,
                 size = excluded.size,
                 avg_price = excluded.avg_price,
@@ -373,6 +386,7 @@ class PortfolioTracker:
             """,
             (
                 position.market_id,
+                position.exchange,
                 position.side.value,
                 position.size,
                 position.avg_price,
@@ -387,6 +401,7 @@ class PortfolioTracker:
         log.info(
             "portfolio.position_updated",
             market_id=position.market_id,
+            exchange=position.exchange,
             side=position.side.value,
             size=position.size,
         )

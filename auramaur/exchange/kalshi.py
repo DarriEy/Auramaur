@@ -196,19 +196,16 @@ class KalshiClient:
             # Cross the spread: pay above the ask to guarantee fill
             exec_price = market.outcome_yes_price + market.spread / 2 + aggression
         elif signal.recommended_side == OrderSide.SELL:
-            # Check if this is an exit (selling a held position) vs new short
-            # If the signal has _exit_token set, sell that token type
-            exit_token = getattr(signal, '_exit_token', None)
-            if exit_token:
-                # Selling a held position — SELL the token we own
+            # Exit the specific token we hold if the signal says so; otherwise
+            # a "SELL" signal is a bearish new position → BUY NO.
+            if signal.exit_token is not None:
                 side = OrderSide.SELL
-                token = exit_token
-                if exit_token == TokenType.NO:
+                token = signal.exit_token
+                if token == TokenType.NO:
                     exec_price = market.outcome_no_price - market.spread / 2 - aggression
                 else:
                     exec_price = market.outcome_yes_price - market.spread / 2 - aggression
             else:
-                # New bearish position → BUY NO
                 side = OrderSide.BUY
                 token = TokenType.NO
                 exec_price = market.outcome_no_price + market.spread / 2 + aggression
@@ -501,9 +498,10 @@ class KalshiClient:
 
                 await db.execute(
                     """INSERT INTO portfolio
-                       (market_id, side, size, avg_price, current_price, token, updated_at)
-                       VALUES (?, 'BUY', ?, ?, ?, ?, datetime('now'))
+                       (market_id, exchange, side, size, avg_price, current_price, token, updated_at)
+                       VALUES (?, 'kalshi', 'BUY', ?, ?, ?, ?, datetime('now'))
                        ON CONFLICT(market_id) DO UPDATE SET
+                           exchange = excluded.exchange,
                            size = excluded.size,
                            avg_price = excluded.avg_price,
                            current_price = excluded.current_price,

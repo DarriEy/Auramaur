@@ -96,12 +96,13 @@ def _make_dashboard_layout(stats: dict) -> Layout:
     layout["right"].update(Panel(signals_table))
 
     # Footer
-    balance = stats.get("balance", 0)
+    balance = stats.get("balance")
     total_pnl = stats.get("total_pnl", 0)
     pnl_style = "green" if total_pnl >= 0 else "red"
+    balance_str = "[dim]n/a[/]" if balance is None else f"[bold]${balance:.2f}[/]"
     footer = Panel(
         Text.from_markup(
-            f"Balance: [bold]${balance:.2f}[/]  |  "
+            f"Balance: {balance_str}  |  "
             f"PnL: [{pnl_style}]${total_pnl:.2f}[/]  |  "
             f"Trades: {stats.get('trade_count', 0)}  |  "
             f"Drawdown: {stats.get('drawdown', 0):.1f}%  |  "
@@ -120,10 +121,14 @@ async def _get_dashboard_stats(db: Database, settings: Settings) -> dict:
         "kill_switch": settings.kill_switch_active,
     }
 
-    # Positions
+    # Positions — scope to current mode so paper state doesn't show in live
+    # dashboards (and vice versa).
+    is_paper_flag = 0 if settings.is_live else 1
     rows = await db.fetchall(
         """SELECT p.*, m.question FROM portfolio p
-           LEFT JOIN markets m ON p.market_id = m.id"""
+           LEFT JOIN markets m ON p.market_id = m.id
+           WHERE p.is_paper = ?""",
+        (is_paper_flag,),
     )
     stats["positions"] = [
         {
@@ -151,9 +156,10 @@ async def _get_dashboard_stats(db: Database, settings: Settings) -> dict:
         for r in rows
     ]
 
-    # Balance and PnL
+    # Balance and PnL — filter trades to the current mode.
     row = await db.fetchone(
-        "SELECT COUNT(*) as cnt, COALESCE(SUM(pnl), 0) as total_pnl FROM trades"
+        "SELECT COUNT(*) as cnt, COALESCE(SUM(pnl), 0) as total_pnl FROM trades WHERE is_paper = ?",
+        (is_paper_flag,),
     )
     stats["trade_count"] = row["cnt"] if row else 0
     stats["total_pnl"] = row["total_pnl"] if row else 0
@@ -163,7 +169,15 @@ async def _get_dashboard_stats(db: Database, settings: Settings) -> dict:
         "SELECT max_drawdown FROM daily_stats ORDER BY date DESC LIMIT 1"
     )
     stats["drawdown"] = row["max_drawdown"] if row else 0
-    stats["balance"] = settings.execution.paper_initial_balance + stats["total_pnl"]
+
+    if settings.is_live:
+        # Live balance should be queried from the CLOB on demand. The running
+        # bot's portfolio monitor already displays on-chain cash via the
+        # syncer, so this dashboard just reports realized PnL from live fills
+        # and leaves balance undefined.
+        stats["balance"] = None
+    else:
+        stats["balance"] = settings.execution.paper_initial_balance + stats["total_pnl"]
 
     return stats
 
@@ -370,7 +384,10 @@ def status():
             except Exception as e:
                 console.print(f"Polymarket: [red]error[/] — {str(e)[:60]}")
 
-        console.print(f"Balance: ${stats['balance']:.2f}")
+        if stats['balance'] is None:
+            console.print("Balance: [dim]n/a (live — see running bot for on-chain cash)[/]")
+        else:
+            console.print(f"Balance: ${stats['balance']:.2f}")
         console.print(f"PnL: ${stats['total_pnl']:.2f}")
         console.print(f"Trades: {stats['trade_count']}")
         console.print(f"Open Positions: {stats['position_count']}")
