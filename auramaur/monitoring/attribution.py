@@ -97,6 +97,99 @@ class PerformanceAttributor:
         )
         return [dict(row) for row in rows]
 
+    async def get_accuracy_and_kelly_maps(self) -> tuple[dict[str, float | None], dict[str, float]]:
+        """Return accuracy and kelly multiplier maps for display."""
+        cal_rows = await self._db.fetchall(
+            """SELECT category,
+                      COUNT(*) AS n,
+                      SUM(CASE WHEN (predicted_prob > 0.5 AND actual_outcome = 1)
+                               OR (predicted_prob <= 0.5 AND actual_outcome = 0)
+                          THEN 1 ELSE 0 END) AS correct
+               FROM calibration
+               WHERE actual_outcome IS NOT NULL AND category != ''
+               GROUP BY category"""
+        )
+        accuracy_map: dict[str, float | None] = {
+            r["category"]: r["correct"] / r["n"] if r["n"] > 0 else None
+            for r in cal_rows
+        }
+
+        stats_rows = await self._db.fetchall("SELECT category, kelly_multiplier FROM category_stats")
+        kelly_map: dict[str, float] = {
+            r["category"]: float(r["kelly_multiplier"] or 1.0) for r in stats_rows
+        }
+
+        return accuracy_map, kelly_map
+
+    async def get_category_lookup(self) -> dict[str, str]:
+        """Return market_id -> category mapping from markets and portfolio tables."""
+        rows = await self._db.fetchall(
+            """SELECT id, category FROM markets
+               WHERE category IS NOT NULL AND category != ''"""
+        )
+        lookup = {r["id"]: r["category"] for r in rows}
+        rows2 = await self._db.fetchall(
+            """SELECT market_id, category FROM portfolio
+               WHERE category IS NOT NULL AND category != ''"""
+        )
+        for r in rows2:
+            lookup.setdefault(r["market_id"], r["category"])
+        return lookup
+
+    async def get_category_summary(self, *, is_live: bool = False) -> list[dict]:
+        """Return per-category summary combining portfolio data with calibration stats."""
+        paper_flag = 0 if is_live else 1
+        portfolio_rows = await self._db.fetchall(
+            """SELECT COALESCE(NULLIF(p.category, ''), NULLIF(m.category, ''), 'other') AS cat,
+                      COUNT(*) AS positions,
+                      SUM(p.size * p.avg_price) AS exposure,
+                      SUM(
+                          (COALESCE(p.current_price, p.avg_price)
+                           - COALESCE(cb.avg_cost, p.avg_price)) * p.size
+                      ) AS unrealized_pnl
+               FROM portfolio p
+               LEFT JOIN markets m ON p.market_id = m.id
+               LEFT JOIN cost_basis cb ON p.market_id = cb.market_id
+                                       AND cb.is_paper = p.is_paper
+               WHERE p.is_paper = ? OR p.exchange != 'polymarket'
+               GROUP BY cat
+               ORDER BY exposure DESC""",
+            (paper_flag,),
+        )
+
+        stats_rows = await self._db.fetchall("SELECT * FROM category_stats")
+        stats_map = {r["category"]: dict(r) for r in stats_rows}
+
+        cal_rows = await self._db.fetchall(
+            """SELECT category,
+                      COUNT(*) AS n,
+                      SUM(CASE WHEN (predicted_prob > 0.5 AND actual_outcome = 1)
+                               OR (predicted_prob <= 0.5 AND actual_outcome = 0)
+                          THEN 1 ELSE 0 END) AS correct
+               FROM calibration
+               WHERE actual_outcome IS NOT NULL AND category != ''
+               GROUP BY category"""
+        )
+        accuracy_map = {
+            r["category"]: r["correct"] / r["n"] if r["n"] > 0 else None
+            for r in cal_rows
+        }
+
+        result = []
+        for row in portfolio_rows:
+            cat = row["cat"]
+            stats = stats_map.get(cat, {})
+            result.append({
+                "category": cat,
+                "positions": row["positions"],
+                "exposure": row["exposure"] or 0,
+                "unrealized_pnl": row["unrealized_pnl"] or 0,
+                "accuracy": accuracy_map.get(cat),
+                "kelly_multiplier": stats.get("kelly_multiplier", 1.0),
+            })
+
+        return result
+
     async def get_kelly_multiplier(self, category: str) -> float:
         """Get the Kelly multiplier for a specific category. Returns 1.0 if unknown."""
         row = await self._db.fetchone(

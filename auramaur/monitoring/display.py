@@ -25,7 +25,7 @@ def show_banner(mode: str, version: str) -> None:
     else:
         banner.append("PAPER", style="bold green")
     banner.append(f"  |  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}", style="dim")
-    console.print(Panel(banner, style="blue"))
+    console.print(Panel(banner, style="cyan"))
 
 
 def show_startup(sources: list[str], balance: float) -> None:
@@ -227,32 +227,124 @@ def show_mm_quote(market_id: str, bid: float, ask: float, spread_bps: int) -> No
     )
 
 
+_BAR_CHARS = " ▏▎▍▌▋▊▉█"
+
+
+def _alloc_bar(fraction: float, width: int = 10) -> str:
+    """Render a proportional bar using Unicode block characters."""
+    filled = fraction * width
+    full_blocks = int(filled)
+    remainder = filled - full_blocks
+    partial_idx = int(remainder * 8)
+
+    bar = _BAR_CHARS[-1] * full_blocks
+    if full_blocks < width:
+        bar += _BAR_CHARS[partial_idx]
+        bar += " " * (width - full_blocks - 1)
+
+    return bar
+
+
+def build_category_stats_from_positions(
+    positions: list,
+    accuracy_map: dict[str, float | None] | None = None,
+    kelly_map: dict[str, float] | None = None,
+    category_lookup: dict[str, str] | None = None,
+) -> list[dict]:
+    """Aggregate LivePosition objects into per-category stats."""
+    if accuracy_map is None:
+        accuracy_map = {}
+    if kelly_map is None:
+        kelly_map = {}
+    if category_lookup is None:
+        category_lookup = {}
+
+    seen: set[str] = set()
+    cats: dict[str, dict] = {}
+    for pos in positions:
+        if pos.market_id in seen:
+            continue
+        seen.add(pos.market_id)
+        cat = pos.category or category_lookup.get(pos.market_id) or "other"
+        if cat not in cats:
+            cats[cat] = {"category": cat, "positions": 0, "exposure": 0.0, "unrealized_pnl": 0.0}
+        cats[cat]["positions"] += 1
+        cats[cat]["exposure"] += pos.size * pos.avg_cost
+        cats[cat]["unrealized_pnl"] += pos.unrealized_pnl
+
+    result = sorted(cats.values(), key=lambda s: s["exposure"], reverse=True)
+    for s in result:
+        s["accuracy"] = accuracy_map.get(s["category"])
+        s["kelly_multiplier"] = kelly_map.get(s["category"], 1.0)
+    return result
+
+
 def show_category_performance(stats: list[dict]) -> None:
     """Show per-category performance summary."""
     if not stats:
         return
 
-    table = Table(title="Category Performance", show_header=True)
-    table.add_column("Category", style="cyan")
-    table.add_column("Trades", justify="right")
-    table.add_column("Win Rate", justify="right")
+    total_exposure = sum(s.get("exposure", 0) for s in stats)
+
+    table = Table(
+        title="Portfolio Allocation",
+        show_header=True,
+        title_style="bold cyan",
+        border_style="dim",
+        header_style="bold",
+        pad_edge=True,
+        padding=(0, 1),
+    )
+    table.add_column("Category", style="cyan", min_width=14)
+    table.add_column("Pos", justify="right", style="dim")
+    table.add_column("Exposure", justify="right")
+    table.add_column("Alloc", justify="left", min_width=14)
     table.add_column("PnL", justify="right")
+    table.add_column("Acc", justify="right")
     table.add_column("Kelly", justify="right")
 
+    total_positions = 0
+    total_pnl = 0.0
+
     for s in stats:
-        win_rate = f"{s['win_count'] / s['trade_count']:.0%}" if s['trade_count'] > 0 else "N/A"
-        pnl_val = s.get('total_pnl', 0)
-        pnl_color = "green" if pnl_val >= 0 else "red"
-        mult = s.get('kelly_multiplier', 1.0) or 1.0
-        mult_color = "green" if mult >= 1.0 else "red"
+        positions = s.get("positions", 0)
+        exposure = s.get("exposure", 0)
+        pnl = s.get("unrealized_pnl", 0)
+        accuracy = s.get("accuracy")
+        mult = s.get("kelly_multiplier", 1.0) or 1.0
+
+        total_positions += positions
+        total_pnl += pnl
+
+        frac = exposure / total_exposure if total_exposure > 0 else 0
+        bar = _alloc_bar(frac)
+        alloc_str = f"[cyan]{bar}[/] [dim]{frac:>4.0%}[/]"
+
+        pnl_color = "green" if pnl >= 0 else "red"
+        acc_str = f"{accuracy:.0%}" if accuracy is not None else "—"
+        mult_color = "green" if mult >= 1.0 else ("yellow" if mult >= 0.5 else "red")
 
         table.add_row(
-            s['category'],
-            str(s['trade_count']),
-            win_rate,
-            f"[{pnl_color}]${pnl_val:+.2f}[/]",
+            s["category"],
+            str(positions),
+            f"${exposure:,.2f}",
+            alloc_str,
+            f"[{pnl_color}]${pnl:+,.2f}[/]",
+            acc_str,
             f"[{mult_color}]{mult:.2f}x[/]",
         )
+
+    total_pnl_color = "green" if total_pnl >= 0 else "red"
+    table.add_section()
+    table.add_row(
+        "[bold]Total[/]",
+        f"[bold]{total_positions}[/]",
+        f"[bold]${total_exposure:,.2f}[/]",
+        "",
+        f"[bold {total_pnl_color}]${total_pnl:+,.2f}[/]",
+        "",
+        "",
+    )
 
     console.print(table)
 

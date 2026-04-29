@@ -542,6 +542,7 @@ class AuramaurBot:
         alerts: AlertManager = self._components["alerts"]
         portfolio_tracker: PortfolioTracker = self._components["risk_manager"].portfolio
         interval = self.settings.intervals.portfolio_check_seconds
+        first_tick = True
 
         while self._running:
             try:
@@ -580,10 +581,41 @@ class AuramaurBot:
 
                     all_positions.extend(positions_list)
 
+                seen_ids: set[str] = set()
+                deduped: list = []
+                for pos in all_positions:
+                    if pos.market_id not in seen_ids:
+                        seen_ids.add(pos.market_id)
+                        deduped.append(pos)
+                all_positions = deduped
+
                 total_cash = sum(per_exchange_cash.values())
                 self._last_known_cash = total_cash
                 total_pnl = await pnl_tracker.get_total_pnl(all_positions)
                 poly_cash = per_exchange_cash.get("polymarket", total_cash)
+
+                if first_tick:
+                    first_tick = False
+                    try:
+                        from auramaur.monitoring.display import (
+                            build_category_stats_from_positions,
+                            show_category_performance,
+                        )
+                        accuracy_map: dict[str, float | None] = {}
+                        kelly_map: dict[str, float] = {}
+                        category_lookup: dict[str, str] = {}
+                        attributor = self._components.get("attributor")
+                        if attributor:
+                            accuracy_map, kelly_map = await attributor.get_accuracy_and_kelly_maps()
+                            category_lookup = await attributor.get_category_lookup()
+                        cat_stats = build_category_stats_from_positions(
+                            all_positions, accuracy_map, kelly_map, category_lookup,
+                        )
+                        if cat_stats:
+                            show_category_performance(cat_stats)
+                    except Exception as e:
+                        log.debug("attribution.initial_error", error=str(e))
+
                 show_portfolio(poly_cash, total_pnl, len(all_positions), 0.0, schedule_mode=self._get_schedule_mode())
 
                 # Per-exchange exit checks + execution
@@ -880,15 +912,15 @@ class AuramaurBot:
             return
 
         while self._running:
+            await asyncio.sleep(3600)
             try:
                 await attributor.compute_kelly_multipliers()
-                stats = await attributor.get_category_stats()
+                stats = await attributor.get_category_summary(is_live=self.settings.is_live)
                 if stats:
                     from auramaur.monitoring.display import show_category_performance
                     show_category_performance(stats)
             except Exception as e:
                 log.error("attribution.error", error=str(e))
-            await asyncio.sleep(3600)  # Every hour
 
     async def _task_performance_feedback(self) -> None:
         """Periodically update per-category calibration stats and Kelly multipliers."""
