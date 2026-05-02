@@ -72,7 +72,7 @@ class TestDetectResolution:
         assert ResolutionTracker._detect_resolution(market, "polymarket") is True
 
     def test_resolved_no(self):
-        market = _make_market(active=False, yes_price=0.02)
+        market = _make_market(active=False, yes_price=0.01)
         assert ResolutionTracker._detect_resolution(market, "polymarket") is False
 
     def test_ambiguous_price_returns_none(self):
@@ -97,17 +97,28 @@ class TestDetectResolution:
         market.status = "finalized"
         assert ResolutionTracker._detect_resolution(market, "kalshi") is False
 
-    def test_boundary_yes_095(self):
-        market = _make_market(active=False, yes_price=0.95)
+    def test_boundary_yes_099(self):
+        market = _make_market(active=False, yes_price=0.99)
         assert ResolutionTracker._detect_resolution(market, "polymarket") is True
 
-    def test_boundary_no_005(self):
-        market = _make_market(active=False, yes_price=0.05)
+    def test_boundary_no_001(self):
+        market = _make_market(active=False, yes_price=0.01)
         assert ResolutionTracker._detect_resolution(market, "polymarket") is False
 
     def test_just_below_threshold_returns_none(self):
-        market = _make_market(active=False, yes_price=0.94)
+        """0.95 used to trigger resolution but is now too loose — must be inactive
+        AND tightly converged (>=0.99 / <=0.01) before we declare a winner."""
+        market = _make_market(active=False, yes_price=0.95)
         assert ResolutionTracker._detect_resolution(market, "polymarket") is None
+
+    def test_active_high_price_returns_none(self):
+        """Even at 95%/5%, an active market is NOT resolved — the prior
+        ordering let high-confidence still-trading markets be settled
+        prematurely and have their portfolio rows deleted."""
+        yes_market = _make_market(active=True, yes_price=0.97)
+        no_market = _make_market(active=True, yes_price=0.03)
+        assert ResolutionTracker._detect_resolution(yes_market, "polymarket") is None
+        assert ResolutionTracker._detect_resolution(no_market, "polymarket") is None
 
 
 # ---------------------------------------------------------------------------
