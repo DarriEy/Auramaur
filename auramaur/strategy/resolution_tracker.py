@@ -171,10 +171,15 @@ class ResolutionTracker:
             # No position — we only had a calibration prediction, not a trade.
             return
 
-        entry_price = pos_row["avg_price"]
-        size = pos_row["size"]
-        side = pos_row["side"]
-        token = pos_row.get("token", "YES")
+        # aiosqlite.Row supports __getitem__ but not .get(); normalise to a
+        # plain dict so we can safely use defaults for columns added in
+        # later migrations (token, is_paper).
+        pos = dict(pos_row)
+        entry_price = pos["avg_price"]
+        size = pos["size"]
+        side = pos["side"]
+        token = pos.get("token") or "YES"
+        is_paper_flag = int(pos.get("is_paper", 1))
 
         # Settlement price: YES resolves to $1, NO resolves to $0
         if token == "NO":
@@ -205,13 +210,15 @@ class ResolutionTracker:
         except Exception as e:
             log.debug("resolution.daily_stats_error", error=str(e))
 
-        # Update cost_basis realized PnL
+        # Update cost_basis realized PnL — scoped to the same paper/live mode
+        # as the portfolio row so a paper resolution can't zero a live row's
+        # cost basis (and vice versa).
         try:
             await self._db.execute(
                 """UPDATE cost_basis
                    SET realized_pnl = realized_pnl + ?, size = 0, updated_at = datetime('now')
-                   WHERE market_id = ?""",
-                (pnl, market_id),
+                   WHERE market_id = ? AND is_paper = ?""",
+                (pnl, market_id, is_paper_flag),
             )
         except Exception as e:
             log.debug("resolution.cost_basis_error", error=str(e))
