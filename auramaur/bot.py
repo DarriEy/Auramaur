@@ -2005,9 +2005,12 @@ class AuramaurBot:
             asyncio.create_task(self._task_recalibrate(), name="recalibrate"),
         ]
 
-        # Portfolio monitor and position sync need syncer (Polymarket-specific)
-        if self._components.get("syncer"):
+        # Portfolio monitor runs whenever any exchange syncer is present so
+        # Kalshi-only runs still populate `_last_known_cash` and exits fire.
+        # Position sync (CLOB reconciler) remains Polymarket-specific.
+        if self._components.get("syncers"):
             tasks.append(asyncio.create_task(self._task_portfolio_monitor(), name="portfolio"))
+        if self._components.get("syncer"):
             tasks.append(asyncio.create_task(self._task_position_sync(), name="position_sync"))
 
         # Resolution checker and order monitor work with any exchange
