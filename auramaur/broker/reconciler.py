@@ -280,22 +280,26 @@ class PositionReconciler:
                 continue  # Still unresolved
 
             orphan_id = pos.condition_id[:16]
-            # Check if cost_basis has the orphan ID
+            # Check if cost_basis has the orphan ID — reconciler is live-only,
+            # so confine the rename to is_paper=0 rows.  cost_basis is keyed
+            # by (market_id, is_paper); without the filter we could rename a
+            # paper row into a key that already exists for live and violate
+            # the composite PK.
             row = await self._db.fetchone(
-                "SELECT market_id FROM cost_basis WHERE market_id = ?",
+                "SELECT market_id FROM cost_basis WHERE market_id = ? AND is_paper = 0",
                 (orphan_id,),
             )
             if row:
                 await self._db.execute(
-                    "UPDATE cost_basis SET market_id = ? WHERE market_id = ?",
+                    "UPDATE cost_basis SET market_id = ? WHERE market_id = ? AND is_paper = 0",
                     (pos.market_id, orphan_id),
                 )
                 await self._db.execute(
-                    "UPDATE portfolio SET market_id = ? WHERE market_id = ?",
+                    "UPDATE portfolio SET market_id = ? WHERE market_id = ? AND is_paper = 0",
                     (pos.market_id, orphan_id),
                 )
                 await self._db.execute(
-                    "UPDATE fills SET market_id = ? WHERE market_id = ?",
+                    "UPDATE fills SET market_id = ? WHERE market_id = ? AND is_paper = 0",
                     (pos.market_id, orphan_id),
                 )
                 repaired += 1
