@@ -11,6 +11,9 @@
 5. **Never read `.env` files.** They contain secrets. Use `.env.example` for reference.
 6. **Never force-push to main.**
 
+## Commit Attribution
+When making git commits, use `Assisted-by: Claude (Anthropic)` in the commit message body instead of `Co-authored-by`. The human author should always be the sole git author of record.
+
 ## Architecture
 - All money flows through `auramaur/exchange/client.py` — this is the ONLY file that touches the CLOB API for orders.
 - Paper trading interception happens in `auramaur/exchange/paper.py`.

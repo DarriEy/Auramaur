@@ -1,9 +1,115 @@
 """Tests for Kalshi exchange client."""
 
 import pytest
+from unittest.mock import AsyncMock, MagicMock
 
+from auramaur.broker.sync import KalshiPositionSyncer
 from auramaur.exchange.kalshi import KalshiClient
-from auramaur.exchange.models import Market, Order, OrderSide, TokenType
+from auramaur.exchange.models import Market, Order, OrderSide, Position, TokenType
+
+
+class TestKalshiPositionSyncerBalance:
+
+    def _settings(self, is_live: bool):
+        s = MagicMock()
+        s.is_live = is_live
+        return s
+
+    @pytest.mark.asyncio
+    async def test_paper_mode_returns_paper_balance(self):
+        paper = MagicMock()
+        paper.balance = 111.0
+        syncer = KalshiPositionSyncer(
+            settings=self._settings(is_live=False),
+            db=MagicMock(),
+            exchange=MagicMock(),
+            paper=paper,
+        )
+        assert await syncer.get_cash_balance() == 111.0
+
+    @pytest.mark.asyncio
+    async def test_live_mode_queries_exchange(self):
+        exchange = MagicMock()
+        exchange.get_balance = AsyncMock(return_value=500.0)
+        syncer = KalshiPositionSyncer(
+            settings=self._settings(is_live=True),
+            db=MagicMock(),
+            exchange=exchange,
+            paper=MagicMock(),
+        )
+        assert await syncer.get_cash_balance() == 500.0
+        exchange.get_balance.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_paper_mode_without_paper_falls_back_to_exchange(self):
+        exchange = MagicMock()
+        exchange.get_balance = AsyncMock(return_value=42.0)
+        syncer = KalshiPositionSyncer(
+            settings=self._settings(is_live=False),
+            db=MagicMock(),
+            exchange=exchange,
+            paper=None,
+        )
+        assert await syncer.get_cash_balance() == 42.0
+
+
+class TestKalshiPositionSyncerPaperSync:
+
+    def _settings(self, is_live: bool):
+        s = MagicMock()
+        s.is_live = is_live
+        return s
+
+    def _db(self):
+        db = MagicMock()
+        db.execute = AsyncMock()
+        db.commit = AsyncMock()
+        db.fetchall = AsyncMock(return_value=[])
+        return db
+
+    @pytest.mark.asyncio
+    async def test_paper_mode_returns_paper_positions(self):
+        pos = Position(
+            market_id="KXTEST",
+            side=OrderSide.BUY,
+            size=10.0,
+            avg_price=0.5,
+            current_price=0.6,
+            category="test",
+            token=TokenType.YES,
+            token_id="KXTEST",
+        )
+        paper = MagicMock()
+        paper.positions = {"KXTEST": pos}
+
+        syncer = KalshiPositionSyncer(
+            settings=self._settings(is_live=False),
+            db=self._db(),
+            exchange=MagicMock(),
+            paper=paper,
+        )
+
+        positions = await syncer.sync()
+        assert len(positions) == 1
+        assert positions[0].market_id == "KXTEST"
+        assert positions[0].size == 10.0
+
+    @pytest.mark.asyncio
+    async def test_paper_sync_empty_clears_portfolio(self):
+        paper = MagicMock()
+        paper.positions = {}
+
+        syncer = KalshiPositionSyncer(
+            settings=self._settings(is_live=False),
+            db=self._db(),
+            exchange=MagicMock(),
+            paper=paper,
+        )
+
+        positions = await syncer.sync()
+        assert positions == []
+        delete_calls = [c for c in syncer._db.execute.call_args_list if "DELETE" in str(c)]
+        assert delete_calls
 
 
 class TestKalshiMarketParsing:

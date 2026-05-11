@@ -256,7 +256,7 @@ class AuramaurBot:
                 discoveries["kalshi"] = kalshi
                 exchanges_map["kalshi"] = kalshi
 
-                kalshi_syncer = KalshiPositionSyncer(settings=s, db=db, exchange=kalshi)
+                kalshi_syncer = KalshiPositionSyncer(settings=s, db=db, exchange=kalshi, paper=paper)
                 kalshi_router = SmartOrderRouter(settings=s, exchange=kalshi)
                 syncers.append(kalshi_syncer)
 
