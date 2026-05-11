@@ -12,15 +12,14 @@ from auramaur.nlp.analyzer import AnalysisResult
 
 log = structlog.get_logger()
 
-# Per-exchange fee rates (as fractions, not percentages).
-# Applied to edge calculation so only genuinely profitable trades pass.
+# Fallback fee rates — callers should prefer passing exchange_fees from config.
+# Kept as a default so standalone calls (tests, REPL) still work.
 EXCHANGE_FEES: dict[str, float] = {
-    "polymarket": 0.0,    # 0% for reward tier accounts
-    "kalshi": 0.07,       # 7% fee on winnings
-    "cryptodotcom": 0.01, # ~1% fee
+    "polymarket": 0.0,
+    "kalshi": 0.07,
+    "cryptodotcom": 0.075,
 }
 
-# Legacy alias for backward compatibility
 POLYMARKET_FEE_PCT = 0.0
 
 
@@ -130,10 +129,16 @@ def _has_inverted_semantics(question: str) -> bool:
     return any(re.search(pat, q) for pat in _NEGATION_REGEXES)
 
 
-def detect_edge(market: Market, analysis: AnalysisResult) -> Signal | None:
+def detect_edge(
+    market: Market,
+    analysis: AnalysisResult,
+    exchange_fees: dict[str, float] | None = None,
+) -> Signal | None:
     """Compare Claude's probability estimate against the market price.
 
     Returns a Signal if there's a tradeable edge, None otherwise.
+    *exchange_fees* overrides the module-level EXCHANGE_FEES when provided
+    (callers should pass settings.arbitrage.exchange_fees).
     """
     if analysis.skipped_reason:
         log.info("signal.skipped", market_id=market.id, reason=analysis.skipped_reason)
@@ -179,7 +184,8 @@ def detect_edge(market: Market, analysis: AnalysisResult) -> Signal | None:
         return None
 
     # Adjust for exchange-specific fees
-    fee_rate = EXCHANGE_FEES.get(market.exchange, 0.0)
+    fees = exchange_fees if exchange_fees is not None else EXCHANGE_FEES
+    fee_rate = fees.get(market.exchange, 0.0)
     net_edge = edge - fee_rate
 
     if net_edge <= 0:

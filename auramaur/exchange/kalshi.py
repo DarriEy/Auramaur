@@ -498,9 +498,9 @@ class KalshiClient:
 
                 await db.execute(
                     """INSERT INTO portfolio
-                       (market_id, exchange, side, size, avg_price, current_price, token, updated_at)
-                       VALUES (?, 'kalshi', 'BUY', ?, ?, ?, ?, datetime('now'))
-                       ON CONFLICT(market_id) DO UPDATE SET
+                       (market_id, exchange, side, size, avg_price, current_price, token, is_paper, updated_at)
+                       VALUES (?, 'kalshi', 'BUY', ?, ?, ?, ?, 0, datetime('now'))
+                       ON CONFLICT(market_id, is_paper) DO UPDATE SET
                            exchange = excluded.exchange,
                            size = excluded.size,
                            avg_price = excluded.avg_price,

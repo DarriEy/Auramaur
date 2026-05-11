@@ -229,7 +229,7 @@ class PipelineAnalyzer:
                 analysis.probability = max(0.01, min(0.99, analysis.probability + nudge))
 
         # 3. Signal detection
-        signal = detect_edge(market, analysis)
+        signal = detect_edge(market, analysis, exchange_fees=self.settings.arbitrage.exchange_fees)
         if signal is None:
             return None
 

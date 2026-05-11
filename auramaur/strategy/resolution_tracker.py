@@ -226,10 +226,11 @@ class ResolutionTracker:
         except Exception as e:
             log.debug("resolution.cost_basis_error", error=str(e))
 
-        # Remove from portfolio
+        # Remove from portfolio — scoped by is_paper so a paper resolution
+        # doesn't delete a live position for the same market (and vice versa).
         await self._db.execute(
-            "DELETE FROM portfolio WHERE market_id = ?",
-            (market_id,),
+            "DELETE FROM portfolio WHERE market_id = ? AND is_paper = ?",
+            (market_id, is_paper_flag),
         )
 
         # Remove peak tracking

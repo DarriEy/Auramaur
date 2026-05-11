@@ -367,13 +367,13 @@ class PortfolioTracker:
     # Updates
     # ------------------------------------------------------------------
 
-    async def update_position(self, position: Position) -> None:
+    async def update_position(self, position: Position, is_paper: bool = True) -> None:
         """Insert or replace a position row in the portfolio table."""
         await self.db.execute(
             """
-            INSERT INTO portfolio (market_id, exchange, side, size, avg_price, current_price, category, token, token_id, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(market_id) DO UPDATE SET
+            INSERT INTO portfolio (market_id, exchange, side, size, avg_price, current_price, category, token, token_id, is_paper, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(market_id, is_paper) DO UPDATE SET
                 exchange = excluded.exchange,
                 side = excluded.side,
                 size = excluded.size,
@@ -394,6 +394,7 @@ class PortfolioTracker:
                 position.category,
                 position.token.value,
                 position.token_id,
+                int(is_paper),
                 datetime.now(timezone.utc).isoformat(),
             ),
         )
