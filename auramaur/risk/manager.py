@@ -68,10 +68,12 @@ class RiskManager:
         category_exposure = await self.portfolio.get_category_exposure()
         correlated = await self.portfolio.get_correlated_markets(signal.market_id)
 
-        # Equity = cash + position notional at current price (falls back to
-        # avg price for positions with no live quote yet). Drives regime
-        # switching: capital-starved books get growth-mode params, mature
-        # books get the preservation-tuned config values.
+        # Cash = what we can actually deploy right now.
+        # Equity = cash + position notional — drives regime switching so
+        # capital-starved books get growth-mode params while mature books
+        # get preservation-tuned config values.  Kelly bankroll uses cash
+        # (not equity) because we can only bet money that isn't already
+        # deployed.
         cash = available_cash if available_cash is not None else self.settings.execution.paper_initial_balance
         position_notional = sum(
             p.size * (p.current_price or p.avg_price)
@@ -84,6 +86,7 @@ class RiskManager:
             base_max_stake=rc.max_stake_per_market,
             base_min_edge_pct=rc.min_edge_pct,
         )
+        bankroll = min(cash, regime.max_stake * 3)
 
         # Time to resolution
         if market.end_date:
@@ -101,13 +104,12 @@ class RiskManager:
         cat_exp = category_exposure.get(market.category, 0.0)
 
         # ----------------------------------------------------------------
-        # Run all 15 checks
+        # Run 14 pre-sizing checks (max_stake validated after sizing)
         # ----------------------------------------------------------------
-        checks: list[CheckResult] = [
+        pre_checks: list[CheckResult] = [
             await check_kill_switch(),
             await check_max_drawdown(drawdown, rc.max_drawdown_pct),
             await check_drawdown_heat(drawdown, rc.max_drawdown_pct),
-            await check_max_stake(signal.recommended_size, regime.max_stake),
             await check_daily_loss(abs(daily_pnl), rc.daily_loss_limit),
             await check_max_positions(len(positions), rc.max_open_positions),
             await check_min_edge(signal.edge, regime.min_edge_pct),
@@ -123,15 +125,14 @@ class RiskManager:
             await check_second_opinion_divergence(divergence, rc.second_opinion_divergence_max),
         ]
 
-        all_passed = all(c.passed for c in checks)
-        failed = [c for c in checks if not c.passed]
+        pre_passed = all(c.passed for c in pre_checks)
 
         # ----------------------------------------------------------------
-        # Position sizing (only when approved)
+        # Position sizing (only when pre-checks pass)
         # ----------------------------------------------------------------
         position_size = 0.0
-        if all_passed:
-            heat_check = next(c for c in checks if c.name == "drawdown_heat")
+        if pre_passed:
+            heat_check = next(c for c in pre_checks if c.name == "drawdown_heat")
             heat = heat_check.value  # GREEN / YELLOW / ORANGE
 
             # Get category multiplier from attribution
@@ -165,15 +166,22 @@ class RiskManager:
             position_size = self.kelly.calculate(
                 claude_prob=signal.claude_prob,
                 market_prob=signal.market_prob,
-                bankroll=equity,
+                bankroll=bankroll,
                 heat_mult=KellySizer.heat_multiplier(heat),
                 confidence_mult=KellySizer.confidence_multiplier(signal.claude_confidence),
                 liquidity_mult=KellySizer.liquidity_multiplier(max(market.liquidity, market.volume)),
                 category_mult=category_mult,
                 volatility_mult=vol_mult,
-                max_stake=regime.max_stake,
+                max_stake=min(regime.max_stake, cash),
                 fraction_override=regime.kelly_fraction,
             )
+
+        # Run max_stake check on the actual computed position size
+        stake_check = await check_max_stake(position_size, regime.max_stake)
+        checks = pre_checks + [stake_check]
+
+        all_passed = pre_passed and stake_check.passed
+        failed = [c for c in checks if not c.passed]
 
         reason = (
             "All checks passed"

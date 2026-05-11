@@ -5,17 +5,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-# Stub py_clob_client so tests can exercise the live-order path without the
+# Stub py_clob_client_v2 so tests can exercise the live-order path without the
 # optional C-extension package installed.
 _clob_stub = MagicMock()
 _clob_stub.order_builder.constants.BUY = "BUY"
 _clob_stub.order_builder.constants.SELL = "SELL"
 for mod_name in (
-    "py_clob_client",
-    "py_clob_client.client",
-    "py_clob_client.clob_types",
-    "py_clob_client.order_builder",
-    "py_clob_client.order_builder.constants",
+    "py_clob_client_v2",
+    "py_clob_client_v2.client",
+    "py_clob_client_v2.clob_types",
+    "py_clob_client_v2.order_builder",
+    "py_clob_client_v2.order_builder.constants",
 ):
     sys.modules.setdefault(mod_name, _clob_stub)
 
