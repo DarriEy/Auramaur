@@ -378,7 +378,7 @@ class PolymarketClient:
         """Submit order to CLOB via V2 client (has built-in version mismatch retry)."""
         return self._clob_client.create_and_post_order(
             ord_args,
-            order_type=ClobOrderType.GTC if want_post_only else ClobOrderType.GTC,
+            order_type=ClobOrderType.GTC,
             post_only=want_post_only,
         )
 
