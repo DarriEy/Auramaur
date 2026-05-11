@@ -209,7 +209,7 @@ class TestCheckResolutions:
     def test_multi_exchange_resolution(self, resolved_yes_market, resolved_no_market):
         """Markets from different exchanges are resolved correctly."""
         resolved_no_market_kalshi = _make_market(
-            market_id="kalshi-mkt", active=False, yes_price=0.02, exchange="kalshi",
+            market_id="kalshi-mkt", active=False, yes_price=0.01, exchange="kalshi",
         )
         rows = [
             {"market_id": "mkt-1", "exchange": "polymarket"},

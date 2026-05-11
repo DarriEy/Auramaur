@@ -64,6 +64,8 @@ class Database:
             await self._migrate_v8_to_v9()
         if from_version < 10:
             await self._migrate_v9_to_v10()
+        if from_version < 11:
+            await self._migrate_v10_to_v11()
 
     async def _migrate_v1_to_v2(self) -> None:
         """Add category to calibration, add new tables."""
@@ -268,6 +270,42 @@ class Database:
         await self._db.execute("UPDATE schema_version SET version = 10")
         await self._db.commit()
         log.info("database.migrated", from_version=9, to_version=10)
+
+    async def _migrate_v10_to_v11(self) -> None:
+        """Make portfolio primary key composite (market_id, is_paper).
+
+        Same treatment as cost_basis got in v9→v10: paper and live rows
+        for the same market can now coexist.
+        """
+        await self._db.executescript("""
+            CREATE TABLE IF NOT EXISTS portfolio_new (
+                market_id TEXT NOT NULL,
+                exchange TEXT DEFAULT 'polymarket',
+                side TEXT NOT NULL,
+                size REAL NOT NULL,
+                avg_price REAL NOT NULL,
+                current_price REAL,
+                unrealized_pnl REAL DEFAULT 0,
+                category TEXT,
+                token TEXT NOT NULL DEFAULT 'YES',
+                token_id TEXT DEFAULT '',
+                is_paper INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (market_id, is_paper),
+                FOREIGN KEY (market_id) REFERENCES markets(id)
+            );
+            INSERT OR IGNORE INTO portfolio_new
+                (market_id, exchange, side, size, avg_price, current_price,
+                 unrealized_pnl, category, token, token_id, is_paper, updated_at)
+            SELECT market_id, exchange, side, size, avg_price, current_price,
+                   unrealized_pnl, category, token, token_id, is_paper, updated_at
+            FROM portfolio;
+            DROP TABLE portfolio;
+            ALTER TABLE portfolio_new RENAME TO portfolio;
+        """)
+        await self._db.execute("UPDATE schema_version SET version = 11")
+        await self._db.commit()
+        log.info("database.migrated", from_version=10, to_version=11)
 
     @property
     def db(self) -> aiosqlite.Connection:
