@@ -125,7 +125,7 @@ async def check_max_positions(open_count: int, max_positions: int = 15) -> Check
 
 async def check_min_edge(edge: float, min_edge_pct: float = 5.0) -> CheckResult:
     """Fail if the estimated edge is below the minimum threshold."""
-    too_small = abs(edge) < min_edge_pct
+    too_small = edge < min_edge_pct
     return CheckResult(
         name="min_edge",
         passed=not too_small,

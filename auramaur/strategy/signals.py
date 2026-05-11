@@ -182,6 +182,9 @@ def detect_edge(market: Market, analysis: AnalysisResult) -> Signal | None:
     fee_rate = EXCHANGE_FEES.get(market.exchange, 0.0)
     net_edge = edge - fee_rate
 
+    if net_edge <= 0:
+        return None
+
     # Compute hours to resolution for signal quality
     hours_to_res = None
     if market.end_date is not None:

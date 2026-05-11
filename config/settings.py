@@ -48,6 +48,7 @@ class RiskConfig(BaseModel):
     time_to_resolution_min_hours: int = 24
     max_correlated_positions: int = 5
     second_opinion_divergence_max: float = 0.15
+    blocked_categories: list[str] = []
 
 
 class KellyConfig(BaseModel):

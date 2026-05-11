@@ -720,7 +720,7 @@ class AuramaurBot:
         # On-chain balance ground truth
         sell_size = pos.size
         try:
-            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+            from py_clob_client_v2 import BalanceAllowanceParams, AssetType
             exchange._init_clob_client()
             bal = exchange._clob_client.get_balance_allowance(
                 BalanceAllowanceParams(

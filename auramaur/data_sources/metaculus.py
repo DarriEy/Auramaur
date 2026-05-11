@@ -57,7 +57,6 @@ class MetaculusSource:
         """Search Metaculus for related binary questions and return community predictions."""
         try:
             session = await self._get_session()
-            await self._rate_limit()
 
             # Extract key terms for search
             words = query.split()
@@ -75,16 +74,30 @@ class MetaculusSource:
                 "order_by": "-activity",
             }
 
-            async with session.get(f"{_API_BASE}/questions/", params=params) as resp:
-                if resp.status != 200:
-                    logger.warning(
-                        "metaculus.api_error",
-                        status=resp.status,
-                        query=search_query,
-                    )
-                    return []
-
-                data = await resp.json()
+            data = None
+            for attempt, delay in enumerate([2, 5, 15]):
+                await self._rate_limit()
+                async with session.get(f"{_API_BASE}/questions/", params=params) as resp:
+                    if resp.status in (429, 403):
+                        logger.warning(
+                            "metaculus.api_error",
+                            status=resp.status,
+                            query=search_query,
+                            attempt=attempt,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    if resp.status != 200:
+                        logger.warning(
+                            "metaculus.api_error",
+                            status=resp.status,
+                            query=search_query,
+                        )
+                        return []
+                    data = await resp.json()
+                    break
+            if data is None:
+                return []
 
             results = data.get("results", [])
             items: list[NewsItem] = []

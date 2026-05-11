@@ -793,8 +793,13 @@ class TradingEngine:
         edge_candidates: list[Market] = []
         filtered_count = 0
 
+        blocked = set(self.settings.risk.blocked_categories)
+
         for m in candidates:
-            # Check performance-based avoid list first
+            if m.category in blocked:
+                filtered_count += 1
+                continue
+            # Check performance-based avoid list
             if m.category in avoid_categories:
                 log.info(
                     "engine.filtered_poor_performance",
