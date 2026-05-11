@@ -125,32 +125,35 @@ class ResolutionTracker:
             True  — resolved YES
             False — resolved NO
             None  — not yet resolved / ambiguous
+
+        Resolution is only declared when the exchange itself has signalled
+        closure.  The earlier implementation checked price convergence
+        before ``market.active`` and could mark a still-trading market at
+        95%/5% as resolved — which then settled the portfolio position
+        prematurely and fed a fake outcome into calibration.
         """
-        yes_price = market.outcome_yes_price
-
-        # Price convergence is the strongest signal.  Resolved markets go
-        # to ~0 or ~1.  Check this FIRST because some APIs (Gamma/Polymarket)
-        # keep the ``active`` flag True even after a market has fully resolved
-        # and prices have converged.
-        if yes_price >= 0.95:
-            return True  # Resolved YES
-        if yes_price <= 0.05:
-            return False  # Resolved NO
-
-        # Market still trading at a non-extreme price and flagged active
-        # by the exchange — genuinely unresolved.
-        if market.active:
-            return None
-
-        # Kalshi-specific: markets have an explicit status field.  If the
-        # market is settled/finalized but the price didn't clearly converge
-        # (rare edge case for multi-outcome events), use price as tiebreak.
+        # Kalshi exposes an explicit settlement status — trust it first.
         if exchange == "kalshi":
             status = getattr(market, "status", None)
             if status in ("settled", "finalized"):
-                return yes_price > 0.5
+                return market.outcome_yes_price > 0.5
 
-        # Market inactive but price ambiguous — can't determine cleanly.
+        # For everything else, the exchange must have flagged the market
+        # inactive (closed/resolved on Polymarket's side).  A still-active
+        # market is by definition not resolved, regardless of price.
+        if market.active:
+            return None
+
+        # Inactive + tightly converged price → resolution.  The threshold
+        # is intentionally tight (0.99/0.01) to avoid declaring a winner
+        # on markets that closed early or paused with non-trivial spread.
+        yes_price = market.outcome_yes_price
+        if yes_price >= 0.99:
+            return True
+        if yes_price <= 0.01:
+            return False
+
+        # Inactive but price ambiguous — wait for clearer signal.
         return None
 
     # ------------------------------------------------------------------
