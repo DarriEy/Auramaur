@@ -687,8 +687,10 @@ class AuramaurBot:
 
         if not token_id:
             try:
+                # _execute_poly_exit only fires for live positions; scope to
+                # is_paper=0 so we can't pick up a stale paper-mode token_id.
                 row = await self._components["db"].fetchone(
-                    "SELECT token_id FROM cost_basis WHERE market_id = ? AND size > 0",
+                    "SELECT token_id FROM cost_basis WHERE market_id = ? AND size > 0 AND is_paper = 0",
                     (pos.market_id,),
                 )
                 if row and row["token_id"]:
@@ -1783,12 +1785,15 @@ class AuramaurBot:
                     reconciled = await reconciler.reconcile()
                     positions = reconciler.to_live_positions(reconciled)
 
-                    # Update cost_basis from real fill prices (ground truth)
+                    # Update cost_basis from real fill prices (ground truth).
+                    # This loop only runs in live mode, so we explicitly
+                    # write is_paper=0 and conflict on (market_id, is_paper).
                     for rp in reconciled:
                         await self._components["db"].execute(
-                            """INSERT INTO cost_basis (market_id, token, token_id, size, avg_cost, total_cost, updated_at)
-                               VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-                               ON CONFLICT(market_id) DO UPDATE SET
+                            """INSERT INTO cost_basis (market_id, token, token_id, size, avg_cost, total_cost, is_paper, updated_at)
+                               VALUES (?, ?, ?, ?, ?, ?, 0, datetime('now'))
+                               ON CONFLICT(market_id, is_paper) DO UPDATE SET
+                                   token = excluded.token,
                                    token_id = excluded.token_id,
                                    size = excluded.size,
                                    avg_cost = excluded.avg_cost,
@@ -1807,12 +1812,14 @@ class AuramaurBot:
                     if reconciled:
                         live_ids = [rp.market_id for rp in reconciled]
                         placeholders = ",".join("?" * len(live_ids))
+                        # Live-mode reconciliation must only delete live rows;
+                        # paper rows (is_paper=1) live in their own namespace.
                         cb_cur = await self._components["db"].execute(
-                            f"DELETE FROM cost_basis WHERE size > 0 AND market_id NOT IN ({placeholders})",
+                            f"DELETE FROM cost_basis WHERE size > 0 AND is_paper = 0 AND market_id NOT IN ({placeholders})",
                             live_ids,
                         )
                         pf_cur = await self._components["db"].execute(
-                            f"DELETE FROM portfolio WHERE market_id NOT IN ({placeholders})",
+                            f"DELETE FROM portfolio WHERE is_paper = 0 AND market_id NOT IN ({placeholders})",
                             live_ids,
                         )
                         log.info(

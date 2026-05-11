@@ -62,10 +62,14 @@ class PnLTracker:
             ),
         )
 
-        # 2. Fetch current cost basis (if any)
+        # 2. Fetch current cost basis for the same paper/live mode (if any).
+        # cost_basis is keyed by (market_id, is_paper); reading without the
+        # is_paper filter would let paper fills consume a live row's basis
+        # and vice versa.
+        is_paper_flag = 1 if fill.is_paper else 0
         row = await self._db.fetchone(
-            "SELECT size, avg_cost, total_cost, realized_pnl FROM cost_basis WHERE market_id = ?",
-            (fill.market_id,),
+            "SELECT size, avg_cost, total_cost, realized_pnl FROM cost_basis WHERE market_id = ? AND is_paper = ?",
+            (fill.market_id, is_paper_flag),
         )
 
         old_size: float = float(row["size"]) if row else 0.0
@@ -133,18 +137,20 @@ class PnLTracker:
             new_total_cost = 0.0
             new_avg_cost = 0.0
 
-        # 5. Upsert cost_basis
+        # 5. Upsert cost_basis — composite PK (market_id, is_paper) keeps
+        # paper and live rows independent.
         now = datetime.now(timezone.utc).isoformat()
         await self._db.execute(
             """INSERT INTO cost_basis
                (market_id, token, token_id, size, avg_cost, total_cost, realized_pnl, is_paper, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(market_id) DO UPDATE SET
+               ON CONFLICT(market_id, is_paper) DO UPDATE SET
+                   token = excluded.token,
+                   token_id = excluded.token_id,
                    size = excluded.size,
                    avg_cost = excluded.avg_cost,
                    total_cost = excluded.total_cost,
                    realized_pnl = excluded.realized_pnl,
-                   is_paper = excluded.is_paper,
                    updated_at = excluded.updated_at""",
             (
                 fill.market_id,
@@ -154,7 +160,7 @@ class PnLTracker:
                 new_avg_cost,
                 new_total_cost,
                 realized_pnl,
-                1 if fill.is_paper else 0,
+                is_paper_flag,
                 now,
             ),
         )

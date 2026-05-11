@@ -62,6 +62,8 @@ class Database:
             await self._migrate_v7_to_v8()
         if from_version < 9:
             await self._migrate_v8_to_v9()
+        if from_version < 10:
+            await self._migrate_v9_to_v10()
 
     async def _migrate_v1_to_v2(self) -> None:
         """Add category to calibration, add new tables."""
@@ -231,6 +233,41 @@ class Database:
         await self._db.execute("UPDATE schema_version SET version = 9")
         await self._db.commit()
         log.info("database.migrated", from_version=8, to_version=9)
+
+    async def _migrate_v9_to_v10(self) -> None:
+        """Make cost_basis primary key composite (market_id, is_paper).
+
+        Previously the PK was ``market_id`` alone, so paper and live fills
+        for the same market collided: ``record_fill()`` upserts with
+        ``ON CONFLICT(market_id)`` would overwrite each other's cost basis
+        and realized PnL.  Recreate the table with the composite PK and
+        copy existing rows across.
+        """
+        await self._db.executescript("""
+            CREATE TABLE IF NOT EXISTS cost_basis_new (
+                market_id TEXT NOT NULL,
+                token TEXT NOT NULL DEFAULT 'YES',
+                token_id TEXT DEFAULT '',
+                size REAL NOT NULL,
+                avg_cost REAL NOT NULL,
+                total_cost REAL NOT NULL,
+                realized_pnl REAL DEFAULT 0,
+                is_paper INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (market_id, is_paper)
+            );
+            INSERT OR IGNORE INTO cost_basis_new
+                (market_id, token, token_id, size, avg_cost, total_cost,
+                 realized_pnl, is_paper, updated_at)
+            SELECT market_id, token, token_id, size, avg_cost, total_cost,
+                   realized_pnl, is_paper, updated_at
+            FROM cost_basis;
+            DROP TABLE cost_basis;
+            ALTER TABLE cost_basis_new RENAME TO cost_basis;
+        """)
+        await self._db.execute("UPDATE schema_version SET version = 10")
+        await self._db.commit()
+        log.info("database.migrated", from_version=9, to_version=10)
 
     @property
     def db(self) -> aiosqlite.Connection:
