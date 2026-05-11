@@ -24,6 +24,7 @@ risk:
   category_exposure_cap_pct: 60.0
   blocked_categories: ["sports"]
   time_to_resolution_min_hours: 24
+  time_to_resolution_max_days: 0   # 0 = no ceiling; set to 90 to reject 3+ month markets
   max_correlated_positions: 10
   second_opinion_divergence_max: 0.25
 

@@ -154,7 +154,7 @@ class CapitalAllocator:
             cat_headroom = category_budget - cat_total
             size = min(desired, remaining_capital, cat_headroom)
 
-            if size <= 0:
+            if round(size, 2) <= 0:
                 show_order_dropped(market_id, f"no capital (${remaining_capital:.2f} remaining, need ${desired:.2f})")
                 log.warning(
                     "allocator.no_capital",

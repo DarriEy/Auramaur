@@ -121,7 +121,7 @@ class RiskManager:
             ),
             await check_category_exposure(market.category, cat_exp, rc.category_exposure_cap_pct),
             await check_correlation(signal.market_id, correlated, rc.max_correlated_positions),
-            await check_time_to_resolution(hours_remaining, rc.time_to_resolution_min_hours),
+            await check_time_to_resolution(hours_remaining, rc.time_to_resolution_min_hours, rc.time_to_resolution_max_days * 24.0),
             await check_second_opinion_divergence(divergence, rc.second_opinion_divergence_max),
         ]
 

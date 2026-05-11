@@ -680,6 +680,90 @@ def _display_comparison(comparison: dict):
 
 
 @main.command()
+@click.option("--exchange", default=None, help="Exchange to evaluate (e.g. kalshi)")
+@click.option("--days", default=7, help="Window in days (default 7)")
+@click.option("--log-file", default="auramaur.log", help="Path to structlog output file")
+@click.option("--json-output", is_flag=True, default=False, help="Emit JSON instead of table")
+def readiness(exchange, days, log_file, json_output):
+    """Evaluate live-trading readiness criteria.
+
+    Prints PASS/FAIL/INSUFFICIENT_DATA per criterion. Exits 0 if all pass, 1 otherwise.
+    """
+    from dataclasses import asdict
+    from pathlib import Path
+    from auramaur.monitoring.readiness import evaluate_readiness
+
+    async def _run():
+        settings = Settings()
+        if exchange:
+            fee_rate = settings.arbitrage.exchange_fees.get(exchange, 0.07)
+        else:
+            fee_rate = 0.07
+
+        db = Database()
+        await db.connect()
+        try:
+            return await evaluate_readiness(
+                db,
+                log_file=Path(log_file),
+                exchange=exchange,
+                days=days,
+                fee_rate=fee_rate,
+            )
+        finally:
+            await db.close()
+
+    report = asyncio.run(_run())
+
+    if json_output:
+        payload = {
+            "timestamp": report.timestamp.isoformat(),
+            "exchange": report.exchange,
+            "window_days": report.window_days,
+            "overall_pass": report.overall_pass,
+            "criteria": [asdict(c) for c in report.criteria],
+        }
+        import json as _json
+        console.print_json(_json.dumps(payload))
+    else:
+        _render_readiness_table(report)
+
+    if not report.overall_pass:
+        raise click.exceptions.Exit(1)
+
+
+def _render_readiness_table(report) -> None:
+    status_styles = {
+        "PASS": "[green]PASS[/]",
+        "FAIL": "[red]FAIL[/]",
+        "INSUFFICIENT_DATA": "[yellow]INSUFFICIENT_DATA[/]",
+    }
+    header = (
+        f"Readiness — {report.exchange or 'all exchanges'} "
+        f"(window: {report.window_days}d)"
+    )
+    table = Table(title=header, expand=True)
+    table.add_column("Criterion", style="cyan")
+    table.add_column("Status", justify="center")
+    table.add_column("Value", justify="right")
+    table.add_column("Threshold", justify="right")
+    table.add_column("Notes", overflow="fold")
+
+    for c in report.criteria:
+        table.add_row(
+            c.name,
+            status_styles.get(c.status, c.status),
+            c.value,
+            c.threshold,
+            c.detail or "",
+        )
+
+    console.print(table)
+    overall = "[green]READY[/]" if report.overall_pass else "[red]NOT READY[/]"
+    console.print(f"\nOverall: {overall}")
+
+
+@main.command()
 def kill():
     """Activate the kill switch."""
     from pathlib import Path

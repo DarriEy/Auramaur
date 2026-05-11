@@ -46,6 +46,7 @@ class RiskConfig(BaseModel):
     implied_prob_max: float = 0.95
     category_exposure_cap_pct: float = 30.0
     time_to_resolution_min_hours: int = 24
+    time_to_resolution_max_days: int = 0  # 0 = no ceiling
     max_correlated_positions: int = 5
     second_opinion_divergence_max: float = 0.15
     blocked_categories: list[str] = []

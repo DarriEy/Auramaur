@@ -265,18 +265,33 @@ async def check_correlation(
 # ---------------------------------------------------------------------------
 
 async def check_time_to_resolution(
-    hours_remaining: float, min_hours: float = 24
+    hours_remaining: float, min_hours: float = 24, max_hours: float = 0.0
 ) -> CheckResult:
-    """Fail if the market is resolving too soon."""
-    too_soon = hours_remaining < min_hours
+    """Fail if the market resolves too soon OR too far in the future.
+
+    max_hours=0 disables the ceiling (default — no upper bound).
+    """
+    if hours_remaining < min_hours:
+        return CheckResult(
+            name="time_to_resolution",
+            passed=False,
+            reason=f"{hours_remaining:.1f}h to resolution (minimum {min_hours:.0f}h)",
+            value=hours_remaining,
+        )
+    if max_hours > 0 and hours_remaining > max_hours:
+        days = hours_remaining / 24.0
+        max_days = max_hours / 24.0
+        label = f">{days:.0f}d" if days < 1e9 else "unknown"
+        return CheckResult(
+            name="time_to_resolution",
+            passed=False,
+            reason=f"resolves {label} away (maximum {max_days:.0f}d)",
+            value=hours_remaining,
+        )
     return CheckResult(
         name="time_to_resolution",
-        passed=not too_soon,
-        reason=(
-            f"{hours_remaining:.1f}h to resolution (minimum {min_hours:.0f}h)"
-            if too_soon
-            else ""
-        ),
+        passed=True,
+        reason="",
         value=hours_remaining,
     )
 
