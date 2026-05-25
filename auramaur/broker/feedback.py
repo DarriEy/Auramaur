@@ -261,6 +261,55 @@ class PerformanceFeedback:
         return avoid
 
     # ------------------------------------------------------------------
+    # Hybrid mode: domain specialization whitelist
+    # ------------------------------------------------------------------
+
+    async def get_whitelist_categories(
+        self,
+        min_accuracy: float = 0.50,
+        min_trades: int = 10,
+    ) -> tuple[set[str], set[str]]:
+        """Return (whitelisted, probationary) category sets for hybrid mode.
+
+        Whitelisted: accuracy >= min_accuracy AND n >= min_trades.
+        Probationary: has calibration data but doesn't meet thresholds.
+        Categories with no data at all are treated as probationary (cold start
+        behaves like today — everything gets analyzed).
+        """
+        rows = await self._db.fetchall(
+            """
+            SELECT category,
+                   COUNT(*) AS n,
+                   SUM(
+                       CASE
+                           WHEN (predicted_prob > 0.5 AND actual_outcome = 1)
+                             OR (predicted_prob <= 0.5 AND actual_outcome = 0)
+                           THEN 1 ELSE 0
+                       END
+                   ) AS correct
+            FROM calibration
+            WHERE actual_outcome IS NOT NULL
+              AND category != ''
+            GROUP BY category
+            """,
+        )
+
+        whitelisted: set[str] = set()
+        probationary: set[str] = set()
+
+        for row in rows:
+            category = row["category"]
+            n = row["n"]
+            accuracy = row["correct"] / n if n > 0 else 0.0
+
+            if n >= min_trades and accuracy >= min_accuracy:
+                whitelisted.add(category)
+            else:
+                probationary.add(category)
+
+        return whitelisted, probationary
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 

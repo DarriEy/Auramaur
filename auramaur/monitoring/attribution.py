@@ -199,3 +199,16 @@ class PerformanceAttributor:
         if row is None or row["kelly_multiplier"] is None:
             return 1.0
         return float(row["kelly_multiplier"])
+
+    async def get_strategy_summary(self) -> list[dict]:
+        """Per-strategy-type P&L summary for hybrid mode reporting."""
+        rows = await self._db.fetchall(
+            """SELECT strategy_source,
+                      COUNT(*) AS trade_count,
+                      COALESCE(SUM(pnl), 0) AS total_pnl,
+                      SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins
+               FROM trades
+               WHERE strategy_source IS NOT NULL
+               GROUP BY strategy_source"""
+        )
+        return [dict(row) for row in rows]

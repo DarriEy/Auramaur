@@ -79,15 +79,18 @@ class NewsReactor:
         max_markets_per_story: int = 3,
         min_liquidity: float = 2000.0,
         min_proper_nouns: int = 1,
+        fast_analysis: bool = False,
     ) -> None:
         """Initialize the reactor.
 
         ``discoveries`` and ``engines`` are keyed by exchange name. Each news
         story is searched across all exchanges concurrently; matches on any
         exchange get flagged on the corresponding engine so the next
-        strategic batch evaluates them. We no longer call analyze_market
-        per-match — that spent two Claude calls per headline on junk
-        matches like clickbait RSS entries.
+        strategic batch evaluates them.
+
+        When ``fast_analysis`` is True (hybrid mode), the reactor additionally
+        triggers a direct Claude analysis on the single highest-liquidity match
+        per cycle, giving a speed advantage on breaking news.
 
         ``min_proper_nouns`` controls how strict headline filtering is.
         Headlines that don't yield at least this many real proper nouns
@@ -101,6 +104,8 @@ class NewsReactor:
         self._max_markets_per_story = max_markets_per_story
         self._min_liquidity = min_liquidity
         self._min_proper_nouns = min_proper_nouns
+        self._fast_analysis = fast_analysis
+        self._analysis_semaphore = asyncio.Semaphore(1)
 
     # ------------------------------------------------------------------
     # Public API
@@ -142,6 +147,7 @@ class NewsReactor:
                             "market_id": market.id,
                             "question": market.question,
                             "headline": item.title,
+                            "liquidity": getattr(market, "liquidity", 0.0),
                         })
             except Exception as e:
                 log.error(
@@ -157,11 +163,39 @@ class NewsReactor:
                 markets_flagged=len(flagged),
             )
 
+        # Hybrid fast-path: trigger immediate Claude analysis on the single
+        # highest-liquidity flagged market (one per cycle, semaphore-guarded).
+        if self._fast_analysis and flagged:
+            best = max(flagged, key=lambda f: self._get_market_liquidity(f))
+            engine = self._engines.get(best["exchange"])
+            if engine and self._analysis_semaphore._value > 0:
+                try:
+                    async with self._analysis_semaphore:
+                        market = await self._discoveries[best["exchange"]].get_market(best["market_id"])
+                        if market:
+                            log.info(
+                                "news_reactor.fast_analysis",
+                                market_id=market.id,
+                                headline=best["headline"][:80],
+                            )
+                            result = await engine.analyze_market(
+                                market, strategy_source="news_speed",
+                            )
+                            if result and result.get("order"):
+                                best["fast_analysis"] = True
+                except Exception as e:
+                    log.error("news_reactor.fast_analysis_error", error=str(e))
+
         return flagged
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _get_market_liquidity(flagged_entry: dict) -> float:
+        """Extract liquidity from a flagged entry for ranking."""
+        return flagged_entry.get("liquidity", 0.0)
 
     def _filter_new(self, items: list[NewsItem]) -> list[NewsItem]:
         """Return only items we haven't processed yet."""

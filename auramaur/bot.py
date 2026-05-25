@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 
 import structlog
+
+# Silence noisy py_clob_client_v2 HTTP error logging (403 geoblock, 404 missing
+# order books). Our code already handles these via try/except.
+logging.getLogger("py_clob_client_v2.http_helpers.helpers").setLevel(logging.CRITICAL)
 
 from config.settings import Settings
 from auramaur.data_sources.aggregator import Aggregator
@@ -43,8 +48,15 @@ log = structlog.get_logger()
 class AuramaurBot:
     """Main bot orchestrator running concurrent async tasks."""
 
-    def __init__(self, settings: Settings | None = None, db_path: str | None = None, exchange_filter: str | None = None):
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        db_path: str | None = None,
+        exchange_filter: str | None = None,
+        hybrid: bool = False,
+    ):
         self.settings = settings or Settings()
+        self._hybrid = hybrid
         self._running = False
         self._components: dict = {}
         self._db_path = db_path
@@ -52,6 +64,7 @@ class AuramaurBot:
         self._lock_file = None  # File handle kept open for duration
         self._rebalance_cooldowns: dict[str, float] = {}  # kept for reference, allocator handles concentration
         self._exit_failures: set[str] = set()  # Track failed exit sells to avoid spam
+        self._exit_pending: set[str] = set()  # Track exits with resting orders
         # Track attempted cross-exchange arbs so the scanner doesn't re-execute
         # the same opportunity every 5-minute cycle. Maps arb-key -> expiry ts.
         self._arb_attempts: dict[str, float] = {}
@@ -245,6 +258,7 @@ class AuramaurBot:
             poly_engine._components_syncer = syncer
             poly_engine.strategic = strategic
             poly_engine.exchange_name = "polymarket"
+            poly_engine._hybrid = self._hybrid
 
             engines["polymarket"] = poly_engine
 
@@ -271,6 +285,7 @@ class AuramaurBot:
                 kalshi_engine._components_syncer = kalshi_syncer
                 kalshi_engine.strategic = strategic
                 kalshi_engine.exchange_name = "kalshi"
+                kalshi_engine._hybrid = self._hybrid
                 kalshi_engine._rebalance_cooldowns = self._rebalance_cooldowns
                 engines["kalshi"] = kalshi_engine
             except ImportError:
@@ -291,6 +306,7 @@ class AuramaurBot:
                 )
                 cdc_engine.strategic = strategic
                 cdc_engine.exchange_name = "cryptodotcom"
+                cdc_engine._hybrid = self._hybrid
                 engines["cryptodotcom"] = cdc_engine
             except ImportError:
                 log.warning("optional.missing", component="CryptoComClient")
@@ -335,6 +351,7 @@ class AuramaurBot:
                 discoveries=discoveries,
                 engines=engines,
                 db=db,
+                fast_analysis=self._hybrid and self.settings.hybrid.news_fast_analysis,
             )
 
         # Attribution (optional)
@@ -632,8 +649,8 @@ class AuramaurBot:
                         continue
 
                     for pos, reason in exit_list:
-                        fail_key = f"exit_fail:{name}:{pos.market_id}"
-                        if fail_key in self._exit_failures:
+                        exit_key = f"exit:{name}:{pos.market_id}"
+                        if exit_key in self._exit_failures or exit_key in self._exit_pending:
                             continue
                         log.info(
                             "exit.triggered",
@@ -652,8 +669,10 @@ class AuramaurBot:
                         except Exception as e:
                             log.warning("exit.execute_error", exchange=name, market_id=pos.market_id, error=str(e))
                             ok = False
-                        if not ok:
-                            self._exit_failures.add(fail_key)
+                        if ok:
+                            self._exit_pending.add(exit_key)
+                        else:
+                            self._exit_failures.add(exit_key)
             except Exception as e:
                 log.debug("portfolio_monitor_error", error=str(e))
             await asyncio.sleep(interval)
@@ -816,6 +835,7 @@ class AuramaurBot:
         show_order(
             result.status, result.order_id, "SELL", order.size, order.price,
             result.is_paper, exchange="kalshi", error_message=result.error_message,
+            market_id=pos.market_id,
         )
         if result.status == "rejected":
             return False
@@ -923,6 +943,35 @@ class AuramaurBot:
                     show_category_performance(stats)
             except Exception as e:
                 log.error("attribution.error", error=str(e))
+
+    async def _task_strategy_report(self) -> None:
+        """Hourly per-pillar P&L report for hybrid mode."""
+        attributor = self._components.get("attributor")
+        if attributor is None:
+            return
+
+        while self._running:
+            await asyncio.sleep(3600)
+            try:
+                summary = await attributor.get_strategy_summary()
+                if summary:
+                    log.info("hybrid.strategy_report", pillars=summary)
+                    from auramaur.monitoring.display import console
+                    console.print("\n[bold cyan]--- Hybrid Strategy Report ---[/]")
+                    for s in summary:
+                        source = s.get("strategy_source", "unknown")
+                        trades = s.get("trade_count", 0)
+                        pnl = s.get("total_pnl", 0)
+                        wins = s.get("wins", 0)
+                        win_rate = (wins / trades * 100) if trades > 0 else 0
+                        color = "green" if pnl > 0 else "red"
+                        console.print(
+                            f"  [{color}]{source:15s}[/] "
+                            f"trades={trades:3d}  P&L=${pnl:+.2f}  "
+                            f"win={win_rate:.0f}%"
+                        )
+            except Exception as e:
+                log.error("hybrid.strategy_report_error", error=str(e))
 
     async def _task_performance_feedback(self) -> None:
         """Periodically update per-category calibration stats and Kelly multipliers."""
@@ -1156,7 +1205,8 @@ class AuramaurBot:
 
             except Exception as e:
                 log.error("arb_scanner.task_error", error=str(e))
-            await asyncio.sleep(300)  # Every 5 minutes
+            interval = self.settings.hybrid.arb_scan_seconds if self._hybrid else 300
+            await asyncio.sleep(interval)
 
     async def _execute_internal_arb(
         self,
@@ -1615,6 +1665,7 @@ class AuramaurBot:
                     result.status, result.order_id, "SELL", order.size,
                     order.price, result.is_paper, exchange="kalshi",
                     error_message=result.error_message,
+                    market_id=pos["mid"],
                 )
 
                 if result.status not in ("rejected",):
@@ -1866,7 +1917,8 @@ class AuramaurBot:
                         )
             except Exception as e:
                 show_error(f"News reactor failed: {e}")
-            await asyncio.sleep(60)
+            interval = self.settings.hybrid.news_cycle_seconds if self._hybrid else 60
+            await asyncio.sleep(interval)
 
     async def _task_order_monitor(self) -> None:
         """Monitor pending limit orders for fills and expiry."""
@@ -2060,6 +2112,10 @@ class AuramaurBot:
         # Market maker (if enabled)
         if self._components.get("market_maker"):
             tasks.append(asyncio.create_task(self._task_market_maker(), name="market_maker"))
+
+        # Hybrid strategy report (hourly per-pillar P&L)
+        if self._hybrid and self._components.get("attributor"):
+            tasks.append(asyncio.create_task(self._task_strategy_report(), name="strategy_report"))
 
         try:
             await asyncio.gather(*tasks)

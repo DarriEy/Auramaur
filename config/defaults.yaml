@@ -123,6 +123,15 @@ arbitrage:
 analysis:
   mode: "strategic"   # "pipeline", "strategic", or "agent"
 
+hybrid:
+  arb_scan_seconds: 60
+  news_fast_analysis: true
+  news_cycle_seconds: 30
+  llm_domain_filter: true
+  llm_whitelist_min_accuracy: 0.50
+  llm_whitelist_min_trades: 10
+  market_maker_auto_enable: true
+
 logging:
   level: "INFO"
   json_format: true

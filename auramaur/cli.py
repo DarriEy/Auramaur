@@ -190,8 +190,9 @@ def main():
 
 @main.command()
 @click.option("--agent", is_flag=True, default=False, help="Use agentic analyzer (relational reasoning + web search)")
+@click.option("--hybrid", is_flag=True, default=False, help="Multi-strategy: arb + news speed + domain LLM + market making")
 @click.option("--exchange", default=None, type=click.Choice(["polymarket", "kalshi", "ibkr"]), help="Run only a specific exchange (isolated instance)")
-def run(agent: bool, exchange: str | None):
+def run(agent: bool, hybrid: bool, exchange: str | None):
     """Start the bot."""
     settings = Settings()
 
@@ -201,11 +202,19 @@ def run(agent: bool, exchange: str | None):
             console.print("[bold red]AGENT MODE[/] — [bold]LIVE TRADING[/]")
         else:
             console.print("[bold yellow]AGENT MODE[/] — paper trading")
+    if hybrid:
+        if settings.hybrid.market_maker_auto_enable:
+            settings.market_maker.enabled = True
+        mode = "[bold red]LIVE TRADING[/]" if settings.is_live else "paper trading"
+        console.print(f"[bold cyan]HYBRID MODE[/] — {mode}")
+        console.print(
+            "[dim]  Pillars: arb (60s) + news speed (30s) + domain LLM + market making[/]"
+        )
     if exchange:
         console.print(f"[bold blue]Starting Auramaur bot (exchange: {exchange})...[/]")
     else:
         console.print("[bold blue]Starting Auramaur bot...[/]")
-    bot = AuramaurBot(settings=settings, exchange_filter=exchange)
+    bot = AuramaurBot(settings=settings, exchange_filter=exchange, hybrid=hybrid)
     asyncio.run(bot.run())
 
 

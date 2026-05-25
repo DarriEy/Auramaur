@@ -101,11 +101,9 @@ class CapitalAllocator:
 
             # Skip if already holding this market
             if market_id in held_market_ids:
-                show_order_dropped(market_id, "already holding position")
-                log.warning(
+                log.debug(
                     "allocator.skip_held",
                     market_id=market_id,
-                    reason="already holding position in this market",
                 )
                 continue
 

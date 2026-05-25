@@ -211,6 +211,18 @@ class AnalysisConfig(BaseModel):
     mode: Literal["pipeline", "strategic", "agent"] = "strategic"
 
 
+class HybridConfig(BaseModel):
+    """Multi-strategy mode: arb + news speed + domain LLM + market making."""
+
+    arb_scan_seconds: int = 60
+    news_fast_analysis: bool = True
+    news_cycle_seconds: int = 30
+    llm_domain_filter: bool = True
+    llm_whitelist_min_accuracy: float = 0.50
+    llm_whitelist_min_trades: int = 10
+    market_maker_auto_enable: bool = True
+
+
 class LoggingConfig(BaseModel):
     level: str = "INFO"
     json_format: bool = True
@@ -271,6 +283,7 @@ class Settings(BaseSettings):
     market_maker: MarketMakerConfig = Field(default_factory=lambda: MarketMakerConfig(**_DEFAULTS.get("market_maker", {})))
     arbitrage: ArbitrageConfig = Field(default_factory=lambda: ArbitrageConfig(**_DEFAULTS.get("arbitrage", {})))
     analysis: AnalysisConfig = Field(default_factory=lambda: AnalysisConfig(**_DEFAULTS.get("analysis", {})))
+    hybrid: HybridConfig = Field(default_factory=lambda: HybridConfig(**_DEFAULTS.get("hybrid", {})))
     logging: LoggingConfig = Field(default_factory=lambda: LoggingConfig(**_DEFAULTS.get("logging", {})))
 
     # Resolve .env to an absolute path anchored at the repo root so Settings
