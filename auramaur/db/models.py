@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS signals (
     divergence REAL,
     evidence_summary TEXT,
     action TEXT,
+    strategy_source TEXT DEFAULT 'llm',
     FOREIGN KEY (market_id) REFERENCES markets(id)
 );
 
@@ -68,6 +69,7 @@ CREATE TABLE IF NOT EXISTS trades (
     pnl REAL,
     kelly_fraction REAL,
     risk_checks_passed TEXT,
+    strategy_source TEXT DEFAULT 'llm',
     FOREIGN KEY (market_id) REFERENCES markets(id),
     FOREIGN KEY (signal_id) REFERENCES signals(id)
 );

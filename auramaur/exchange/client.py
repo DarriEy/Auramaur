@@ -45,6 +45,7 @@ class PolymarketClient:
         # Cache of real on-chain positions: asset_id -> net token balance
         self._real_positions: dict[str, dict] = {}
         self._positions_loaded = False
+        self._geoblocked = False  # Set on first 403 geoblock; routes to paper for session
 
     def _load_real_positions(self) -> None:
         """Load actual on-chain positions from CLOB trade history."""
@@ -275,6 +276,13 @@ class PolymarketClient:
                 is_paper=True,
             )
 
+        # Geoblock: once detected, route all orders to paper for this session
+        if self._geoblocked:
+            order.dry_run = True
+            result = await self._paper.execute(order)
+            log.debug("order.geoblocked_paper", market_id=order.market_id)
+            return result
+
         # Paper trade if ANY gate is closed
         if order.dry_run or not self._is_live_enabled():
             result = await self._paper.execute(order)
@@ -365,13 +373,23 @@ class PolymarketClient:
             )
 
         except Exception as e:
-            log.error("order.live_error", error=str(e), market_id=order.market_id)
+            err_str = str(e)
+            if "restricted in your region" in err_str or "geoblock" in err_str.lower():
+                self._geoblocked = True
+                log.warning(
+                    "order.geoblocked",
+                    market_id=order.market_id,
+                    msg="Polymarket trading geoblocked — routing to paper for this session",
+                )
+                order.dry_run = True
+                return await self._paper.execute(order)
+            log.error("order.live_error", error=err_str, market_id=order.market_id)
             return OrderResult(
                 order_id="ERROR",
                 market_id=order.market_id,
                 status="rejected",
                 is_paper=False,
-                error_message=str(e)[:200],
+                error_message=err_str[:200],
             )
 
     def _submit_clob_order(self, ord_args, want_post_only, ClobOrderType, order):
@@ -532,5 +550,5 @@ class PolymarketClient:
             ]
             return OrderBook(bids=bids, asks=asks)
         except Exception as e:
-            log.error("orderbook.error", token_id=token_id[:20], error=str(e))
+            log.debug("orderbook.unavailable", token_id=token_id[:20], error=str(e))
             return OrderBook()

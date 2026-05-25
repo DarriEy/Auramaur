@@ -71,6 +71,7 @@ class TradingEngine:
         self.allocator = allocator
         self.market_analyzer = market_analyzer
         self.exchange_name = ""  # Set by bot after init (e.g. "polymarket", "kalshi")
+        self._hybrid = False  # Set by bot when --hybrid flag is active
         self.strategic = None  # StrategicAnalyzer, set by bot after init
         self._components_pnl = None  # Set by bot after init
         # News-flagged markets: market_id -> UTC timestamp of flag.
@@ -401,6 +402,7 @@ class TradingEngine:
         *,
         place_order: bool = True,
         price_history: dict[str, list[float]] | None = None,
+        strategy_source: str = "llm",
     ) -> dict | None:
         """Full pipeline for a single market.
 
@@ -539,13 +541,15 @@ class TradingEngine:
         )
         await self.db.execute(
             """INSERT INTO signals (market_id, claude_prob, claude_confidence, market_prob,
-                                     edge, second_opinion_prob, divergence, evidence_summary, action)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                     edge, second_opinion_prob, divergence, evidence_summary, action,
+                                     strategy_source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 signal.market_id, signal.claude_prob, signal.claude_confidence.value,
                 signal.market_prob, signal.edge, signal.second_opinion_prob,
                 signal.divergence, signal.evidence_summary,
                 signal.recommended_side.value if signal.recommended_side else None,
+                strategy_source,
             ),
         )
         await self.db.commit()
@@ -565,7 +569,7 @@ class TradingEngine:
             return {"market": market, "signal": signal, "decision": decision, "order": None}
 
         # 6. Build and place order — use smart router if available
-        order = await self._build_and_place_order(signal, market, decision.position_size)
+        order = await self._build_and_place_order(signal, market, decision.position_size, strategy_source=strategy_source)
         if order is None:
             return {"market": market, "signal": signal, "decision": decision, "order": None}
 
@@ -573,6 +577,7 @@ class TradingEngine:
 
     async def _build_and_place_order(
         self, signal: Signal, market: Market, size_dollars: float,
+        *, strategy_source: str = "llm",
     ) -> OrderResult | None:
         """Build an order (via router or direct) and place it."""
         from auramaur.exchange.models import OrderResult
@@ -605,7 +610,7 @@ class TradingEngine:
             return None
 
         result = await self.exchange.place_order(order)
-        show_order(result.status, result.order_id, order.side.value, order.size, order.price, result.is_paper, exchange=self.exchange_name, error_message=result.error_message)
+        show_order(result.status, result.order_id, order.side.value, order.size, order.price, result.is_paper, exchange=self.exchange_name, error_message=result.error_message, market_id=order.market_id)
 
         # Cooldown on API errors — retry in 30 min, not every cycle
         if result.status == "rejected" and result.order_id == "ERROR":
@@ -661,8 +666,8 @@ class TradingEngine:
                 await self.db.execute(
                     """INSERT INTO trades
                        (market_id, signal_id, side, size, price, is_paper,
-                        order_id, status, kelly_fraction, exchange)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        order_id, status, kelly_fraction, exchange, strategy_source)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         order.market_id,
                         getattr(signal, "id", None),
@@ -674,6 +679,7 @@ class TradingEngine:
                         "filled" if result.status in ("filled", "paper") else "pending",
                         None,
                         order.exchange or self.exchange_name,
+                        strategy_source,
                     ),
                 )
                 await self.db.commit()
@@ -780,6 +786,7 @@ class TradingEngine:
 
         # --- Load avoid-categories from performance feedback ---
         avoid_categories: set[str] = set()
+        feedback: PerformanceFeedback | None = None
         try:
             from auramaur.broker.feedback import PerformanceFeedback
             feedback = PerformanceFeedback(self.db)
@@ -788,6 +795,24 @@ class TradingEngine:
                 log.info("engine.avoid_categories", categories=sorted(avoid_categories))
         except Exception as e:
             log.debug("engine.feedback_import_error", error=str(e))
+
+        # --- Hybrid domain filter: restrict LLM to proven categories ---
+        hybrid_whitelist: set[str] = set()
+        hybrid_probationary: set[str] = set()
+        if self._hybrid and self.settings.hybrid.llm_domain_filter and feedback is not None:
+            try:
+                hybrid_whitelist, hybrid_probationary = await feedback.get_whitelist_categories(
+                    min_accuracy=self.settings.hybrid.llm_whitelist_min_accuracy,
+                    min_trades=self.settings.hybrid.llm_whitelist_min_trades,
+                )
+                if hybrid_whitelist:
+                    log.info(
+                        "hybrid.domain_filter",
+                        whitelisted=sorted(hybrid_whitelist),
+                        probationary=sorted(hybrid_probationary),
+                    )
+            except Exception as e:
+                log.debug("hybrid.domain_filter_error", error=str(e))
 
         # --- Filter markets where Claude has no informational edge ---
         edge_candidates: list[Market] = []
@@ -806,6 +831,12 @@ class TradingEngine:
                     market_id=m.id,
                     category=m.category,
                 )
+                filtered_count += 1
+                continue
+            # Hybrid mode: skip categories that are neither whitelisted nor probationary
+            # (i.e. categories with data showing poor accuracy, already in avoid_categories above)
+            # When whitelist is empty (cold start), all categories pass through
+            if hybrid_whitelist and m.category and m.category not in hybrid_whitelist and m.category not in hybrid_probationary:
                 filtered_count += 1
                 continue
 
@@ -976,11 +1007,12 @@ class TradingEngine:
             # Store signal
             await self.db.execute(
                 """INSERT INTO signals (market_id, claude_prob, claude_confidence, market_prob,
-                                         edge, evidence_summary, action)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                                         edge, evidence_summary, action, strategy_source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (tc.signal.market_id, tc.signal.claude_prob, tc.signal.claude_confidence.value,
                  tc.signal.market_prob, tc.signal.edge, tc.signal.evidence_summary,
-                 tc.signal.recommended_side.value if tc.signal.recommended_side else None),
+                 tc.signal.recommended_side.value if tc.signal.recommended_side else None,
+                 getattr(tc, "strategy_source", "llm")),
             )
             await self.db.commit()
 
@@ -1186,11 +1218,12 @@ class TradingEngine:
             # Store signal
             await self.db.execute(
                 """INSERT INTO signals (market_id, claude_prob, claude_confidence, market_prob,
-                                         edge, evidence_summary, action)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                                         edge, evidence_summary, action, strategy_source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (signal.market_id, signal.claude_prob, signal.claude_confidence.value,
                  signal.market_prob, signal.edge, signal.evidence_summary,
-                 signal.recommended_side.value if signal.recommended_side else None),
+                 signal.recommended_side.value if signal.recommended_side else None,
+                 "llm"),
             )
             await self.db.commit()
 

@@ -66,6 +66,8 @@ class Database:
             await self._migrate_v9_to_v10()
         if from_version < 11:
             await self._migrate_v10_to_v11()
+        if from_version < 12:
+            await self._migrate_v11_to_v12()
 
     async def _migrate_v1_to_v2(self) -> None:
         """Add category to calibration, add new tables."""
@@ -306,6 +308,19 @@ class Database:
         await self._db.execute("UPDATE schema_version SET version = 11")
         await self._db.commit()
         log.info("database.migrated", from_version=10, to_version=11)
+
+    async def _migrate_v11_to_v12(self) -> None:
+        """Add strategy_source column to signals and trades for hybrid mode attribution."""
+        for table in ("signals", "trades"):
+            try:
+                await self._db.execute(
+                    f"ALTER TABLE {table} ADD COLUMN strategy_source TEXT DEFAULT 'llm'"
+                )
+            except Exception:
+                pass  # Column already exists
+        await self._db.execute("UPDATE schema_version SET version = 12")
+        await self._db.commit()
+        log.info("database.migrated", from_version=11, to_version=12)
 
     @property
     def db(self) -> aiosqlite.Connection:

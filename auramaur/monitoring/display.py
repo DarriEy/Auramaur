@@ -89,6 +89,8 @@ def show_analysis(claude_prob: float, market_prob: float, edge: float,
 def show_risk_decision(approved: bool, reason: str, passed: int, failed: int, size: float = 0) -> None:
     total = passed + failed
     if approved:
+        if size <= 0:
+            return
         console.print(
             f"         [bold green]APPROVED[/] ({passed}/{total}) "
             f"Size: [bold]${size:.2f}[/]"
@@ -99,10 +101,11 @@ def show_risk_decision(approved: bool, reason: str, passed: int, failed: int, si
         console.print(f"         [red]REJECTED[/] ({passed}/{total}) [dim]{short_reason}[/]")
 
 
-def show_order(status: str, order_id: str, side: str, size: float, price: float, is_paper: bool, exchange: str = "", error_message: str = "") -> None:
+def show_order(status: str, order_id: str, side: str, size: float, price: float, is_paper: bool, exchange: str = "", error_message: str = "", market_id: str = "") -> None:
     mode = "[green]PAPER[/]" if is_paper else "[bold red]LIVE[/]"
     side_color = "green" if side == "BUY" else "red"
     ex = f"[magenta]{exchange}[/] " if exchange else ""
+    tag = f"[dim]{market_id[:16]}[/]" if market_id else f"[dim]{order_id[:16]}[/]"
 
     # SKIP_DUP is the sentinel order_id returned when the exchange's duplicate
     # guard suppresses an order because an equivalent resting order already
@@ -123,7 +126,7 @@ def show_order(status: str, order_id: str, side: str, size: float, price: float,
         console.print(
             f"         [bold]ORDER[/] {mode} {ex}[{side_color}]{side}[/] "
             f"${size * price:.2f} ({size:.1f} tokens @ ${price:.3f}) "
-            f"[dim]{order_id[:16]}[/]"
+            f"{tag}"
         )
         _cycle_stats["trades"] = _cycle_stats.get("trades", 0) + 1
 
