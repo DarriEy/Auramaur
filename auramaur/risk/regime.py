@@ -80,5 +80,7 @@ def resolve_regime(
         name="transition",
         kelly_fraction=GROWTH_KELLY_FRACTION + (base_kelly - GROWTH_KELLY_FRACTION) * t,
         max_stake=growth_stake + (base_max_stake - growth_stake) * t,
-        min_edge_pct=GROWTH_MIN_EDGE_PCT + (base_min_edge_pct - GROWTH_MIN_EDGE_PCT) * t,
+        min_edge_pct=round(
+            GROWTH_MIN_EDGE_PCT + (base_min_edge_pct - GROWTH_MIN_EDGE_PCT) * t, 2
+        ),
     )
