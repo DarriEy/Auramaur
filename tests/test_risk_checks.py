@@ -133,6 +133,18 @@ async def test_min_edge_insufficient():
     assert result.passed is False
 
 
+@pytest.mark.asyncio
+async def test_min_edge_at_exact_threshold_passes():
+    result = await check_min_edge(2.5, 2.5)
+    assert result.passed is True
+
+
+@pytest.mark.asyncio
+async def test_min_edge_reason_shows_two_decimal_places():
+    result = await check_min_edge(2.0, 3.50)
+    assert "3.50%" in result.reason
+
+
 # 8. Min liquidity
 @pytest.mark.asyncio
 async def test_min_liquidity_sufficient():

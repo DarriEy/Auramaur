@@ -91,3 +91,16 @@ def test_growth_applied_uniformly_below_threshold():
         assert r.name == "growth"
         assert r.kelly_fraction == GROWTH_KELLY_FRACTION
         assert r.max_stake == pytest.approx(equity * GROWTH_MAX_STAKE_PCT / 100.0)
+
+
+def test_transition_min_edge_has_no_floating_point_residue():
+    # At equity just above the growth cap, interpolation should yield
+    # exactly GROWTH_MIN_EDGE_PCT (2.50), not 2.5003 or similar.
+    for equity in (
+        GROWTH_EQUITY_MAX + 0.01,
+        GROWTH_EQUITY_MAX + 1.0,
+        GROWTH_EQUITY_MAX + 10.0,
+    ):
+        r = resolve_regime(equity, BASE_KELLY, BASE_MAX_STAKE, BASE_MIN_EDGE)
+        assert r.name == "transition"
+        assert r.min_edge_pct == round(r.min_edge_pct, 2)
