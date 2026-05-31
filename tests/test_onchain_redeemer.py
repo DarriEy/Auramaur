@@ -213,12 +213,34 @@ async def test_built_status_does_not_count_as_submitted(db):
 
 
 @pytest.mark.asyncio
-async def test_neg_risk_position_is_rejected(db):
+async def test_neg_risk_position_is_accepted_for_dry_run(db):
+    """NegRisk positions are no longer rejected early; they build dry-run calldata."""
     r = OnChainRedeemer(_make_settings(), db)
     pos = _make_position(neg_risk=True)
-    result = await r.redeem(pos, dry_run=True)
-    assert result.status == "rejected"
-    assert "NegRisk" in result.error
+
+    # Mock web3 so it doesn't try to connect to the dummy URL
+    mock_w3 = MagicMock()
+    mock_w3.is_connected.return_value = True
+    r._w3 = mock_w3
+
+    # Mock the Safe contract
+    mock_safe = MagicMock()
+    mock_safe.functions.nonce.return_value.call.return_value = 42
+    exec_mock = MagicMock()
+    exec_mock._encode_transaction_data.return_value = "0x" + "bb" * 50
+    mock_safe.functions.execTransaction.return_value = exec_mock
+
+    # Mock build_negrisk_redeem_calldata to avoid real ABI encoding in this test
+    r.build_negrisk_redeem_calldata = MagicMock(return_value=b"fake_calldata")
+
+    with MagicMock() as mock_contract:
+        r._safe_contract = MagicMock(return_value=mock_safe)
+
+        result = await r.redeem(pos, dry_run=True)
+        assert result.status == "built"
+        assert result.safe_nonce == 42
+        assert "NegRisk" not in result.error
+
 
 
 @pytest.mark.asyncio

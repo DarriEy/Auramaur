@@ -168,3 +168,35 @@ def format_evidence(news_items: list) -> str:
         lines.append(block)
 
     return "\n\n".join(lines)
+
+
+BATCH_ARBITRAGE_MATCHING_PROMPT = """\
+You are an expert at identifying equivalent prediction markets across \
+different exchanges (Polymarket and Kalshi).
+
+I will provide two lists of markets as JSON (List A and List B). For each \
+market, you have the `id` and the `question` text.
+
+Your task:
+1. Identify markets in List A that are EQUIVALENT to markets in List B.
+2. Two markets are equivalent if they resolve based on the same real-world event \
+   and have the SAME "YES" outcome (e.g. "Will X happen?" and "X to happen?").
+3. Beware of subtle differences in dates or specific conditions (e.g. \
+   "Will X happen in 2024?" is NOT equivalent to "Will X happen in 2025?").
+4. Beware of inverted questions (e.g. "Will X win?" and "Will X NOT win?"). \
+   Only match them if they represent the exact same "YES" outcome.
+
+Return ONLY a JSON list of objects representing the matches:
+[
+  {{"id_a": "<id from List A>", "id_b": "<id from List B>", "reason": "<brief reason>"}},
+  ...
+]
+
+If no matches are found, return an empty list [].
+
+LIST A (Exchange: {exchange_a}):
+{markets_a_json}
+
+LIST B (Exchange: {exchange_b}):
+{markets_b_json}
+"""

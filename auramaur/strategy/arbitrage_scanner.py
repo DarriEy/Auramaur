@@ -94,6 +94,7 @@ class ArbitrageScanner:
     def __init__(
         self,
         discoveries: dict[str, MarketDiscovery],
+        analyzer: Any = None,
         exchange_fees: dict[str, float] | None = None,
         min_profit_after_fees_pct: float = 1.5,
     ) -> None:
@@ -102,12 +103,14 @@ class ArbitrageScanner:
         Args:
             discoveries: Mapping of exchange name to MarketDiscovery instance.
                          e.g. {"polymarket": gamma, "kalshi": kalshi_client}
+            analyzer: ClaudeAnalyzer instance for data-driven matching.
             exchange_fees: Mapping of exchange name to fee rate (0.0-1.0).
                           e.g. {"polymarket": 0.0, "kalshi": 0.07}
             min_profit_after_fees_pct: Minimum profit % after fees to flag
                                        as an opportunity.
         """
         self._discoveries = discoveries
+        self._analyzer = analyzer
         self._exchange_fees = exchange_fees or {}
         self._min_profit_after_fees_pct = min_profit_after_fees_pct
 
@@ -116,7 +119,7 @@ class ArbitrageScanner:
 
         Strategy:
         1. Fetch markets from each exchange concurrently.
-        2. Match equivalent markets across exchanges by question similarity.
+        2. Match equivalent markets across exchanges using LLM batch pairing.
         3. Compare YES prices -- if spread > 3%, it is an arb opportunity.
         4. Also check within-exchange arbs: YES + NO should sum to ~1.0.
            If YES + NO < 0.97, buy both for risk-free profit on resolution.
@@ -148,7 +151,7 @@ class ArbitrageScanner:
                 markets_a = exchange_markets[name_a]
                 markets_b = exchange_markets[name_b]
 
-                matched = self._match_markets(markets_a, markets_b)
+                matched = await self._match_markets(markets_a, markets_b, name_a, name_b)
 
                 for market_a, market_b in matched:
                     spread = abs(market_a.outcome_yes_price - market_b.outcome_yes_price)
@@ -218,13 +221,17 @@ class ArbitrageScanner:
 
         return opportunities
 
-    def _match_markets(
-        self, markets_a: list[Market], markets_b: list[Market]
+    async def _match_markets(
+        self,
+        markets_a: list[Market],
+        markets_b: list[Market],
+        name_a: str = "",
+        name_b: str = "",
     ) -> list[tuple[Market, Market]]:
-        """Fuzzy match markets between exchanges by question similarity.
+        """Match equivalent markets across exchanges.
 
-        Uses simple word overlap scoring with a threshold of >60% overlap.
-        Each market is matched at most once (greedy best-match).
+        Uses LLM batch pairing for high-recall data-driven matching, falling
+        back to word-overlap scoring if the analyzer is unavailable.
 
         Returns:
             List of (market_a, market_b) tuples that are likely the same question.
@@ -232,6 +239,54 @@ class ArbitrageScanner:
         if not markets_a or not markets_b:
             return []
 
+        # Strategy A: LLM Batch Pairing (Preferred)
+        if self._analyzer:
+            try:
+                from auramaur.nlp.prompts import BATCH_ARBITRAGE_MATCHING_PROMPT
+                from auramaur.nlp.analyzer import _parse_claude_json
+
+                # Format minimal market lists for the prompt to save tokens
+                list_a = [{"id": m.id, "question": m.question} for m in markets_a]
+                list_b = [{"id": m.id, "question": m.question} for m in markets_b]
+
+                prompt = BATCH_ARBITRAGE_MATCHING_PROMPT.format(
+                    exchange_a=name_a or "Exchange A",
+                    exchange_b=name_b or "Exchange B",
+                    markets_a_json=re.sub(r"\s+", " ", str(list_a)),
+                    markets_b_json=re.sub(r"\s+", " ", str(list_b)),
+                )
+
+                raw = await self._analyzer._call_claude_cli(prompt)
+                matches = _parse_claude_json(raw)
+
+                if not isinstance(matches, list):
+                    log.warning("arb_scanner.llm_match_invalid_format", raw=raw[:200])
+                    return []
+
+                # Map IDs back to Market objects
+                map_a = {m.id: m for m in markets_a}
+                map_b = {m.id: m for m in markets_b}
+                results: list[tuple[Market, Market]] = []
+
+                for m in matches:
+                    id_a, id_b = m.get("id_a"), m.get("id_b")
+                    if id_a in map_a and id_b in map_b:
+                        results.append((map_a[id_a], map_b[id_b]))
+
+                if results:
+                    log.info(
+                        "arb_scanner.llm_matched",
+                        count=len(results),
+                        exchange_a=name_a,
+                        exchange_b=name_b,
+                    )
+                return results
+
+            except Exception as e:
+                log.error("arb_scanner.llm_match_failed", error=str(e))
+                # Fall through to word-overlap fallback
+
+        # Strategy B: Word-Overlap Fallback
         # Pre-tokenize for performance
         tokens_a = [(m, _tokenize(m.question)) for m in markets_a]
         tokens_b = [(m, _tokenize(m.question)) for m in markets_b]
@@ -267,7 +322,7 @@ class ArbitrageScanner:
 
         if matched:
             log.debug(
-                "arb_scanner.matched_markets",
+                "arb_scanner.word_overlap_matched",
                 count=len(matched),
                 sample_question=matched[0][0].question[:60] if matched else "",
             )

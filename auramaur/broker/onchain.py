@@ -77,6 +77,19 @@ CTF_ABI: list[dict[str, Any]] = [
     },
 ]
 
+NEG_RISK_ADAPTER_ABI: list[dict[str, Any]] = [
+    {
+        "name": "redeemPositions",
+        "type": "function",
+        "stateMutability": "nonpayable",
+        "inputs": [
+            {"name": "_conditionId", "type": "bytes32"},
+            {"name": "_amounts", "type": "uint256[]"},
+        ],
+        "outputs": [],
+    },
+]
+
 SAFE_ABI: list[dict[str, Any]] = [
     {
         "name": "nonce",
@@ -238,6 +251,31 @@ class OnChainRedeemer:
             return bytes.fromhex(encoded[2:] if encoded.startswith("0x") else encoded)
         return bytes(encoded)
 
+    def build_negrisk_redeem_calldata(self, condition_id: str, outcome: str, size: float) -> bytes:
+        """Build NegRiskAdapter.redeemPositions calldata.
+
+        The adapter takes an [YES_AMOUNT, NO_AMOUNT] array. We redeem the full
+        held balance of the winning outcome token. Losing tokens are skipped
+        (0 amount) to avoid unnecessary transfers.
+        """
+        self._init()
+        adapter = self._w3.eth.contract(
+            address=Web3.to_checksum_address(NEG_RISK_ADAPTER_ADDRESS),
+            abi=NEG_RISK_ADAPTER_ABI,
+        )
+        cond_bytes = self._normalize_bytes32(condition_id)
+
+        # Polymarket uses 6 decimals for USDC collateral.
+        amount_raw = int(size * 10**6)
+        # outcome is "Yes" or "No" from the redeemer
+        amounts = [amount_raw, 0] if outcome.lower() == "yes" else [0, amount_raw]
+
+        encoded = adapter.encode_abi("redeemPositions", args=[cond_bytes, amounts])
+
+        if isinstance(encoded, str):
+            return bytes.fromhex(encoded[2:] if encoded.startswith("0x") else encoded)
+        return bytes(encoded)
+
     # ------------------------------------------------------------------
     # Safe EIP-712 signing
     # ------------------------------------------------------------------
@@ -361,14 +399,6 @@ class OnChainRedeemer:
         NOT broadcast it. Use this to review the calldata before flipping the
         AURAMAUR_ENABLE_REDEMPTION gate.
         """
-        if position.neg_risk:
-            return RedemptionResult(
-                condition_id=position.condition_id,
-                title=position.title,
-                status="rejected",
-                error="NegRisk adapter redemption not implemented yet",
-            )
-
         if await self._already_submitted(position.condition_id):
             return RedemptionResult(
                 condition_id=position.condition_id,
@@ -381,13 +411,20 @@ class OnChainRedeemer:
         safe = self._safe_contract()
         safe_nonce = safe.functions.nonce().call()
 
-        # Build the inner call — CTF.redeemPositions(USDC, 0, conditionId, [1,2])
-        inner_data = self.build_ctf_redeem_calldata(position.condition_id)
+        if position.neg_risk:
+            # NegRiskAdapter(0xd91E...) path
+            to = Web3.to_checksum_address(NEG_RISK_ADAPTER_ADDRESS)
+            inner_data = self.build_negrisk_redeem_calldata(
+                position.condition_id, position.outcome, position.size
+            )
+        else:
+            # CTF(0x4D97...) path — standard binary
+            to = Web3.to_checksum_address(CTF_ADDRESS)
+            inner_data = self.build_ctf_redeem_calldata(position.condition_id)
 
         # Wrap in Safe execTransaction. EOA pays Polygon gas directly, so all
         # internal gas parameters are zero — Safe forwards gasleft() to the
         # inner call and no refund logic kicks in.
-        to = Web3.to_checksum_address(CTF_ADDRESS)
         value = 0
         operation = 0  # CALL
         signature = self._sign_safe_tx(

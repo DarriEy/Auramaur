@@ -337,6 +337,7 @@ class AuramaurBot:
         # Cross-platform arbitrage scanner (fee-aware)
         arb_scanner = ArbitrageScanner(
             discoveries=discoveries,
+            analyzer=analyzer,
             exchange_fees=s.arbitrage.exchange_fees,
             min_profit_after_fees_pct=s.arbitrage.min_profit_after_fees_pct,
         )

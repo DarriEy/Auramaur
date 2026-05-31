@@ -12,10 +12,10 @@ execution:
 
 risk:
   max_drawdown_pct: 15.0
-  max_stake_per_market: 25.0
+  max_stake_per_market: 0.02
   daily_loss_limit: 200.0
-  max_open_positions: 500
-  min_edge_pct: 3.5
+  max_open_positions: 50
+  min_edge_pct: 2.5
   min_liquidity: 1000.0
   max_spread_pct: 5.0
   confidence_floor: "LOW"
@@ -23,7 +23,7 @@ risk:
   implied_prob_max: 0.95
   category_exposure_cap_pct: 60.0
   blocked_categories: ["sports"]
-  time_to_resolution_min_hours: 24
+  time_to_resolution_min_hours: 4
   time_to_resolution_max_days: 0   # 0 = no ceiling; set to 90 to reject 3+ month markets
   max_correlated_positions: 10
   second_opinion_divergence_max: 0.25
