@@ -22,6 +22,7 @@ for mod_name in (
 from auramaur.exchange.client import PolymarketClient
 from auramaur.exchange.models import Order, OrderResult, OrderSide
 from auramaur.exchange.paper import PaperTrader
+from auramaur.broker.sync import PositionSyncer
 
 
 @pytest.fixture
@@ -163,3 +164,25 @@ async def test_live_order_pending_size_zero(client):
     assert result.filled_size == 0
     assert result.is_paper is False
     assert "live-123" in client._live_pending
+
+
+@pytest.mark.asyncio
+async def test_live_balance_does_not_cancel_resting_orders(client, mock_paper):
+    """Balance checks should not globally cancel open maker/limit orders."""
+    mock_clob = MagicMock()
+    mock_clob.get_balance_allowance.return_value = {"balance": 123_000_000}
+    client._clob_client = mock_clob
+    client._init_clob_client = MagicMock()
+
+    syncer = PositionSyncer(
+        settings=client._settings,
+        db=AsyncMock(),
+        exchange=client,
+        paper=mock_paper,
+        pnl=AsyncMock(),
+    )
+
+    balance = await syncer._get_live_balance()
+
+    assert balance == 123.0
+    mock_clob.cancel_all.assert_not_called()

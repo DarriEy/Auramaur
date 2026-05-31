@@ -23,7 +23,7 @@ from auramaur.data_sources.websearch import WebSearchSource
 from auramaur.db.database import Database
 from auramaur.exchange.client import PolymarketClient
 from auramaur.exchange.gamma import GammaClient
-from auramaur.exchange.models import ExitReason, Order, OrderSide, OrderType, TokenType
+from auramaur.exchange.models import Fill, Order, OrderSide, OrderType, TokenType
 from auramaur.exchange.protocols import ExchangeClient, MarketDiscovery
 from auramaur.exchange.paper import PaperTrader
 from auramaur.monitoring.alerts import AlertManager
@@ -1229,8 +1229,10 @@ class AuramaurBot:
 
         alerts: AlertManager = self._components["alerts"]
 
-        # Build a synthetic signal for the YES leg
-        edge_pct = opp.expected_profit_pct / 2  # Split edge across both legs
+        # Build synthetic signals for risk checks.  expected_profit_pct is the
+        # net package return; halving it per leg makes valid package arbs fail
+        # the generic minimum-edge gate.
+        edge_pct = opp.expected_profit_pct
         yes_signal = Signal(
             market_id=market.id,
             market_question=market.question,
@@ -1255,17 +1257,28 @@ class AuramaurBot:
         )
 
         # Run risk checks on both legs
-        yes_decision = await risk_manager.evaluate(yes_signal, market)
-        no_decision = await risk_manager.evaluate(no_signal, market)
+        available_cash = await engine._get_available_cash()
+        yes_decision = await risk_manager.evaluate(
+            yes_signal,
+            market,
+            available_cash=available_cash,
+        )
+        no_decision = await risk_manager.evaluate(
+            no_signal,
+            market,
+            available_cash=available_cash,
+        )
 
         if not yes_decision.approved or not no_decision.approved:
-            log.debug(
+            log.info(
                 "arb_scanner.internal_risk_rejected",
                 market_id=market.id,
+                expected_profit_pct=round(opp.expected_profit_pct, 2),
                 yes_approved=yes_decision.approved,
                 no_approved=no_decision.approved,
                 yes_reason=yes_decision.reason,
                 no_reason=no_decision.reason,
+                available_cash=round(available_cash, 2),
             )
             return
 
@@ -1370,8 +1383,11 @@ class AuramaurBot:
         alerts: AlertManager = self._components["alerts"]
         max_size = self.settings.arbitrage.max_arb_size
 
-        # Synthetic signals for risk checks and prepare_order
-        edge_pct = opp.expected_profit_pct / 2
+        # Synthetic signals for risk checks and prepare_order.  The scanner's
+        # expected_profit_pct is already the net package return after fees; do
+        # not halve it per leg or guaranteed arbs fall below the normal edge
+        # floor before sizing.
+        edge_pct = opp.expected_profit_pct
         evidence = (
             f"Cross-exchange arb: {cheap_exchange} YES@{cheap_market.outcome_yes_price:.3f} "
             f"vs {expensive_exchange} YES@{expensive_market.outcome_yes_price:.3f}"
@@ -1399,15 +1415,30 @@ class AuramaurBot:
             recommended_side=OrderSide.SELL,
         )
 
-        # Risk checks on both legs
-        yes_decision = await risk_manager.evaluate(yes_signal, cheap_market)
-        no_decision = await risk_manager.evaluate(no_signal, expensive_market)
+        # Risk checks on both legs using exchange-local cash for sizing.
+        cheap_cash = await engine_cheap._get_available_cash()
+        expensive_cash = await engine_expensive._get_available_cash()
+        yes_decision = await risk_manager.evaluate(
+            yes_signal,
+            cheap_market,
+            available_cash=cheap_cash,
+        )
+        no_decision = await risk_manager.evaluate(
+            no_signal,
+            expensive_market,
+            available_cash=expensive_cash,
+        )
         if not yes_decision.approved or not no_decision.approved:
-            log.debug(
+            log.info(
                 "arb_scanner.cross_risk_rejected",
                 question=opp.question[:60],
+                expected_profit_pct=round(opp.expected_profit_pct, 2),
                 yes_approved=yes_decision.approved,
                 no_approved=no_decision.approved,
+                yes_reason=yes_decision.reason,
+                no_reason=no_decision.reason,
+                cheap_cash=round(cheap_cash, 2),
+                expensive_cash=round(expensive_cash, 2),
             )
             return
 
@@ -1870,7 +1901,7 @@ class AuramaurBot:
                             live_ids,
                         )
                         pf_cur = await self._components["db"].execute(
-                            f"DELETE FROM portfolio WHERE is_paper = 0 AND market_id NOT IN ({placeholders})",
+                            f"DELETE FROM portfolio WHERE exchange = 'polymarket' AND is_paper = 0 AND market_id NOT IN ({placeholders})",
                             live_ids,
                         )
                         log.info(
@@ -1946,8 +1977,67 @@ class AuramaurBot:
                 # Live order monitoring
                 for order_id in list(exchange._live_pending.keys()):
                     try:
+                        order = exchange._live_pending.get(order_id)
                         result = await exchange.get_order_status(order_id)
                         if result.status in ("filled", "cancelled", "expired", "rejected"):
+                            if result.status == "filled" and order is not None and result.filled_size > 0:
+                                try:
+                                    fill = Fill(
+                                        order_id=order_id,
+                                        market_id=order.market_id,
+                                        token_id=order.token_id,
+                                        side=order.side,
+                                        token=order.token,
+                                        size=result.filled_size,
+                                        price=result.filled_price if result.filled_price > 0 else order.price,
+                                        is_paper=False,
+                                    )
+                                    pnl_tracker = self._components.get("pnl_tracker")
+                                    if pnl_tracker:
+                                        await pnl_tracker.record_fill(fill)
+                                except Exception as e:
+                                    log.error(
+                                        "order_monitor.fill_record_error",
+                                        order_id=order_id,
+                                        error=str(e),
+                                    )
+
+                            db = self._components.get("db")
+                            if db and order is not None:
+                                try:
+                                    price = result.filled_price if result.filled_price > 0 else order.price
+                                    size = result.filled_size if result.filled_size > 0 else order.size
+                                    cur = await db.execute(
+                                        """UPDATE trades
+                                           SET status = ?, size = ?, price = ?
+                                           WHERE order_id = ?""",
+                                        (result.status, size, price, order_id),
+                                    )
+                                    if getattr(cur, "rowcount", 0) == 0:
+                                        await db.execute(
+                                            """INSERT INTO trades
+                                               (market_id, side, size, price, is_paper,
+                                                order_id, status, exchange, strategy_source)
+                                               VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)""",
+                                            (
+                                                order.market_id,
+                                                order.side.value,
+                                                size,
+                                                price,
+                                                order_id,
+                                                result.status,
+                                                order.exchange,
+                                                "order_monitor",
+                                            ),
+                                        )
+                                    await db.commit()
+                                except Exception as e:
+                                    log.debug(
+                                        "order_monitor.trade_update_error",
+                                        order_id=order_id,
+                                        error=str(e),
+                                    )
+
                             exchange._live_pending.pop(order_id, None)
                             log.info(
                                 "order_monitor.live_terminal",

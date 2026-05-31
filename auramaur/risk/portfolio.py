@@ -16,21 +16,47 @@ class PortfolioTracker:
     """Reads and writes portfolio / daily-stats tables to provide exposure
     information consumed by the risk checks and the Kelly sizer."""
 
-    def __init__(self, db: Database):
+    def __init__(self, db: Database, settings=None):
         self.db = db
+        self.settings = settings
+
+    def _mode_flag(self, is_paper: bool | None = None) -> int | None:
+        """Return the paper/live DB flag, or None for legacy unscoped reads."""
+        if is_paper is not None:
+            return 1 if is_paper else 0
+        if self.settings is None:
+            return None
+        is_live = getattr(self.settings, "is_live", None)
+        if isinstance(is_live, bool):
+            return 0 if is_live else 1
+        return None
 
     # ------------------------------------------------------------------
     # Positions
     # ------------------------------------------------------------------
 
-    async def get_positions(self, exchange: str | None = None) -> list[Position]:
-        """Return all current open positions, optionally filtered by exchange."""
+    async def get_positions(
+        self,
+        exchange: str | None = None,
+        is_paper: bool | None = None,
+    ) -> list[Position]:
+        """Return current open positions, optionally filtered by exchange/mode."""
+        clauses: list[str] = []
+        params: list[object] = []
+
         if exchange:
-            rows = await self.db.fetchall(
-                "SELECT * FROM portfolio WHERE exchange = ?", (exchange,),
-            )
-        else:
-            rows = await self.db.fetchall("SELECT * FROM portfolio")
+            clauses.append("exchange = ?")
+            params.append(exchange)
+        mode_flag = self._mode_flag(is_paper)
+        if mode_flag is not None:
+            clauses.append("is_paper = ?")
+            params.append(mode_flag)
+
+        sql = "SELECT * FROM portfolio"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        rows = await self.db.fetchall(sql, tuple(params))
+
         positions = []
         for row in rows:
             keys = row.keys()
@@ -55,12 +81,12 @@ class PortfolioTracker:
     # Category exposure
     # ------------------------------------------------------------------
 
-    async def get_category_exposure(self) -> dict[str, float]:
+    async def get_category_exposure(self, is_paper: bool | None = None) -> dict[str, float]:
         """Return the percentage of portfolio notional per category.
 
         Notional = size * avg_price for each position.
         """
-        positions = await self.get_positions()
+        positions = await self.get_positions(is_paper=is_paper)
         if not positions:
             return {}
 
@@ -84,7 +110,11 @@ class PortfolioTracker:
     # relationship.  Category alone is weak evidence of correlation.
     CATEGORY_WEIGHT = 0.3
 
-    async def get_correlated_markets(self, market_id: str) -> float:
+    async def get_correlated_markets(
+        self,
+        market_id: str,
+        is_paper: bool | None = None,
+    ) -> float:
         """Return a *weighted* correlation score for *market_id*.
 
         Semantic relationships (strength >= 0.5) count at full weight.
@@ -92,10 +122,15 @@ class PortfolioTracker:
         ``CATEGORY_WEIGHT`` (default 0.3) each.  This prevents a large
         number of unrelated same-category positions from blocking trades.
         """
-        # Determine category
-        row = await self.db.fetchone(
-            "SELECT category FROM portfolio WHERE market_id = ?", (market_id,)
-        )
+        mode_flag = self._mode_flag(is_paper)
+
+        # Determine category from the current mode's position first.
+        category_sql = "SELECT category FROM portfolio WHERE market_id = ?"
+        category_params: list[object] = [market_id]
+        if mode_flag is not None:
+            category_sql += " AND is_paper = ?"
+            category_params.append(mode_flag)
+        row = await self.db.fetchone(category_sql, tuple(category_params))
         if row is None:
             row = await self.db.fetchone(
                 "SELECT category FROM markets WHERE id = ?", (market_id,)
@@ -118,10 +153,12 @@ class PortfolioTracker:
                 r["market_id_b"] if r["market_id_a"] == market_id else r["market_id_a"]
             )
             # Only count if we hold a position in the related market
-            pos_row = await self.db.fetchone(
-                "SELECT market_id FROM portfolio WHERE market_id = ?",
-                (related_id,),
-            )
+            pos_sql = "SELECT market_id FROM portfolio WHERE market_id = ?"
+            pos_params: list[object] = [related_id]
+            if mode_flag is not None:
+                pos_sql += " AND is_paper = ?"
+                pos_params.append(mode_flag)
+            pos_row = await self.db.fetchone(pos_sql, tuple(pos_params))
             if pos_row:
                 # Use the relationship strength as weight (0.5–1.0)
                 semantic_ids[related_id] = max(
@@ -129,10 +166,12 @@ class PortfolioTracker:
                 )
 
         # --- Same-category positions (discounted weight) ---
-        cat_rows = await self.db.fetchall(
-            "SELECT market_id FROM portfolio WHERE category = ? AND market_id != ?",
-            (category, market_id),
-        )
+        cat_sql = "SELECT market_id FROM portfolio WHERE category = ? AND market_id != ?"
+        cat_params: list[object] = [category, market_id]
+        if mode_flag is not None:
+            cat_sql += " AND is_paper = ?"
+            cat_params.append(mode_flag)
+        cat_rows = await self.db.fetchall(cat_sql, tuple(cat_params))
 
         score = 0.0
         for r in cat_rows:
@@ -219,8 +258,11 @@ class PortfolioTracker:
         4. Edge erosion — price converging toward resolution boundary
         5. Time decay — market expiring soon with thin edge remaining
         """
-        positions = await self.get_positions(exchange=exchange)
+        settings_is_live = getattr(settings, "is_live", None)
+        is_paper = None if not isinstance(settings_is_live, bool) else not settings_is_live
+        positions = await self.get_positions(exchange=exchange, is_paper=is_paper)
         exits: list[tuple[Position, ExitReason]] = []
+        mode_flag = self._mode_flag(is_paper)
 
         # Load peak prices for trailing stop calculation
         peak_prices = await self._get_peak_prices()
@@ -282,10 +324,12 @@ class PortfolioTracker:
                 end_dt = market.end_date if market.end_date.tzinfo else market.end_date.replace(tzinfo=timezone.utc)
                 now = datetime.now(timezone.utc)
                 # Look up when position was first entered
-                entry_row = await self.db.fetchone(
-                    "SELECT MIN(timestamp) as first_entry FROM trades WHERE market_id = ?",
-                    (pos.market_id,),
-                )
+                entry_sql = "SELECT MIN(timestamp) as first_entry FROM trades WHERE market_id = ?"
+                entry_params: list[object] = [pos.market_id]
+                if mode_flag is not None:
+                    entry_sql += " AND is_paper = ?"
+                    entry_params.append(mode_flag)
+                entry_row = await self.db.fetchone(entry_sql, tuple(entry_params))
                 if entry_row and entry_row["first_entry"]:
                     entry_dt = datetime.fromisoformat(entry_row["first_entry"]).replace(tzinfo=timezone.utc)
                 else:

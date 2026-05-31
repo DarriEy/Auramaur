@@ -48,7 +48,7 @@ class RiskManager:
     def __init__(self, settings, db: Database):
         self.settings = settings
         self.db = db
-        self.portfolio = PortfolioTracker(db)
+        self.portfolio = PortfolioTracker(db, settings=settings)
         self.kelly = KellySizer(fraction=settings.kelly.fraction)
 
     async def evaluate(

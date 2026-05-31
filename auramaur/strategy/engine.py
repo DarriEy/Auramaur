@@ -14,7 +14,7 @@ import time
 
 from auramaur.data_sources.aggregator import Aggregator
 from auramaur.db.database import Database
-from auramaur.exchange.models import Market, Order, OrderSide, TokenType
+from auramaur.exchange.models import Market, OrderResult, OrderSide, Signal
 from auramaur.exchange.protocols import ExchangeClient, MarketDiscovery
 
 # Shared directory for cross-instance market claim locks
@@ -580,8 +580,6 @@ class TradingEngine:
         *, strategy_source: str = "llm",
     ) -> OrderResult | None:
         """Build an order (via router or direct) and place it."""
-        from auramaur.exchange.models import OrderResult
-
         if self.router:
             order = await self.router.route(signal, market, size_dollars, self.settings.is_live)
         else:
@@ -626,8 +624,9 @@ class TradingEngine:
             except Exception:
                 pass
 
-        # Log slippage
-        if result.status in ("filled", "paper", "pending") and result.filled_price > 0:
+        # Log slippage only for actual executions.  Live pending orders echo
+        # the limit price but have not filled yet.
+        if result.status in ("filled", "paper", "partial") and result.filled_price > 0:
             slippage_bps = (result.filled_price - order.price) / order.price * 10000
             if order.side == OrderSide.SELL:
                 slippage_bps = -slippage_bps  # For sells, lower fill = worse
@@ -643,8 +642,12 @@ class TradingEngine:
             except Exception:
                 pass
 
-        # Record fill for P&L tracking
-        if result.status in ("filled", "paper", "pending"):
+        fill_size = result.filled_size if result.filled_size > 0 else order.size
+        fill_price = result.filled_price if result.filled_price > 0 else order.price
+
+        # Record P&L only for actual executions.  Pending live orders are
+        # mirrored to trades below, then finalized by the order monitor.
+        if result.status in ("filled", "paper", "partial") and result.filled_size > 0:
             from auramaur.exchange.models import Fill
             fill = Fill(
                 order_id=result.order_id,
@@ -652,18 +655,20 @@ class TradingEngine:
                 token_id=order.token_id,
                 side=order.side,
                 token=order.token,
-                size=result.filled_size if result.filled_size > 0 else order.size,
-                price=result.filled_price if result.filled_price > 0 else order.price,
+                size=result.filled_size,
+                price=fill_price,
                 is_paper=result.is_paper,
             )
             pnl_tracker = self._components_pnl
             if pnl_tracker:
                 await pnl_tracker.record_fill(fill)
 
-            # Mirror into legacy `trades` table so the CLI stats view and
-            # holding-period lookups in risk/portfolio.py stay in sync.
-            # (PnLTracker writes the authoritative row to `fills`.)
+        if result.status in ("filled", "paper", "partial", "pending"):
+            # Mirror into legacy `trades` table so the CLI stats view,
+            # order monitor, and holding-period lookups stay in sync.
+            # PnLTracker writes authoritative execution rows to `fills`.
             try:
+                trade_status = "filled" if result.status == "paper" else result.status
                 await self.db.execute(
                     """INSERT INTO trades
                        (market_id, signal_id, side, size, price, is_paper,
@@ -673,11 +678,11 @@ class TradingEngine:
                         order.market_id,
                         getattr(signal, "id", None),
                         order.side.value,
-                        fill.size,
-                        fill.price,
-                        1 if fill.is_paper else 0,
+                        fill_size,
+                        fill_price,
+                        1 if result.is_paper else 0,
                         result.order_id,
-                        "filled" if result.status in ("filled", "paper") else "pending",
+                        trade_status,
                         None,
                         order.exchange or self.exchange_name,
                         strategy_source,
@@ -687,46 +692,17 @@ class TradingEngine:
             except Exception as e:
                 log.debug("engine.trade_mirror_error", error=str(e))
 
-        # Record trade metadata for later PnL attribution
-        await self._record_trade_for_attribution(market, signal,
-            type("D", (), {"position_size": size_dollars}))
-
         return result
 
     async def _record_trade_for_attribution(self, market: Market, signal, decision) -> None:
-        """Store trade metadata for later PnL attribution when the market resolves."""
-        # Determine token type based on signal side
-        from auramaur.exchange.models import TokenType
-        if signal.recommended_side == OrderSide.SELL:
-            token = TokenType.NO.value
-            price = market.outcome_no_price if market.outcome_no_price > 0.01 else (1.0 - market.outcome_yes_price)
-        else:
-            token = TokenType.YES.value
-            price = market.outcome_yes_price
-        token_id = market.clob_token_yes if token == "YES" else market.clob_token_no
+        """Deprecated hook kept for compatibility.
 
-        await self.db.execute(
-            """INSERT INTO portfolio
-               (market_id, side, size, avg_price, current_price, category, token, token_id, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-               ON CONFLICT(market_id) DO UPDATE SET
-                   size = excluded.size,
-                   avg_price = excluded.avg_price,
-                   current_price = excluded.current_price,
-                   category = excluded.category,
-                   token = excluded.token,
-                   token_id = excluded.token_id,
-                   updated_at = excluded.updated_at""",
-            (
-                market.id,
-                "BUY",  # Always BUY on Polymarket
-                decision.position_size,
-                price, price,
-                market.category,
-                token, token_id,
-            ),
-        )
-        await self.db.commit()
+        The portfolio table represents current position state and is owned by
+        the PnL tracker plus exchange reconcilers.  Writing synthetic rows here
+        used the wrong primary key and mixed dollar notional with token size,
+        which corrupted attribution instead of improving it.
+        """
+        return None
 
     async def _run_cycle_starved(self) -> list[dict]:
         """Watch mode when cash-starved: refresh prices only, zero Claude calls.
@@ -999,10 +975,9 @@ class TradingEngine:
         implementation.  The analyzer produces candidates; this method
         decides which ones to trade and at what size.
         """
-        from auramaur.exchange.models import Signal
-
         results: list[dict] = []
         alloc_candidates: list[CandidateTrade] = []
+        cycle_cash = await self._get_available_cash()
 
         for tc in trade_candidates:
             # Ensure market exists in DB (FK requirement)
@@ -1030,11 +1005,9 @@ class TradingEngine:
             await self.db.commit()
 
             # Risk evaluation (pass actual cash for correct Kelly sizing)
-            if not hasattr(self, '_cached_cycle_cash'):
-                self._cached_cycle_cash = await self._get_available_cash()
             decision = await self.risk_manager.evaluate(
                 tc.signal, tc.market, price_history=price_history,
-                available_cash=self._cached_cycle_cash,
+                available_cash=cycle_cash,
             )
             checks_passed = sum(1 for c in decision.checks if c.passed)
             checks_failed = sum(1 for c in decision.checks if not c.passed)
@@ -1081,7 +1054,7 @@ class TradingEngine:
         """Strategic cycle: batch analysis with persistent world model."""
         from pathlib import Path
         from auramaur.nlp.strategic import StrategicAnalyzer
-        from auramaur.exchange.models import Confidence, Signal, OrderSide
+        from auramaur.exchange.models import Confidence
         exchange_fees = self.settings.arbitrage.exchange_fees
 
         # Kill switch check — halt immediately if active
@@ -1194,6 +1167,7 @@ class TradingEngine:
         # Convert strategic results to signals and run risk checks
         results: list[dict] = []
         candidates: list[CandidateTrade] = []
+        cycle_cash = await self._get_available_cash()
 
         for batch_result in analysis.markets:
             market = next((m for m in batch_markets if m.id == batch_result.market_id), None)
@@ -1260,9 +1234,7 @@ class TradingEngine:
             await self.db.commit()
 
             # Risk evaluation (pass actual cash for correct Kelly sizing)
-            if not hasattr(self, '_cached_cycle_cash'):
-                self._cached_cycle_cash = await self._get_available_cash()
-            decision = await self.risk_manager.evaluate(signal, market, price_history=price_history, available_cash=self._cached_cycle_cash)
+            decision = await self.risk_manager.evaluate(signal, market, price_history=price_history, available_cash=cycle_cash)
             from auramaur.monitoring.display import show_risk_decision
             checks_passed = sum(1 for c in decision.checks if c.passed)
             checks_failed = sum(1 for c in decision.checks if not c.passed)

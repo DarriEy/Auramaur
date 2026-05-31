@@ -133,11 +133,14 @@ class MarketMaker:
             log.info("market_maker.cancelled_stale", count=cancelled)
 
         # Step 3 & 4: Compute and place quotes for each market
+        skip_reasons: dict[str, int] = {}
         for market in candidates[: self._max_markets]:
             try:
-                result = await self._quote_market(market)
+                result, skip_reason = await self._quote_market(market)
                 if result:
                     results.append(result)
+                elif skip_reason:
+                    skip_reasons[skip_reason] = skip_reasons.get(skip_reason, 0) + 1
             except Exception as e:
                 log.error(
                     "market_maker.quote_error",
@@ -151,7 +154,17 @@ class MarketMaker:
             quoted=len(results),
             active_quotes=len(self._active_quotes),
             inventory_markets=len([v for v in self._inventory.values() if abs(v) > 0.01]),
+            skip_reasons=skip_reasons or None,
         )
+        if candidates and not results:
+            log.info(
+                "market_maker.no_quotes",
+                candidates=len(candidates),
+                checked=min(len(candidates), self._max_markets),
+                skip_reasons=skip_reasons,
+                min_spread_bps=self._min_spread_bps,
+                quote_size=self._quote_size,
+            )
 
         return results
 
@@ -208,19 +221,19 @@ class MarketMaker:
 
         return suitable
 
-    async def _quote_market(self, market: Market) -> dict | None:
+    async def _quote_market(self, market: Market) -> tuple[dict | None, str | None]:
         """Fetch order book, compute quotes, and place two-sided order for a market."""
         # Fetch YES order book to determine BBO
         book = await self._exchange.get_order_book(market.clob_token_yes)
 
         if not book.bids or not book.asks:
             log.debug("market_maker.empty_book", market_id=market.id)
-            return None
+            return None, "empty_book"
 
         # Compute our quote
-        quote = self._compute_quotes(market, book)
+        quote, skip_reason = self._compute_quotes(market, book)
         if quote is None:
-            return None
+            return None, skip_reason
 
         # Place the two-sided quote
         is_live = self._settings.is_live
@@ -229,9 +242,9 @@ class MarketMaker:
         if result.get("success"):
             self._active_quotes[market.id] = quote
 
-        return result
+        return result, None
 
-    def _compute_quotes(self, market: Market, book: OrderBook) -> MMQuote | None:
+    def _compute_quotes(self, market: Market, book: OrderBook) -> tuple[MMQuote | None, str | None]:
         """Compute bid/ask prices for a two-sided quote.
 
         Strategy: post inside the current spread.
@@ -247,7 +260,7 @@ class MarketMaker:
         best_ask = book.best_ask
 
         if best_bid is None or best_ask is None:
-            return None
+            return None, "no_bbo"
 
         # Polymarket has 1-cent ticks. Try to price-improve by one tick on each
         # side; if the underlying spread is too tight for that (which is the
@@ -289,7 +302,7 @@ class MarketMaker:
                 best_bid=best_bid,
                 best_ask=best_ask,
             )
-            return None
+            return None, "bid_gte_ask"
 
         # Check our spread meets minimum
         our_spread = our_ask - our_bid
@@ -302,25 +315,25 @@ class MarketMaker:
                 our_spread_bps=our_spread_bps,
                 min_spread_bps=self._min_spread_bps,
             )
-            return None
+            return None, "spread_too_narrow"
 
         # Check the NO leg price is valid
         no_price = round(1.0 - our_ask, 2)
         if no_price < 0.01 or no_price > 0.99:
-            return None
+            return None, "invalid_no_price"
 
         # Determine size — scale down if we're near inventory limit
         remaining_capacity = self._max_inventory - abs(inventory)
         size = min(self._quote_size, remaining_capacity)
         if size < 1.0:
-            return None
+            return None, "inventory_capacity"
 
         # Round size to Polymarket precision
         size = round(size, 2)
 
         # Verify notional is >= $1 on both legs (Polymarket minimum)
         if size * our_bid < 1.0 or size * no_price < 1.0:
-            return None
+            return None, "min_notional"
 
         return MMQuote(
             market_id=market.id,
@@ -330,7 +343,7 @@ class MarketMaker:
             ask_price=our_ask,
             size=size,
             spread_bps=our_spread_bps,
-        )
+        ), None
 
     async def _place_two_sided(self, quote: MMQuote, is_live: bool) -> dict:
         """Place both legs of a two-sided quote.

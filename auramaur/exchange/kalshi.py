@@ -514,13 +514,14 @@ class KalshiClient:
             positions = data.get("market_positions", [])
 
             synced = 0
+            synced_ids: list[str] = []
             for p in positions:
                 pos_fp = float(p.get("position_fp", 0))
                 if pos_fp == 0:
                     continue
 
                 ticker = p.get("ticker", "")
-                exposure = float(p.get("market_exposure_dollars", 0))
+                exposure = abs(float(p.get("market_exposure_dollars", 0)))
                 contracts = abs(pos_fp)
                 token = "NO" if pos_fp < 0 else "YES"
                 avg_price = exposure / contracts if contracts > 0 else 0
@@ -535,23 +536,110 @@ class KalshiClient:
                     else:
                         current_price = avg_price
                 except Exception:
+                    market = None
                     current_price = avg_price
+
+                category = market.category if market else ""
+                question = market.question if market else ticker
+                description = market.description if market else ""
+                yes_price = market.outcome_yes_price if market else 0.0
+                no_price = market.outcome_no_price if market else 0.0
+                volume = market.volume if market else 0.0
+                liquidity = market.liquidity if market else 0.0
+
+                await db.execute(
+                    """INSERT INTO markets
+                       (id, exchange, ticker, question, description, category,
+                        active, outcome_yes_price, outcome_no_price, volume,
+                        liquidity, last_updated)
+                       VALUES (?, 'kalshi', ?, ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))
+                       ON CONFLICT(id) DO UPDATE SET
+                           exchange = excluded.exchange,
+                           ticker = excluded.ticker,
+                           question = excluded.question,
+                           description = excluded.description,
+                           category = excluded.category,
+                           outcome_yes_price = excluded.outcome_yes_price,
+                           outcome_no_price = excluded.outcome_no_price,
+                           volume = excluded.volume,
+                           liquidity = excluded.liquidity,
+                           last_updated = excluded.last_updated""",
+                    (
+                        ticker,
+                        ticker,
+                        question,
+                        description[:500],
+                        category,
+                        yes_price,
+                        no_price,
+                        volume,
+                        liquidity,
+                    ),
+                )
 
                 await db.execute(
                     """INSERT INTO portfolio
-                       (market_id, exchange, side, size, avg_price, current_price, token, is_paper, updated_at)
-                       VALUES (?, 'kalshi', 'BUY', ?, ?, ?, ?, 0, datetime('now'))
+                       (market_id, exchange, side, size, avg_price, current_price,
+                        category, token, token_id, is_paper, updated_at)
+                       VALUES (?, 'kalshi', 'BUY', ?, ?, ?, ?, ?, ?, 0, datetime('now'))
                        ON CONFLICT(market_id, is_paper) DO UPDATE SET
                            exchange = excluded.exchange,
                            size = excluded.size,
                            avg_price = excluded.avg_price,
                            current_price = excluded.current_price,
+                           category = excluded.category,
                            token = excluded.token,
+                           token_id = excluded.token_id,
                            updated_at = excluded.updated_at""",
                     (ticker, contracts, round(avg_price, 4),
-                     round(current_price, 4), token),
+                     round(current_price, 4), category, token, ticker),
                 )
+                await db.execute(
+                    """INSERT INTO cost_basis
+                       (market_id, token, token_id, size, avg_cost, total_cost,
+                        is_paper, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, 0, datetime('now'))
+                       ON CONFLICT(market_id, is_paper) DO UPDATE SET
+                           token = excluded.token,
+                           token_id = excluded.token_id,
+                           size = excluded.size,
+                           avg_cost = excluded.avg_cost,
+                           total_cost = excluded.total_cost,
+                           updated_at = excluded.updated_at""",
+                    (
+                        ticker,
+                        token,
+                        ticker,
+                        contracts,
+                        round(avg_price, 4),
+                        round(contracts * avg_price, 4),
+                    ),
+                )
+                synced_ids.append(ticker)
                 synced += 1
+
+            if synced_ids:
+                placeholders = ",".join("?" * len(synced_ids))
+                await db.execute(
+                    f"DELETE FROM portfolio WHERE exchange = 'kalshi' AND is_paper = 0 AND market_id NOT IN ({placeholders})",
+                    tuple(synced_ids),
+                )
+                await db.execute(
+                    f"""DELETE FROM cost_basis
+                        WHERE is_paper = 0
+                          AND market_id IN (SELECT id FROM markets WHERE exchange = 'kalshi')
+                          AND market_id NOT IN ({placeholders})""",
+                    tuple(synced_ids),
+                )
+            else:
+                await db.execute(
+                    "DELETE FROM portfolio WHERE exchange = 'kalshi' AND is_paper = 0"
+                )
+                await db.execute(
+                    """DELETE FROM cost_basis
+                       WHERE is_paper = 0
+                         AND market_id IN (SELECT id FROM markets WHERE exchange = 'kalshi')"""
+                )
 
             await db.commit()
             if synced > 0:

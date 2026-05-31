@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from auramaur.exchange.models import Market
-from auramaur.strategy.arbitrage_scanner import ArbitrageScanner
+from auramaur.bot import AuramaurBot
+from auramaur.exchange.models import Market, Order, OrderResult, OrderSide, TokenType
+from auramaur.strategy.arbitrage_scanner import ArbOpportunity, ArbitrageScanner
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +86,87 @@ class TestFeeAwareProfit:
         opps = await scanner.scan()
         cross = [o for o in opps if o.arb_type == "cross_exchange"]
         assert len(cross) == 0
+
+    @pytest.mark.asyncio
+    async def test_cross_exchange_executor_uses_full_package_edge(self):
+        """Execution risk checks should see scanner net edge, not half of it."""
+        poly = _make_market("polymarket", 0.40, "Will X happen?")
+        kalshi = _make_market("kalshi", 0.44, "Will X happen?")
+        opp = ArbOpportunity(
+            market_a=poly,
+            market_b=kalshi,
+            exchange_a="polymarket",
+            exchange_b="kalshi",
+            price_a=0.40,
+            price_b=0.44,
+            spread=0.04,
+            expected_profit_pct=3.72,
+            question="Will X happen?",
+        )
+
+        class FakeRisk:
+            def __init__(self):
+                self.calls = []
+
+            async def evaluate(self, signal, market, price_history=None, available_cash=None):
+                self.calls.append((signal.edge, market.exchange, available_cash))
+                return SimpleNamespace(approved=True, position_size=12.0, reason="ok", checks=[])
+
+        class FakeExchange:
+            def __init__(self, name):
+                self.name = name
+                self.orders = []
+
+            def prepare_order(self, signal, market, position_size, is_live):
+                token = TokenType.NO if signal.recommended_side == OrderSide.SELL else TokenType.YES
+                price = market.outcome_no_price if token == TokenType.NO else market.outcome_yes_price
+                order = Order(
+                    market_id=market.id,
+                    exchange=self.name,
+                    token_id=f"{market.id}-{token.value}",
+                    token=token,
+                    side=OrderSide.BUY,
+                    size=position_size,
+                    price=price,
+                    dry_run=not is_live,
+                )
+                self.orders.append(order)
+                return order
+
+            async def place_order(self, order):
+                return OrderResult(
+                    order_id=f"{self.name}-1",
+                    market_id=order.market_id,
+                    status="pending",
+                    is_paper=order.dry_run,
+                )
+
+        class FakeEngine:
+            def __init__(self, name, cash):
+                self.exchange = FakeExchange(name)
+                self._cash = cash
+
+            async def _get_available_cash(self):
+                return self._cash
+
+        settings = MagicMock()
+        settings.is_live = True
+        settings.arbitrage.max_arb_size = 25.0
+        bot = AuramaurBot(settings=settings)
+        bot._components = {"alerts": SimpleNamespace(send=AsyncMock())}
+
+        risk = FakeRisk()
+        engines = {
+            "polymarket": FakeEngine("polymarket", 101.0),
+            "kalshi": FakeEngine("kalshi", 202.0),
+        }
+
+        await bot._execute_cross_exchange_arb(opp, risk, engines)
+
+        assert [call[0] for call in risk.calls] == [pytest.approx(3.72), pytest.approx(3.72)]
+        assert [call[2] for call in risk.calls] == [101.0, 202.0]
+        assert len(engines["polymarket"].exchange.orders) == 1
+        assert len(engines["kalshi"].exchange.orders) == 1
 
     @pytest.mark.asyncio
     async def test_zero_fees_full_profit(self):

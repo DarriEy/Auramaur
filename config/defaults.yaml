@@ -104,7 +104,7 @@ llm_ensemble:
 
 market_maker:
   enabled: true
-  min_spread_bps: 80        # minimum 0.8% spread (BBO-join kicks in when 1-tick improvement would go below this)
+  min_spread_bps: 40        # minimum 0.4% spread (BBO-join kicks in when 1-tick improvement would go below this)
   quote_size: 10.0          # tokens per side
   max_inventory: 50.0       # max directional exposure per market
   max_markets: 5            # max simultaneous MM markets

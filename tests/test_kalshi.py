@@ -1,8 +1,10 @@
 """Tests for Kalshi exchange client."""
 
+import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
+from auramaur.db.database import Database
 from auramaur.broker.sync import KalshiPositionSyncer
 from auramaur.exchange.kalshi import KalshiClient
 from auramaur.exchange.models import Market, Order, OrderSide, Position, TokenType
@@ -110,6 +112,57 @@ class TestKalshiPositionSyncerPaperSync:
         assert positions == []
         delete_calls = [c for c in syncer._db.execute.call_args_list if "DELETE" in str(c)]
         assert delete_calls
+
+
+class TestKalshiLivePositionAccounting:
+    @pytest.mark.asyncio
+    async def test_sync_positions_writes_portfolio_and_cost_basis(self):
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            client = KalshiClient.__new__(KalshiClient)
+            client._init_api = MagicMock()
+            client._portfolio_api = MagicMock()
+            client._portfolio_api.get_positions_without_preload_content = MagicMock()
+            client._call_raw = AsyncMock(return_value=json.dumps({
+                "market_positions": [{
+                    "ticker": "KXTEST",
+                    "position_fp": 10,
+                    "market_exposure_dollars": 4.2,
+                }]
+            }))
+            client.get_market = AsyncMock(return_value=Market(
+                id="KXTEST",
+                exchange="kalshi",
+                question="Will test happen?",
+                category="test",
+                outcome_yes_price=0.45,
+                outcome_no_price=0.55,
+            ))
+
+            count = await client.sync_positions(db)
+
+            portfolio = await db.fetchone(
+                "SELECT exchange, size, avg_price, token, is_paper FROM portfolio WHERE market_id = ?",
+                ("KXTEST",),
+            )
+            cost_basis = await db.fetchone(
+                "SELECT size, avg_cost, total_cost, token, is_paper FROM cost_basis WHERE market_id = ?",
+                ("KXTEST",),
+            )
+
+            assert count == 1
+            assert portfolio["exchange"] == "kalshi"
+            assert portfolio["size"] == pytest.approx(10)
+            assert portfolio["avg_price"] == pytest.approx(0.42)
+            assert portfolio["token"] == "YES"
+            assert portfolio["is_paper"] == 0
+            assert cost_basis["size"] == pytest.approx(10)
+            assert cost_basis["avg_cost"] == pytest.approx(0.42)
+            assert cost_basis["total_cost"] == pytest.approx(4.2)
+            assert cost_basis["is_paper"] == 0
+        finally:
+            await db.close()
 
 
 class TestKalshiMarketParsing:
