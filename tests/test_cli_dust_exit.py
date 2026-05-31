@@ -7,7 +7,64 @@ import pytest
 from click.testing import CliRunner
 
 from auramaur.cli import main
+from auramaur.db.database import Database
 from auramaur.exchange.models import ExitReason
+
+
+class _FakeMarket:
+    outcome_yes_price = 0.2
+    outcome_no_price = 0.8
+
+
+class _FakeDiscovery:
+    async def get_market(self, market_id):
+        return _FakeMarket()
+
+
+# Two dust positions, BOTH stored with the stale label "sports". One is a real
+# sports market; the other is a politics market that only *looks* sports in the
+# stored column. --category sports must use the live classifier and keep only
+# the real one.
+_SEED = [
+    ("spt1", "Arkansas Razorbacks vs. Arizona Wildcats", ""),
+    ("pol1", "Will the Republicans win the Mississippi Senate race in 2026?",
+     "This market will resolve according to the winner of the election."),
+]
+
+
+class _FakeBot:
+    """Stands in for AuramaurBot: seeds an in-memory DB inside the command's
+    own event loop (so the aiosqlite connection is bound to the right loop)."""
+
+    def __init__(self, *args, **kwargs):
+        self._components = {}
+
+    async def _init_components(self):
+        db = Database(":memory:")
+        await db.connect()
+        for mid, q, desc in _SEED:
+            await db.execute(
+                "INSERT INTO markets (id, question, description, category, last_updated, "
+                "outcome_yes_price, outcome_no_price) VALUES (?,?,?,?,datetime('now'),?,?)",
+                (mid, q, desc, "sports", 0.2, 0.8),
+            )
+            for is_paper in (0, 1):  # seed both modes so the test is mode-agnostic
+                await db.execute(
+                    "INSERT INTO portfolio (market_id, exchange, side, size, avg_price, "
+                    "current_price, category, token, token_id, is_paper) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (mid, "polymarket", "BUY", 10.0, 0.3, 0.2, "sports", "YES", f"tok-{mid}", is_paper),
+                )
+        await db.commit()
+        self._components = {
+            "db": db,
+            "discoveries": {"polymarket": _FakeDiscovery()},
+            "exchanges": {"polymarket": object()},
+            "alerts": object(),
+        }
+
+    async def shutdown(self):
+        await self._components["db"].close()
 
 
 @pytest.fixture(autouse=True)
@@ -28,8 +85,25 @@ def test_dust_exit_registered_with_help():
     result = CliRunner().invoke(main, ["dust-exit", "--help"])
     assert result.exit_code == 0
     assert "dust" in result.output.lower()
-    assert "--execute" in result.output
-    assert "--max-notional" in result.output
+    assert "--category" in result.output
+
+
+def test_category_filter_uses_live_classification():
+    """--category sports keeps the real sports market and drops the politics
+    market that merely has a stale 'sports' label stored."""
+    with patch("auramaur.cli.AuramaurBot", _FakeBot):
+        result = CliRunner().invoke(main, ["dust-exit", "--category", "sports", "--max-notional", "100"])
+    assert result.exit_code == 0, result.output
+    assert "spt1" in result.output       # real sports market kept
+    assert "pol1" not in result.output   # stale-labelled politics market excluded
+
+
+def test_no_category_filter_includes_both():
+    with patch("auramaur.cli.AuramaurBot", _FakeBot):
+        result = CliRunner().invoke(main, ["dust-exit", "--max-notional", "100"])
+    assert result.exit_code == 0, result.output
+    assert "spt1" in result.output
+    assert "pol1" in result.output
 
 
 def test_dust_exit_refuses_when_bot_is_running():
