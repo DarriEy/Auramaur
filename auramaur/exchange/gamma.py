@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import datetime
 
@@ -18,6 +19,15 @@ GAMMA_API_BASE = "https://gamma-api.polymarket.com"
 # re-hit the API every cycle for dead/orphaned IDs.
 _NEGATIVE_CACHE_TTL = 3600.0
 
+# Gamma sits behind Cloudflare. When CF throttles/challenges the client it can
+# half-close the socket (CLOSE_WAIT) and leave a read hanging indefinitely,
+# which wedges the whole scan/trade cycle. Bound every request so a stalled CF
+# connection raises (and is caught below) instead of freezing the bot.
+#   - sock_connect: cap the TCP/TLS handshake
+#   - sock_read:    cap any single read so a half-closed CF socket can't hang
+#   - total:        overall ceiling per request
+_GAMMA_TIMEOUT = aiohttp.ClientTimeout(total=20, sock_connect=10, sock_read=15)
+
 
 class GammaClient:
     """Unauthenticated Gamma API for market discovery and filtering."""
@@ -29,7 +39,7 @@ class GammaClient:
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            self._session = aiohttp.ClientSession(timeout=_GAMMA_TIMEOUT)
         return self._session
 
     async def close(self) -> None:
@@ -69,8 +79,8 @@ class GammaClient:
             log.info("gamma.markets_fetched", count=len(markets))
             return markets
 
-        except aiohttp.ClientError as e:
-            log.error("gamma.fetch_error", error=str(e))
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            log.error("gamma.fetch_error", error=str(e), kind=type(e).__name__)
             return []
 
     async def get_market(self, market_id: str) -> Market | None:
@@ -105,8 +115,13 @@ class GammaClient:
                 resp.raise_for_status()
                 data = await resp.json()
                 return self._parse_market(data)
-        except aiohttp.ClientError as e:
-            log.error("gamma.market_fetch_error", market_id=market_id, error=str(e))
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            log.error(
+                "gamma.market_fetch_error",
+                market_id=market_id,
+                error=str(e),
+                kind=type(e).__name__,
+            )
             return None
 
     async def search_markets(self, query: str, limit: int = 50) -> list[Market]:
@@ -147,8 +162,8 @@ class GammaClient:
                     break
             return markets
 
-        except aiohttp.ClientError as e:
-            log.error("gamma.search_error", query=query, error=str(e))
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            log.error("gamma.search_error", query=query, error=str(e), kind=type(e).__name__)
             return []
 
     def _parse_market(self, data: dict) -> Market | None:

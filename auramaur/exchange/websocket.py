@@ -13,6 +13,14 @@ log = structlog.get_logger()
 
 POLYMARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 
+# Seconds between application-level pings. If Cloudflare half-closes the socket
+# without sending a WS CLOSE frame, the `async for` read loop would otherwise
+# block forever; the heartbeat surfaces the dead connection as a
+# ServerTimeoutError (an aiohttp.ClientError) so the run loop reconnects.
+_WS_HEARTBEAT = 30.0
+# Cap the connection handshake so a Cloudflare stall can't hang the connect.
+_WS_TIMEOUT = aiohttp.ClientTimeout(total=30, sock_connect=10)
+
 
 class PolymarketWebSocket:
     """WebSocket connection to Polymarket for real-time price events.
@@ -36,7 +44,7 @@ class PolymarketWebSocket:
 
     async def connect(self) -> None:
         """Connect to the WebSocket endpoint."""
-        self._session = aiohttp.ClientSession()
+        self._session = aiohttp.ClientSession(timeout=_WS_TIMEOUT)
         self._running = True
         log.info("websocket.connecting")
 
@@ -69,7 +77,9 @@ class PolymarketWebSocket:
 
         while self._running:
             try:
-                self._ws = await self._session.ws_connect(POLYMARKET_WS_URL)
+                self._ws = await self._session.ws_connect(
+                    POLYMARKET_WS_URL, heartbeat=_WS_HEARTBEAT
+                )
                 self._reconnect_delay = 1.0
                 log.info("websocket.connected")
 
