@@ -120,6 +120,12 @@ arbitrage:
     kalshi: 0.07       # ~7% on profits
     cryptodotcom: 0.075  # ~0.075% maker/taker
 
+technical:
+  enabled: true
+  min_move_pct: 5.0
+  mean_rev_threshold: 0.10
+  min_history_points: 5
+
 analysis:
   mode: "strategic"   # "pipeline", "strategic", or "agent"
 

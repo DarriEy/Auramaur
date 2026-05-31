@@ -56,6 +56,7 @@ class TradingEngine:
         router: SmartOrderRouter | None = None,
         allocator: CapitalAllocator | None = None,
         market_analyzer: MarketAnalyzer | None = None,
+        technical_analyzer: MarketAnalyzer | None = None,
     ):
         self.settings = settings
         self.db = db
@@ -70,6 +71,7 @@ class TradingEngine:
         self.router = router
         self.allocator = allocator
         self.market_analyzer = market_analyzer
+        self.technical_analyzer = technical_analyzer
         self.exchange_name = ""  # Set by bot after init (e.g. "polymarket", "kalshi")
         self._hybrid = False  # Set by bot when --hybrid flag is active
         self.strategic = None  # StrategicAnalyzer, set by bot after init
@@ -402,7 +404,6 @@ class TradingEngine:
         *,
         place_order: bool = True,
         price_history: dict[str, list[float]] | None = None,
-        strategy_source: str = "llm",
     ) -> dict | None:
         """Full pipeline for a single market.
 
@@ -549,7 +550,7 @@ class TradingEngine:
                 signal.market_prob, signal.edge, signal.second_opinion_prob,
                 signal.divergence, signal.evidence_summary,
                 signal.recommended_side.value if signal.recommended_side else None,
-                strategy_source,
+                signal.strategy_source,
             ),
         )
         await self.db.commit()
@@ -569,7 +570,7 @@ class TradingEngine:
             return {"market": market, "signal": signal, "decision": decision, "order": None}
 
         # 6. Build and place order — use smart router if available
-        order = await self._build_and_place_order(signal, market, decision.position_size, strategy_source=strategy_source)
+        order = await self._build_and_place_order(signal, market, decision.position_size)
         if order is None:
             return {"market": market, "signal": signal, "decision": decision, "order": None}
 
@@ -577,7 +578,6 @@ class TradingEngine:
 
     async def _build_and_place_order(
         self, signal: Signal, market: Market, size_dollars: float,
-        *, strategy_source: str = "llm",
     ) -> OrderResult | None:
         """Build an order (via router or direct) and place it."""
         if self.router:
@@ -685,7 +685,7 @@ class TradingEngine:
                         trade_status,
                         None,
                         order.exchange or self.exchange_name,
-                        strategy_source,
+                        signal.strategy_source,
                     ),
                 )
                 await self.db.commit()
@@ -936,6 +936,8 @@ class TradingEngine:
                     market_ids=[m.id for m, _ in flagged_entries[:5]],
                 )
 
+        trade_candidates: list[TradeCandidate] = []
+
         if self.market_analyzer:
             # Protocol-based path: analyzer returns TradeCandidates,
             # engine handles risk + allocation + execution
@@ -943,9 +945,9 @@ class TradingEngine:
             trade_candidates = await self.market_analyzer.analyze_markets(
                 analysis_markets, price_history=price_history,
             )
-            results = await self._execute_candidates(trade_candidates, price_history)
         elif self.strategic:
             # Strategic mode: batch analysis with world model + allocate
+            # (Execution happens inside _run_cycle_strategic)
             results = await self._run_cycle_strategic(ranked[:max_markets], price_history=price_history)
         elif self.allocator:
             # Legacy: sequential analyze + trade one at a time
@@ -957,6 +959,41 @@ class TradingEngine:
                         results.append(result)
                 except Exception as e:
                     log.error("engine.market_error", market_id=market.id, error=str(e))
+
+        # Technical Strategy (The Second Leg):
+        # Run rule-based technical analysis on all fresh candidates.
+        # This analyzer is fast and free (no LLM), so it can scan a
+        # larger universe.
+        if self.technical_analyzer:
+            tech_candidates = await self.technical_analyzer.analyze_markets(
+                fresh_candidates, price_history=price_history
+            )
+            if tech_candidates:
+                # Filter out any that were already analyzed by the LLM
+                # to prevent duplicate signals/executions.
+                # (Note: for strategic mode, we'd need to track which markets
+                # were already traded. For now, we just merge candidates if
+                # they exist).
+                llm_ids = {tc.market.id for tc in trade_candidates}
+                unique_tech = [
+                    tc for tc in tech_candidates
+                    if tc.market.id not in llm_ids
+                ]
+                if unique_tech:
+                    log.info(
+                        "engine.technical_signals_detected",
+                        count=len(unique_tech),
+                    )
+                    # For strategic mode, _run_cycle_strategic already executed.
+                    # We need to execute these tech candidates now.
+                    tech_results = await self._execute_candidates(unique_tech, price_history)
+                    if 'results' in locals():
+                        results.extend(tech_results)
+                    else:
+                        results = tech_results
+
+        if trade_candidates and not results:
+            results = await self._execute_candidates(trade_candidates, price_history)
 
         elapsed = time.monotonic() - start
         trades = [r for r in results if r.get("order")]
@@ -1000,7 +1037,7 @@ class TradingEngine:
                 (tc.signal.market_id, tc.signal.claude_prob, tc.signal.claude_confidence.value,
                  tc.signal.market_prob, tc.signal.edge, tc.signal.evidence_summary,
                  tc.signal.recommended_side.value if tc.signal.recommended_side else None,
-                 getattr(tc, "strategy_source", "llm")),
+                 tc.signal.strategy_source),
             )
             await self.db.commit()
 

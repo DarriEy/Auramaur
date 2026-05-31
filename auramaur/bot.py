@@ -41,6 +41,7 @@ from auramaur.strategy.engine import TradingEngine
 from auramaur.strategy.market_maker import MarketMaker
 from auramaur.strategy.news_reactor import NewsReactor
 from auramaur.strategy.resolution_tracker import ResolutionTracker
+from auramaur.strategy.technical import TechnicalAnalyzer
 
 log = structlog.get_logger()
 
@@ -213,12 +214,13 @@ class AuramaurBot:
         # Strategic analyzer for breadth (batch analysis with world model)
         from auramaur.nlp.strategic import StrategicAnalyzer
         strategic = StrategicAnalyzer(settings=s, db=db)
+        technical = TechnicalAnalyzer(settings=s)
 
         # Depth agent for deep research on high-potential markets
         from auramaur.strategy.agent_analyzer import AgentAnalyzer
         depth_agent = AgentAnalyzer(settings=s, db=db, calibration=calibration)
 
-        log.info("bot.analyzer_mode", mode="strategic+depth_agent")
+        log.info("bot.analyzer_mode", mode="strategic+depth_agent+technical")
 
         # Strategy — per-exchange engines
         engines: dict[str, TradingEngine] = {}
@@ -253,6 +255,7 @@ class AuramaurBot:
                 exchange=exchange, calibration=calibration,
                 flow_tracker=flow_tracker,
                 router=router, allocator=allocator,
+                technical_analyzer=technical,
             )
             poly_engine._components_pnl = pnl_tracker
             poly_engine._components_syncer = syncer
@@ -280,6 +283,7 @@ class AuramaurBot:
                     exchange=kalshi, calibration=calibration,
                     flow_tracker=flow_tracker,
                     router=kalshi_router, allocator=allocator,
+                    technical_analyzer=technical,
                 )
                 kalshi_engine._components_pnl = pnl_tracker
                 kalshi_engine._components_syncer = kalshi_syncer
@@ -303,6 +307,7 @@ class AuramaurBot:
                     exchange=cryptodotcom, calibration=calibration,
                     flow_tracker=flow_tracker,
                     allocator=allocator,
+                    technical_analyzer=technical,
                 )
                 cdc_engine.strategic = strategic
                 cdc_engine.exchange_name = "cryptodotcom"
@@ -322,6 +327,7 @@ class AuramaurBot:
                     analyzer=analyzer, cache=cache, risk_manager=risk_manager,
                     exchange=ibkr, calibration=calibration,
                     flow_tracker=flow_tracker,
+                    technical_analyzer=technical,
                 )
             except ImportError:
                 log.warning("optional.missing", component="IBKRClient")
