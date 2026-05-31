@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import structlog
@@ -231,20 +232,28 @@ class PolymarketClient:
         token_size = round(token_size, 2)
         notional = token_size * exec_price
 
-        if token_size < 5 or notional < 1.0:
-            reason = "below_token_min" if token_size < 5 else "below_notional_min"
-            log.warning(
-                "prepare_order.too_small",
+        # A risk-approved trade that lands below the CLOB floor is bumped UP to
+        # the minimum viable order rather than dropped — discarding edge the
+        # risk manager already signed off on (and benching the market) is worse
+        # than a few dollars of over-sizing. The floor is tiny: 5 tokens (or
+        # enough tokens for $1 notional at low prices), so the bump is at most
+        # ~$5 and always well under max_stake. ceil-to-2-decimals guarantees we
+        # clear both the token and notional minimums.
+        min_tokens, min_notional = 5.0, 1.0
+        if token_size < min_tokens or notional < min_notional:
+            bumped = max(min_tokens, math.ceil(min_notional / exec_price * 100) / 100)
+            log.info(
+                "prepare_order.bumped_to_min",
                 market_id=market.id,
-                reason=reason,
-                token_size=token_size,
-                notional=round(notional, 2),
-                min_tokens=5,
-                min_notional=1.0,
+                original_tokens=token_size,
+                original_notional=round(notional, 2),
+                bumped_tokens=bumped,
+                bumped_notional=round(bumped * exec_price, 2),
                 position_size=position_size,
                 exec_price=exec_price,
             )
-            return None
+            token_size = bumped
+            notional = token_size * exec_price
 
         return Order(
             market_id=market.id,

@@ -588,20 +588,21 @@ class TradingEngine:
             order = self.exchange.prepare_order(signal, market, size_dollars, self.settings.is_live)
 
         if order is None:
-            show_order_dropped(market.id, f"order build failed (${size_dollars:.2f} too small for CLOB minimum)")
+            show_order_dropped(market.id, f"order build failed (${size_dollars:.2f} — could not build a valid order)")
             log.warning(
                 "engine.order_dropped",
                 market_id=market.id,
                 size_dollars=size_dollars,
-                reason="prepare_order returned None (likely below CLOB minimum or router rejection)",
+                reason="prepare_order returned None (bad price/token or router rejection)",
             )
-            # Block re-evaluation for 24 hours — price won't change enough to matter
-            # and each re-analysis wastes a Claude API call for nothing.
+            # Sub-minimum sizing is now bumped up in prepare_order, so a None
+            # order here is a genuine build failure (bad price/token). Block
+            # only briefly so a transient issue can retry next cycle.
             try:
                 await self.db.execute(
                     """INSERT OR REPLACE INTO order_build_drops
                        (market_id, blocked_until, reason)
-                       VALUES (?, datetime('now', '+24 hours'), ?)""",
+                       VALUES (?, datetime('now', '+2 hours'), ?)""",
                     (market.id, f"order build failed at ${size_dollars:.2f}"),
                 )
                 await self.db.commit()
@@ -761,7 +762,19 @@ class TradingEngine:
         opportunity is compelling enough to justify liquidating an
         existing stake. Otherwise runs the full scan.
         """
-        if cash_available is not None and cash_available < 5.0:
+        # Starved check uses the LOWER of aggregate cash and this exchange's own
+        # deployable balance. An exchange with separate funding (e.g. Kalshi) can
+        # be starved even when aggregate cash looks healthy — without this it
+        # would burn full cycles scanning for BUYs it cannot fund. Starved mode
+        # still manages/closes existing positions, so we don't abandon the book.
+        effective_cash = cash_available
+        try:
+            exch_cash = await self._get_available_cash()
+            if exch_cash is not None:
+                effective_cash = exch_cash if effective_cash is None else min(effective_cash, exch_cash)
+        except Exception:
+            pass
+        if effective_cash is not None and effective_cash < 5.0:
             return await self._run_cycle_starved()
 
         import time
@@ -1084,53 +1097,72 @@ class TradingEngine:
         # Gather evidence for all markets first
         from auramaur.data_sources.base import NewsItem as _NI
         from auramaur.nlp.query_decomposer import extract_search_queries
-        evidence_map: dict[str, list] = {}
-        for market in markets:
-            skip = self._is_junk_market(market)
-            if skip:
-                continue
+
+        # Evidence gathering is the dominant cycle cost — each market fans out
+        # to ~15 data sources. Running markets concurrently (instead of one at a
+        # time) cuts cycle wall-clock from ~10min toward ~2-3min, which is what
+        # makes the news-speed pillar actually fast. The CLOB description enrich
+        # is a blocking, not-thread-safe call, so it's serialized behind a lock
+        # and pushed to a worker thread to keep the event loop responsive.
+        _EVIDENCE_CONCURRENCY = 6
+        sem = asyncio.Semaphore(_EVIDENCE_CONCURRENCY)
+        clob_lock = asyncio.Lock()
+
+        async def _gather_market_evidence(market) -> tuple[str, list] | None:
+            if self._is_junk_market(market):
+                return None
             if not self._try_claim_market(market.id):
-                continue
-            try:
-                # Enrich market description from CLOB if thin
-                if len(market.description) < 50 and market.condition_id:
-                    try:
-                        self.exchange._init_clob_client()
-                        clob_info = self.exchange._clob_client.get_market(market.condition_id)
-                        if clob_info and clob_info.get("description"):
-                            market.description = clob_info["description"][:1000]
-                    except Exception:
-                        pass
+                return None
+            async with sem:
+                try:
+                    # Enrich market description from CLOB if thin
+                    if len(market.description) < 50 and market.condition_id:
+                        try:
+                            def _enrich():
+                                self.exchange._init_clob_client()
+                                return self.exchange._clob_client.get_market(market.condition_id)
+                            async with clob_lock:
+                                clob_info = await asyncio.to_thread(_enrich)
+                            if clob_info and clob_info.get("description"):
+                                market.description = clob_info["description"][:1000]
+                        except Exception:
+                            pass
 
-                queries = extract_search_queries(market.question, market.description, market.category or "")
-                all_evidence: list = []
-                seen_ids: set[str] = set()
+                    queries = extract_search_queries(market.question, market.description, market.category or "")
+                    all_evidence: list = []
+                    seen_ids: set[str] = set()
 
-                # Add market description as synthetic evidence (resolution criteria)
-                if market.description and len(market.description) > 20:
-                    all_evidence.append(_NI(
-                        id=f"polymarket_desc:{market.id}",
-                        source="polymarket_context",
-                        title=f"Resolution criteria: {market.question}",
-                        content=market.description[:800],
-                        url=f"https://polymarket.com/event/{market.id}",
-                    ))
-                    seen_ids.add(f"polymarket_desc:{market.id}")
+                    # Add market description as synthetic evidence (resolution criteria)
+                    if market.description and len(market.description) > 20:
+                        all_evidence.append(_NI(
+                            id=f"polymarket_desc:{market.id}",
+                            source="polymarket_context",
+                            title=f"Resolution criteria: {market.question}",
+                            content=market.description[:800],
+                            url=f"https://polymarket.com/event/{market.id}",
+                        ))
+                        seen_ids.add(f"polymarket_desc:{market.id}")
 
-                for query in queries:
-                    items = await self.aggregator.gather(
-                        query, limit_per_source=8, category=market.category or None,
-                    )
-                    for item in items:
-                        if item.id not in seen_ids:
-                            seen_ids.add(item.id)
-                            all_evidence.append(item)
-                # Cap evidence per market to keep total prompt under context window
-                # 12 markets × 8 items × ~500 chars = ~48k chars of evidence
-                evidence_map[market.id] = all_evidence[:8]
-            except Exception as e:
-                log.error("strategic.evidence_error", market_id=market.id, error=str(e))
-                evidence_map[market.id] = []
+                    for query in queries:
+                        items = await self.aggregator.gather(
+                            query, limit_per_source=8, category=market.category or None,
+                        )
+                        for item in items:
+                            if item.id not in seen_ids:
+                                seen_ids.add(item.id)
+                                all_evidence.append(item)
+                    # Cap evidence per market to keep total prompt under context window
+                    # 12 markets × 8 items × ~500 chars = ~48k chars of evidence
+                    return (market.id, all_evidence[:8])
+                except Exception as e:
+                    log.error("strategic.evidence_error", market_id=market.id, error=str(e))
+                    return (market.id, [])
+
+        gathered = await asyncio.gather(*[_gather_market_evidence(m) for m in markets])
+        evidence_map: dict[str, list] = {}
+        for _res in gathered:
+            if _res is not None:
+                evidence_map[_res[0]] = _res[1]
 
         # Filter to markets with evidence gathered
         batch_markets = [m for m in markets if m.id in evidence_map]

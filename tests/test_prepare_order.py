@@ -55,11 +55,23 @@ class TestPolymarketPrepareOrder:
         assert order.token == TokenType.NO
         assert order.token_id == "tok-no"
 
-    def test_min_size_rejected(self):
+    def test_min_size_bumped_to_minimum(self):
         client = self._make_client()
-        # $0.50 at 0.50 = $0.25 notional (< $1 minimum)
+        # $0.50 at 0.50 = 1 token / $0.50 notional — below both CLOB floors.
+        # Risk-approved trades are bumped UP to the minimum viable order
+        # (>=5 tokens AND >=$1 notional), not dropped.
         order = client.prepare_order(_make_signal(), _make_market(), 0.50, False)
-        assert order is None
+        assert order is not None
+        assert order.size >= 5.0
+        assert order.size * order.price >= 1.0
+
+    def test_low_price_bump_clears_notional_floor(self):
+        client = self._make_client()
+        # At $0.05, 5 tokens is only $0.25 — the bump must add tokens until the
+        # $1 notional floor is cleared, not just hit 5 tokens.
+        order = client.prepare_order(_make_signal(), _make_market(yes_price=0.05), 0.20, False)
+        assert order is not None
+        assert order.size * order.price >= 1.0
 
     def test_price_clamping(self):
         client = self._make_client()
