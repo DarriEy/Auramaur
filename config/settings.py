@@ -149,6 +149,13 @@ class MarketMakerConfig(BaseModel):
     refresh_seconds: int = 30  # re-quote frequency
 
 
+class TechnicalConfig(BaseModel):
+    enabled: bool = True
+    min_move_pct: float = 5.0
+    mean_rev_threshold: float = 0.10
+    min_history_points: int = 5
+
+
 class BrokerConfig(BaseModel):
     sync_interval_seconds: int = 60
     use_limit_orders: bool = True
@@ -285,6 +292,7 @@ class Settings(BaseSettings):
     ensemble: EnsembleConfig = Field(default_factory=lambda: EnsembleConfig(**_DEFAULTS.get("ensemble", {})))
     llm_ensemble: LLMEnsembleConfig = Field(default_factory=lambda: LLMEnsembleConfig(**_DEFAULTS.get("llm_ensemble", {})))
     market_maker: MarketMakerConfig = Field(default_factory=lambda: MarketMakerConfig(**_DEFAULTS.get("market_maker", {})))
+    technical: TechnicalConfig = Field(default_factory=lambda: TechnicalConfig(**_DEFAULTS.get("technical", {})))
     arbitrage: ArbitrageConfig = Field(default_factory=lambda: ArbitrageConfig(**_DEFAULTS.get("arbitrage", {})))
     analysis: AnalysisConfig = Field(default_factory=lambda: AnalysisConfig(**_DEFAULTS.get("analysis", {})))
     hybrid: HybridConfig = Field(default_factory=lambda: HybridConfig(**_DEFAULTS.get("hybrid", {})))

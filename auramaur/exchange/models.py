@@ -202,4 +202,5 @@ class Signal(BaseModel):
     # Exchanges like Kalshi that support direct YES/NO sells read this to
     # build a proper SELL order instead of opening a new opposing position.
     exit_token: TokenType | None = None
+    strategy_source: str = "llm"
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
