@@ -194,6 +194,16 @@ def main():
 @click.option("--exchange", default=None, type=click.Choice(["polymarket", "kalshi", "ibkr"]), help="Run only a specific exchange (isolated instance)")
 def run(agent: bool, hybrid: bool, exchange: str | None):
     """Start the bot."""
+    # Hang diagnostic: `kill -USR1 <pid>` dumps every thread's Python stack
+    # (including the asyncio loop thread) to stderr — even when the loop is
+    # blocked in a synchronous C call. Needs no root/py-spy. Fires only on the
+    # explicit signal, so it has no effect on normal operation.
+    import faulthandler
+    import signal as _signal
+
+    if hasattr(_signal, "SIGUSR1"):
+        faulthandler.register(_signal.SIGUSR1, all_threads=True)
+
     settings = Settings()
 
     if agent:

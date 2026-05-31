@@ -25,6 +25,12 @@ log = structlog.get_logger()
 # Kalshi basic tier: 20 reads/sec
 _RATE_LIMIT = 20
 
+# (connect, read) seconds applied to every Kalshi request. Without this a
+# stalled Cloudflare/Kalshi connection mid-body-read hangs forever — and since
+# the *_without_preload_content body read lands on the asyncio loop thread, it
+# freezes the entire bot, not just one task.
+_REQUEST_TIMEOUT = (10, 20)
+
 
 class KalshiClient:
     """Kalshi exchange client for market discovery and order execution.
@@ -75,9 +81,37 @@ class KalshiClient:
         log.info("kalshi.initialized", host=host, environment=cfg.environment)
 
     async def _call(self, fn, *args, **kwargs):
-        """Run a synchronous SDK call in a thread with rate limiting."""
+        """Run a synchronous SDK call in a thread with rate limiting.
+
+        Note: not every SDK method accepts ``_request_timeout`` (the plain
+        ``get_order``/``cancel_order``/``get_balance`` variants do not), so the
+        timeout is injected per call site rather than here. These run fully in
+        the worker thread (body included), so a stall blocks only that thread,
+        not the event loop.
+        """
         async with self._semaphore:
             return await asyncio.to_thread(fn, *args, **kwargs)
+
+    async def _call_raw(self, fn, *args, **kwargs):
+        """Run a ``*_without_preload_content`` SDK call AND read its body, both
+        in the worker thread.
+
+        These SDK methods return as soon as the response headers arrive and
+        read the body lazily on first ``.data`` access. If that access happens
+        on the event loop (the default when the caller does
+        ``json.loads(resp.data)`` after ``_call`` returns), the blocking SSL
+        body-read freezes the entire bot. Reading ``.data`` inside the thread
+        keeps it off the loop; ``_request_timeout`` bounds the read.
+
+        Returns the raw response body, ready for ``json.loads``.
+        """
+        kwargs.setdefault("_request_timeout", _REQUEST_TIMEOUT)
+
+        def _run():
+            return fn(*args, **kwargs).data
+
+        async with self._semaphore:
+            return await asyncio.to_thread(_run)
 
     # ------------------------------------------------------------------
     # MarketDiscovery protocol
@@ -86,19 +120,19 @@ class KalshiClient:
     async def _get_events_raw(self, **kwargs) -> list[dict]:
         """Fetch events and return raw dicts (bypasses SDK model validation)."""
         import json
-        response = await self._call(
+        raw = await self._call_raw(
             self._events_api.get_events_without_preload_content, **kwargs,
         )
-        data = json.loads(response.data)
+        data = json.loads(raw)
         return data.get("events", [])
 
     async def _get_market_raw(self, ticker: str) -> dict | None:
         """Fetch a single market as raw dict."""
         import json
-        response = await self._call(
+        raw = await self._call_raw(
             self._markets_api.get_market_without_preload_content, ticker,
         )
-        data = json.loads(response.data)
+        data = json.loads(raw)
         return data.get("market")
 
     async def get_markets(self, active: bool = True, limit: int = 100) -> list[Market]:
@@ -260,10 +294,10 @@ class KalshiClient:
         # Guard: skip if we already have a resting order on the same market + side
         try:
             import json as _json
-            existing = await self._call(
+            existing_raw = await self._call_raw(
                 self._portfolio_api.get_orders_without_preload_content,
             )
-            existing_data = _json.loads(existing.data)
+            existing_data = _json.loads(existing_raw)
             kalshi_side = "yes" if order.token == TokenType.YES else "no"
             kalshi_action = "buy" if order.side == OrderSide.BUY else "sell"
             ticker = order.token_id
@@ -331,11 +365,11 @@ class KalshiClient:
                 yes_price=yes_price_cents,
             )
 
-            response = await self._call(
+            raw = await self._call_raw(
                 self._portfolio_api.create_order_without_preload_content,
                 create_order_request=req,
             )
-            data = json.loads(response.data)
+            data = json.loads(raw)
             order_data = data.get("order", {})
             order_id = str(order_data.get("order_id", "unknown"))
 
@@ -371,6 +405,7 @@ class KalshiClient:
             import json
             response = await self._call(
                 self._markets_api.get_market_orderbook_with_http_info, market_id,
+                _request_timeout=_REQUEST_TIMEOUT,
             )
             data = json.loads(response.raw_data)
             # API returns orderbook_fp (dollar strings) or orderbook (cents)
@@ -466,10 +501,10 @@ class KalshiClient:
 
         self._init_api()
         try:
-            resp = await self._call(
+            raw = await self._call_raw(
                 self._portfolio_api.get_positions_without_preload_content,
             )
-            data = _json.loads(resp.data)
+            data = _json.loads(raw)
             positions = data.get("market_positions", [])
 
             synced = 0
