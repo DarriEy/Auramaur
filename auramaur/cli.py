@@ -384,12 +384,22 @@ def redeem_check():
               help="Skip the confirmation prompt (for non-interactive use).")
 @click.option("--limit", default=0, type=int,
               help="Cap how many positions to close this run (0 = no cap).")
-def dust_exit(max_notional: float, exchange: str | None, execute: bool, yes: bool, limit: int):
+@click.option("--category", default=None,
+              help="Only positions in this category (comma-separated for several, "
+                   "e.g. 'sports,esports'). The category is recomputed live with the "
+                   "current classifier, not the stored label, so stale mislabels "
+                   "don't leak in.")
+def dust_exit(max_notional: float, exchange: str | None, execute: bool, yes: bool,
+              limit: int, category: str | None):
     """List small 'dust' positions and optionally close them.
 
     Dust is open positions whose current value is below ``--max-notional``.
     Closing them frees capital and trims position count — which un-starves
     Kelly sizing and lowers the regime-driven minimum-edge bar.
+
+    Use ``--category`` to target a specific category (e.g. a blocked one like
+    sports) — the category is recomputed live so freshly-fixed classifications
+    apply even before the next scan rewrites the stored label.
 
     Safety: this attaches to the primary database with an exclusive lock, so
     it refuses to run while the live bot is running (which would risk
@@ -398,6 +408,12 @@ def dust_exit(max_notional: float, exchange: str | None, execute: bool, yes: boo
 
     async def _run():
         from auramaur.exchange.models import ExitReason, OrderSide, Position, TokenType
+        from auramaur.strategy.classifier import classify_market
+
+        cat_filter = (
+            {c.strip().lower() for c in category.split(",") if c.strip()}
+            if category else None
+        )
 
         settings = Settings()
         bot = AuramaurBot(settings=settings, db_path="auramaur.db", exchange_filter=exchange)
@@ -440,20 +456,32 @@ def dust_exit(max_notional: float, exchange: str | None, execute: bool, yes: boo
                 if exchanges.get(name) is None:
                     continue
                 rows = await db.fetchall(
-                    "SELECT market_id, side, size, avg_price, current_price, category, "
-                    "token, token_id FROM portfolio "
-                    "WHERE exchange = ? AND is_paper = ? AND size > 0",
+                    "SELECT p.market_id, p.side, p.size, p.avg_price, p.current_price, "
+                    "p.category, p.token, p.token_id, "
+                    "COALESCE(m.question, '') AS question, "
+                    "COALESCE(m.description, '') AS description "
+                    "FROM portfolio p LEFT JOIN markets m ON p.market_id = m.id "
+                    "WHERE p.exchange = ? AND p.is_paper = ? AND p.size > 0",
                     (name, is_paper),
                 )
                 found: list[Position] = []
                 for row in rows:
                     tok = TokenType(row["token"]) if row["token"] in ("YES", "NO") else TokenType.YES
+                    # Recompute the category with the current classifier so the
+                    # filter targets the true category, not a stale stored label
+                    # (the whole reason mislabeled markets got stuck blocked).
+                    live_cat = (
+                        classify_market(row["question"], row["description"])
+                        if row["question"] else (row["category"] or "")
+                    )
+                    if cat_filter and live_cat.lower() not in cat_filter:
+                        continue
                     p = Position(
                         market_id=row["market_id"], exchange=name,
                         side=OrderSide(row["side"]) if row["side"] else OrderSide.BUY,
                         size=float(row["size"]), avg_price=float(row["avg_price"] or 0.0),
                         current_price=float(row["current_price"] or 0.0),
-                        category=row["category"] or "",
+                        category=live_cat,
                         token=tok, token_id=row["token_id"] or "",
                     )
                     # Pre-filter on the stored value so we only hit the API for
@@ -474,17 +502,18 @@ def dust_exit(max_notional: float, exchange: str | None, execute: bool, yes: boo
                 if found:
                     dust[name] = found
 
+            scope = f" in [{category}]" if category else ""
             total = sum(len(v) for v in dust.values())
             if total == 0:
-                console.print(f"[green]No dust positions under ${max_notional:.2f}.[/]")
+                console.print(f"[green]No dust positions under ${max_notional:.2f}{scope}.[/]")
                 return
 
             # ---- Show what we found ----
             sellables: list[tuple[str, object, object, Position]] = []
             grand_value = grand_pnl = 0.0
             for name, positions in dust.items():
-                table = Table(title=f"{name} — dust under ${max_notional:.2f}")
-                for col in ("Market", "Tok", "Size", "Price", "Value", "PnL", ""):
+                table = Table(title=f"{name} — dust under ${max_notional:.2f}{scope}")
+                for col in ("Market", "Cat", "Tok", "Size", "Price", "Value", "PnL", ""):
                     table.add_column(col)
                 for p in positions:
                     value = p.size * (p.current_price or 0.0)
@@ -494,7 +523,7 @@ def dust_exit(max_notional: float, exchange: str | None, execute: bool, yes: boo
                     if ok:
                         sellables.append((name, discoveries[name], exchanges[name], p))
                     table.add_row(
-                        p.market_id[:34], p.token.value, f"{p.size:.1f}",
+                        p.market_id[:30], (p.category or "?")[:12], p.token.value, f"{p.size:.1f}",
                         f"${p.current_price:.3f}", f"${value:.2f}",
                         f"${p.unrealized_pnl:+.2f}",
                         "[green]sell[/]" if ok else "[dim]redeem-only[/]",
