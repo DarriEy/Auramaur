@@ -45,17 +45,37 @@ def test_no_edge_equal():
     assert size == 0
 
 
-def test_heat_multiplier_reduces_size():
+def test_confidence_multiplier_reduces_size():
+    """Confidence multiplier applies to the edge, reducing final size."""
     sizer = KellySizer(fraction=0.25)
-    full = sizer.calculate(claude_prob=0.7, market_prob=0.5, bankroll=1000, heat_mult=1.0, max_stake=100)
-    reduced = sizer.calculate(claude_prob=0.7, market_prob=0.5, bankroll=1000, heat_mult=0.5, max_stake=100)
+    full = sizer.calculate(claude_prob=0.7, market_prob=0.5, bankroll=1000, confidence_mult=1.0, max_stake=500)
+    reduced = sizer.calculate(claude_prob=0.7, market_prob=0.5, bankroll=1000, confidence_mult=0.5, max_stake=500)
+    # raw_edge = 0.2
+    # reduced_edge = 0.1
+    # full_kelly = 0.2 / (0.5 * 0.5) = 0.8 -> size = 0.8 * 0.25 * 1000 = 200
+    # reduced_kelly = 0.1 / (0.5 * 0.5) = 0.4 -> size = 0.4 * 0.25 * 1000 = 100
     assert reduced < full
+    assert reduced == pytest.approx(full * 0.5, rel=0.01)
 
 
-def test_red_heat_zero():
+def test_category_multiplier_reduces_size():
+    """Category multiplier applies to the edge, reducing final size."""
     sizer = KellySizer(fraction=0.25)
-    size = sizer.calculate(claude_prob=0.7, market_prob=0.5, bankroll=1000, heat_mult=0.0, max_stake=25)
-    assert size == 0
+    full = sizer.calculate(claude_prob=0.7, market_prob=0.5, bankroll=1000, category_mult=1.0, max_stake=500)
+    reduced = sizer.calculate(claude_prob=0.7, market_prob=0.5, bankroll=1000, category_mult=0.5, max_stake=500)
+    assert reduced < full
+    assert reduced == pytest.approx(full * 0.5, rel=0.01)
+
+
+def test_legacy_multipliers_ignored():
+    """Risk-based multipliers passed via kwargs should not affect sizing."""
+    sizer = KellySizer(fraction=0.25)
+    full = sizer.calculate(claude_prob=0.7, market_prob=0.5, bankroll=1000, max_stake=100)
+    ignored = sizer.calculate(
+        claude_prob=0.7, market_prob=0.5, bankroll=1000, max_stake=100,
+        heat_mult=0.5, volatility_mult=0.5, liquidity_mult=0.5
+    )
+    assert ignored == full
 
 
 def test_capped_at_max_stake():
@@ -63,50 +83,3 @@ def test_capped_at_max_stake():
     size = sizer.calculate(claude_prob=0.9, market_prob=0.1, bankroll=100000, max_stake=25.0)
     assert size == 25.0
 
-
-# --- Volatility multiplier tests ---
-
-
-def test_volatility_multiplier_low_vol():
-    """Vol <= 0.05 should return 1.0 (no reduction)."""
-    # Stable prices: changes are tiny
-    prices = [0.50, 0.51, 0.50, 0.51, 0.50]
-    mult = KellySizer.volatility_multiplier(prices)
-    assert mult == 1.0
-
-
-def test_volatility_multiplier_high_vol():
-    """Vol > 0.10 should reduce the multiplier significantly."""
-    # Wild swings: +0.15, -0.15, +0.15, -0.15
-    prices = [0.50, 0.65, 0.50, 0.65, 0.50]
-    mult = KellySizer.volatility_multiplier(prices)
-    assert mult < 1.0
-    assert mult >= 0.3  # Floor
-
-
-def test_volatility_multiplier_extreme_vol():
-    """Extreme volatility should hit the 0.3 floor."""
-    prices = [0.20, 0.80, 0.20, 0.80, 0.20]
-    mult = KellySizer.volatility_multiplier(prices)
-    assert mult == 0.3
-
-
-def test_volatility_multiplier_insufficient_data():
-    """Fewer than 2 price points should return 1.0."""
-    assert KellySizer.volatility_multiplier([0.5]) == 1.0
-    assert KellySizer.volatility_multiplier([]) == 1.0
-
-
-def test_volatility_mult_reduces_kelly_size():
-    """Passing volatility_mult < 1.0 should reduce position size."""
-    sizer = KellySizer(fraction=0.10)  # Smaller fraction so we don't hit max_stake cap
-    full = sizer.calculate(
-        claude_prob=0.6, market_prob=0.5, bankroll=1000,
-        volatility_mult=1.0, max_stake=500,
-    )
-    reduced = sizer.calculate(
-        claude_prob=0.6, market_prob=0.5, bankroll=1000,
-        volatility_mult=0.5, max_stake=500,
-    )
-    assert reduced < full
-    assert reduced == pytest.approx(full * 0.5, rel=0.01)

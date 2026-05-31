@@ -41,32 +41,28 @@ class KellySizer:
         claude_prob: float,
         market_prob: float,
         bankroll: float,
-        heat_mult: float = 1.0,
         confidence_mult: float = 1.0,
-        liquidity_mult: float = 1.0,
         category_mult: float = 1.0,
-        volatility_mult: float = 1.0,
-        book_imbalance_mult: float = 1.0,
         max_stake: float = 25.0,
         fraction_override: float | None = None,
+        **kwargs,  # Accept but ignore legacy multipliers (heat, liquidity, etc.)
     ) -> float:
         """Return the optimal stake in dollars using geometric Kelly.
 
-        Geometric Kelly formula:
-          For BUY YES at price p, with true probability q:
-            kelly = q/p - (1-q)/(1-p)  (simplified: maximize E[log(wealth)])
-          This is equivalent to: kelly = (q*(1-p) - (1-q)*p) / (p*(1-p))
-                                       = (q - p) / (p*(1-p))
-
-        This naturally produces SMALLER bets than linear Kelly when edge is
-        slim relative to risk, which is exactly what we want for compounding.
+        Conviction-based discounts (confidence_mult, category_mult) are applied
+        directly to the EDGE estimate. Risk-based discounts (heat, liquidity,
+        volatility) are handled by the pre-trade risk checks and should NOT
+        be double-counted here.
         """
         if market_prob >= 0.99 or market_prob <= 0.01:
             return 0.0
 
-        edge = claude_prob - market_prob
-        if abs(edge) < 0.001:
+        raw_edge = claude_prob - market_prob
+        if abs(raw_edge) < 0.001:
             return 0.0
+
+        # Apply conviction multipliers to the edge
+        edge = raw_edge * confidence_mult * category_mult
 
         # Cap edge to ±20% — larger claimed edges are almost always
         # overconfident and cause outsized bets on phantom signals.
@@ -75,11 +71,11 @@ class KellySizer:
         if edge > 0:
             # BUY YES: geometric Kelly
             # kelly = (q - p) / (p * (1 - p))
-            # where q = claude_prob, p = market_prob
+            # where q = market_prob + edge, p = market_prob
             kelly = edge / (market_prob * (1.0 - market_prob))
         else:
             # BUY NO: same formula with inverted probabilities
-            no_claude = 1.0 - claude_prob
+            no_claude = 1.0 - (market_prob + edge)
             no_market = 1.0 - market_prob
             kelly = (no_claude - no_market) / (no_market * (1.0 - no_market))
 
@@ -87,17 +83,8 @@ class KellySizer:
             return 0.0
 
         fraction = self.fraction if fraction_override is None else fraction_override
-        size = (
-            kelly
-            * fraction
-            * heat_mult
-            * confidence_mult
-            * liquidity_mult
-            * category_mult
-            * volatility_mult
-            * book_imbalance_mult
-            * bankroll
-        )
+        size = kelly * fraction * bankroll
+
         size = min(size, max_stake)
         if 0 < size < 1.0:
             return 0.0

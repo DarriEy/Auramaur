@@ -86,7 +86,13 @@ class RiskManager:
             base_max_stake=rc.max_stake_per_market,
             base_min_edge_pct=rc.min_edge_pct,
         )
-        bankroll = min(cash, regime.max_stake * 3)
+
+        # Interpret max_stake <= 1.0 as a percentage of equity (e.g. 0.02 = 2%)
+        max_stake = regime.max_stake
+        if max_stake <= 1.0:
+            max_stake = equity * max_stake
+
+        bankroll = min(cash, max_stake * 3)
 
         # Time to resolution
         if market.end_date:
@@ -172,12 +178,12 @@ class RiskManager:
                 liquidity_mult=KellySizer.liquidity_multiplier(max(market.liquidity, market.volume)),
                 category_mult=category_mult,
                 volatility_mult=vol_mult,
-                max_stake=min(regime.max_stake, cash),
+                max_stake=min(max_stake, cash),
                 fraction_override=regime.kelly_fraction,
             )
 
         # Run max_stake check on the actual computed position size
-        stake_check = await check_max_stake(position_size, regime.max_stake)
+        stake_check = await check_max_stake(position_size, max_stake)
         checks = pre_checks + [stake_check]
 
         all_passed = pre_passed and stake_check.passed
