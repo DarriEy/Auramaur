@@ -42,8 +42,8 @@ class RiskConfig(BaseModel):
     min_liquidity: float = 1000.0
     max_spread_pct: float = 5.0
     confidence_floor: Literal["LOW", "MEDIUM", "HIGH"] = "MEDIUM"
-    implied_prob_min: float = 0.05
-    implied_prob_max: float = 0.95
+    implied_prob_min: float = 0.03
+    implied_prob_max: float = 0.97
     category_exposure_cap_pct: float = 30.0
     time_to_resolution_min_hours: int = 24
     time_to_resolution_max_days: int = 0  # 0 = no ceiling

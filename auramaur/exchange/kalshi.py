@@ -249,8 +249,14 @@ class KalshiClient:
         # Kalshi contracts are $1 notional; position_size in dollars = number of contracts
         contract_count = round(position_size / exec_price, 2) if exec_price > 0 else 0
         if contract_count < 1:
-            log.info("kalshi.prepare_order.too_small", contracts=contract_count)
-            return None
+            # Bump a risk-approved sub-minimum order up to 1 contract rather
+            # than dropping it. One contract is at most $0.99 of notional.
+            log.info(
+                "kalshi.prepare_order.bumped_to_min",
+                original=contract_count,
+                exec_price=exec_price,
+            )
+            contract_count = 1.0
 
         return Order(
             market_id=market.id,
