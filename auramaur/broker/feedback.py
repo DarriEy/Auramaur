@@ -22,8 +22,19 @@ _BRIER_BAD = 0.30        # Above this = poorly calibrated
 _MULT_GOOD = 1.2         # Kelly multiplier for accurate categories
 _MULT_NEUTRAL = 1.0      # Kelly multiplier for average categories
 _MULT_BAD = 0.3           # Kelly multiplier for poor categories
-_AVOID_MIN_TRADES = 10    # Minimum trades before we consider avoiding
+_AVOID_MIN_TRADES = 10    # Minimum distinct markets before we consider avoiding
 _AVOID_ACCURACY = 0.40    # Directional accuracy below this = avoid
+
+# The calibration table holds one row per *analysis snapshot*, so a single
+# market re-analyzed across many cycles can appear dozens of times. Counting
+# each snapshot as an independent prediction inflates trade counts ~3-4x and
+# lets heavily-re-analyzed markets dominate a category's accuracy/Brier. Every
+# aggregate below restricts to the most recent resolved snapshot per market so
+# the unit of measure is the market (= the resolution event), not the snapshot.
+_LATEST_PER_MARKET = (
+    "id IN (SELECT MAX(id) FROM calibration "
+    "WHERE actual_outcome IS NOT NULL AND category != '' GROUP BY market_id)"
+)
 
 
 class PerformanceFeedback:
@@ -55,7 +66,7 @@ class PerformanceFeedback:
         multipliers on its next evaluation.
         """
         rows = await self._db.fetchall(
-            """
+            f"""
             SELECT category,
                    COUNT(*) AS n,
                    AVG((predicted_prob - actual_outcome) * (predicted_prob - actual_outcome)) AS brier,
@@ -69,6 +80,7 @@ class PerformanceFeedback:
             FROM calibration
             WHERE actual_outcome IS NOT NULL
               AND category != ''
+              AND {_LATEST_PER_MARKET}
             GROUP BY category
             """
         )
@@ -132,7 +144,7 @@ class PerformanceFeedback:
             ``{category: {brier, accuracy, trade_count, kelly_mult}}``
         """
         rows = await self._db.fetchall(
-            """
+            f"""
             SELECT category,
                    COUNT(*) AS n,
                    AVG((predicted_prob - actual_outcome) * (predicted_prob - actual_outcome)) AS brier,
@@ -146,6 +158,7 @@ class PerformanceFeedback:
             FROM calibration
             WHERE actual_outcome IS NOT NULL
               AND category != ''
+              AND {_LATEST_PER_MARKET}
             GROUP BY category
             """
         )
@@ -223,7 +236,8 @@ class PerformanceFeedback:
         """Categories to skip based on poor historical performance.
 
         A category is added to the avoid list when:
-        - At least ``_AVOID_MIN_TRADES`` resolved predictions exist
+        - At least ``_AVOID_MIN_TRADES`` distinct resolved markets exist
+          (snapshots of the same market are collapsed — see _LATEST_PER_MARKET)
         - Directional accuracy is below ``_AVOID_ACCURACY`` (40%)
         """
         rows = await self._db.fetchall(
@@ -240,9 +254,10 @@ class PerformanceFeedback:
             FROM calibration
             WHERE actual_outcome IS NOT NULL
               AND category != ''
+              AND {dedup}
             GROUP BY category
             HAVING n >= ?
-            """,
+            """.format(dedup=_LATEST_PER_MARKET),
             (_AVOID_MIN_TRADES,),
         )
 
@@ -290,8 +305,9 @@ class PerformanceFeedback:
             FROM calibration
             WHERE actual_outcome IS NOT NULL
               AND category != ''
+              AND {dedup}
             GROUP BY category
-            """,
+            """.format(dedup=_LATEST_PER_MARKET),
         )
 
         whitelisted: set[str] = set()
