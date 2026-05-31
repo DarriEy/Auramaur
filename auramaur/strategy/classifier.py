@@ -13,6 +13,12 @@ SPORTS_KEYWORDS: list[str] = [
     "world cup", "vs.", "o/u", "spread", "game", "match", "fc",
     "league", "premier", "serie a", "bundesliga", "ligue 1",
     "eredivisie", "champions league", "europa league", "nhl", "mls",
+    # Individual-sport / event markets — these often lack a team-vs marker and
+    # used to rely on the removed "winner" keyword, so without explicit markers
+    # they fall to "other" (which is NOT blocked) and the bot would trade them.
+    "golf", "pga", "masters", "ryder cup", "tennis", "wimbledon", "grand slam",
+    "us open", "australian open", "french open", "atp", "wta",
+    "grand prix", "nascar", "tour de france", "ufc", "boxing",
 ]
 # Note: "winner" is intentionally NOT a sports marker — it appears in the
 # resolution boilerplate of nearly every election/award market ("resolve
@@ -20,7 +26,7 @@ SPORTS_KEYWORDS: list[str] = [
 # matching below runs against the question, not the description.
 # Sports markets phrased "<team> win on <date>", e.g. "Will Poland win on
 # 2026-03-26?". A plain keyword can't express the year, so it's a pattern.
-SPORTS_PATTERNS: list[str] = [r"win on 20\d\d"]
+SPORTS_PATTERNS: list[str] = [r"win on 20\d\d", r"\bolympics?\b", r"\bf1\b"]
 
 # Checked BEFORE sports so award-show markets ("Eurovision ... Jury Winner",
 # "win the Oscar") aren't stolen by the sports "winner"/"win" markers.

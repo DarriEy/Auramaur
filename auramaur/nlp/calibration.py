@@ -22,6 +22,17 @@ _ONLINE_LR = 0.01
 # Window size for moving Brier score
 _BRIER_WINDOW = 20
 
+# One row per market — its most recent resolved forecast. The calibration table
+# holds a row per analysis snapshot, so a market re-analysed N times across
+# cycles appears N times. Without this, the batch Platt fit, Brier score, and
+# calibration curve over-weight heavily-re-analysed markets (the same bias
+# fixed in broker/feedback.py), and refit_all periodically clobbers the clean
+# per-resolution online-SGD params with that biased fit.
+_LATEST_RESOLVED_PER_MARKET = (
+    "id IN (SELECT MAX(id) FROM calibration "
+    "WHERE actual_outcome IS NOT NULL GROUP BY market_id)"
+)
+
 
 def _clamp(p: float) -> float:
     """Clamp probability to avoid log(0)."""
@@ -85,9 +96,10 @@ class CalibrationTracker:
         self._initialized = True
         try:
             rows = await self._db.fetchall(
-                """SELECT predicted_prob, actual_outcome
+                f"""SELECT predicted_prob, actual_outcome
                    FROM calibration
                    WHERE actual_outcome IS NOT NULL
+                     AND {_LATEST_RESOLVED_PER_MARKET}
                    ORDER BY resolved_at DESC
                    LIMIT ?""",
                 (_BRIER_WINDOW,),
@@ -303,12 +315,13 @@ class CalibrationTracker:
             The Brier score, or None if no resolved predictions exist.
         """
         row = await self._db.fetchone(
-            """
+            f"""
             SELECT AVG((predicted_prob - actual_outcome) * (predicted_prob - actual_outcome))
                    AS brier_score,
                    COUNT(*) AS n
             FROM calibration
             WHERE actual_outcome IS NOT NULL
+              AND {_LATEST_RESOLVED_PER_MARKET}
             """,
         )
         if row is None or row["n"] == 0:
@@ -334,10 +347,11 @@ class CalibrationTracker:
             A list of (mean_predicted, mean_actual) tuples, one per non-empty bin.
         """
         rows = await self._db.fetchall(
-            """
+            f"""
             SELECT predicted_prob, actual_outcome
             FROM calibration
             WHERE actual_outcome IS NOT NULL
+              AND {_LATEST_RESOLVED_PER_MARKET}
             ORDER BY predicted_prob
             """,
         )
@@ -384,19 +398,21 @@ class CalibrationTracker:
         cat = category or ""
         if cat:
             rows = await self._db.fetchall(
-                """
+                f"""
                 SELECT predicted_prob, actual_outcome
                 FROM calibration
                 WHERE actual_outcome IS NOT NULL AND category = ?
+                  AND {_LATEST_RESOLVED_PER_MARKET}
                 """,
                 (cat,),
             )
         else:
             rows = await self._db.fetchall(
-                """
+                f"""
                 SELECT predicted_prob, actual_outcome
                 FROM calibration
                 WHERE actual_outcome IS NOT NULL
+                  AND {_LATEST_RESOLVED_PER_MARKET}
                 """,
             )
 
@@ -534,10 +550,11 @@ class CalibrationTracker:
 
         # Per-category fits
         rows = await self._db.fetchall(
-            """
+            f"""
             SELECT category, COUNT(*) AS n
             FROM calibration
             WHERE actual_outcome IS NOT NULL AND category != ''
+              AND {_LATEST_RESOLVED_PER_MARKET}
             GROUP BY category
             HAVING n >= ?
             """,

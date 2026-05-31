@@ -363,3 +363,32 @@ class TestOnlineCalibration:
         # Record resolution for a market with no prediction
         run(tracker.record_resolution("nonexistent", True), event_loop)
         # Should not crash — just no online update triggered
+
+
+class TestSnapshotDedup:
+    """Calibration must measure per resolved market, not per analysis snapshot —
+    otherwise a heavily re-analysed market dominates the Platt fit / Brier."""
+
+    async def _seed(self, db, market_id, prob, outcome, n=1, category=""):
+        for _ in range(n):
+            await db.execute(
+                "INSERT INTO calibration (market_id, predicted_prob, actual_outcome, category) "
+                "VALUES (?, ?, ?, ?)",
+                (market_id, prob, outcome, category),
+            )
+        await db.commit()
+
+    def test_brier_dedups_snapshots(self, db, tracker, event_loop):
+        # m1 snapshotted 5x (0.2, YES); m2 once (0.8, YES).
+        run(self._seed(db, "m1", 0.2, 1, n=5), event_loop)
+        run(self._seed(db, "m2", 0.8, 1, n=1), event_loop)
+        score = run(tracker.get_brier_score(), event_loop)
+        # Deduped: mean((0.2-1)^2, (0.8-1)^2) = (0.64 + 0.04) / 2 = 0.34.
+        # Per-snapshot it would be (5*0.64 + 0.04) / 6 = 0.54.
+        assert abs(score - 0.34) < 1e-9
+
+    def test_fit_counts_distinct_markets(self, db, event_loop):
+        tracker = CalibrationTracker(db=db, min_samples=10)
+        # 15 snapshots but ONE market — below the 10 distinct-market threshold.
+        run(self._seed(db, "m1", 0.6, 1, n=15), event_loop)
+        assert run(tracker.fit_params(category=None), event_loop) is None
