@@ -9,11 +9,15 @@ import re
 # to generic keyword matching (e.g. "win" matching politics).
 
 SPORTS_KEYWORDS: list[str] = [
-    "nba", "nfl", "mlb", "soccer", "football", "championship", "super bowl",
-    "world cup", "vs.", "o/u", "spread", "winner", "game", "match", "fc",
+    "nba", "nfl", "mlb", "ncaa", "soccer", "football", "championship", "super bowl",
+    "world cup", "vs.", "o/u", "spread", "game", "match", "fc",
     "league", "premier", "serie a", "bundesliga", "ligue 1",
     "eredivisie", "champions league", "europa league", "nhl", "mls",
 ]
+# Note: "winner" is intentionally NOT a sports marker — it appears in the
+# resolution boilerplate of nearly every election/award market ("resolve
+# according to the winner of the ... election"), which is exactly why priority
+# matching below runs against the question, not the description.
 # Sports markets phrased "<team> win on <date>", e.g. "Will Poland win on
 # 2026-03-26?". A plain keyword can't express the year, so it's a pattern.
 SPORTS_PATTERNS: list[str] = [r"win on 20\d\d"]
@@ -100,17 +104,23 @@ def classify_market(question: str, description: str = "") -> str:
     misclassified by generic keyword overlap. All matching is on word
     boundaries to avoid substring collisions (e.g. "nfl" inside "NFLX").
     """
-    text = f"{question} {description}".lower()
+    # Priority categories match the QUESTION only. Descriptions are resolution
+    # boilerplate ("resolve according to the winner of the ... election",
+    # candidate "A vs. B" matchups) that reliably triggers sports/gambling
+    # markers on non-sports markets. The fallthrough scoring below still uses
+    # the description, where extra signal helps more than it hurts.
+    q = question.lower()
+    full = f"{question} {description}".lower()
 
-    # 1. Check priority categories first
+    # 1. Check priority categories first (question only)
     for category, patterns in _PRIORITY_CATEGORIES:
-        if any(p.search(text) for p in patterns):
+        if any(p.search(q) for p in patterns):
             return category
 
-    # 2. Fall through to general keyword scoring
+    # 2. Fall through to general keyword scoring (question + description)
     scores: dict[str, int] = {}
     for category, patterns in _CATEGORY_RES.items():
-        score = sum(1 for p in patterns if p.search(text))
+        score = sum(1 for p in patterns if p.search(full))
         if score > 0:
             scores[category] = score
 
