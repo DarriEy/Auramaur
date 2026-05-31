@@ -370,6 +370,190 @@ def redeem_check():
     asyncio.run(_check())
 
 
+@main.command("dust-exit")
+@click.option("--max-notional", default=5.0, type=float,
+              help="Treat open positions worth less than this (current value, $) as dust.")
+@click.option("--exchange", default=None, type=click.Choice(["polymarket", "kalshi"]),
+              help="Limit to a single exchange (default: all).")
+@click.option("--execute", is_flag=True, default=False,
+              help="Place the closing orders. Without this flag it's a preview only. "
+                   "Live vs paper still follows the normal three-gate model "
+                   "(AURAMAUR_LIVE + execution.live); without those gates open the "
+                   "sells are simulated.")
+@click.option("--yes", is_flag=True, default=False,
+              help="Skip the confirmation prompt (for non-interactive use).")
+@click.option("--limit", default=0, type=int,
+              help="Cap how many positions to close this run (0 = no cap).")
+def dust_exit(max_notional: float, exchange: str | None, execute: bool, yes: bool, limit: int):
+    """List small 'dust' positions and optionally close them.
+
+    Dust is open positions whose current value is below ``--max-notional``.
+    Closing them frees capital and trims position count — which un-starves
+    Kelly sizing and lowers the regime-driven minimum-edge bar.
+
+    Safety: this attaches to the primary database with an exclusive lock, so
+    it refuses to run while the live bot is running (which would risk
+    double-selling). Stop the bot first.
+    """
+
+    async def _run():
+        from auramaur.exchange.models import ExitReason, OrderSide, Position, TokenType
+
+        settings = Settings()
+        bot = AuramaurBot(settings=settings, db_path="auramaur.db", exchange_filter=exchange)
+        try:
+            await bot._init_components()
+        except RuntimeError as e:
+            console.print(f"[red]Cannot start dust-exit:[/] {e}")
+            console.print(
+                "[yellow]Auramaur looks like it's already running. Stop the bot first — "
+                "running dust-exit alongside it risks double-selling the same position.[/]"
+            )
+            return
+
+        comps = bot._components
+        db = comps["db"]
+        discoveries = comps["discoveries"]
+        exchanges = comps["exchanges"]
+        alerts = comps["alerts"]
+        is_paper = 0 if settings.is_live else 1
+
+        def _price_for(market, token: TokenType) -> float:
+            if token == TokenType.NO:
+                no = market.outcome_no_price
+                return no if no > 0.01 else (1.0 - market.outcome_yes_price)
+            return market.outcome_yes_price
+
+        def _sellable(name: str, p: Position) -> bool:
+            # Mirrors the hard floors in the bot's exit paths: Polymarket needs
+            # >=5 tokens, Kalshi >=1 contract, and a price the book can fill.
+            if (p.current_price or 0.0) < 0.01:
+                return False
+            return p.size >= 5 if name == "polymarket" else p.size >= 1
+
+        try:
+            # ---- Discover dust, refreshing prices for candidates only ----
+            dust: dict[str, list[Position]] = {}
+            for name, discovery in discoveries.items():
+                if exchange and name != exchange:
+                    continue
+                if exchanges.get(name) is None:
+                    continue
+                rows = await db.fetchall(
+                    "SELECT market_id, side, size, avg_price, current_price, category, "
+                    "token, token_id FROM portfolio "
+                    "WHERE exchange = ? AND is_paper = ? AND size > 0",
+                    (name, is_paper),
+                )
+                found: list[Position] = []
+                for row in rows:
+                    tok = TokenType(row["token"]) if row["token"] in ("YES", "NO") else TokenType.YES
+                    p = Position(
+                        market_id=row["market_id"], exchange=name,
+                        side=OrderSide(row["side"]) if row["side"] else OrderSide.BUY,
+                        size=float(row["size"]), avg_price=float(row["avg_price"] or 0.0),
+                        current_price=float(row["current_price"] or 0.0),
+                        category=row["category"] or "",
+                        token=tok, token_id=row["token_id"] or "",
+                    )
+                    # Pre-filter on the stored value so we only hit the API for
+                    # likely-dust positions, then refresh their price to confirm.
+                    if p.size * (p.current_price or 0.0) > max_notional:
+                        continue
+                    try:
+                        m = await discovery.get_market(p.market_id)
+                        if m is not None:
+                            fresh = _price_for(m, p.token)
+                            if fresh and fresh > 0:
+                                p.current_price = round(fresh, 4)
+                    except Exception:
+                        pass
+                    if p.size * (p.current_price or 0.0) <= max_notional:
+                        found.append(p)
+                found.sort(key=lambda x: x.size * (x.current_price or 0.0))
+                if found:
+                    dust[name] = found
+
+            total = sum(len(v) for v in dust.values())
+            if total == 0:
+                console.print(f"[green]No dust positions under ${max_notional:.2f}.[/]")
+                return
+
+            # ---- Show what we found ----
+            sellables: list[tuple[str, object, object, Position]] = []
+            grand_value = grand_pnl = 0.0
+            for name, positions in dust.items():
+                table = Table(title=f"{name} — dust under ${max_notional:.2f}")
+                for col in ("Market", "Tok", "Size", "Price", "Value", "PnL", ""):
+                    table.add_column(col)
+                for p in positions:
+                    value = p.size * (p.current_price or 0.0)
+                    grand_value += value
+                    grand_pnl += p.unrealized_pnl
+                    ok = _sellable(name, p)
+                    if ok:
+                        sellables.append((name, discoveries[name], exchanges[name], p))
+                    table.add_row(
+                        p.market_id[:34], p.token.value, f"{p.size:.1f}",
+                        f"${p.current_price:.3f}", f"${value:.2f}",
+                        f"${p.unrealized_pnl:+.2f}",
+                        "[green]sell[/]" if ok else "[dim]redeem-only[/]",
+                    )
+                console.print(table)
+
+            n_unsellable = total - len(sellables)
+            console.print(
+                f"\n[bold]{total}[/] dust positions — ${grand_value:.2f} value, "
+                f"${grand_pnl:+.2f} PnL.  [green]{len(sellables)} sellable[/], "
+                f"[dim]{n_unsellable} redeem-only[/] (resolved/near-zero — use "
+                f"[cyan]auramaur redeem-check[/])."
+            )
+
+            if not execute:
+                console.print(
+                    f"\n[dim]Preview only. Re-run with [cyan]--execute[/] to close the "
+                    f"{len(sellables)} sellable position(s).[/]"
+                )
+                return
+
+            if not sellables:
+                console.print("\n[yellow]Nothing sellable to close.[/]")
+                return
+
+            if limit and limit > 0:
+                sellables = sellables[:limit]
+
+            mode = "LIVE — real sell orders" if settings.is_live else "PAPER — simulated sells"
+            console.print(f"\n[bold]Execution mode:[/] {mode}")
+            if not yes:
+                if not click.confirm(f"Close {len(sellables)} sellable dust position(s)?"):
+                    console.print("[yellow]Aborted.[/]")
+                    return
+
+            closed = failed = 0
+            for name, discovery, exch, p in sellables:
+                try:
+                    if name == "polymarket":
+                        ok = await bot._execute_poly_exit(p, ExitReason.DUST_CLEANUP, discovery, exch, alerts)
+                    else:
+                        ok = await bot._execute_kalshi_exit(p, ExitReason.DUST_CLEANUP, discovery, exch, alerts)
+                except Exception as e:
+                    console.print(f"[red]ERROR closing {p.market_id[:24]}: {e}[/]")
+                    ok = False
+                if ok:
+                    closed += 1
+                    console.print(f"[green]✓[/] {name} {p.market_id[:30]} — sell submitted")
+                else:
+                    failed += 1
+                    console.print(f"[yellow]✗[/] {name} {p.market_id[:30]} — not closed (too small / no fill path)")
+
+            console.print(f"\n[bold]Done:[/] {closed} submitted, {failed} skipped.")
+        finally:
+            await bot.shutdown()
+
+    asyncio.run(_run())
+
+
 @main.command()
 def status():
     """Show current bot status."""

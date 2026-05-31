@@ -143,6 +143,7 @@ class ExitReason(str, Enum):
     PROFIT_TARGET = "PROFIT_TARGET"
     EDGE_EROSION = "EDGE_EROSION"
     TIME_DECAY = "TIME_DECAY"
+    DUST_CLEANUP = "DUST_CLEANUP"
 
 
 class Fill(BaseModel):
