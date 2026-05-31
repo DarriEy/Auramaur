@@ -60,3 +60,26 @@ def test_dated_match_still_sports():
 
 def test_vs_marker_still_sports():
     assert classify_market("Arkansas Razorbacks vs. Arizona Wildcats") == "sports"
+
+
+def test_election_winner_boilerplate_not_sports():
+    """'winner' in resolution boilerplate must not make an election sports."""
+    cat = classify_market(
+        "Will the Republicans win the Mississippi Senate race in 2026?",
+        description="This market will resolve according to the winner of the 2026 "
+                    "midterm Mississippi U.S. Senate election, inclusive of any run-offs.",
+    )
+    assert cat == "politics_us"
+
+
+def test_primary_winner_boilerplate_not_sports():
+    cat = classify_market(
+        "Will Phil Weiser win the 2026 Colorado Governor Democratic primary?",
+        description="This market will resolve according to the winner of the "
+                    "Democratic Primary for Governor of Colorado.",
+    )
+    assert cat == "politics_us"
+
+
+def test_ncaa_is_sports():
+    assert classify_market("NCAA Tournament: No. 15 seed to pull off an upset?") == "sports"
