@@ -83,3 +83,17 @@ def test_primary_winner_boilerplate_not_sports():
 
 def test_ncaa_is_sports():
     assert classify_market("NCAA Tournament: No. 15 seed to pull off an upset?") == "sports"
+
+
+def test_individual_sports_stay_blocked():
+    """Individual-event sports (no team-vs marker) must classify as sports so
+    the block keeps them out, not leak into the tradeable 'other' bucket."""
+    for q in [
+        "Will Scottie Scheffler win the 2026 Masters?",
+        "Who will win Wimbledon 2026 men's singles?",
+        "Will Max Verstappen win the 2026 Monaco Grand Prix?",
+        "Will Novak Djokovic win the US Open?",
+        "Will Team USA win gold in the 2026 Olympics?",
+        "Will the winner of the 2026 Tour de France be from Slovenia?",
+    ]:
+        assert classify_market(q) == "sports", q
