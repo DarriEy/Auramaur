@@ -49,7 +49,11 @@ class RiskConfig(BaseModel):
     time_to_resolution_max_days: int = 0  # 0 = no ceiling
     max_correlated_positions: int = 5
     second_opinion_divergence_max: float = 0.15
-    blocked_categories: list[str] = []
+    # sports: the LLM has no structural edge on game outcomes / spreads / O-U
+    # (driven by live injury & lineup info we don't ingest), and resolved-market
+    # performance bears that out. Blocked outright rather than left to the
+    # feedback loop, which needs a sample sports keeps losing money to build.
+    blocked_categories: list[str] = ["sports"]
 
 
 class KellyConfig(BaseModel):
