@@ -142,7 +142,7 @@ class CalibrationConfig(BaseModel):
 
 class MarketMakerConfig(BaseModel):
     enabled: bool = True
-    min_spread_bps: int = 80  # minimum spread in bps; below the 1-tick improvement, join BBO
+    min_spread_bps: int = 40  # minimum spread in bps; below the 1-tick improvement, join BBO
     quote_size: float = 10.0  # tokens per side
     max_inventory: float = 50.0  # max directional exposure per market
     max_markets: int = 5  # max simultaneous MM markets

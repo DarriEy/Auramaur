@@ -5,7 +5,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from auramaur.exchange.models import ExitReason, OrderSide, Position
+from auramaur.exchange.models import ExitReason, OrderSide
+from auramaur.db.database import Database
 from auramaur.risk.portfolio import PortfolioTracker
 
 
@@ -131,3 +132,34 @@ async def test_no_exit_healthy_position(mock_db, settings):
     tracker = PortfolioTracker(db=mock_db)
     exits = await tracker.check_exits(settings, gamma)
     assert len(exits) == 0
+
+
+@pytest.mark.asyncio
+async def test_live_exits_ignore_paper_positions(settings):
+    """Live exit checks must not act on stale paper rows."""
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        settings.is_live = True
+        await db.execute(
+            """INSERT INTO portfolio
+               (market_id, exchange, side, size, avg_price, current_price,
+                category, token, token_id, is_paper)
+               VALUES
+               ('live_ok', 'polymarket', 'BUY', 10, 0.50, 0.50, 'test', 'YES', 'yes1', 0),
+               ('paper_exit', 'polymarket', 'BUY', 10, 0.50, 0.50, 'test', 'YES', 'yes2', 1)"""
+        )
+        await db.commit()
+
+        gamma = AsyncMock()
+        gamma.get_market = AsyncMock(return_value=_make_market("live_ok", 0.55))
+
+        tracker = PortfolioTracker(db=db, settings=settings)
+        positions = await tracker.get_positions(exchange="polymarket")
+        exits = await tracker.check_exits(settings, gamma, exchange="polymarket")
+
+        assert [p.market_id for p in positions] == ["live_ok"]
+        assert exits == []
+        gamma.get_market.assert_awaited_once_with("live_ok")
+    finally:
+        await db.close()
