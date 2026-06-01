@@ -31,6 +31,7 @@ risk:
   max_open_positions: 500
   min_edge_pct: 2.5
   min_liquidity: 1000.0
+  kalshi_min_liquidity: 300.0   # Kalshi book is thinner; lower its candidate floor
   max_spread_pct: 5.0
   confidence_floor: "LOW"
   implied_prob_min: 0.05
@@ -267,7 +268,7 @@ hybrid:
   news_cycle_seconds: 30
   llm_domain_filter: true
   llm_whitelist_min_accuracy: 0.50
-  llm_whitelist_min_trades: 10
+  llm_whitelist_min_trades: 5
   market_maker_auto_enable: true
 
 logging:

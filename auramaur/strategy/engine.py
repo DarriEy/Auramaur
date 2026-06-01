@@ -760,6 +760,13 @@ class TradingEngine:
 
         markets = await self.scan_and_store_markets()
 
+        # Kalshi's book is thinner than Polymarket's, so it gets a lower activity
+        # floor (kalshi_min_liquidity) to surface more genuinely-tradeable markets.
+        min_liq = (
+            self.settings.risk.kalshi_min_liquidity
+            if self.exchange_name == "kalshi"
+            else self.settings.risk.min_liquidity
+        )
         candidates = [
             m for m in markets
             if m.active
@@ -768,7 +775,7 @@ class TradingEngine:
             # liquidity but high volume on active markets. Using max() ensures
             # active Kalshi markets aren't filtered out by the Polymarket-tuned
             # min_liquidity threshold.
-            and max(m.liquidity or 0, m.volume or 0) >= self.settings.risk.min_liquidity
+            and max(m.liquidity or 0, m.volume or 0) >= min_liq
             and m.spread <= self.settings.risk.max_spread_pct / 100
             and self.settings.risk.implied_prob_min <= m.outcome_yes_price <= self.settings.risk.implied_prob_max
             # Skip near-dead markets (no volume = orders won't fill)
@@ -824,12 +831,14 @@ class TradingEngine:
                 )
                 filtered_count += 1
                 continue
-            # Hybrid mode: skip categories that are neither whitelisted nor probationary
-            # (i.e. categories with data showing poor accuracy, already in avoid_categories above)
-            # When whitelist is empty (cold start), all categories pass through
-            if hybrid_whitelist and m.category and m.category not in hybrid_whitelist and m.category not in hybrid_probationary:
-                filtered_count += 1
-                continue
+            # Hybrid mode: explore categories with no track record yet instead of
+            # filtering them. Proven-poor categories are already removed by
+            # avoid_categories above; whitelisted/probationary both pass. The old
+            # filter dropped categories absent from BOTH sets — i.e. ones with no
+            # resolved data — which created a chicken-and-egg: a newly-active venue
+            # (Kalshi) could never build a record in a category it was filtered
+            # out of. Such unknown categories now stay explorable (still gated by
+            # the edge bar + all risk checks downstream).
 
             reason = self._is_junk_market(m)
             if reason:

@@ -54,6 +54,10 @@ class RiskConfig(BaseModel):
     max_open_positions: int = 200
     min_edge_pct: float = 5.0
     min_liquidity: float = 1000.0
+    # Kalshi reports thin top-of-book liquidity even on active markets, so its
+    # candidate floor is lower than the Polymarket-tuned default (the engine
+    # uses this when exchange_name == 'kalshi').
+    kalshi_min_liquidity: float = 300.0
     max_spread_pct: float = 5.0
     confidence_floor: Literal["LOW", "MEDIUM", "HIGH"] = "MEDIUM"
     implied_prob_min: float = 0.03
@@ -365,7 +369,7 @@ class HybridConfig(BaseModel):
     news_cycle_seconds: int = 30
     llm_domain_filter: bool = True
     llm_whitelist_min_accuracy: float = 0.50
-    llm_whitelist_min_trades: int = 10
+    llm_whitelist_min_trades: int = 5
     market_maker_auto_enable: bool = True
 
 
