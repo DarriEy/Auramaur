@@ -142,6 +142,16 @@ class IBKREquityClient:
             log.warning("ibkr_equity.momentum_error", symbol=symbol, error=str(e)[:100])
             return None
 
+    async def get_positions(self) -> dict[str, float]:
+        """Held equity positions {symbol: qty} from the account (for reconcile)."""
+        try:
+            await self._ensure_connected()
+            return {p.contract.symbol: p.position
+                    for p in self._ib.positions() if p.position != 0}
+        except Exception as e:  # noqa: BLE001
+            log.debug("ibkr_equity.positions_error", error=str(e)[:80])
+            return {}
+
     async def close(self) -> None:
         if self._ib is not None and self._connected:
             self._ib.disconnect()

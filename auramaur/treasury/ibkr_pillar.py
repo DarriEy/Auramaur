@@ -26,6 +26,18 @@ class IBKRDirectionalPillar:
         cfg = self._s.ibkr
         if not cfg.directional_equity_enabled:
             return
+        # Reconcile open positions from the IBKR account so a restart doesn't lose
+        # track (re-buy / miss exits). Empty when disconnected — safe.
+        try:
+            held = await self._eq.get_positions()
+            for sym in cfg.directional_equity_symbols:
+                if abs(held.get(sym, 0)) > 1e-6:
+                    self._long.setdefault(sym, 0.0)   # discovered holding
+            for sym in list(self._long):
+                if abs(held.get(sym, 0)) <= 1e-6:
+                    self._long.pop(sym, None)          # closed externally
+        except Exception as e:  # noqa: BLE001
+            log.debug("ibkr_equity.reconcile_error", error=str(e)[:80])
         for sym in cfg.directional_equity_symbols:
             try:
                 await self._eval(sym)
