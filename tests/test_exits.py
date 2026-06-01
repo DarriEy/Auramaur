@@ -232,6 +232,38 @@ async def test_no_exit_healthy_position(mock_db, settings):
 
 
 @pytest.mark.asyncio
+async def test_binary_exits_skipped_for_ibkr_options(settings):
+    """IBKR options are priced in premium, not 0-1 probability. A price that
+    would trip edge-erosion for a binary venue must NOT exit an IBKR option;
+    only the P&L-ratio exits apply (here PnL is +4%, so it holds)."""
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        settings.is_live = True
+        # current 0.99 vs avg 0.95 -> +4.2% PnL (no stop/profit); for a binary
+        # venue remaining_upside = 1% would fire EDGE_EROSION.
+        await db.execute(
+            """INSERT INTO portfolio
+               (market_id, exchange, side, size, avg_price, current_price,
+                category, token, token_id, is_paper)
+               VALUES ('IB:AAPL:200:20260418:C', 'ibkr', 'BUY', 10, 0.95, 0.99,
+                       'tech', 'YES', '123:buy_call:C:200:20260418', 0)"""
+        )
+        await db.commit()
+
+        gamma = AsyncMock()
+        # Discovery would report a binary 0.99; for IBKR the refresh is skipped,
+        # so this must not leak in.
+        gamma.get_market = AsyncMock(return_value=_make_market("IB:AAPL:200:20260418:C", 0.99))
+
+        tracker = PortfolioTracker(db=db, settings=settings)
+        exits = await tracker.check_exits(settings, gamma, exchange="ibkr")
+        assert exits == []  # no edge-erosion / time-decay for options
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_live_exits_ignore_paper_positions(settings):
     """Live exit checks must not act on stale paper rows."""
     db = Database(":memory:")

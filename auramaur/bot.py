@@ -680,6 +680,8 @@ class AuramaurBot:
                                 ok = await self._execute_poly_exit(pos, reason, discovery, exchange_client, alerts)
                             elif name == "kalshi":
                                 ok = await self._execute_kalshi_exit(pos, reason, discovery, exchange_client, alerts)
+                            elif name == "ibkr":
+                                ok = await self._execute_ibkr_exit(pos, reason, discovery, exchange_client, alerts)
                             else:
                                 ok = False
                         except Exception as e:
@@ -887,6 +889,50 @@ class AuramaurBot:
         await alerts.send(
             f"Exit {reason.value} (kalshi): {pos.market_id} "
             f"size={pos.size:.0f} pnl={pos.unrealized_pnl:+.2f}",
+            level="warning",
+        )
+        return True
+
+    async def _execute_ibkr_exit(self, pos, reason, discovery, exchange, alerts) -> bool:
+        """Close a held IBKR option position by selling the exact contract.
+
+        Unlike the prediction-venue exits (which reframe a fresh SELL signal), an
+        option position is closed by selling the specific contract we hold.
+        ``pos.token_id`` carries that contract (conId:action:right:strike:expiry)
+        from prepare_order, so we build a direct SELL for it rather than routing
+        through the reframer (which would open a new position).
+        """
+        from auramaur.exchange.models import Order, OrderType
+
+        if not pos.token_id or pos.token_id.count(":") < 4:
+            log.debug("exit.ibkr.no_contract", market_id=pos.market_id)
+            return False
+        if pos.size < 1:
+            return False
+
+        order = Order(
+            market_id=pos.market_id,
+            exchange="ibkr",
+            token_id=pos.token_id,
+            side=OrderSide.SELL,
+            token=pos.token,
+            size=float(int(pos.size)),
+            price=max(pos.current_price or 0.0, 0.01),
+            order_type=OrderType.LIMIT,
+            dry_run=not self.settings.is_live,
+        )
+        result = await exchange.place_order(order)
+        from auramaur.monitoring.display import show_order
+        show_order(
+            result.status, result.order_id, "SELL", order.size, order.price,
+            result.is_paper, exchange="ibkr", error_message=result.error_message,
+            market_id=pos.market_id,
+        )
+        if result.status == "rejected":
+            return False
+        await alerts.send(
+            f"Exit {reason.value} (ibkr): {pos.market_id} "
+            f"contracts={pos.size:.0f} pnl={pos.unrealized_pnl:+.2f}",
             level="warning",
         )
         return True
