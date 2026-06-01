@@ -53,6 +53,31 @@ class ArbOpportunity:
     arb_type: str = "cross_exchange"  # "cross_exchange" | "internal"
 
 
+@dataclass
+class NegRiskArbOpportunity:
+    """A buy-all-NO arbitrage across a NegRisk multi-outcome event.
+
+    A NegRisk event is a set of N mutually-exclusive, collectively-exhaustive
+    binary outcomes (exactly one resolves YES). Buying NO on every outcome
+    costs ``sum(no_price_i)`` and pays ``$1`` for each of the N-1 losing
+    outcomes at resolution. When ``sum(no_price_i) < (N-1)`` the package is
+    risk-free profit (equivalently, the YES legs are collectively > $1).
+    """
+
+    markets: list[Market]
+    exchange: str
+    neg_risk_market_id: str
+    total_no_cost: float          # sum of NO prices across all legs
+    guaranteed_payout: float      # (N - 1), net of fees
+    expected_profit_pct: float    # profit / cost, as a percentage
+    question: str
+    arb_type: str = "negrisk"
+
+    @property
+    def n_outcomes(self) -> int:
+        return len(self.markets)
+
+
 def _tokenize(text: str) -> set[str]:
     """Extract meaningful words from a question string."""
     words = set(re.findall(r"[a-z0-9]+", text.lower()))
@@ -394,6 +419,84 @@ class ArbitrageScanner:
                 profit_pct=round(profit_pct, 1),
             )
 
+        return opportunities
+
+    async def scan_negrisk(
+        self,
+        markets_by_exchange: dict[str, list[Market]] | None = None,
+    ) -> list[NegRiskArbOpportunity]:
+        """Find buy-all-NO arbs across NegRisk multi-outcome events.
+
+        Groups markets by their shared ``neg_risk_market_id`` (only Polymarket
+        tags these). For each group of N>=2 mutually-exclusive outcomes, if the
+        sum of NO prices is below the guaranteed (N-1) payout — net of the
+        exchange fee — the package is risk-free profit.
+
+        Args:
+            markets_by_exchange: Pre-fetched markets (avoids refetching). If
+                omitted, fetches from all exchanges.
+        """
+        if markets_by_exchange is None:
+            markets_by_exchange = await self._fetch_all_markets()
+
+        opportunities: list[NegRiskArbOpportunity] = []
+
+        for exchange_name, markets in markets_by_exchange.items():
+            fee = self._exchange_fees.get(exchange_name, 0.0)
+
+            # Group mutually-exclusive legs by their NegRisk grouping key.
+            groups: dict[str, list[Market]] = {}
+            for m in markets:
+                if not m.neg_risk or not m.neg_risk_market_id:
+                    continue
+                groups.setdefault(m.neg_risk_market_id, []).append(m)
+
+            for group_id, legs in groups.items():
+                n = len(legs)
+                if n < 2:
+                    continue  # need at least two outcomes for a package
+
+                # Skip groups with unpriced legs — can't trust the sum.
+                if any(leg.outcome_no_price <= 0 for leg in legs):
+                    continue
+
+                total_no_cost = sum(leg.outcome_no_price for leg in legs)
+                # Exactly one outcome wins: its NO pays $0, the other (n-1) pay
+                # $1 each. Fees apply to the winning legs' payout.
+                guaranteed_payout = (n - 1) * (1.0 - fee)
+
+                profit = guaranteed_payout - total_no_cost
+                if profit <= 0 or total_no_cost <= 0:
+                    continue
+
+                profit_pct = (profit / total_no_cost) * 100
+                if profit_pct < self._min_profit_after_fees_pct:
+                    continue
+
+                question = (legs[0].question or group_id)
+                opp = NegRiskArbOpportunity(
+                    markets=legs,
+                    exchange=exchange_name,
+                    neg_risk_market_id=group_id,
+                    total_no_cost=total_no_cost,
+                    guaranteed_payout=guaranteed_payout,
+                    expected_profit_pct=profit_pct,
+                    question=question,
+                )
+                opportunities.append(opp)
+
+                log.info(
+                    "arb_scanner.negrisk_arb",
+                    exchange=exchange_name,
+                    neg_risk_market_id=group_id,
+                    n_outcomes=n,
+                    total_no_cost=round(total_no_cost, 3),
+                    guaranteed_payout=round(guaranteed_payout, 3),
+                    profit_pct=round(profit_pct, 2),
+                    question=question[:80],
+                )
+
+        opportunities.sort(key=lambda o: o.expected_profit_pct, reverse=True)
         return opportunities
 
     async def _fetch_all_markets(self) -> dict[str, list[Market]]:

@@ -92,7 +92,14 @@ class RiskManager:
         if max_stake <= 1.0:
             max_stake = equity * max_stake
 
-        bankroll = min(cash, max_stake * 3)
+        # Kelly sizes against the full deployable cash; max_stake is the
+        # ceiling that actually binds. The previous min(cash, max_stake*3)
+        # double-capped: with fraction<=0.55 and edge capped at ±20% (so
+        # kelly<=~0.8), kelly*fraction*(3*max_stake) tops out near 0.7*max_stake,
+        # meaning the configured per-market cap was unreachable and effective
+        # sizing sat ~30% below the documented limit. Cash is the real bankroll;
+        # the post-sizing max_stake check still enforces the per-market cap.
+        bankroll = cash
 
         # Time to resolution
         if market.end_date:

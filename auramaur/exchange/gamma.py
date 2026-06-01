@@ -212,6 +212,20 @@ class GammaClient:
                 clob_yes = str(raw_clob[0])
                 clob_no = str(raw_clob[1])
 
+            # NegRisk grouping. Polymarket marks mutually-exclusive multi-outcome
+            # sets with negRisk + a shared negRiskMarketID; fall back to the first
+            # event id so the multi-outcome scanner can still group the legs.
+            neg_risk = bool(data.get("negRisk") or data.get("negativeRisk") or False)
+            neg_risk_market_id = str(
+                data.get("negRiskMarketID") or data.get("negRiskMarketId") or ""
+            )
+            if not neg_risk_market_id:
+                events = data.get("events") or []
+                if isinstance(events, list) and events and isinstance(events[0], dict):
+                    neg_risk_market_id = str(events[0].get("id", ""))
+                    if not neg_risk and events[0].get("negRisk"):
+                        neg_risk = True
+
             return Market(
                 id=str(data.get("id", data.get("conditionId", ""))),
                 exchange="polymarket",
@@ -228,6 +242,8 @@ class GammaClient:
                 spread=spread,
                 clob_token_yes=clob_yes,
                 clob_token_no=clob_no,
+                neg_risk=neg_risk,
+                neg_risk_market_id=neg_risk_market_id,
             )
         except Exception as e:
             log.warning("gamma.parse_error", error=str(e), data_keys=list(data.keys()))

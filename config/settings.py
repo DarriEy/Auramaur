@@ -210,6 +210,7 @@ class ArbitrageConfig(BaseModel):
     min_profit_after_fees_pct: float = 1.5
     max_arb_size: float = 25.0
     cross_exchange_auto_execute: bool = True
+    negrisk_auto_execute: bool = True
     exchange_fees: dict[str, float] = Field(default_factory=lambda: {
         "polymarket": 0.0,
         "kalshi": 0.07,

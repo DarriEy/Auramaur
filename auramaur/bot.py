@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -24,6 +25,9 @@ from auramaur.db.database import Database
 from auramaur.exchange.client import PolymarketClient
 from auramaur.exchange.gamma import GammaClient
 from auramaur.exchange.models import Fill, Order, OrderSide, OrderType, TokenType
+
+if TYPE_CHECKING:
+    from auramaur.exchange.models import Market, Signal
 from auramaur.exchange.protocols import ExchangeClient, MarketDiscovery
 from auramaur.exchange.paper import PaperTrader
 from auramaur.monitoring.alerts import AlertManager
@@ -36,7 +40,11 @@ from auramaur.nlp.cache import NLPCache
 from auramaur.nlp.calibration import CalibrationTracker
 from auramaur.risk.manager import RiskManager
 from auramaur.risk.portfolio import PortfolioTracker
-from auramaur.strategy.arbitrage_scanner import ArbOpportunity, ArbitrageScanner
+from auramaur.strategy.arbitrage_scanner import (
+    ArbOpportunity,
+    ArbitrageScanner,
+    NegRiskArbOpportunity,
+)
 from auramaur.strategy.engine import TradingEngine
 from auramaur.strategy.market_maker import MarketMaker
 from auramaur.strategy.news_reactor import NewsReactor
@@ -872,6 +880,7 @@ class AuramaurBot:
         that can be converted to USDC, print a loud banner so the user
         knows to hit 'Redeem All' in the Polymarket UI. Runs hourly.
         """
+        from auramaur.broker.onchain import OnChainRedeemer
         from auramaur.broker.redeemer import (
             fetch_redeemable_positions, summarize_redemptions,
         )
@@ -880,6 +889,13 @@ class AuramaurBot:
         proxy = self.settings.polymarket_proxy_address
         if not proxy:
             return  # no proxy configured, can't check
+
+        db: Database = self._components["db"]
+        alerts: AlertManager = self._components["alerts"]
+        redeemer = OnChainRedeemer(self.settings, db)
+        # Only auto-redeem winners worth claiming; the replay guard in the
+        # redemptions table prevents re-submitting an already-sent condition.
+        AUTO_REDEEM_MIN_PAYOUT = 0.50
 
         # Track the last-notified payout to avoid spamming on every cycle
         last_notified_payout: float = -1.0
@@ -890,30 +906,123 @@ class AuramaurBot:
                 summary = summarize_redemptions(positions)
                 payout = summary["payout_now_usdc"]
 
-                if summary["redeemable_now"] > 0 and payout > 0 and payout != last_notified_payout:
-                    console.print()
-                    console.print(
-                        f"[bold green]╔══ REDEMPTION AVAILABLE ══╗[/]"
-                    )
-                    console.print(
-                        f"[bold green]║[/] [green]${payout:.2f} USDC[/] ready to "
-                        f"redeem on Polymarket — {summary['winning_now']} winning "
-                        f"position{'s' if summary['winning_now'] != 1 else ''} "
-                        f"(net [green]${summary['net_pnl_now']:+.2f}[/])"
-                    )
-                    console.print(
-                        f"[bold green]║[/] [dim]→ https://polymarket.com/portfolio  "
-                        f"or run:[/] [cyan]auramaur redeem-check[/]"
-                    )
-                    console.print(
-                        f"[bold green]╚══════════════════════════╝[/]"
-                    )
-                    console.print()
-                    last_notified_payout = payout
+                gates_open = redeemer._is_live_submission_allowed()
+
+                if summary["redeemable_now"] > 0 and payout > 0:
+                    if gates_open:
+                        # Auto-submit: claim winners on-chain. The redeemer
+                        # enforces the live gates again internally and records
+                        # each attempt (replay guard), so this is idempotent.
+                        await self._auto_redeem(
+                            redeemer, positions, AUTO_REDEEM_MIN_PAYOUT, alerts
+                        )
+                    elif payout != last_notified_payout:
+                        # Gates closed — fall back to the manual-action banner.
+                        console.print()
+                        console.print(
+                            f"[bold green]╔══ REDEMPTION AVAILABLE ══╗[/]"
+                        )
+                        console.print(
+                            f"[bold green]║[/] [green]${payout:.2f} USDC[/] ready to "
+                            f"redeem on Polymarket — {summary['winning_now']} winning "
+                            f"position{'s' if summary['winning_now'] != 1 else ''} "
+                            f"(net [green]${summary['net_pnl_now']:+.2f}[/])"
+                        )
+                        console.print(
+                            f"[bold green]║[/] [dim]→ https://polymarket.com/portfolio  "
+                            f"or run:[/] [cyan]auramaur redeem --submit[/]"
+                        )
+                        console.print(
+                            f"[bold green]╚══════════════════════════╝[/]"
+                        )
+                        console.print()
+                        last_notified_payout = payout
+
+                # Alert on redemptions that broadcast but never confirmed — these
+                # are stuck in the mempool / under-priced and silently lose the
+                # payout until manually re-sent.
+                await self._alert_stuck_redemptions(db, alerts)
             except Exception as e:
                 log.debug("redemption_check.error", error=str(e))
 
             await asyncio.sleep(3600)  # hourly
+
+    async def _auto_redeem(
+        self,
+        redeemer,
+        positions: list,
+        min_payout: float,
+        alerts: "AlertManager",
+    ) -> None:
+        """Submit on-chain redemptions for winning, redeemable positions.
+
+        Assumes the caller has confirmed all live gates are open. Each redeem()
+        is idempotent via the redemptions-table replay guard, so re-running
+        hourly will not double-submit a condition already sent or confirmed.
+        """
+        ready = [
+            p for p in positions
+            if p.redeemable_now and p.is_winner and p.payout >= min_payout
+        ]
+        for pos in ready:
+            try:
+                result = await redeemer.redeem(pos, dry_run=False)
+            except Exception as e:
+                log.error(
+                    "redemption.submit_error",
+                    condition_id=pos.condition_id[:10],
+                    error=str(e)[:200],
+                )
+                continue
+
+            if result.status in ("submitted", "confirmed"):
+                log.info(
+                    "redemption.submitted",
+                    condition_id=pos.condition_id[:10],
+                    title=pos.title[:50],
+                    payout=round(pos.payout, 2),
+                    status=result.status,
+                    tx_hash=result.tx_hash[:12],
+                )
+                await alerts.send(
+                    f"Redemption {result.status}: ${pos.payout:.2f} — "
+                    f"{pos.title[:50]} (tx {result.tx_hash[:12]})",
+                    level="warning",
+                )
+            elif result.status not in ("skipped",):
+                log.warning(
+                    "redemption.not_submitted",
+                    condition_id=pos.condition_id[:10],
+                    status=result.status,
+                    error=result.error[:200],
+                )
+
+    async def _alert_stuck_redemptions(self, db: "Database", alerts: "AlertManager") -> None:
+        """Warn when a broadcast redemption has not confirmed within 24h."""
+        try:
+            rows = await db.fetchall(
+                """SELECT condition_id, title, tx_hash, submitted_at
+                   FROM redemptions
+                   WHERE status = 'submitted'
+                   AND submitted_at IS NOT NULL
+                   AND datetime(submitted_at) < datetime('now', '-1 day')"""
+            )
+        except Exception as e:
+            log.debug("redemption.stuck_query_error", error=str(e))
+            return
+        for row in rows:
+            log.warning(
+                "redemption.stuck",
+                condition_id=str(row["condition_id"])[:10],
+                tx_hash=str(row["tx_hash"])[:12],
+                submitted_at=row["submitted_at"],
+            )
+            await alerts.send(
+                f"Redemption stuck >24h (unconfirmed): {str(row['title'])[:50]} "
+                f"tx {str(row['tx_hash'])[:12]}. May be under-priced/dropped — "
+                f"re-send with `auramaur redeem --submit`.",
+                level="critical",
+            )
 
     async def _task_kill_switch_monitor(self) -> None:
         """Rapid kill switch polling."""
@@ -1001,64 +1110,183 @@ class AuramaurBot:
             await asyncio.sleep(3600)  # Every hour
 
     async def _task_correlation_scan(self) -> None:
-        """Periodically scan for correlated markets and execute arbitrage."""
+        """Scan for correlated markets and execute conditional / divergence arbs.
+
+        Relationship detection calls Claude (and is TTL-cached per market), so
+        it runs on a slow sub-cadence. Arb detection + execution is a cheap DB
+        read off the stored relationships and runs every cycle, so opportunities
+        are acted on before they decay (previously the whole loop ran every 4h,
+        by which point conditional violations had usually closed).
+        """
         correlator = self._components.get("correlator")
         arb_executor = self._components.get("arb_executor")
         if correlator is None or arb_executor is None:
             return
         discovery: MarketDiscovery = self._components["discovery"]
         risk_manager: RiskManager = self._components["risk_manager"]
+        engines: dict[str, TradingEngine] = self._components["engines"]
+
+        scan_interval = 120              # act on arbs every 2 minutes
+        relationship_refresh_cycles = 15  # refresh LLM relationships ~every 30 min
+        cycle = 0
 
         while self._running:
             if await self._check_kill_switch():
                 return
             try:
-                markets = await discovery.get_markets(limit=20)
-                if markets:
-                    await correlator.detect_relationships(markets)
+                # Refresh semantic relationships infrequently to bound LLM cost;
+                # the detector also TTL-caches per market internally.
+                if cycle % relationship_refresh_cycles == 0:
+                    markets = await discovery.get_markets(limit=20)
+                    if markets:
+                        await correlator.detect_relationships(markets)
+                cycle += 1
 
-                    # Generate and execute arbitrage signals
-                    pairs = await arb_executor.generate_arb_signals()
-                    for buy_signal, sell_signal, opp in pairs:
-                        try:
-                            # Load markets for risk evaluation
-                            buy_market = await arb_executor._load_market(buy_signal.market_id)
-                            sell_market = await arb_executor._load_market(sell_signal.market_id)
-                            if not buy_market or not sell_market:
-                                continue
-
-                            # Run risk checks on both legs
-                            buy_decision = await risk_manager.evaluate(buy_signal, buy_market)
-                            sell_decision = await risk_manager.evaluate(sell_signal, sell_market)
-
-                            if buy_decision.approved and sell_decision.approved:
-                                log.info(
-                                    "arbitrage.executing",
-                                    buy_market=buy_signal.market_id,
-                                    sell_market=sell_signal.market_id,
-                                    type=opp.get("type"),
-                                )
-                                alerts: AlertManager = self._components["alerts"]
-                                await alerts.send(
-                                    f"Executing arbitrage: {opp.get('type')} "
-                                    f"buy {buy_signal.market_id[:12]} / sell {sell_signal.market_id[:12]}",
-                                    level="warning",
-                                )
-                                # Execute both legs
-                                # Note: Uses analyze_market which goes through full order flow
-                                # For now, just log — actual execution would need
-                                # the engine to accept pre-computed signals
-                            else:
-                                log.debug(
-                                    "arbitrage.risk_rejected",
-                                    buy_approved=buy_decision.approved,
-                                    sell_approved=sell_decision.approved,
-                                )
-                        except Exception as e:
-                            log.debug("arbitrage.execution_error", error=str(e))
+                # Generate and execute arbitrage signals (cheap DB read).
+                pairs = await arb_executor.generate_arb_signals()
+                for buy_signal, sell_signal, opp in pairs:
+                    try:
+                        buy_market = await arb_executor._load_market(buy_signal.market_id)
+                        sell_market = await arb_executor._load_market(sell_signal.market_id)
+                        if not buy_market or not sell_market:
+                            continue
+                        await self._execute_conditional_arb(
+                            buy_signal, sell_signal, buy_market, sell_market,
+                            opp, risk_manager, engines,
+                        )
+                    except Exception as e:
+                        log.debug("arbitrage.execution_error", error=str(e))
             except Exception as e:
                 log.error("correlation_scan.error", error=str(e))
-            await asyncio.sleep(14400)  # Every 4 hours
+            await asyncio.sleep(scan_interval)
+
+    async def _execute_conditional_arb(
+        self,
+        buy_signal: "Signal",
+        sell_signal: "Signal",
+        buy_market: "Market",
+        sell_market: "Market",
+        opp: dict,
+        risk_manager: RiskManager,
+        engines: dict[str, TradingEngine],
+    ) -> None:
+        """Execute a conditional / divergence arb: buy the underpriced leg, sell
+        the overpriced leg.
+
+        Both legs pass risk checks independently and are sized to the smaller
+        approved size (capped at arbitrage.max_arb_size). Orders are built via
+        each exchange's ``prepare_order`` (tick rounding, token resolution,
+        SELL→buy-NO conversion) and carry ``dry_run = not is_live`` so paper
+        mode is honored. These legs are a relative-value pair, not a guaranteed
+        $1 hedge, so a half-fill raises a critical alert for manual review
+        rather than attempting an automatic rollback.
+        """
+        buy_exchange = buy_market.exchange or "polymarket"
+        sell_exchange = sell_market.exchange or "polymarket"
+        buy_engine = engines.get(buy_exchange)
+        sell_engine = engines.get(sell_exchange)
+        if buy_engine is None or sell_engine is None:
+            log.debug("arbitrage.no_engine", buy=buy_exchange, sell=sell_exchange)
+            return
+
+        alerts: AlertManager = self._components["alerts"]
+
+        # Risk checks on both legs using exchange-local cash for sizing.
+        buy_cash = await buy_engine._get_available_cash()
+        sell_cash = await sell_engine._get_available_cash()
+        buy_decision = await risk_manager.evaluate(
+            buy_signal, buy_market, available_cash=buy_cash
+        )
+        sell_decision = await risk_manager.evaluate(
+            sell_signal, sell_market, available_cash=sell_cash
+        )
+        if not buy_decision.approved or not sell_decision.approved:
+            log.debug(
+                "arbitrage.risk_rejected",
+                type=opp.get("type"),
+                buy_approved=buy_decision.approved,
+                sell_approved=sell_decision.approved,
+                buy_reason=buy_decision.reason,
+                sell_reason=sell_decision.reason,
+            )
+            return
+
+        max_size = self.settings.arbitrage.max_arb_size
+        position_size = min(
+            buy_decision.position_size, sell_decision.position_size, max_size
+        )
+        if position_size <= 0:
+            return
+
+        # Dedup: 1-hour cooldown per market pair, set before placement so
+        # concurrent/rapid scans don't double-fire on the same arb.
+        import time as _time
+        arb_key = f"cond|{buy_market.id}|{sell_market.id}"
+        now_ts = _time.monotonic()
+        expiry = self._arb_attempts.get(arb_key)
+        if expiry and expiry > now_ts:
+            log.debug("arbitrage.dedup_skip", buy=buy_market.id, sell=sell_market.id)
+            return
+        self._arb_attempts[arb_key] = now_ts + 3600
+        if len(self._arb_attempts) > 200:
+            self._arb_attempts = {
+                k: v for k, v in self._arb_attempts.items() if v > now_ts
+            }
+
+        is_live = self.settings.is_live
+        buy_client = buy_engine.exchange
+        sell_client = sell_engine.exchange
+        buy_order = buy_client.prepare_order(buy_signal, buy_market, position_size, is_live)
+        sell_order = sell_client.prepare_order(sell_signal, sell_market, position_size, is_live)
+        if buy_order is None or sell_order is None:
+            log.debug(
+                "arbitrage.prepare_failed",
+                type=opp.get("type"),
+                buy_built=buy_order is not None,
+                sell_built=sell_order is not None,
+            )
+            return
+
+        log.info(
+            "arbitrage.executing",
+            type=opp.get("type"),
+            buy_market=buy_market.id,
+            sell_market=sell_market.id,
+            size=round(position_size, 2),
+            is_paper=not is_live,
+        )
+
+        try:
+            buy_result, sell_result = await asyncio.gather(
+                buy_client.place_order(buy_order),
+                sell_client.place_order(sell_order),
+            )
+            buy_ok = buy_result.status not in ("rejected", "error")
+            sell_ok = sell_result.status not in ("rejected", "error")
+            mode = "PAPER" if not is_live else "LIVE"
+            if buy_ok and sell_ok:
+                await alerts.send(
+                    f"[{mode}] Arb executed ({opp.get('type')}): "
+                    f"buy {buy_market.id[:12]} / sell {sell_market.id[:12]} "
+                    f"size {position_size:.2f}",
+                    level="warning",
+                )
+            elif buy_ok != sell_ok:
+                log.warning(
+                    "arbitrage.half_fill",
+                    type=opp.get("type"),
+                    buy_status=buy_result.status,
+                    sell_status=sell_result.status,
+                )
+                await alerts.send(
+                    f"[{mode}] ARB HALF-FILL ({opp.get('type')}): "
+                    f"buy_ok={buy_ok} sell_ok={sell_ok} — "
+                    f"buy {buy_market.id[:12]} / sell {sell_market.id[:12]}. "
+                    f"Manual review required (no auto-rollback for relative-value legs).",
+                    level="critical",
+                )
+        except Exception as e:
+            log.error("arbitrage.execution_error", error=str(e))
 
     async def _task_depth_research(self) -> None:
         """Run deep research on the most promising markets.
@@ -1210,10 +1438,178 @@ class AuramaurBot:
                     elif opp.arb_type == "cross_exchange" and self.settings.arbitrage.cross_exchange_auto_execute:
                         await self._execute_cross_exchange_arb(opp, risk_manager, engines)
 
+                # NegRisk multi-outcome arbs: buy NO on every leg of a
+                # mutually-exclusive event when the legs sum below the (N-1)
+                # guaranteed payout. (Separate fetch; different opportunity shape.)
+                negrisk_opps = await scanner.scan_negrisk()
+                for nopp in negrisk_opps:
+                    log.info(
+                        "arb_scanner.opportunity",
+                        arb_type=nopp.arb_type,
+                        question=nopp.question[:80],
+                        exchange=nopp.exchange,
+                        n_outcomes=nopp.n_outcomes,
+                        total_no_cost=round(nopp.total_no_cost, 3),
+                        profit_pct=round(nopp.expected_profit_pct, 2),
+                    )
+                    if nopp.expected_profit_pct > 5.0:
+                        await alerts.send(
+                            f"NegRisk arb: {nopp.question[:50]} | "
+                            f"{nopp.n_outcomes} legs, buy-all-NO cost "
+                            f"{nopp.total_no_cost:.2f} < payout "
+                            f"{nopp.guaranteed_payout:.2f} | "
+                            f"profit: {nopp.expected_profit_pct:.1f}%",
+                            level="warning",
+                        )
+                    if self.settings.arbitrage.negrisk_auto_execute:
+                        await self._execute_negrisk_arb(nopp, risk_manager, engines)
+
             except Exception as e:
                 log.error("arb_scanner.task_error", error=str(e))
             interval = self.settings.hybrid.arb_scan_seconds if self._hybrid else 300
             await asyncio.sleep(interval)
+
+    async def _execute_negrisk_arb(
+        self,
+        opp: NegRiskArbOpportunity,
+        risk_manager: RiskManager,
+        engines: dict[str, TradingEngine],
+    ) -> None:
+        """Execute a NegRisk buy-all-NO arb: buy NO on every outcome of a
+        mutually-exclusive event so the (N-1) guaranteed payout exceeds the cost.
+
+        Every leg passes its own risk check, all legs are sized to the same
+        share quantity (so each losing leg pays an identical $1), and each NO
+        order carries ``dry_run = not is_live``. The profit guarantee only holds
+        with the COMPLETE set, so if any leg fails risk checks the whole package
+        is skipped, and a partial fill raises a critical alert for manual review.
+        """
+        from auramaur.exchange.models import Confidence, Signal
+
+        engine = engines.get(opp.exchange)
+        if engine is None:
+            log.debug("arb_scanner.negrisk_no_engine", exchange=opp.exchange)
+            return
+        legs = opp.markets
+        if len(legs) < 2:
+            return
+        if any(not leg.clob_token_no or leg.outcome_no_price <= 0 for leg in legs):
+            log.debug("arb_scanner.negrisk_unpriced_or_no_token", group=opp.neg_risk_market_id)
+            return
+
+        alerts: AlertManager = self._components["alerts"]
+
+        # Dedup: 1-hour cooldown per NegRisk event, set before placement.
+        import time as _time
+        arb_key = f"negrisk|{opp.exchange}|{opp.neg_risk_market_id}"
+        now_ts = _time.monotonic()
+        expiry = self._arb_attempts.get(arb_key)
+        if expiry and expiry > now_ts:
+            log.debug("arb_scanner.negrisk_dedup_skip", group=opp.neg_risk_market_id)
+            return
+
+        # Risk-check every leg as a BUY-NO. The package edge is carried on each
+        # leg so the generic min-edge gate doesn't reject valid arb legs.
+        available_cash = await engine._get_available_cash()
+        decisions = []
+        for leg in legs:
+            no_price = leg.outcome_no_price
+            fair = min(0.98, no_price * (1.0 + opp.expected_profit_pct / 100.0))
+            signal = Signal(
+                market_id=leg.id,
+                market_question=leg.question,
+                claude_prob=fair,
+                claude_confidence=Confidence.HIGH,
+                market_prob=no_price,
+                edge=opp.expected_profit_pct,
+                evidence_summary=(
+                    f"NegRisk arb: {opp.n_outcomes} legs, buy-all-NO cost "
+                    f"{opp.total_no_cost:.3f} < payout {opp.guaranteed_payout:.3f}"
+                ),
+                recommended_side=OrderSide.BUY,
+            )
+            decision = await risk_manager.evaluate(signal, leg, available_cash=available_cash)
+            if not decision.approved:
+                log.info(
+                    "arb_scanner.negrisk_risk_rejected",
+                    group=opp.neg_risk_market_id,
+                    market_id=leg.id,
+                    reason=decision.reason,
+                )
+                return  # incomplete package is not an arb — skip entirely
+            decisions.append((leg, decision))
+
+        # Size all legs to a common SHARE quantity so each losing leg pays an
+        # identical $1. Per leg, shares are bounded by both the approved dollar
+        # size and the max per-leg arb size.
+        max_size = self.settings.arbitrage.max_arb_size
+        qty = min(
+            min(decision.position_size, max_size) / leg.outcome_no_price
+            for leg, decision in decisions
+        )
+        if qty < 1:
+            log.debug("arb_scanner.negrisk_size_too_small", group=opp.neg_risk_market_id, qty=round(qty, 3))
+            return
+
+        self._arb_attempts[arb_key] = now_ts + 3600
+        if len(self._arb_attempts) > 200:
+            self._arb_attempts = {k: v for k, v in self._arb_attempts.items() if v > now_ts}
+
+        is_live = self.settings.is_live
+        exchange_client = engine.exchange
+        orders = [
+            Order(
+                market_id=leg.id,
+                exchange=opp.exchange,
+                token_id=leg.clob_token_no,
+                side=OrderSide.BUY,
+                token=TokenType.NO,
+                size=qty,
+                # Round to a valid Polymarket tick (1-cent, 0.01-0.99), matching
+                # PolymarketClient.prepare_order so live orders aren't rejected.
+                price=max(0.01, min(0.99, round(leg.outcome_no_price, 2))),
+                dry_run=not is_live,
+            )
+            for leg, _ in decisions
+        ]
+
+        log.info(
+            "arb_scanner.negrisk_executing",
+            group=opp.neg_risk_market_id,
+            n_outcomes=opp.n_outcomes,
+            shares_per_leg=round(qty, 2),
+            profit_pct=round(opp.expected_profit_pct, 2),
+            is_paper=not is_live,
+        )
+
+        try:
+            results = await asyncio.gather(
+                *[exchange_client.place_order(o) for o in orders]
+            )
+            n_ok = sum(1 for r in results if r.status not in ("rejected", "error"))
+            mode = "PAPER" if not is_live else "LIVE"
+            if n_ok == len(orders):
+                await alerts.send(
+                    f"[{mode}] NegRisk arb executed: {opp.question[:45]} | "
+                    f"{opp.n_outcomes} legs @ {round(qty, 1)} shares | "
+                    f"profit: {opp.expected_profit_pct:.1f}%",
+                    level="warning",
+                )
+            elif n_ok > 0:
+                log.warning(
+                    "arb_scanner.negrisk_partial_fill",
+                    group=opp.neg_risk_market_id,
+                    filled_legs=n_ok,
+                    total_legs=len(orders),
+                )
+                await alerts.send(
+                    f"[{mode}] NEGRISK PARTIAL FILL: {n_ok}/{len(orders)} legs filled "
+                    f"for {opp.question[:40]}. Package no longer guaranteed — "
+                    f"manual review required.",
+                    level="critical",
+                )
+        except Exception as e:
+            log.error("arb_scanner.negrisk_execution_error", group=opp.neg_risk_market_id, error=str(e))
 
     async def _execute_internal_arb(
         self,
