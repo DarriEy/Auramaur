@@ -279,7 +279,7 @@ class GeminiConfig(BaseModel):
     Claude if Gemini errors."""
 
     enabled: bool = False
-    model: str = "gemini-2.5-flash"
+    model: str = "gemini-3.1-pro-preview"
     # UTC hours to prefer Gemini (default = deep-night quiet hours).
     off_hours_utc: list[int] = Field(default_factory=lambda: [4, 5, 6, 7, 8, 9])
     # Switch to Gemini once Claude calls reach this fraction of the daily budget.
