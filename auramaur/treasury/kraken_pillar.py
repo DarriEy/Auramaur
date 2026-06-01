@@ -166,7 +166,13 @@ class KrakenPillar:
                 continue
             holding = pair in self._dir_long
 
-            if not holding and mom >= kcfg.directional_momentum_pct:
+            # Asymmetric long bias: enter on a smaller up-move, hold through a
+            # larger down-move (ride winners). Fall back to the legacy symmetric
+            # threshold if the split ones aren't configured.
+            entry_thr = getattr(kcfg, "directional_entry_momentum_pct", None) or kcfg.directional_momentum_pct
+            exit_thr = getattr(kcfg, "directional_exit_momentum_pct", None) or kcfg.directional_momentum_pct
+
+            if not holding and mom >= entry_thr:
                 # Budget ceiling: each open position ~= max_order_usd. Scaled by
                 # the global risk-tolerance lever so it moves with all exposure.
                 from auramaur.risk.tolerance import scale_budget, current_tolerance
@@ -185,7 +191,7 @@ class KrakenPillar:
                 log.info("kraken.directional.entry", pair=pair, momentum=round(mom, 2),
                          status=res.status, err=res.error_message[:80])
 
-            elif holding and mom <= -kcfg.directional_momentum_pct:
+            elif holding and mom <= -exit_thr:
                 entry = self._dir_long.get(pair) or price
                 vol = round(kcfg.max_order_usd * 0.98 / entry, 6)
                 res = await self._k.place_spot_order(
