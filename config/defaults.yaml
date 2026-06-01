@@ -19,7 +19,7 @@ risk:
   max_drawdown_pct: 15.0
   max_stake_per_market: 0.02
   daily_loss_limit: 200.0
-  max_open_positions: 50
+  max_open_positions: 500
   min_edge_pct: 2.5
   min_liquidity: 1000.0
   max_spread_pct: 5.0
