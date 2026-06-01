@@ -53,29 +53,47 @@ class IBKRClient:
         self._paper = paper_trader
         self._ib = None  # Lazy init of ib_async.IB
         self._connected = False
+        # Backoff so a missing Gateway doesn't get dialed (and logged) every
+        # scan cycle. monotonic deadline; 0 = no cooldown.
+        self._connect_cooldown_until = 0.0
+        self._connect_warned = False
         # Cache of reframed markets: market_id → ReframedMarket
         self._reframed: dict[str, ReframedMarket] = {}
         # Watchlist of underlying symbols to scan
         self._watchlist: list[str] = settings.ibkr.watchlist
 
     async def _ensure_connected(self) -> None:
-        """Lazily connect to TWS / IB Gateway."""
+        """Lazily connect to TWS / IB Gateway.
+
+        On failure (e.g. no Gateway running) it sets a cooldown so we don't
+        re-dial — and re-log — on every scan cycle, and raises so callers can
+        skip this cycle.
+        """
         if self._connected and self._ib is not None:
             return
+
+        import time as _time
+        if _time.monotonic() < self._connect_cooldown_until:
+            raise ConnectionError("ibkr connect on cooldown (no reachable Gateway)")
 
         from ib_async import IB
 
         cfg = self._settings.ibkr
-        self._ib = IB()
-
         port = cfg.paper_port if cfg.environment == "paper" else cfg.live_port
-        await self._ib.connectAsync(
-            host=cfg.host,
-            port=port,
-            clientId=cfg.client_id,
-            readonly=cfg.environment == "paper",
-        )
+        try:
+            self._ib = IB()
+            await self._ib.connectAsync(
+                host=cfg.host,
+                port=port,
+                clientId=cfg.client_id,
+                readonly=cfg.environment == "paper",
+            )
+        except Exception:
+            self._ib = None
+            self._connect_cooldown_until = _time.monotonic() + 300  # back off 5 min
+            raise
         self._connected = True
+        self._connect_warned = False
         log.info(
             "ibkr.connected",
             host=cfg.host,
@@ -89,7 +107,18 @@ class IBKRClient:
 
     async def get_markets(self, active: bool = True, limit: int = 100) -> list[Market]:
         """Scan option chains for watchlist symbols and return reframed markets."""
-        await self._ensure_connected()
+        try:
+            await self._ensure_connected()
+        except Exception as e:  # noqa: BLE001 — degrade quietly, don't spam
+            if not self._connect_warned:
+                log.warning(
+                    "ibkr.unavailable",
+                    error=str(e)[:120],
+                    hint="TWS / IB Gateway not reachable; backing off. "
+                         "Disable ibkr in config to silence entirely.",
+                )
+                self._connect_warned = True
+            return []
 
         markets: list[Market] = []
         for symbol in self._watchlist:
