@@ -17,11 +17,15 @@ from auramaur.db.database import Database
 log = structlog.get_logger()
 
 # --- Thresholds ---
-_BRIER_GOOD = 0.15      # Below this = well calibrated
-_BRIER_BAD = 0.30        # Above this = poorly calibrated
+# Centered on Brier 0.25 = a coin flip (no edge). A category at/near random is
+# throttled hard; only categories with clear calibration edge keep full size.
+# (Edge audit 2026-06: tech ~0.09 / crypto ~0.19 = real edge; politics_us ~0.24,
+#  other/economics ~0.235 = no edge and were over-traded under the old 0.30 cap.)
+_BRIER_GOOD = 0.15      # Below this = real edge -> boost
+_BRIER_BAD = 0.24        # At/above this = ~random -> throttle hard
 _MULT_GOOD = 1.2         # Kelly multiplier for accurate categories
 _MULT_NEUTRAL = 1.0      # Kelly multiplier for average categories
-_MULT_BAD = 0.3           # Kelly multiplier for poor categories
+_MULT_BAD = 0.2           # Kelly multiplier for no-edge categories
 _AVOID_MIN_TRADES = 10    # Minimum distinct markets before we consider avoiding
 _AVOID_ACCURACY = 0.40    # Directional accuracy below this = avoid
 
