@@ -432,7 +432,7 @@ class StrategicAnalyzer:
             if self._ensemble and self._settings.llm_ensemble.enabled:
                 result = await self._analyze_batch_ensemble(prompt, markets)
             else:
-                raw = await self._call_claude_cli(prompt)
+                raw = await self._call_llm(prompt)
                 result = self._parse_strategic_response(raw)
         except Exception as e:
             log.error("strategic.batch_failed", error=str(e))
@@ -480,7 +480,7 @@ class StrategicAnalyzer:
         )
 
         try:
-            raw = await self._call_claude_cli(prompt)
+            raw = await self._call_llm(prompt)
             adversarial = self._parse_strategic_response(raw)
 
             # Merge adversarial into primary results
@@ -755,6 +755,11 @@ class StrategicAnalyzer:
                     await asyncio.sleep(backoff[attempt - 1])
 
         raise last_error  # type: ignore[misc]
+
+    async def _call_llm(self, prompt: str) -> str:
+        """Single-model call, routed to Gemini off-hours / when Claude budget low."""
+        from auramaur.nlp.llm_router import route
+        return await route(self._settings, self._daily_calls, prompt, self._call_claude_cli)
 
     async def _call_ensemble(self, prompt: str) -> list[tuple[str, str]]:
         """Call all ensemble models in parallel, returning [(model, raw_response), ...].

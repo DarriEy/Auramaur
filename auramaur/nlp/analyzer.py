@@ -150,53 +150,10 @@ class ClaudeAnalyzer:
 
         raise last_error  # type: ignore[misc]
 
-    # ------------------------------------------------------------------
-    # LLM routing — Gemini for off-hours / Claude-budget relief
-    # ------------------------------------------------------------------
-
-    def _should_use_gemini(self) -> bool:
-        from datetime import datetime, timezone
-        g = self._settings.gemini
-        if not (g.enabled and self._settings.gemini_api_key):
-            return False
-        budget = self._settings.nlp.daily_claude_call_budget
-        if budget > 0 and self._daily_calls >= int(budget * g.claude_budget_threshold):
-            return True  # Claude budget near-exhausted
-        return datetime.now(timezone.utc).hour in g.off_hours_utc  # off-hours
-
-    async def _call_gemini(self, prompt: str) -> str:
-        """Call Gemini via REST (JSON mode). No SDK dependency."""
-        import aiohttp
-        g = self._settings.gemini
-        url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-               f"{g.model}:generateContent?key={self._settings.gemini_api_key}")
-        body = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "maxOutputTokens": self._settings.nlp.max_tokens,
-                "temperature": 0.3,
-                "responseMimeType": "application/json",
-            },
-        }
-        async with aiohttp.ClientSession() as s:
-            async with s.post(url, json=body,
-                              timeout=aiohttp.ClientTimeout(total=120)) as r:
-                data = await r.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-
     async def _call_llm(self, prompt: str) -> str:
-        """Route to Gemini when off-hours / Claude budget low; else Claude.
-
-        Falls back to Claude if Gemini errors.
-        """
-        if self._should_use_gemini():
-            try:
-                out = await self._call_gemini(prompt)
-                log.info("llm.routed", provider="gemini", model=self._settings.gemini.model)
-                return out
-            except Exception as e:  # noqa: BLE001 — fall back to Claude
-                log.warning("gemini.failed_fallback_claude", error=str(e)[:120])
-        return await self._call_claude_cli(prompt)
+        """Route to Gemini (off-hours / Claude budget low) else Claude."""
+        from auramaur.nlp.llm_router import route
+        return await route(self._settings, self._daily_calls, prompt, self._call_claude_cli)
 
     # ------------------------------------------------------------------
     # Core estimation methods
