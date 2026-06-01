@@ -40,10 +40,12 @@ class IBKRDirectionalPillar:
         holding = sym in self._long
 
         if not holding and mom >= cfg.directional_equity_momentum_pct:
+            from auramaur.risk.tolerance import scale_budget, current_tolerance
+            budget = scale_budget(cfg.directional_equity_budget_usd, current_tolerance(self._s))
             allocated = len(self._long) * cfg.equity_max_order_usd
-            if allocated + cfg.equity_max_order_usd > cfg.directional_equity_budget_usd:
+            if allocated + cfg.equity_max_order_usd > budget:
                 log.info("ibkr_equity.directional.budget_full", symbol=sym,
-                         allocated=allocated, budget=cfg.directional_equity_budget_usd)
+                         allocated=allocated, budget=round(budget, 2))
                 return
             res = await self._eq.place_order(sym, OrderSide.BUY, cfg.equity_max_order_usd)
             if res.order_id not in ("ERROR", "BLOCKED"):

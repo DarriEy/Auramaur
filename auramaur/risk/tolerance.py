@@ -14,7 +14,32 @@ Applied at the RiskManager gateway, so every trade respects it.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 _CONF = ["LOW", "MEDIUM", "HIGH"]
+
+# Runtime override so `auramaur risk <n>` takes effect LIVE (no restart): the CLI
+# writes here, every consumer reads it each time, falling back to config.
+_OVERRIDE = Path("data/risk_tolerance")
+
+
+def current_tolerance(settings) -> float:
+    """Effective risk tolerance now: the live override file if present, else config."""
+    try:
+        return max(0.0, min(100.0, float(_OVERRIDE.read_text().strip())))
+    except (OSError, ValueError):
+        return float(getattr(settings, "risk_tolerance", 50.0))
+
+
+def set_tolerance(value: float) -> None:
+    """Persist a live override (clamped 0..100)."""
+    _OVERRIDE.parent.mkdir(parents=True, exist_ok=True)
+    _OVERRIDE.write_text(str(max(0.0, min(100.0, float(value)))))
+
+
+def scale_budget(base_usd: float, tolerance: float) -> float:
+    """Scale a directional exposure budget by the lever (0..100)."""
+    return base_usd * _aggr(max(0.0, min(100.0, tolerance)) / 100.0)
 
 
 def _aggr(t: float) -> float:

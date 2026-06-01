@@ -273,6 +273,28 @@ def cockpit():
 
 
 @main.command()
+@click.argument("value", required=False, type=float)
+def risk(value):
+    """Show or set the global risk-tolerance lever (0=conservative..100=YOLO).
+
+    Live — a running bot picks up the new value on its next risk check, no restart.
+    """
+    from auramaur.risk.tolerance import current_tolerance, set_tolerance
+    s = Settings()
+    if value is None:
+        console.print(f"risk_tolerance = [bold]{current_tolerance(s):.0f}[/]/100")
+        return
+    if not 0 <= value <= 100:
+        console.print("[red]value must be between 0 and 100[/]")
+        return
+    set_tolerance(value)
+    label = ("most conservative" if value <= 15 else "conservative" if value < 45
+             else "neutral" if value <= 55 else "aggressive" if value < 85 else "YOLO")
+    console.print(f"risk_tolerance -> [bold]{value:.0f}[/]/100 ([cyan]{label}[/]) — "
+                  "live; running bot applies it next cycle.")
+
+
+@main.command()
 def gates():
     """Show feature gates — which experimental switches the data has earned."""
     from auramaur.monitoring import gates as g
