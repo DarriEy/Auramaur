@@ -25,6 +25,10 @@ def settings():
     s.execution.profit_target_pct = 50.0
     s.execution.edge_erosion_min_pct = 2.0
     s.execution.time_decay_hours = 12.0
+    # Off by default so existing exit tests are unaffected; opted in per-test.
+    s.execution.free_winners_enabled = False
+    s.execution.free_winners_max_upside_pct = 5.0
+    s.execution.free_winners_min_hours = 48.0
     return s
 
 
@@ -117,6 +121,43 @@ async def test_time_decay_triggered(mock_db, settings):
     exits = await tracker.check_exits(settings, gamma)
     assert len(exits) == 1
     assert exits[0][1] == ExitReason.TIME_DECAY
+
+
+@pytest.mark.asyncio
+async def test_free_winners_far_dated(mock_db, settings):
+    """Near-certain winner (4% upside) far from resolution → CAPITAL_EFFICIENCY."""
+    settings.execution.free_winners_enabled = True
+    mock_db.fetchall = AsyncMock(return_value=[
+        _make_position("m1", avg_price=0.90),
+    ])
+    gamma = AsyncMock()
+    # 0.96 → remaining upside 4% (>2% edge-erosion floor, <5% free-winners cap);
+    # PnL +6.7% (below profit target). Resolves in ~8 days (>48h).
+    end_date = datetime.now(timezone.utc) + timedelta(hours=200)
+    gamma.get_market = AsyncMock(return_value=_make_market("m1", 0.96, end_date=end_date))
+
+    tracker = PortfolioTracker(db=mock_db)
+    exits = await tracker.check_exits(settings, gamma)
+    assert len(exits) == 1
+    assert exits[0][1] == ExitReason.CAPITAL_EFFICIENCY
+
+
+@pytest.mark.asyncio
+async def test_free_winners_holds_when_resolution_near(mock_db, settings):
+    """Same near-winner but resolving soon (<48h) is held, not freed early."""
+    settings.execution.free_winners_enabled = True
+    mock_db.fetchall = AsyncMock(return_value=[
+        _make_position("m1", avg_price=0.90),
+    ])
+    gamma = AsyncMock()
+    # 0.96, resolves in 24h: free-winners needs >48h, and time-decay needs <=12h,
+    # so neither fires -> held.
+    end_date = datetime.now(timezone.utc) + timedelta(hours=24)
+    gamma.get_market = AsyncMock(return_value=_make_market("m1", 0.96, end_date=end_date))
+
+    tracker = PortfolioTracker(db=mock_db)
+    exits = await tracker.check_exits(settings, gamma)
+    assert exits == []
 
 
 @pytest.mark.asyncio

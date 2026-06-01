@@ -383,6 +383,28 @@ class PortfolioTracker:
                 exits.append((pos, ExitReason.EDGE_EROSION))
                 continue
 
+            # 4b. Capital efficiency — near-certain winner (small upside left)
+            #     that is still far from resolution. Holding it locks capital for
+            #     little residual gain; free it to redeploy into fresh edges.
+            #     Small remaining_upside == the held side is near its payout
+            #     boundary, so this only ever sells winners (never dumps losers).
+            if (
+                settings.execution.free_winners_enabled
+                and remaining_upside < settings.execution.free_winners_max_upside_pct
+                and market.end_date is not None
+            ):
+                end = market.end_date if market.end_date.tzinfo else market.end_date.replace(tzinfo=timezone.utc)
+                hours_left = (end - datetime.now(timezone.utc)).total_seconds() / 3600.0
+                if hours_left > settings.execution.free_winners_min_hours:
+                    log.info(
+                        "exit.capital_efficiency",
+                        market_id=pos.market_id,
+                        remaining_upside_pct=round(remaining_upside, 2),
+                        hours_left=round(hours_left, 1),
+                    )
+                    exits.append((pos, ExitReason.CAPITAL_EFFICIENCY))
+                    continue
+
             # 5. Time decay — market expiring soon with thin edge
             if market.end_date is not None:
                 end = market.end_date if market.end_date.tzinfo else market.end_date.replace(tzinfo=timezone.utc)

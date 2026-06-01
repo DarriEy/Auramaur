@@ -14,6 +14,11 @@ execution:
   profit_target_pct: 50.0
   edge_erosion_min_pct: 2.0
   time_decay_hours: 12.0
+  # Free capital from near-certain winners far from resolution (sell early to
+  # redeploy). Only fires on the winning side; see ExecutionConfig.
+  free_winners_enabled: true
+  free_winners_max_upside_pct: 5.0
+  free_winners_min_hours: 48.0
 
 risk:
   max_drawdown_pct: 15.0

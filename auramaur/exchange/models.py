@@ -154,6 +154,7 @@ class ExitReason(str, Enum):
     EDGE_EROSION = "EDGE_EROSION"
     TIME_DECAY = "TIME_DECAY"
     DUST_CLEANUP = "DUST_CLEANUP"
+    CAPITAL_EFFICIENCY = "CAPITAL_EFFICIENCY"
 
 
 class Fill(BaseModel):
