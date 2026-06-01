@@ -25,12 +25,26 @@ _DEFAULTS = _load_defaults()
 class ExecutionConfig(BaseModel):
     live: bool = False
     paper_initial_balance: float = 1000.0
-    limit_order_ttl_seconds: int = 300
+    limit_order_ttl_seconds: int = 120
     spread_capture_min_bps: int = 50
     stop_loss_pct: float = 30.0
     profit_target_pct: float = 50.0
     edge_erosion_min_pct: float = 2.0
     time_decay_hours: float = 12.0
+    # Free capital from near-certain winners that are still far from resolution:
+    # a position with <max_upside_pct left to gain but >min_hours until it
+    # resolves ties up capital for little residual return. Sell it early to
+    # redeploy into fresh edges. Only targets the winning side (tiny remaining
+    # upside == price near the payout boundary).
+    free_winners_enabled: bool = True
+    free_winners_max_upside_pct: float = 3.0
+    free_winners_min_hours: float = 48.0
+    # Periodic dust sweep: close tiny stale positions to trim position count and
+    # free locked slots. Age-guarded so freshly-opened small entries are never
+    # swept (the bot opens $1-7 positions). Runs via the portfolio exit monitor.
+    dust_sweep_enabled: bool = True
+    dust_max_notional: float = 1.0
+    dust_min_age_hours: float = 24.0
 
 
 class RiskConfig(BaseModel):
@@ -392,10 +406,12 @@ class Settings(BaseSettings):
 
     # Safety
     auramaur_live: bool = False
-    # Separate opt-in for on-chain redemption — real Polygon transactions.
-    # Gated independently of auramaur_live so you can run live-trading without
-    # inadvertently enabling automated redemption submission.
-    auramaur_enable_redemption: bool = False
+    # On-chain redemption — real Polygon transactions. Defaulted ON so resolved
+    # winners auto-claim back to USDC (recycling capital). Still requires the
+    # full live triple-gate (auramaur_live + execution.live + no KILL_SWITCH) in
+    # _is_live_submission_allowed(), so this never fires outside live trading;
+    # override with env AURAMAUR_ENABLE_REDEMPTION=false to disable.
+    auramaur_enable_redemption: bool = True
 
     # Separate opt-in for cross-venue fund transfers (Kraken -> Polymarket
     # withdrawals). Gated independently of auramaur_live AND of redemption so

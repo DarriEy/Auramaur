@@ -8,12 +8,21 @@ risk_tolerance: 50
 execution:
   live: true
   paper_initial_balance: 111.0
-  limit_order_ttl_seconds: 300
+  limit_order_ttl_seconds: 120
   spread_capture_min_bps: 50
   stop_loss_pct: 30.0
   profit_target_pct: 50.0
   edge_erosion_min_pct: 2.0
   time_decay_hours: 12.0
+  # Free capital from near-certain winners far from resolution (sell early to
+  # redeploy). Only fires on the winning side; see ExecutionConfig.
+  free_winners_enabled: true
+  free_winners_max_upside_pct: 3.0
+  free_winners_min_hours: 48.0
+  # Periodic dust sweep (age-guarded so fresh entries are never swept).
+  dust_sweep_enabled: true
+  dust_max_notional: 1.0
+  dust_min_age_hours: 24.0
 
 risk:
   max_drawdown_pct: 15.0

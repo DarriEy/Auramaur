@@ -145,7 +145,15 @@ class PositionSyncer:
         return positions
 
     async def _get_live_balance(self) -> float:
-        """Return spendable pUSD without mutating live order state."""
+        """Return *spendable* pUSD: gross collateral minus collateral already
+        reserved by resting BUY orders.
+
+        ``get_balance_allowance`` reports gross collateral (open orders are not
+        netted out), so without this subtraction the engine sizes Kelly bets and
+        approves trades against cash that is actually locked in open orders —
+        only for the submit-time guard to then reject them. Netting here makes
+        sizing/allocation deploy only what is genuinely available.
+        """
         self._exchange._init_clob_client()
         client = self._exchange._clob_client
         try:
@@ -153,12 +161,19 @@ class PositionSyncer:
             resp = client.get_balance_allowance(
                 BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=2)
             )
-            total = int(resp.get("balance", 0)) / 1e6 if isinstance(resp, dict) else 0.0
-            log.info("sync.balance.computed", available=round(total, 2))
-            return total
+            gross = int(resp.get("balance", 0)) / 1e6 if isinstance(resp, dict) else 0.0
         except Exception as e:
             log.error("sync.balance.error", error=str(e))
             return 0.0
+
+        reserved = 0.0
+        reserve_fn = getattr(self._exchange, "_reserved_buy_collateral_from_open_orders", None)
+        if reserve_fn is not None:
+            reserved = reserve_fn() or 0.0
+        available = max(0.0, gross - reserved)
+        log.info("sync.balance.computed", available=round(available, 2),
+                 gross=round(gross, 2), reserved=round(reserved, 2))
+        return available
 
     # ------------------------------------------------------------------
     # Paper sync

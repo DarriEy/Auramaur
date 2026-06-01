@@ -25,6 +25,13 @@ def settings():
     s.execution.profit_target_pct = 50.0
     s.execution.edge_erosion_min_pct = 2.0
     s.execution.time_decay_hours = 12.0
+    # Off by default so existing exit tests are unaffected; opted in per-test.
+    s.execution.free_winners_enabled = False
+    s.execution.free_winners_max_upside_pct = 5.0
+    s.execution.free_winners_min_hours = 48.0
+    s.execution.dust_sweep_enabled = False
+    s.execution.dust_max_notional = 1.0
+    s.execution.dust_min_age_hours = 24.0
     return s
 
 
@@ -117,6 +124,96 @@ async def test_time_decay_triggered(mock_db, settings):
     exits = await tracker.check_exits(settings, gamma)
     assert len(exits) == 1
     assert exits[0][1] == ExitReason.TIME_DECAY
+
+
+@pytest.mark.asyncio
+async def test_free_winners_far_dated(mock_db, settings):
+    """Near-certain winner (4% upside) far from resolution → CAPITAL_EFFICIENCY."""
+    settings.execution.free_winners_enabled = True
+    mock_db.fetchall = AsyncMock(return_value=[
+        _make_position("m1", avg_price=0.90),
+    ])
+    gamma = AsyncMock()
+    # 0.96 → remaining upside 4% (>2% edge-erosion floor, <5% free-winners cap);
+    # PnL +6.7% (below profit target). Resolves in ~8 days (>48h).
+    end_date = datetime.now(timezone.utc) + timedelta(hours=200)
+    gamma.get_market = AsyncMock(return_value=_make_market("m1", 0.96, end_date=end_date))
+
+    tracker = PortfolioTracker(db=mock_db)
+    exits = await tracker.check_exits(settings, gamma)
+    assert len(exits) == 1
+    assert exits[0][1] == ExitReason.CAPITAL_EFFICIENCY
+
+
+@pytest.mark.asyncio
+async def test_free_winners_holds_when_resolution_near(mock_db, settings):
+    """Same near-winner but resolving soon (<48h) is held, not freed early."""
+    settings.execution.free_winners_enabled = True
+    mock_db.fetchall = AsyncMock(return_value=[
+        _make_position("m1", avg_price=0.90),
+    ])
+    gamma = AsyncMock()
+    # 0.96, resolves in 24h: free-winners needs >48h, and time-decay needs <=12h,
+    # so neither fires -> held.
+    end_date = datetime.now(timezone.utc) + timedelta(hours=24)
+    gamma.get_market = AsyncMock(return_value=_make_market("m1", 0.96, end_date=end_date))
+
+    tracker = PortfolioTracker(db=mock_db)
+    exits = await tracker.check_exits(settings, gamma)
+    assert exits == []
+
+
+@pytest.mark.asyncio
+async def test_dust_sweep_old_small_position(mock_db, settings):
+    """A small (<$1), sellable, old (>24h) position → DUST_CLEANUP."""
+    settings.execution.dust_sweep_enabled = True
+    mock_db.fetchall = AsyncMock(return_value=[
+        _make_position("m1", avg_price=0.10, size=8.0),  # value $0.80, 8 tokens
+    ])
+    # First fill 100h ago → older than the 24h guard.
+    old_ts = (datetime.now(timezone.utc) - timedelta(hours=100)).isoformat()
+    mock_db.fetchone = AsyncMock(return_value={"first_entry": old_ts})
+    gamma = AsyncMock()
+    gamma.get_market = AsyncMock(return_value=_make_market("m1", 0.10))  # flat → no PnL exit
+
+    tracker = PortfolioTracker(db=mock_db)
+    exits = await tracker.check_exits(settings, gamma)
+    assert len(exits) == 1
+    assert exits[0][1] == ExitReason.DUST_CLEANUP
+
+
+@pytest.mark.asyncio
+async def test_dust_sweep_skips_fresh_position(mock_db, settings):
+    """A small position that was just opened (<24h) is NOT swept (age guard)."""
+    settings.execution.dust_sweep_enabled = True
+    mock_db.fetchall = AsyncMock(return_value=[
+        _make_position("m1", avg_price=0.10, size=8.0),
+    ])
+    fresh_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    mock_db.fetchone = AsyncMock(return_value={"first_entry": fresh_ts})
+    gamma = AsyncMock()
+    gamma.get_market = AsyncMock(return_value=_make_market("m1", 0.10))
+
+    tracker = PortfolioTracker(db=mock_db)
+    exits = await tracker.check_exits(settings, gamma)
+    assert exits == []
+
+
+@pytest.mark.asyncio
+async def test_dust_sweep_skips_sub_minimum_size(mock_db, settings):
+    """A <$1 position too small to sell (poly needs >=5 tokens) is left alone."""
+    settings.execution.dust_sweep_enabled = True
+    mock_db.fetchall = AsyncMock(return_value=[
+        _make_position("m1", avg_price=0.20, size=2.0),  # value $0.40, only 2 tokens
+    ])
+    old_ts = (datetime.now(timezone.utc) - timedelta(hours=100)).isoformat()
+    mock_db.fetchone = AsyncMock(return_value={"first_entry": old_ts})
+    gamma = AsyncMock()
+    gamma.get_market = AsyncMock(return_value=_make_market("m1", 0.20))
+
+    tracker = PortfolioTracker(db=mock_db)
+    exits = await tracker.check_exits(settings, gamma)
+    assert exits == []
 
 
 @pytest.mark.asyncio

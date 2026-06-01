@@ -383,6 +383,28 @@ class PortfolioTracker:
                 exits.append((pos, ExitReason.EDGE_EROSION))
                 continue
 
+            # 4b. Capital efficiency — near-certain winner (small upside left)
+            #     that is still far from resolution. Holding it locks capital for
+            #     little residual gain; free it to redeploy into fresh edges.
+            #     Small remaining_upside == the held side is near its payout
+            #     boundary, so this only ever sells winners (never dumps losers).
+            if (
+                settings.execution.free_winners_enabled
+                and remaining_upside < settings.execution.free_winners_max_upside_pct
+                and market.end_date is not None
+            ):
+                end = market.end_date if market.end_date.tzinfo else market.end_date.replace(tzinfo=timezone.utc)
+                hours_left = (end - datetime.now(timezone.utc)).total_seconds() / 3600.0
+                if hours_left > settings.execution.free_winners_min_hours:
+                    log.info(
+                        "exit.capital_efficiency",
+                        market_id=pos.market_id,
+                        remaining_upside_pct=round(remaining_upside, 2),
+                        hours_left=round(hours_left, 1),
+                    )
+                    exits.append((pos, ExitReason.CAPITAL_EFFICIENCY))
+                    continue
+
             # 5. Time decay — market expiring soon with thin edge
             if market.end_date is not None:
                 end = market.end_date if market.end_date.tzinfo else market.end_date.replace(tzinfo=timezone.utc)
@@ -391,10 +413,52 @@ class PortfolioTracker:
                     exits.append((pos, ExitReason.TIME_DECAY))
                     continue
 
+            # 6. Dust cleanup (lowest priority — real exit reasons win first).
+            #    Tiny stale positions clog the position count and lock small
+            #    amounts of capital. Sweep only those below the notional floor,
+            #    above the per-exchange sellable size, AND old enough not to be a
+            #    freshly-opened entry (the bot itself opens $1-7 positions, so a
+            #    value-only rule would instantly sell new entries). Config-gated.
+            if settings.execution.dust_sweep_enabled:
+                current_value = pos.size * (pos.current_price or 0.0)
+                min_size = 1 if exchange == "kalshi" else 5
+                if (
+                    0.01 <= (pos.current_price or 0.0)
+                    and pos.size >= min_size
+                    and current_value < settings.execution.dust_max_notional
+                    and await self._position_age_hours(pos.market_id, mode_flag)
+                        >= settings.execution.dust_min_age_hours
+                ):
+                    log.info(
+                        "exit.dust_cleanup",
+                        market_id=pos.market_id,
+                        value=round(current_value, 2),
+                        size=pos.size,
+                    )
+                    exits.append((pos, ExitReason.DUST_CLEANUP))
+                    continue
+
         if prices_updated:
             await self.db.commit()
 
         return exits
+
+    async def _position_age_hours(self, market_id: str, mode_flag: int | None) -> float:
+        """Hours since the position's first recorded fill. Returns 0.0 when the
+        entry time is unknown, so dust-sweep treats it as 'too new to touch'."""
+        sql = "SELECT MIN(timestamp) AS first_entry FROM trades WHERE market_id = ?"
+        params: list[object] = [market_id]
+        if mode_flag is not None:
+            sql += " AND is_paper = ?"
+            params.append(mode_flag)
+        try:
+            row = await self.db.fetchone(sql, tuple(params))
+            if not row or not row["first_entry"]:
+                return 0.0
+            entry_dt = datetime.fromisoformat(row["first_entry"]).replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError, KeyError):
+            return 0.0
+        return (datetime.now(timezone.utc) - entry_dt).total_seconds() / 3600.0
 
     async def _get_peak_prices(self) -> dict[str, float]:
         """Load tracked peak PnL percentages for trailing stop."""
