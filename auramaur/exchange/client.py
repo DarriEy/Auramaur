@@ -540,9 +540,11 @@ class PolymarketClient:
         self._init_clob_client()
         try:
             raw = self._clob_client.get_order_book(token_id)
-            # OrderBookSummary is a dataclass with .bids/.asks as lists of OrderSummary
-            raw_bids = getattr(raw, "bids", []) or []
-            raw_asks = getattr(raw, "asks", []) or []
+            # py_clob_client_v2 returns a plain dict ({"bids": [...], "asks": [...]}),
+            # not a dataclass — read by key, falling back to attribute access for
+            # any client version that returns an OrderBookSummary object.
+            raw_bids = (raw.get("bids") if isinstance(raw, dict) else getattr(raw, "bids", [])) or []
+            raw_asks = (raw.get("asks") if isinstance(raw, dict) else getattr(raw, "asks", [])) or []
             bids = [
                 OrderBookLevel(
                     price=float(getattr(b, "price", b.get("price", 0)) if isinstance(b, dict) else b.price),
