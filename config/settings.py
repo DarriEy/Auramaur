@@ -210,6 +210,14 @@ class IBKRConfig(BaseModel):
     # The options client connects read-only by default (data only). To place
     # equity orders the trading connection must be read-only=False.
     readonly: bool = True
+    # Paper-trade mode: route IBKR orders to the paper ledger and size against
+    # paper_budget_usd instead of the live account. Lets IBKR exercise the full
+    # discovery->analysis->execution pipeline (and feed calibration) while the
+    # live account is unfunded / cash-starved. Flip to false once funded to go
+    # live. Options are expensive (~$300+/contract) so the live $0 balance would
+    # size to zero — the paper budget is what makes prep trading possible.
+    paper_trade: bool = True
+    paper_budget_usd: float = 5000.0
 
     # --- Directional equity speculation (gated; no validated edge) ---
     # Mirrors the Kraken directional pillar. Uses its OWN socket connection

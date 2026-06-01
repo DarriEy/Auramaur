@@ -53,6 +53,10 @@ class IBKRClient:
         self._paper = paper_trader
         self._ib = None  # Lazy init of ib_async.IB
         self._connected = False
+        # Live orders awaiting terminal status, keyed by IB orderId. The shared
+        # order monitor polls this (records fills, TTL-cancels) exactly as it
+        # does for Polymarket/Kalshi — so IBKR is a first-class monitored venue.
+        self._live_pending: dict[str, Order] = {}
         # Backoff so a missing Gateway doesn't get dialed (and logged) every
         # scan cycle. monotonic deadline; 0 = no cooldown.
         self._connect_cooldown_until = 0.0
@@ -211,9 +215,11 @@ class IBKRClient:
                     opt = Option(symbol, expiry, strike, right, "SMART")
                     option_contracts.append(opt)
 
-        # Qualify in batch
+        # Qualify in batch. qualifyContractsAsync can return None entries for
+        # strike/expiry combos that don't exist (logged as Error 200), so guard
+        # against None before reading conId.
         qualified = await self._ib.qualifyContractsAsync(*option_contracts)
-        qualified = [c for c in qualified if c.conId > 0]
+        qualified = [c for c in qualified if c is not None and c.conId > 0]
 
         if not qualified:
             return []
@@ -355,6 +361,15 @@ class IBKRClient:
             return result
 
         # === LIVE ORDER PATH ===
+        # Route to the paper ledger when paper_trade is on (prep mode while the
+        # account is unfunded) or the socket is read-only (can't place orders).
+        # Degrades safely instead of erroring.
+        if self._settings.ibkr.paper_trade or self._settings.ibkr.readonly:
+            reason = "paper_trade" if self._settings.ibkr.paper_trade else "readonly"
+            log.info("ibkr.order_to_paper", market_id=order.market_id, reason=reason)
+            order.dry_run = True
+            return await self._paper.execute(order)
+
         await self._ensure_connected()
 
         log.warning(
@@ -390,8 +405,11 @@ class IBKRClient:
 
             trade = self._ib.placeOrder(contract, ib_order)
 
+            order_id = str(trade.order.orderId)
+            # Track for the shared order monitor (fill recording + TTL-cancel).
+            self._live_pending[order_id] = order
             return OrderResult(
-                order_id=str(trade.order.orderId),
+                order_id=order_id,
                 market_id=order.market_id,
                 status="pending",
                 filled_size=0,
@@ -479,12 +497,31 @@ class IBKRClient:
             for trade in trades:
                 if str(trade.order.orderId) == order_id:
                     self._ib.cancelOrder(trade.order)
+                    self._live_pending.pop(order_id, None)
                     log.info("order.cancelled", exchange="ibkr", order_id=order_id)
                     return True
             return False
         except Exception as e:
             log.error("ibkr.cancel_error", order_id=order_id, error=str(e))
             return False
+
+    async def get_balance(self) -> float:
+        """Cash available for trading (AvailableFunds), in the account's base
+        currency. Returns 0.0 if the gateway is unreachable so sizing degrades
+        to "no capital" rather than erroring. Used by the engine for sizing,
+        the same way KalshiClient.get_balance is."""
+        # Prep mode: size against the paper budget, not the (empty) live account.
+        # Options cost ~$300+/contract, so the live $0 balance would size to zero
+        # and nothing would paper-trade.
+        if self._settings.ibkr.paper_trade:
+            return float(self._settings.ibkr.paper_budget_usd)
+        try:
+            await self._ensure_connected()
+            summary = {v.tag: v.value for v in self._ib.accountSummary()}
+            return float(summary.get("AvailableFunds", 0.0) or 0.0)
+        except Exception as e:  # noqa: BLE001 — degrade to no-capital on failure
+            log.debug("ibkr.balance_error", error=str(e)[:120])
+            return 0.0
 
     async def close(self) -> None:
         """Disconnect from IB."""
