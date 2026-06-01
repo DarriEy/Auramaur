@@ -60,7 +60,11 @@ class RiskManager:
         available_cash: float | None = None,
     ) -> RiskDecision:
         """Run every risk check and, if all pass, compute position size."""
-        rc = self.settings.risk  # RiskConfig shortcut
+        # Apply the global risk-tolerance lever (0=conservative..100=YOLO) — one
+        # dial scales the whole prob/stat/risk surface at this gateway.
+        from auramaur.risk.tolerance import scale_risk
+        rc, scaled_kelly = scale_risk(
+            self.settings.risk, self.settings.kelly.fraction, self.settings.risk_tolerance)
 
         # Gather portfolio state
         drawdown = await self.portfolio.get_drawdown()
@@ -83,7 +87,7 @@ class RiskManager:
         equity = cash + position_notional
         regime = resolve_regime(
             equity=equity,
-            base_kelly=self.settings.kelly.fraction,
+            base_kelly=scaled_kelly,
             base_max_stake=rc.max_stake_per_market,
             base_min_edge_pct=rc.min_edge_pct,
         )
