@@ -125,8 +125,10 @@ async def _get_dashboard_stats(db: Database, settings: Settings) -> dict:
     # dashboards (and vice versa).
     is_paper_flag = 0 if settings.is_live else 1
     rows = await db.fetchall(
-        """SELECT p.*, m.question FROM portfolio p
+        """SELECT p.*, m.question, cb.avg_cost AS cb_avg_cost FROM portfolio p
            LEFT JOIN markets m ON p.market_id = m.id
+           LEFT JOIN cost_basis cb ON cb.market_id = p.market_id
+                                  AND cb.is_paper = p.is_paper
            WHERE p.is_paper = ?""",
         (is_paper_flag,),
     )
@@ -135,7 +137,10 @@ async def _get_dashboard_stats(db: Database, settings: Settings) -> dict:
             "market_id": r["market_id"], "question": r["question"] or r["market_id"],
             "side": r["side"], "size": r["size"], "avg_price": r["avg_price"],
             "current_price": r["current_price"] or r["avg_price"],
-            "pnl": r["unrealized_pnl"] or 0,
+            "pnl": (
+                ((r["current_price"] or r["avg_price"]) - (r["cb_avg_cost"] or r["avg_price"]))
+                * (r["size"] or 0)
+            ),
         }
         for r in rows
     ]
@@ -156,12 +161,47 @@ async def _get_dashboard_stats(db: Database, settings: Settings) -> dict:
         for r in rows
     ]
 
-    # Balance and PnL — filter trades to the current mode.
+    # Balance and PnL — use fills/cost_basis/resolution_pnl, not trades.pnl
+    # (legacy mirror rows never had authoritative P&L).
     row = await db.fetchone(
-        "SELECT COUNT(*) as cnt, COALESCE(SUM(pnl), 0) as total_pnl FROM trades WHERE is_paper = ?",
+        "SELECT COUNT(*) as cnt FROM fills WHERE is_paper = ?",
         (is_paper_flag,),
     )
     stats["trade_count"] = row["cnt"] if row else 0
+    resolved_component_sql = (
+        "COALESCE((SELECT SUM(r.pnl) FROM resolution_pnl r), 0)"
+        if settings.is_live else "0"
+    )
+    resolved_exclusion_sql = (
+        "AND cb.market_id NOT IN (SELECT market_id FROM resolution_pnl)"
+        if settings.is_live else ""
+    )
+    portfolio_resolved_exclusion_sql = (
+        "AND p.market_id NOT IN (SELECT market_id FROM resolution_pnl)"
+        if settings.is_live else ""
+    )
+    row = await db.fetchone(
+        f"""
+        SELECT
+            {resolved_component_sql}
+          + COALESCE((
+                SELECT SUM(cb.realized_pnl)
+                FROM cost_basis cb
+                WHERE cb.is_paper = ?
+                  {resolved_exclusion_sql}
+            ), 0)
+          + COALESCE((
+                SELECT SUM((COALESCE(p.current_price, p.avg_price)
+                            - COALESCE(cb.avg_cost, p.avg_price)) * p.size)
+                FROM portfolio p
+                LEFT JOIN cost_basis cb ON cb.market_id = p.market_id
+                                      AND cb.is_paper = p.is_paper
+                WHERE p.is_paper = ?
+                  {portfolio_resolved_exclusion_sql}
+            ), 0) AS total_pnl
+        """,
+        (is_paper_flag, is_paper_flag),
+    )
     stats["total_pnl"] = row["total_pnl"] if row else 0
 
     # Drawdown
@@ -547,6 +587,61 @@ def redeem_check():
     asyncio.run(_check())
 
 
+@main.command("repair-pnl")
+@click.option("--write", is_flag=True,
+              help="Persist resolution_pnl rows and rebuild category_stats dollar fields.")
+def repair_pnl(write: bool):
+    """Backfill realized PnL from fills for resolved markets.
+
+    Default mode is a dry-run. Use ``--write`` after reviewing the summary.
+    """
+
+    async def _run():
+        from auramaur.broker.pnl_repair import (
+            backfill_resolution_pnl,
+            rebuild_category_stats_from_resolution_pnl,
+        )
+
+        db = Database()
+        await db.connect()
+        try:
+            dry_run = not write
+            backfill = await backfill_resolution_pnl(db, is_paper=0, dry_run=dry_run)
+            category = await rebuild_category_stats_from_resolution_pnl(db, dry_run=dry_run)
+
+            mode = "WRITE" if write else "DRY RUN"
+            console.print(f"[bold]{mode}[/] PnL repair")
+            console.print(
+                f"Resolved markets scanned: [cyan]{backfill.scanned_markets}[/]  "
+                f"with live fills: [cyan]{backfill.markets_with_fills}[/]"
+            )
+            console.print(
+                f"resolution_pnl rows {'written' if write else 'would write'}: "
+                f"[cyan]{backfill.written_resolution_rows if write else backfill.markets_with_fills}[/]  "
+                f"total PnL: [{'green' if backfill.total_pnl >= 0 else 'red'}]"
+                f"${backfill.total_pnl:+.2f}[/]"
+            )
+
+            category_pnl = category.by_category if write else backfill.by_category
+            if category_pnl:
+                table = Table(title="Resolution PnL by Category")
+                table.add_column("Category", style="cyan")
+                table.add_column("PnL", justify="right")
+                for cat, pnl in sorted(
+                    category_pnl.items(), key=lambda item: item[1], reverse=True,
+                ):
+                    style = "green" if pnl >= 0 else "red"
+                    table.add_row(cat or "other", f"[{style}]${pnl:+.2f}[/]")
+                console.print(table)
+
+            if not write:
+                console.print("\n[dim]Preview only. Re-run with [cyan]--write[/] to persist.[/]")
+        finally:
+            await db.close()
+
+    asyncio.run(_run())
+
+
 @main.command("dust-exit")
 @click.option("--max-notional", default=5.0, type=float,
               help="Treat open positions worth less than this (current value, $) as dust.")
@@ -813,8 +908,6 @@ def status():
 @click.option("--compare", is_flag=True, help="Compare two strategies (default params vs aggressive)")
 def backtest(days: int, min_edge: float | None, kelly_fraction: float | None, compare: bool):
     """Run backtest on historical signals."""
-    from rich.columns import Columns
-
     from auramaur.backtest.engine import BacktestEngine
 
     async def _backtest():
@@ -852,8 +945,6 @@ def backtest(days: int, min_edge: float | None, kelly_fraction: float | None, co
 
 def _display_backtest_result(result, days: int):
     """Render backtest results with Rich tables and panels."""
-    from auramaur.backtest.engine import BacktestResult
-
     if result.total_trades == 0:
         console.print(Panel(
             "[yellow]No resolved signals found for backtesting.[/]\n"

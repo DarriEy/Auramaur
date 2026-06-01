@@ -150,8 +150,14 @@ class TestKalshiLivePositionAccounting:
                 "SELECT size, avg_cost, total_cost, token, is_paper FROM cost_basis WHERE market_id = ?",
                 ("KXTEST",),
             )
+            market_row = await db.fetchone(
+                "SELECT exchange, condition_id FROM markets WHERE id = ?",
+                ("KXTEST",),
+            )
 
             assert count == 1
+            assert market_row["exchange"] == "kalshi"
+            assert market_row["condition_id"] == "KXTEST"
             assert portfolio["exchange"] == "kalshi"
             assert portfolio["size"] == pytest.approx(10)
             assert portfolio["avg_price"] == pytest.approx(0.42)

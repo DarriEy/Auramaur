@@ -68,6 +68,8 @@ class Database:
             await self._migrate_v10_to_v11()
         if from_version < 12:
             await self._migrate_v11_to_v12()
+        if from_version < 13:
+            await self._migrate_v12_to_v13()
 
     async def _migrate_v1_to_v2(self) -> None:
         """Add category to calibration, add new tables."""
@@ -321,6 +323,59 @@ class Database:
         await self._db.execute("UPDATE schema_version SET version = 12")
         await self._db.commit()
         log.info("database.migrated", from_version=11, to_version=12)
+
+    async def _migrate_v12_to_v13(self) -> None:
+        """Relax legacy ``markets.condition_id`` constraints.
+
+        Older live DBs have ``condition_id TEXT NOT NULL`` with no default,
+        even though non-CLOB venues such as Kalshi do not have a condition id.
+        Recreate the table with the current nullable/defaulted schema so
+        exchange syncers can upsert market metadata consistently.
+        """
+        await self._db.executescript("""
+            CREATE TABLE IF NOT EXISTS markets_new (
+                id TEXT PRIMARY KEY,
+                exchange TEXT DEFAULT 'polymarket',
+                condition_id TEXT DEFAULT '',
+                ticker TEXT DEFAULT '',
+                question TEXT NOT NULL,
+                description TEXT,
+                category TEXT,
+                end_date TEXT,
+                active INTEGER DEFAULT 1,
+                outcome_yes_price REAL,
+                outcome_no_price REAL,
+                volume REAL DEFAULT 0,
+                liquidity REAL DEFAULT 0,
+                last_updated TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            INSERT OR IGNORE INTO markets_new
+                (id, exchange, condition_id, ticker, question, description,
+                 category, end_date, active, outcome_yes_price, outcome_no_price,
+                 volume, liquidity, last_updated, created_at)
+            SELECT id,
+                   COALESCE(exchange, 'polymarket'),
+                   COALESCE(condition_id, ''),
+                   COALESCE(ticker, ''),
+                   COALESCE(question, id),
+                   description,
+                   category,
+                   end_date,
+                   COALESCE(active, 1),
+                   outcome_yes_price,
+                   outcome_no_price,
+                   COALESCE(volume, 0),
+                   COALESCE(liquidity, 0),
+                   COALESCE(last_updated, datetime('now')),
+                   COALESCE(created_at, datetime('now'))
+            FROM markets;
+            DROP TABLE markets;
+            ALTER TABLE markets_new RENAME TO markets;
+        """)
+        await self._db.execute("UPDATE schema_version SET version = 13")
+        await self._db.commit()
+        log.info("database.migrated", from_version=12, to_version=13)
 
     @property
     def db(self) -> aiosqlite.Connection:

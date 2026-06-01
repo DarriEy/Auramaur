@@ -17,7 +17,7 @@ capping max inventory per market.
 
 from __future__ import annotations
 
-import asyncio
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,7 +29,6 @@ from auramaur.exchange.models import (
     Market,
     Order,
     OrderBook,
-    OrderResult,
     OrderSide,
     OrderType,
     TokenType,
@@ -322,18 +321,23 @@ class MarketMaker:
         if no_price < 0.01 or no_price > 0.99:
             return None, "invalid_no_price"
 
-        # Determine size — scale down if we're near inventory limit
+        # Determine size — scale down if we're near inventory limit, but bump
+        # above Polymarket's $1 minimum when the configured quote size would
+        # otherwise make both-sided quoting impossible on low-price markets.
         remaining_capacity = self._max_inventory - abs(inventory)
         size = min(self._quote_size, remaining_capacity)
         if size < 1.0:
             return None, "inventory_capacity"
 
+        min_size = max(1.0 / our_bid, 1.0 / no_price)
+        if size * our_bid < 1.0 or size * no_price < 1.0:
+            bumped = math.ceil(min_size * 100) / 100
+            if bumped > remaining_capacity:
+                return None, "min_notional"
+            size = bumped
+
         # Round size to Polymarket precision
         size = round(size, 2)
-
-        # Verify notional is >= $1 on both legs (Polymarket minimum)
-        if size * our_bid < 1.0 or size * no_price < 1.0:
-            return None, "min_notional"
 
         return MMQuote(
             market_id=market.id,

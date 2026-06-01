@@ -8,6 +8,10 @@ import math
 import pytest
 
 from auramaur.db.database import Database
+from auramaur.broker.pnl_repair import (
+    backfill_resolution_pnl,
+    rebuild_category_stats_from_resolution_pnl,
+)
 from auramaur.nlp.calibration import CalibrationTracker, _logit, _sigmoid
 
 
@@ -200,6 +204,48 @@ class TestCalibrationTracker:
         assert score is not None
         # (0.9-1)^2 + (0.9-0)^2 / 2 = (0.01 + 0.81) / 2 = 0.41
         assert abs(score - 0.41) < 0.01
+
+    def test_backfill_resolution_pnl_from_live_fills(self, db, event_loop):
+        """Resolved calibration rows with live fills should populate dollar PnL."""
+        run(db.execute(
+            """INSERT INTO markets
+               (id, question, category, last_updated)
+               VALUES ('m_pnl', 'Will PnL work?', 'crypto', datetime('now'))"""
+        ), event_loop)
+        run(db.execute(
+            """INSERT INTO calibration
+               (market_id, predicted_prob, actual_outcome, category)
+               VALUES ('m_pnl', 0.7, 1, 'crypto')"""
+        ), event_loop)
+        run(db.execute(
+            """INSERT INTO signals
+               (market_id, claude_prob, claude_confidence, market_prob, edge)
+               VALUES ('m_pnl', 0.7, 'HIGH', 0.4, 30.0)"""
+        ), event_loop)
+        run(db.execute(
+            """INSERT INTO fills
+               (order_id, market_id, side, token, size, price, is_paper)
+               VALUES ('o1', 'm_pnl', 'BUY', 'YES', 10, 0.4, 0)"""
+        ), event_loop)
+        run(db.commit(), event_loop)
+
+        result = run(backfill_resolution_pnl(db, dry_run=False), event_loop)
+        run(rebuild_category_stats_from_resolution_pnl(db, dry_run=False), event_loop)
+
+        row = run(db.fetchone(
+            "SELECT pnl, category FROM resolution_pnl WHERE market_id = 'm_pnl'"
+        ), event_loop)
+        stats = run(db.fetchone(
+            "SELECT total_pnl, trade_count, win_count, avg_edge FROM category_stats WHERE category = 'crypto'"
+        ), event_loop)
+
+        assert result.markets_with_fills == 1
+        assert row["pnl"] == pytest.approx(6.0)
+        assert row["category"] == "crypto"
+        assert stats["total_pnl"] == pytest.approx(6.0)
+        assert stats["trade_count"] == 1
+        assert stats["win_count"] == 1
+        assert stats["avg_edge"] == pytest.approx(30.0)
 
 
 class TestOnlineCalibration:

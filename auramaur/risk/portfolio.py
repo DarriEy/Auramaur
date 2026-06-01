@@ -266,6 +266,7 @@ class PortfolioTracker:
 
         # Load peak prices for trailing stop calculation
         peak_prices = await self._get_peak_prices()
+        prices_updated = False
 
         for pos in positions:
             # Refresh current price from discovery client
@@ -282,6 +283,22 @@ class PortfolioTracker:
                     )
                 else:
                     pos.current_price = market.outcome_yes_price
+                update_sql = (
+                    """UPDATE portfolio
+                       SET current_price = ?,
+                           unrealized_pnl = (? - avg_price) * size,
+                           updated_at = datetime('now')
+                       WHERE market_id = ?"""
+                )
+                update_params: list[object] = [pos.current_price, pos.current_price, pos.market_id]
+                if exchange:
+                    update_sql += " AND exchange = ?"
+                    update_params.append(exchange)
+                if mode_flag is not None:
+                    update_sql += " AND is_paper = ?"
+                    update_params.append(mode_flag)
+                await self.db.execute(update_sql, tuple(update_params))
+                prices_updated = True
             except Exception as e:
                 log.debug("check_exits.price_error", market_id=pos.market_id, error=str(e))
                 continue
@@ -357,14 +374,9 @@ class PortfolioTracker:
             if pos.side == OrderSide.BUY:
                 # Bought YES: need price to go to 1.0
                 remaining_upside = (1.0 - pos.current_price) * 100.0
-                # True edge erosion: compare current profit margin to entry
-                entry_upside = (1.0 - pos.avg_price) * 100.0
-                erosion = entry_upside - remaining_upside if entry_upside > 0 else 0
             else:
                 # Bought NO / sold YES: need price to go to 0.0
                 remaining_upside = pos.current_price * 100.0
-                entry_upside = pos.avg_price * 100.0
-                erosion = entry_upside - remaining_upside if entry_upside > 0 else 0
 
             # Exit if remaining upside is tiny (near resolution boundary)
             if remaining_upside < settings.execution.edge_erosion_min_pct:
@@ -378,6 +390,9 @@ class PortfolioTracker:
                 if hours_left <= settings.execution.time_decay_hours and remaining_upside < 5.0:
                     exits.append((pos, ExitReason.TIME_DECAY))
                     continue
+
+        if prices_updated:
+            await self.db.commit()
 
         return exits
 
@@ -415,14 +430,17 @@ class PortfolioTracker:
         """Insert or replace a position row in the portfolio table."""
         await self.db.execute(
             """
-            INSERT INTO portfolio (market_id, exchange, side, size, avg_price, current_price, category, token, token_id, is_paper, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO portfolio
+                (market_id, exchange, side, size, avg_price, current_price,
+                 unrealized_pnl, category, token, token_id, is_paper, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(market_id, is_paper) DO UPDATE SET
                 exchange = excluded.exchange,
                 side = excluded.side,
                 size = excluded.size,
                 avg_price = excluded.avg_price,
                 current_price = excluded.current_price,
+                unrealized_pnl = excluded.unrealized_pnl,
                 category = excluded.category,
                 token = excluded.token,
                 token_id = excluded.token_id,
@@ -435,6 +453,7 @@ class PortfolioTracker:
                 position.size,
                 position.avg_price,
                 position.current_price,
+                position.unrealized_pnl,
                 position.category,
                 position.token.value,
                 position.token_id,

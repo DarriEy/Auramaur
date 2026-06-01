@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 import structlog
@@ -549,12 +549,13 @@ class KalshiClient:
 
                 await db.execute(
                     """INSERT INTO markets
-                       (id, exchange, ticker, question, description, category,
+                       (id, exchange, condition_id, ticker, question, description, category,
                         active, outcome_yes_price, outcome_no_price, volume,
                         liquidity, last_updated)
-                       VALUES (?, 'kalshi', ?, ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))
+                       VALUES (?, 'kalshi', ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))
                        ON CONFLICT(id) DO UPDATE SET
                            exchange = excluded.exchange,
+                           condition_id = excluded.condition_id,
                            ticker = excluded.ticker,
                            question = excluded.question,
                            description = excluded.description,
@@ -565,6 +566,7 @@ class KalshiClient:
                            liquidity = excluded.liquidity,
                            last_updated = excluded.last_updated""",
                     (
+                        ticker,
                         ticker,
                         ticker,
                         question,
@@ -580,19 +582,21 @@ class KalshiClient:
                 await db.execute(
                     """INSERT INTO portfolio
                        (market_id, exchange, side, size, avg_price, current_price,
-                        category, token, token_id, is_paper, updated_at)
-                       VALUES (?, 'kalshi', 'BUY', ?, ?, ?, ?, ?, ?, 0, datetime('now'))
+                        unrealized_pnl, category, token, token_id, is_paper, updated_at)
+                       VALUES (?, 'kalshi', 'BUY', ?, ?, ?, ?, ?, ?, ?, 0, datetime('now'))
                        ON CONFLICT(market_id, is_paper) DO UPDATE SET
                            exchange = excluded.exchange,
                            size = excluded.size,
                            avg_price = excluded.avg_price,
                            current_price = excluded.current_price,
+                           unrealized_pnl = excluded.unrealized_pnl,
                            category = excluded.category,
                            token = excluded.token,
                            token_id = excluded.token_id,
                            updated_at = excluded.updated_at""",
                     (ticker, contracts, round(avg_price, 4),
-                     round(current_price, 4), category, token, ticker),
+                     round(current_price, 4), round((current_price - avg_price) * contracts, 4),
+                     category, token, ticker),
                 )
                 await db.execute(
                     """INSERT INTO cost_basis
