@@ -131,9 +131,13 @@ kraken:
   # Major crypto, USDC-funded (you hold USDC). True fiat/FX spot isn't fundable
   # with current holdings — spot can't short a currency. Budget caps concurrent
   # positions regardless of list length.
+  # Low + medium risk only (liquid majors/midcaps). High-risk memes/new tokens
+  # (BERA, TRUMP, PENGU, VIRTUAL, FARTCOIN, MELANIA, PEAQ) deliberately excluded.
+  # Budget caps exposure regardless of list length, so breadth is low-risk.
   directional_pairs: ["XBTUSDC", "ETHUSDC", "SOLUSDC", "XRPUSDC", "ADAUSDC", "AVAXUSDC",
     "DOTUSDC", "LINKUSDC", "LTCUSDC", "BCHUSDC", "ATOMUSDC", "ALGOUSDC", "BNBUSDC",
-    "TONUSDC", "XMRUSDC", "XTZUSDC", "MANAUSDC", "APEUSDC", "VETUSDC", "XDGUSDC"]
+    "TONUSDC", "XMRUSDC", "XTZUSDC", "MANAUSDC", "APEUSDC", "VETUSDC", "XDGUSDC",
+    "CROUSDC", "SHIBUSDC"]
   directional_momentum_pct: 3.0
   directional_lookback: 12
   # max total open speculative exposure (raised $50->$100 with the wider
