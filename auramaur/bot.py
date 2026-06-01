@@ -773,6 +773,8 @@ class AuramaurBot:
             log.debug("exit.balance_check_error", error=str(e))
 
         if sell_size < 5:
+            if self.settings.is_live and sell_size <= 0.01:
+                await self._prune_zero_onchain_poly_position(pos.market_id)
             log.debug("exit.too_small", market_id=pos.market_id, size=sell_size)
             return False
         if pos.current_price < 0.01:
@@ -800,6 +802,32 @@ class AuramaurBot:
             level="warning",
         )
         return True
+
+    async def _prune_zero_onchain_poly_position(self, market_id: str) -> None:
+        """Remove stale live Polymarket rows after an on-chain zero balance check."""
+        db = self._components.get("db")
+        if db is None:
+            return
+        try:
+            pf_cur = await db.execute(
+                """DELETE FROM portfolio
+                   WHERE market_id = ? AND exchange = 'polymarket' AND is_paper = 0""",
+                (market_id,),
+            )
+            cb_cur = await db.execute(
+                "DELETE FROM cost_basis WHERE market_id = ? AND is_paper = 0",
+                (market_id,),
+            )
+            await db.execute("DELETE FROM position_peaks WHERE market_id = ?", (market_id,))
+            await db.commit()
+            log.info(
+                "exit.stale_zero_pruned",
+                market_id=market_id,
+                portfolio=getattr(pf_cur, "rowcount", 0),
+                cost_basis=getattr(cb_cur, "rowcount", 0),
+            )
+        except Exception as e:
+            log.debug("exit.stale_zero_prune_error", market_id=market_id, error=str(e))
 
     async def _execute_kalshi_exit(
         self,
@@ -1531,6 +1559,13 @@ class AuramaurBot:
                         )
                     if self.settings.arbitrage.negrisk_auto_execute:
                         await self._execute_negrisk_arb(nopp, risk_manager, engines)
+                    else:
+                        log.info(
+                            "arb_scanner.negrisk_auto_disabled",
+                            group=nopp.neg_risk_market_id,
+                            n_outcomes=nopp.n_outcomes,
+                            profit_pct=round(nopp.expected_profit_pct, 2),
+                        )
 
             except Exception as e:
                 log.error("arb_scanner.task_error", error=str(e))
@@ -2424,10 +2459,29 @@ class AuramaurBot:
 
     async def _task_order_monitor(self) -> None:
         """Monitor pending limit orders for fills and expiry."""
+        from datetime import datetime, timezone
+
         paper: PaperTrader = self._components["paper"]
-        exchange: PolymarketClient = self._components["exchange"]
+        primary_exchange: PolymarketClient = self._components["exchange"]
+        exchanges: dict[str, ExchangeClient] = self._components.get("exchanges", {})
         discovery: MarketDiscovery = self._components["discovery"]
         ttl = self.settings.execution.limit_order_ttl_seconds
+
+        # One-time startup reconcile: pull orphaned live orders left resting by a
+        # prior session into _live_pending so the TTL-cancel below can reap them
+        # and release their locked collateral.
+        reconciled_ids: set[int] = set()
+        for client in [primary_exchange, *exchanges.values()]:
+            if (
+                client is not None
+                and hasattr(client, "reconcile_open_orders")
+                and id(client) not in reconciled_ids
+            ):
+                reconciled_ids.add(id(client))
+                try:
+                    await client.reconcile_open_orders()
+                except Exception as e:
+                    log.debug("order_monitor.reconcile_error", error=str(e))
 
         while self._running:
             try:
@@ -2446,78 +2500,122 @@ class AuramaurBot:
                     await paper.cancel_expired(ttl)
 
                 # Live order monitoring
-                for order_id in list(exchange._live_pending.keys()):
-                    try:
-                        order = exchange._live_pending.get(order_id)
-                        result = await exchange.get_order_status(order_id)
-                        if result.status in ("filled", "cancelled", "expired", "rejected"):
-                            if result.status == "filled" and order is not None and result.filled_size > 0:
-                                try:
-                                    fill = Fill(
-                                        order_id=order_id,
-                                        market_id=order.market_id,
-                                        token_id=order.token_id,
-                                        side=order.side,
-                                        token=order.token,
-                                        size=result.filled_size,
-                                        price=result.filled_price if result.filled_price > 0 else order.price,
-                                        is_paper=False,
-                                    )
-                                    pnl_tracker = self._components.get("pnl_tracker")
-                                    if pnl_tracker:
-                                        await pnl_tracker.record_fill(fill)
-                                except Exception as e:
-                                    log.error(
-                                        "order_monitor.fill_record_error",
-                                        order_id=order_id,
-                                        error=str(e),
-                                    )
+                live_clients: list[tuple[str, ExchangeClient]] = []
+                seen_client_ids: set[int] = set()
+                for name, client in exchanges.items():
+                    if client is None or not hasattr(client, "_live_pending"):
+                        continue
+                    live_clients.append((name, client))
+                    seen_client_ids.add(id(client))
+                if (
+                    primary_exchange is not None
+                    and hasattr(primary_exchange, "_live_pending")
+                    and id(primary_exchange) not in seen_client_ids
+                ):
+                    live_clients.append(("polymarket", primary_exchange))
 
-                            db = self._components.get("db")
-                            if db and order is not None:
-                                try:
-                                    price = result.filled_price if result.filled_price > 0 else order.price
-                                    size = result.filled_size if result.filled_size > 0 else order.size
-                                    cur = await db.execute(
-                                        """UPDATE trades
-                                           SET status = ?, size = ?, price = ?
-                                           WHERE order_id = ?""",
-                                        (result.status, size, price, order_id),
-                                    )
-                                    if getattr(cur, "rowcount", 0) == 0:
-                                        await db.execute(
-                                            """INSERT INTO trades
-                                               (market_id, side, size, price, is_paper,
-                                                order_id, status, exchange, strategy_source)
-                                               VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)""",
-                                            (
-                                                order.market_id,
-                                                order.side.value,
-                                                size,
-                                                price,
-                                                order_id,
-                                                result.status,
-                                                order.exchange,
-                                                "order_monitor",
-                                            ),
+                for exchange_name, live_exchange in live_clients:
+                    pending = getattr(live_exchange, "_live_pending", {})
+                    for order_id in list(pending.keys()):
+                        try:
+                            order = pending.get(order_id)
+                            result = await live_exchange.get_order_status(order_id)
+                            if result.status in ("filled", "cancelled", "expired", "rejected"):
+                                if result.status == "filled" and order is not None and result.filled_size > 0:
+                                    try:
+                                        fill = Fill(
+                                            order_id=order_id,
+                                            market_id=order.market_id,
+                                            token_id=order.token_id,
+                                            side=order.side,
+                                            token=order.token,
+                                            size=result.filled_size,
+                                            price=result.filled_price if result.filled_price > 0 else order.price,
+                                            is_paper=False,
                                         )
-                                    await db.commit()
-                                except Exception as e:
-                                    log.debug(
-                                        "order_monitor.trade_update_error",
-                                        order_id=order_id,
-                                        error=str(e),
-                                    )
+                                        pnl_tracker = self._components.get("pnl_tracker")
+                                        if pnl_tracker:
+                                            await pnl_tracker.record_fill(fill)
+                                    except Exception as e:
+                                        log.error(
+                                            "order_monitor.fill_record_error",
+                                            exchange=exchange_name,
+                                            order_id=order_id,
+                                            error=str(e),
+                                        )
 
-                            exchange._live_pending.pop(order_id, None)
-                            log.info(
-                                "order_monitor.live_terminal",
+                                db = self._components.get("db")
+                                if db and order is not None:
+                                    try:
+                                        price = result.filled_price if result.filled_price > 0 else order.price
+                                        size = result.filled_size if result.filled_size > 0 else order.size
+                                        cur = await db.execute(
+                                            """UPDATE trades
+                                               SET status = ?, size = ?, price = ?
+                                               WHERE order_id = ?""",
+                                            (result.status, size, price, order_id),
+                                        )
+                                        if getattr(cur, "rowcount", 0) == 0:
+                                            await db.execute(
+                                                """INSERT INTO trades
+                                                   (market_id, side, size, price, is_paper,
+                                                    order_id, status, exchange, strategy_source)
+                                                   VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)""",
+                                                (
+                                                    order.market_id,
+                                                    order.side.value,
+                                                    size,
+                                                    price,
+                                                    order_id,
+                                                    result.status,
+                                                    order.exchange or exchange_name,
+                                                    "order_monitor",
+                                                ),
+                                            )
+                                        await db.commit()
+                                    except Exception as e:
+                                        log.debug(
+                                            "order_monitor.trade_update_error",
+                                            exchange=exchange_name,
+                                            order_id=order_id,
+                                            error=str(e),
+                                        )
+
+                                pending.pop(order_id, None)
+                                log.info(
+                                    "order_monitor.live_terminal",
+                                    exchange=exchange_name,
+                                    order_id=order_id,
+                                    status=result.status,
+                                    filled_size=result.filled_size,
+                                )
+                            elif order is not None:
+                                # Still resting. Live limit orders never auto-expire
+                                # on-chain, so an unfilled GTC order locks its
+                                # collateral indefinitely. Mirror the paper TTL: a
+                                # live order older than limit_order_ttl_seconds is
+                                # cancelled to release balance for fresh signals.
+                                ts = order.created_at
+                                if ts.tzinfo is None:
+                                    ts = ts.replace(tzinfo=timezone.utc)
+                                age = (datetime.now(timezone.utc) - ts).total_seconds()
+                                if age > ttl:
+                                    cancelled = await live_exchange.cancel_order(order_id)
+                                    pending.pop(order_id, None)
+                                    log.info(
+                                        "order_monitor.live_ttl_cancel",
+                                        exchange=exchange_name,
+                                        order_id=order_id,
+                                        age_seconds=round(age),
+                                        cancelled=cancelled,
+                                    )
+                        except Exception as e:
+                            log.debug(
+                                "order_monitor.live_poll_error",
+                                exchange=exchange_name,
                                 order_id=order_id,
-                                status=result.status,
-                                filled_size=result.filled_size,
+                                error=str(e),
                             )
-                    except Exception as e:
-                        log.debug("order_monitor.live_poll_error", order_id=order_id, error=str(e))
             except Exception as e:
                 log.debug("order_monitor.error", error=str(e))
             await asyncio.sleep(30)

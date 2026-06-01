@@ -404,6 +404,7 @@ class TradingEngine:
         *,
         place_order: bool = True,
         price_history: dict[str, list[float]] | None = None,
+        strategy_source: str = "llm",
     ) -> dict | None:
         """Full pipeline for a single market.
 
@@ -500,6 +501,7 @@ class TradingEngine:
         signal = detect_edge(market, analysis, exchange_fees=self.settings.arbitrage.exchange_fees)
         if signal is None:
             return None
+        signal.strategy_source = strategy_source
 
         show_analysis(
             signal.claude_prob, signal.market_prob, signal.edge,
@@ -1226,8 +1228,10 @@ class TradingEngine:
             if abs(raw_edge) < 0.001:
                 continue
             side = OrderSide.BUY if raw_edge > 0 else OrderSide.SELL
+            # Fee coefficient applies to per-contract P*(1-P), not a flat
+            # percentage (see detect_edge in signals.py).
             fee_rate = exchange_fees.get(market.exchange or self.exchange_name, 0.0)
-            edge = abs(raw_edge) - fee_rate
+            edge = abs(raw_edge) - fee_rate * market_prob * (1.0 - market_prob)
 
             signal = Signal(
                 market_id=market.id,

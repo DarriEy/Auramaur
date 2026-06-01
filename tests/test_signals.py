@@ -57,6 +57,39 @@ def test_edge_accounts_for_fees():
     assert signal.edge == pytest.approx(3.0, abs=0.5)
 
 
+def _make_kalshi_market(yes_price: float) -> Market:
+    return Market(
+        id="kalshi-market",
+        condition_id="",
+        exchange="kalshi",
+        question="Will X happen?",
+        outcome_yes_price=yes_price,
+        outcome_no_price=1 - yes_price,
+    )
+
+
+def test_kalshi_fee_is_price_dependent_not_flat():
+    """Kalshi fee is a coefficient on P*(1-P), not a flat 7pt haircut.
+
+    6% raw edge at P=0.5: flat 7pt would make net edge negative (rejected),
+    but the real per-contract fee is 0.07*0.25 = 1.75pt -> net ~4.25%.
+    Regression guard for the bug where Kalshi never traded.
+    """
+    fees = {"polymarket": 0.0, "kalshi": 0.07}
+    signal = detect_edge(_make_kalshi_market(0.50), _make_analysis(0.56), exchange_fees=fees)
+    assert signal is not None, "Kalshi edge wrongly rejected — flat-fee regression"
+    assert signal.edge == pytest.approx(4.25, abs=0.2)
+
+
+def test_kalshi_fee_smaller_at_price_extremes():
+    """At P=0.2 the fee is 0.07*0.2*0.8 = 1.12pt, smaller than at midprice."""
+    fees = {"polymarket": 0.0, "kalshi": 0.07}
+    # raw edge 6%: 0.26 vs 0.20
+    signal = detect_edge(_make_kalshi_market(0.20), _make_analysis(0.26), exchange_fees=fees)
+    assert signal is not None
+    assert signal.edge == pytest.approx(6.0 - 1.12, abs=0.2)
+
+
 # ---------------------------------------------------------------------------
 # Divergence-weighted blending tests
 # ---------------------------------------------------------------------------

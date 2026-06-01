@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any
 
 import structlog
 
@@ -19,6 +21,10 @@ log = structlog.get_logger()
 
 # Minimum spread to qualify as a cross-exchange arb opportunity
 CROSS_EXCHANGE_MIN_SPREAD = 0.03  # 3%
+
+# Risk checks reject arbs inside this window. Filter before logging/execution
+# so near-expiry mismatches don't consume LLM matching and risk cycles forever.
+CROSS_EXCHANGE_MIN_HOURS_TO_RESOLUTION = 4.0
 
 # If YES + NO < this, buying both is risk-free profit on resolution
 INTERNAL_ARB_THRESHOLD = 0.97
@@ -102,6 +108,15 @@ def _word_overlap_score(text_a: str, text_b: str) -> float:
     return len(intersection) / smaller if smaller > 0 else 0.0
 
 
+def _hours_to_resolution(market: Market, now: datetime) -> float | None:
+    if market.end_date is None:
+        return None
+    end = market.end_date
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    return (end - now).total_seconds() / 3600.0
+
+
 class ArbitrageScanner:
     """Scans all connected exchanges for arbitrage opportunities.
 
@@ -169,6 +184,7 @@ class ArbitrageScanner:
 
         # Step 3: Cross-exchange arbs (compare every pair of exchanges)
         exchange_names = list(exchange_markets.keys())
+        now = datetime.now(timezone.utc)
         for i in range(len(exchange_names)):
             for j in range(i + 1, len(exchange_names)):
                 name_a = exchange_names[i]
@@ -179,6 +195,25 @@ class ArbitrageScanner:
                 matched = await self._match_markets(markets_a, markets_b, name_a, name_b)
 
                 for market_a, market_b in matched:
+                    hours_a = _hours_to_resolution(market_a, now)
+                    hours_b = _hours_to_resolution(market_b, now)
+                    min_hours = min(
+                        h for h in (hours_a, hours_b) if h is not None
+                    ) if hours_a is not None or hours_b is not None else None
+                    if (
+                        min_hours is not None
+                        and min_hours < CROSS_EXCHANGE_MIN_HOURS_TO_RESOLUTION
+                    ):
+                        log.debug(
+                            "arb_scanner.cross_filtered",
+                            reason="near_resolution",
+                            exchange_a=name_a,
+                            exchange_b=name_b,
+                            question=market_a.question[:80],
+                            hours_to_resolution=round(min_hours, 2),
+                        )
+                        continue
+
                     spread = abs(market_a.outcome_yes_price - market_b.outcome_yes_price)
 
                     if spread < CROSS_EXCHANGE_MIN_SPREAD:
@@ -186,10 +221,8 @@ class ArbitrageScanner:
 
                     # Identify cheap/expensive sides for fee calc
                     if market_a.outcome_yes_price <= market_b.outcome_yes_price:
-                        cheap_yes, expensive_yes = market_a, market_b
                         cheap_exchange, expensive_exchange = name_a, name_b
                     else:
-                        cheap_yes, expensive_yes = market_b, market_a
                         cheap_exchange, expensive_exchange = name_b, name_a
 
                     # Fee-aware profit: buy YES cheap, buy NO on expensive side

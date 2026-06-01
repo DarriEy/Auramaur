@@ -79,6 +79,10 @@ class Order(BaseModel):
     # when the book moves between order formation and submission, and keeps
     # us eligible for Polymarket's maker-reward tier.
     post_only: bool = False
+    # Stamped at construction (≈ submission time). The order monitor uses this
+    # to TTL-cancel live limit orders that are still resting, since live GTC
+    # orders never auto-expire on-chain and would otherwise lock collateral.
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @property
     def notional(self) -> float:

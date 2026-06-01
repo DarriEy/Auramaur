@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -182,6 +183,18 @@ class TestFeeAwareProfit:
         cross = [o for o in opps if o.arb_type == "cross_exchange"]
         assert len(cross) == 1
         assert cross[0].expected_profit_pct == pytest.approx(10.0, abs=0.1)
+
+    @pytest.mark.asyncio
+    async def test_near_resolution_cross_exchange_arb_filtered_before_execution(self):
+        poly = _make_market("polymarket", 0.10, "Will X happen?")
+        kalshi = _make_market("kalshi", 0.20, "Will X happen?")
+        poly.end_date = datetime.now(timezone.utc) + timedelta(hours=1)
+        kalshi.end_date = datetime.now(timezone.utc) + timedelta(hours=1)
+        scanner = self._make_scanner([poly], [kalshi])
+
+        opps = await scanner.scan()
+
+        assert [o for o in opps if o.arb_type == "cross_exchange"] == []
 
     @pytest.mark.asyncio
     async def test_no_match_different_questions(self):

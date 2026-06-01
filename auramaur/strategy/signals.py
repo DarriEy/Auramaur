@@ -183,10 +183,14 @@ def detect_edge(
         )
         return None
 
-    # Adjust for exchange-specific fees
+    # Adjust for exchange-specific fees. The configured rate is a *coefficient*
+    # on the per-contract fee P*(1-P) (Kalshi's actual formula), not a flat
+    # percentage haircut: 0.07 -> at most ~1.75pt (at P=0.5), ~1.1pt at the
+    # extremes. Treating it as flat 7pt made nearly every Kalshi edge negative.
+    # Polymarket (0.0) is unaffected.
     fees = exchange_fees if exchange_fees is not None else EXCHANGE_FEES
     fee_rate = fees.get(market.exchange, 0.0)
-    net_edge = edge - fee_rate
+    net_edge = edge - fee_rate * market_prob * (1.0 - market_prob)
 
     if net_edge <= 0:
         return None

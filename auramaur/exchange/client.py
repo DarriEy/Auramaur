@@ -315,6 +315,28 @@ class PolymarketClient:
 
         self._init_clob_client()
 
+        # Pre-submit collateral guard for BUYs. An unfilled limit order locks its
+        # notional as collateral; once prior resting orders consume the balance,
+        # the CLOB rejects new BUYs with "not enough balance / allowance". Skip
+        # here instead of hammering the API with doomed orders. Fail-open: if the
+        # balance probe errors, fall through and let the CLOB decide.
+        if order.side == OrderSide.BUY:
+            free = await self._free_collateral_usd()
+            if free is not None and order.size * order.price > free + 1e-6:
+                log.info(
+                    "order.skipped_insufficient_balance",
+                    market_id=order.market_id,
+                    cost=round(order.size * order.price, 2),
+                    free=round(free, 2),
+                )
+                return OrderResult(
+                    order_id="INSUFFICIENT_BALANCE",
+                    market_id=order.market_id,
+                    status="rejected",
+                    is_paper=False,
+                    error_message="insufficient free collateral (open orders lock balance)",
+                )
+
         try:
             from py_clob_client_v2.order_builder.constants import BUY, SELL
             from py_clob_client_v2 import OrderArgs, BalanceAllowanceParams, AssetType, OrderType as ClobOrderType
@@ -400,6 +422,130 @@ class PolymarketClient:
                 is_paper=False,
                 error_message=err_str[:200],
             )
+
+    async def _free_collateral_usd(self) -> float | None:
+        """Spendable pUSD = on-chain collateral minus collateral reserved by
+        resting BUY orders. Returns None if the probe fails (caller fails open).
+
+        ``get_balance_allowance`` reports *gross* collateral — open orders are not
+        netted out (the CLOB rejection reports ``balance`` and ``sum of active
+        orders`` separately) — so we subtract collateral reserved by open BUYs.
+        We prefer the CLOB's authoritative open-order list so orphaned orders
+        from a prior session are counted too, and fall back to our in-memory
+        ``_live_pending`` only when that query is unavailable.
+        """
+        try:
+            from py_clob_client_v2 import AssetType, BalanceAllowanceParams
+            resp = self._clob_client.get_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=2)
+            )
+            # A non-dict / balance-less response means "unknown" — fail open rather
+            # than treat it as zero collateral (which would block every BUY).
+            if not isinstance(resp, dict) or "balance" not in resp:
+                return None
+            gross = int(resp.get("balance", 0)) / 1e6
+        except Exception as e:
+            log.debug("order.balance_probe_failed", error=str(e))
+            return None
+
+        reserved = self._reserved_buy_collateral_from_open_orders()
+        if reserved is None:
+            # Authoritative view unavailable — fall back to orders we placed this
+            # session. Less complete (misses orphans) but better than no guard.
+            reserved = sum(
+                o.notional
+                for o in self._live_pending.values()
+                if o is not None and o.side == OrderSide.BUY
+            )
+        return gross - reserved
+
+    def _reserved_buy_collateral_from_open_orders(self) -> float | None:
+        """USDC reserved by *all* resting BUY orders on the CLOB, including
+        orphans from prior sessions. Returns None if the query or any row fails
+        to parse, so the caller can fall back to the ``_live_pending`` estimate.
+
+        SELL orders lock conditional tokens (not USDC), so they are excluded.
+        Reservation per BUY = price * (original_size - size_matched).
+        """
+        try:
+            orders = self._clob_client.get_open_orders()
+        except Exception as e:
+            log.debug("order.open_orders_probe_failed", error=str(e))
+            return None
+        if not isinstance(orders, list):
+            return None
+        try:
+            reserved = 0.0
+            for o in orders:
+                if not isinstance(o, dict):
+                    return None
+                if str(o.get("side", "")).upper() != "BUY":
+                    continue
+                price = float(o.get("price", 0) or 0)
+                original = float(o.get("original_size", 0) or 0)
+                matched = float(o.get("size_matched", 0) or 0)
+                reserved += price * max(0.0, original - matched)
+            return reserved
+        except (TypeError, ValueError) as e:
+            log.debug("order.open_orders_parse_failed", error=str(e))
+            return None
+
+    async def reconcile_open_orders(self) -> int:
+        """Pull existing CLOB open orders into ``_live_pending`` at startup.
+
+        Live GTC orders left resting by a prior session ("orphans") are not
+        otherwise tracked, so the order monitor can neither TTL-cancel them
+        (freeing locked collateral) nor record their fills. Reconstruct
+        lightweight Order records stamped with each order's real ``created_at``
+        so stale ones are reaped on the first monitor pass. Best-effort: returns
+        the number reconciled, 0 if live trading is off or the query fails.
+        """
+        if not self._is_live_enabled():
+            return 0
+        try:
+            self._init_clob_client()
+            orders = self._clob_client.get_open_orders()
+        except Exception as e:
+            log.warning("order.reconcile_failed", error=str(e))
+            return 0
+        if not isinstance(orders, list):
+            return 0
+
+        from datetime import datetime, timezone
+
+        count = 0
+        for o in orders:
+            if not isinstance(o, dict):
+                continue
+            oid = str(o.get("id") or o.get("orderID") or "")
+            if not oid or oid in self._live_pending:
+                continue
+            try:
+                side = OrderSide.BUY if str(o.get("side", "")).upper() == "BUY" else OrderSide.SELL
+                created_raw = o.get("created_at")
+                created = (
+                    datetime.fromtimestamp(int(created_raw), tz=timezone.utc)
+                    if created_raw not in (None, "")
+                    else datetime.now(timezone.utc)
+                )
+                self._live_pending[oid] = Order(
+                    market_id=str(o.get("market") or o.get("asset_id") or ""),
+                    exchange="polymarket",
+                    token_id=str(o.get("asset_id") or ""),
+                    side=side,
+                    size=float(o.get("original_size", 0) or 0),
+                    price=float(o.get("price", 0) or 0),
+                    order_type=OrderType.LIMIT,
+                    dry_run=False,
+                    created_at=created,
+                )
+                count += 1
+            except (TypeError, ValueError) as e:
+                log.debug("order.reconcile_parse_skip", order_id=oid, error=str(e))
+                continue
+        if count:
+            log.info("order.reconciled_open_orders", count=count)
+        return count
 
     def _submit_clob_order(self, ord_args, want_post_only, ClobOrderType, order):
         """Submit order to CLOB via V2 client (has built-in version mismatch retry)."""

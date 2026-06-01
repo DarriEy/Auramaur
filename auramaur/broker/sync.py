@@ -211,19 +211,22 @@ class PositionSyncer:
             token_id = pos.token_id or ""
             await self._db.execute(
                 """INSERT INTO portfolio
-                   (market_id, exchange, side, size, avg_price, current_price, category, token, token_id, is_paper, updated_at)
-                   VALUES (?, 'polymarket', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   (market_id, exchange, side, size, avg_price, current_price,
+                    unrealized_pnl, category, token, token_id, is_paper, updated_at)
+                   VALUES (?, 'polymarket', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(market_id, is_paper) DO UPDATE SET
                        exchange = excluded.exchange,
                        size = excluded.size,
                        avg_price = excluded.avg_price,
                        current_price = excluded.current_price,
+                       unrealized_pnl = excluded.unrealized_pnl,
                        token = excluded.token,
                        token_id = excluded.token_id,
                        is_paper = excluded.is_paper,
                        updated_at = excluded.updated_at""",
                 (pos.market_id, side, pos.size, pos.avg_cost,
-                 pos.current_price, pos.category, token, token_id, is_paper_flag, now),
+                 pos.current_price, pos.unrealized_pnl, pos.category,
+                 token, token_id, is_paper_flag, now),
             )
         await self._db.commit()
         log.info("sync.merge_new", count=len(positions))
@@ -278,14 +281,16 @@ class PositionSyncer:
 
             await self._db.execute(
                 """INSERT INTO portfolio
-                   (market_id, exchange, side, size, avg_price, current_price, category, token, token_id, is_paper, updated_at)
-                   VALUES (?, 'polymarket', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   (market_id, exchange, side, size, avg_price, current_price,
+                    unrealized_pnl, category, token, token_id, is_paper, updated_at)
+                   VALUES (?, 'polymarket', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(market_id, is_paper) DO UPDATE SET
                        exchange = excluded.exchange,
                        side = excluded.side,
                        size = excluded.size,
                        avg_price = excluded.avg_price,
                        current_price = excluded.current_price,
+                       unrealized_pnl = excluded.unrealized_pnl,
                        category = excluded.category,
                        token = excluded.token,
                        token_id = excluded.token_id,
@@ -297,6 +302,7 @@ class PositionSyncer:
                     pos.size,
                     pos.avg_cost,
                     pos.current_price,
+                    pos.unrealized_pnl,
                     pos.category,
                     token,
                     token_id,
@@ -381,14 +387,15 @@ class KalshiPositionSyncer:
             await self._db.execute(
                 """INSERT INTO portfolio
                    (market_id, exchange, side, size, avg_price, current_price,
-                    category, token, token_id, is_paper, updated_at)
-                   VALUES (?, 'kalshi', ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                    unrealized_pnl, category, token, token_id, is_paper, updated_at)
+                   VALUES (?, 'kalshi', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
                    ON CONFLICT(market_id, is_paper) DO UPDATE SET
                        exchange = excluded.exchange,
                        side = excluded.side,
                        size = excluded.size,
                        avg_price = excluded.avg_price,
                        current_price = excluded.current_price,
+                       unrealized_pnl = excluded.unrealized_pnl,
                        category = excluded.category,
                        token = excluded.token,
                        token_id = excluded.token_id,
@@ -400,6 +407,7 @@ class KalshiPositionSyncer:
                     pos.size,
                     pos.avg_price,
                     pos.current_price,
+                    pos.unrealized_pnl,
                     category,
                     token.value,
                     token_id,

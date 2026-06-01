@@ -54,6 +54,139 @@ def client(mock_settings, mock_paper):
     return PolymarketClient(settings=mock_settings, paper_trader=mock_paper)
 
 
+async def _place_live_buy(client, size=10, price=0.5):
+    order = Order(market_id="m1", token_id="tok1", side=OrderSide.BUY,
+                  size=size, price=price, dry_run=False)
+    with patch.object(type(client), "_is_live_enabled", return_value=True), \
+         patch("pathlib.Path.exists", return_value=False):
+        return await client.place_order(order)
+
+
+@pytest.mark.asyncio
+async def test_buy_skipped_counts_orphan_open_orders(client):
+    """Orphan-proofing: a resting BUY from a prior session (NOT in _live_pending)
+    is still counted via the CLOB's authoritative open-order list.
+
+    Gross $26.28, orphan BUY locks 51.78 @ $0.50 = $25.89 -> ~$0.39 free, so a
+    $5 order must be skipped even though _live_pending is empty.
+    """
+    mock_clob = MagicMock()
+    mock_clob.get_balance_allowance.return_value = {"balance": 26275397}  # $26.28
+    mock_clob.get_open_orders.return_value = [
+        {"side": "BUY", "price": "0.5", "original_size": "51.78", "size_matched": "0"},
+    ]
+    client._clob_client = mock_clob
+    assert client._live_pending == {}  # no in-memory record of the orphan
+
+    result = await _place_live_buy(client)
+
+    assert result.status == "rejected"
+    assert result.order_id == "INSUFFICIENT_BALANCE"
+    mock_clob.create_and_post_order.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_buy_guard_counts_only_unfilled_portion(client):
+    """Reservation uses original_size - size_matched (the still-resting part)."""
+    mock_clob = MagicMock()
+    mock_clob.get_balance_allowance.return_value = {"balance": 26275397}  # $26.28
+    # 100 @ $0.50 with 60 already filled -> only 40 @ $0.50 = $20 reserved.
+    mock_clob.get_open_orders.return_value = [
+        {"side": "BUY", "price": "0.5", "original_size": "100", "size_matched": "60"},
+    ]
+    mock_clob.create_and_post_order.return_value = {"orderID": "live-ok"}
+    client._clob_client = mock_clob
+
+    # $6.28 free; a $5 order fits, a $7 order does not.
+    assert (await _place_live_buy(client, size=10, price=0.5)).status == "pending"
+    assert (await _place_live_buy(client, size=14, price=0.5)).order_id == "INSUFFICIENT_BALANCE"
+
+
+@pytest.mark.asyncio
+async def test_buy_guard_excludes_sell_open_orders(client):
+    """SELL orders lock conditional tokens, not USDC -> not counted as reserved."""
+    mock_clob = MagicMock()
+    mock_clob.get_balance_allowance.return_value = {"balance": 26275397}  # $26.28
+    mock_clob.get_open_orders.return_value = [
+        {"side": "SELL", "price": "0.5", "original_size": "1000", "size_matched": "0"},
+    ]
+    mock_clob.create_and_post_order.return_value = {"orderID": "live-ok"}
+    client._clob_client = mock_clob
+
+    result = await _place_live_buy(client)
+    assert result.status == "pending"
+    assert result.order_id == "live-ok"
+
+
+@pytest.mark.asyncio
+async def test_buy_guard_falls_back_to_live_pending_when_open_orders_unavailable(client):
+    """If the authoritative open-orders query fails, fall back to _live_pending."""
+    mock_clob = MagicMock()
+    mock_clob.get_balance_allowance.return_value = {"balance": 26275397}  # $26.28
+    mock_clob.get_open_orders.side_effect = RuntimeError("api down")
+    client._clob_client = mock_clob
+    client._live_pending["resting"] = Order(
+        market_id="m0", token_id="t0", side=OrderSide.BUY, size=51.78, price=0.5,
+    )
+
+    result = await _place_live_buy(client)
+    assert result.order_id == "INSUFFICIENT_BALANCE"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_open_orders_imports_orphans(client):
+    """Startup reconcile pulls CLOB open orders into _live_pending, stamped with
+    their real age so the monitor's TTL-cancel reaps stale ones."""
+    mock_clob = MagicMock()
+    mock_clob.get_open_orders.return_value = [
+        {"id": "orphan-1", "side": "BUY", "price": "0.5",
+         "original_size": "20", "size_matched": "0",
+         "asset_id": "tokA", "market": "mktA", "created_at": 1000},
+        {"id": "orphan-2", "side": "SELL", "price": "0.7",
+         "original_size": "5", "size_matched": "0",
+         "asset_id": "tokB", "market": "mktB", "created_at": 2000},
+    ]
+    client._clob_client = mock_clob
+
+    with patch.object(type(client), "_is_live_enabled", return_value=True):
+        n = await client.reconcile_open_orders()
+
+    assert n == 2
+    assert set(client._live_pending) == {"orphan-1", "orphan-2"}
+    buy = client._live_pending["orphan-1"]
+    assert buy.side == OrderSide.BUY
+    assert buy.size == 20 and buy.price == 0.5
+    assert buy.token_id == "tokA"
+    # created_at parsed from the order's unix timestamp (not "now")
+    assert buy.created_at.year == 1970
+
+
+@pytest.mark.asyncio
+async def test_reconcile_open_orders_noop_when_not_live(client):
+    """Reconcile is a no-op (and never calls the CLOB) when live trading is off."""
+    mock_clob = MagicMock()
+    client._clob_client = mock_clob
+    with patch.object(type(client), "_is_live_enabled", return_value=False):
+        n = await client.reconcile_open_orders()
+    assert n == 0
+    mock_clob.get_open_orders.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_buy_proceeds_when_free_collateral_sufficient(client):
+    """With no resting orders, the full gross balance is spendable -> order sent."""
+    mock_clob = MagicMock()
+    mock_clob.get_balance_allowance.return_value = {"balance": 26275397}  # $26.28
+    mock_clob.get_open_orders.return_value = []
+    mock_clob.create_and_post_order.return_value = {"orderID": "live-ok"}
+    client._clob_client = mock_clob
+
+    result = await _place_live_buy(client)
+
+    assert result.status == "pending"
+    assert result.order_id == "live-ok"
+
+
 @pytest.mark.asyncio
 async def test_get_order_status_filled(client):
     """Mock CLOB returns filled status."""

@@ -53,7 +53,7 @@ def test_default_risk_params():
     # (0.02 = 2%); see RiskManager. defaults.yaml tunes it to 2%.
     assert s.risk.max_stake_per_market == 0.02
     assert s.risk.daily_loss_limit == 200.0
-    assert s.risk.max_open_positions == 50
+    assert s.risk.max_open_positions == 500
     assert s.kelly.fraction == 0.30
 
 

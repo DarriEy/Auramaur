@@ -152,27 +152,30 @@ class CalibrationTracker:
         P&L = sell_proceeds - buy_cost - fees + resolution_payout (held token
         pays $1 if it won). No-op if the market had no live fills.
         """
-        fills = await self._db.fetchall(
-            "SELECT side, token, size, price, fee FROM fills WHERE market_id=? AND is_paper=0",
-            (market_id,))
-        if not fills:
+        from auramaur.broker.pnl_repair import (
+            compute_market_resolution_pnl,
+            rebuild_category_stats_from_resolution_pnl,
+        )
+
+        market_pnl = await compute_market_resolution_pnl(
+            self._db, market_id, outcome_int, category, is_paper=0,
+        )
+        if market_pnl is None:
             return
-        buy_cost = sum(f["size"] * f["price"] for f in fills if f["side"] == "BUY")
-        sell_proc = sum(f["size"] * f["price"] for f in fills if f["side"] == "SELL")
-        fees = sum(f["fee"] or 0 for f in fills)
-        net: dict[str, float] = {}
-        for f in fills:
-            net[f["token"]] = net.get(f["token"], 0.0) + (
-                f["size"] if f["side"] == "BUY" else -f["size"])
-        payout = sum(
-            sz for tok, sz in net.items() if sz > 0.01
-            and ((tok == "YES" and outcome_int == 1) or (tok == "NO" and outcome_int == 0)))
-        pnl = sell_proc - buy_cost - fees + payout
+
         await self._db.execute(
             "INSERT OR REPLACE INTO resolution_pnl (market_id, category, pnl, resolved_at) "
-            "VALUES (?, ?, ?, datetime('now'))", (market_id, category, pnl))
+            "VALUES (?, ?, ?, datetime('now'))",
+            (market_id, category, market_pnl.pnl),
+        )
         await self._db.commit()
-        log.info("pnl.realized", market_id=market_id, pnl=round(pnl, 2), category=category)
+        await rebuild_category_stats_from_resolution_pnl(self._db, dry_run=False)
+        log.info(
+            "pnl.realized",
+            market_id=market_id,
+            pnl=round(market_pnl.pnl, 2),
+            category=category,
+        )
 
     async def record_resolution(self, market_id: str, actual_outcome: bool) -> None:
         """Record the actual resolution for a market.
