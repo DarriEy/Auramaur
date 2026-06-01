@@ -261,7 +261,11 @@ class KrakenConfig(BaseModel):
     # --- Directional spot (gated; no validated edge — flip on deliberately) ---
     directional_enabled: bool = False
     directional_pairs: list[str] = []     # e.g. ["XBTUSDC", "ETHUSDC"] (USDC-funded)
-    directional_momentum_pct: float = 3.0  # |momentum| over the lookback to act
+    directional_momentum_pct: float = 3.0  # legacy symmetric threshold (fallback)
+    # Asymmetric long bias: enter on a smaller up-move, exit only on a larger
+    # down-move so winners ride longer. Fall back to directional_momentum_pct.
+    directional_entry_momentum_pct: float = 2.0
+    directional_exit_momentum_pct: float = 4.0
     directional_lookback: int = 12        # OHLC candles (hourly) for the momentum read
     # Total $ the speculation engine may hold in open directional positions at
     # once — a hard ceiling so it can't consume the treasury reserve / CAD.
