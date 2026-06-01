@@ -319,3 +319,29 @@ async def test_live_balance_does_not_cancel_resting_orders(client, mock_paper):
 
     assert balance == 123.0
     mock_clob.cancel_all.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_live_balance_nets_out_open_buy_orders(client, mock_paper):
+    """Spendable balance subtracts collateral reserved by resting BUYs (not
+    SELLs) so the engine sizes against genuinely-available cash, not gross."""
+    mock_clob = MagicMock()
+    mock_clob.get_balance_allowance.return_value = {"balance": 26_275_397}  # $26.28 gross
+    mock_clob.get_open_orders.return_value = [
+        {"side": "BUY", "price": "0.5", "original_size": "51.78", "size_matched": "0"},  # $25.89 locked
+        {"side": "SELL", "price": "0.9", "original_size": "100", "size_matched": "0"},   # excluded
+    ]
+    client._clob_client = mock_clob
+    client._init_clob_client = MagicMock()
+
+    syncer = PositionSyncer(
+        settings=client._settings,
+        db=AsyncMock(),
+        exchange=client,
+        paper=mock_paper,
+        pnl=AsyncMock(),
+    )
+
+    balance = await syncer._get_live_balance()
+
+    assert balance == pytest.approx(0.39, abs=0.01)  # 26.28 - 25.89

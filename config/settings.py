@@ -25,7 +25,7 @@ _DEFAULTS = _load_defaults()
 class ExecutionConfig(BaseModel):
     live: bool = False
     paper_initial_balance: float = 1000.0
-    limit_order_ttl_seconds: int = 300
+    limit_order_ttl_seconds: int = 120
     spread_capture_min_bps: int = 50
     stop_loss_pct: float = 30.0
     profit_target_pct: float = 50.0

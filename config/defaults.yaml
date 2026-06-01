@@ -8,7 +8,7 @@ risk_tolerance: 50
 execution:
   live: true
   paper_initial_balance: 111.0
-  limit_order_ttl_seconds: 300
+  limit_order_ttl_seconds: 120
   spread_capture_min_bps: 50
   stop_loss_pct: 30.0
   profit_target_pct: 50.0
