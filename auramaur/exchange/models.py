@@ -40,6 +40,12 @@ class Market(BaseModel):
     spread: float = 0
     clob_token_yes: str = ""
     clob_token_no: str = ""
+    # NegRisk grouping: Polymarket multi-outcome events (e.g. "who wins the
+    # election") are a set of mutually-exclusive binary markets sharing one
+    # neg_risk_market_id. Buying NO on every outcome for < (N-1) dollars is a
+    # guaranteed-profit arb. neg_risk_market_id is the grouping key.
+    neg_risk: bool = False
+    neg_risk_market_id: str = ""
     last_updated: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
