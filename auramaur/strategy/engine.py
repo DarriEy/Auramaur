@@ -486,7 +486,7 @@ class TradingEngine:
         # 2c. Order flow nudge
         if self.flow_tracker is not None:
             try:
-                order_book = await self.exchange.get_order_book(market.id)
+                order_book = await self.exchange.get_order_book(market.clob_token_yes)
                 self.flow_tracker.record_book_snapshot(market.id, order_book)
             except Exception:
                 pass
