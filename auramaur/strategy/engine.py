@@ -238,6 +238,35 @@ class TradingEngine:
         cash = await self._get_available_cash()
         return positions, cash
 
+    async def _held_market_ids(self) -> set[str]:
+        """market_ids we already hold in the current mode + exchange.
+
+        Used to keep already-held markets out of the BUY-candidate set: the
+        allocator won't average into an open position (skip_held), so analyzing
+        them only burns LLM calls and yields approved-but-unexecutable
+        candidates. Exit/management of held positions runs through the dedicated
+        venue-exit path and the portfolio monitor, not this cycle, so dropping
+        them here does not affect closing positions. The allocator's skip_held
+        remains the correctness backstop; this is a pure efficiency filter.
+        """
+        is_paper_flag = 0 if self.settings.is_live else 1
+        try:
+            if self.exchange_name:
+                rows = await self.db.fetchall(
+                    """SELECT p.market_id FROM portfolio p
+                       JOIN markets m ON p.market_id = m.id
+                       WHERE p.size > 0 AND p.is_paper = ? AND m.exchange = ?""",
+                    (is_paper_flag, self.exchange_name),
+                )
+            else:
+                rows = await self.db.fetchall(
+                    "SELECT market_id FROM portfolio WHERE size > 0 AND is_paper = ?",
+                    (is_paper_flag,),
+                )
+            return {r["market_id"] for r in rows}
+        except Exception:
+            return set()
+
     async def scan_and_store_markets(self, limit: int = 300) -> list[Market]:
         """Fetch markets from Gamma API and store in DB."""
         markets = await self.discovery.get_markets(limit=limit)
@@ -893,6 +922,18 @@ class TradingEngine:
                     filtered_count += drop_count
         except Exception:
             pass  # Table may not exist yet
+
+        # Drop markets we already hold — the allocator won't average into an
+        # open position, so analyzing them wastes LLM calls and produces
+        # approved-but-unexecutable candidates. Exits are managed elsewhere.
+        held_ids = await self._held_market_ids()
+        if held_ids:
+            before = len(fresh_candidates)
+            fresh_candidates = [m for m in fresh_candidates if m.id not in held_ids]
+            held_filtered = before - len(fresh_candidates)
+            if held_filtered > 0:
+                log.info("engine.held_filtered", count=held_filtered)
+                filtered_count += held_filtered
 
         show_scan_results(len(markets), len(fresh_candidates), filtered_count, exchange=self.exchange_name)
 
