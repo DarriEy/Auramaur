@@ -198,6 +198,15 @@ CREATE TABLE IF NOT EXISTS cost_basis (
     PRIMARY KEY (market_id, is_paper)
 );
 
+-- Realized dollar P&L per market, written when a market resolves. Lets us
+-- measure edge in $ (not just calibration) and allocate by actual profit.
+CREATE TABLE IF NOT EXISTS resolution_pnl (
+    market_id TEXT PRIMARY KEY,
+    category TEXT DEFAULT '',
+    pnl REAL NOT NULL,
+    resolved_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_price_history_market ON price_history(market_id);
 CREATE INDEX IF NOT EXISTS idx_price_history_time ON price_history(recorded_at);
 
