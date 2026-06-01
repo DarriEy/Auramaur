@@ -117,6 +117,14 @@ class KrakenSpotClient:
         except (KeyError, IndexError, TypeError):
             return None
 
+    async def get_pair_quote(self, pair: str) -> str | None:
+        """Quote-currency asset code for a pair (e.g. PAXGUSD -> 'ZUSD')."""
+        info = await self._public("AssetPairs", {"pair": pair})
+        if not info:
+            return None
+        meta = next(iter(info.values()))
+        return meta.get("quote")
+
     # ------------------------------------------------------------------
     # Spot order placement
     # ------------------------------------------------------------------

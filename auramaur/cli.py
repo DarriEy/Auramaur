@@ -327,6 +327,27 @@ async def _kraken_spot(pair: str, side: str, usd: float, assume_yes: bool) -> No
                 console.print("[yellow]Not confirmed — aborted.[/]")
                 return
         side_enum = OrderSide.BUY if side == "buy" else OrderSide.SELL
+
+        # Auto-bridge: buying a non-USDC-quoted pair (e.g. gold PAXGUSD) needs the
+        # quote currency. Convert USDC -> quote to cover the shortfall first.
+        if side == "buy":
+            quote = await k.get_pair_quote(pair)              # e.g. 'ZUSD'
+            qsym = quote[1:] if quote and quote[0] in "XZ" else quote  # ZUSD -> USD
+            if quote and qsym and qsym != "USDC":
+                bal = await k.get_balance()
+                have = bal.get(quote, 0.0)
+                if have < usd:
+                    short = round(usd - have + 0.5, 2)
+                    bridge_pair = f"USDC{qsym}"               # USDCUSD / USDCUSDT
+                    console.print(f"[dim]bridging ~${short:.2f} USDC -> {qsym} "
+                                  f"via {bridge_pair}[/]")
+                    bres = await k.place_spot_order(bridge_pair, OrderSide.SELL, short,
+                                                    ordertype="market", purpose="manual",
+                                                    max_usd=short * 1.1)
+                    if bres.status not in ("pending", "paper"):
+                        console.print(f"[red]bridge failed: {bres.error_message}[/] — aborting")
+                        return
+
         res = await k.place_spot_order(pair, side_enum, vol, ordertype="market",
                                        purpose="manual", max_usd=usd * 1.1)
         color = "green" if res.status in ("pending", "paper") else "red"
