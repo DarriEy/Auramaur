@@ -99,11 +99,16 @@ class CapitalAllocator:
             market_id = candidate.market.id
             category = candidate.market.category
 
-            # Skip if already holding this market
+            # Skip if already holding this market (no averaging into an open
+            # position). Surface it — this is the single most common reason an
+            # APPROVED candidate produces no trade, and it used to be invisible
+            # (debug-only), making approved-but-no-trade look like a silent bug.
             if market_id in held_market_ids:
-                log.debug(
+                show_order_dropped(market_id, "already holding — allocator won't average in")
+                log.info(
                     "allocator.skip_held",
                     market_id=market_id,
+                    reason="already holding this market; not averaging into existing position",
                 )
                 continue
 
