@@ -170,6 +170,14 @@ llm_ensemble:
   min_samples_for_weights: 10
   default_weight: 0.5
 
+gemini:
+  # Route analysis to Gemini during off-hours OR when Claude's daily budget is
+  # near-exhausted; falls back to Claude on Gemini error. Needs GEMINI_API_KEY.
+  enabled: true
+  model: "gemini-2.5-flash"
+  off_hours_utc: [4, 5, 6, 7, 8, 9]   # deep-night ET — conserve Claude
+  claude_budget_threshold: 0.8        # switch at 80% of daily_claude_call_budget
+
 market_maker:
   enabled: true
   min_spread_bps: 40        # minimum 0.4% spread (BBO-join kicks in when 1-tick improvement would go below this)

@@ -273,6 +273,19 @@ class LLMEnsembleConfig(BaseModel):
     default_weight: float = 0.5  # Starting weight per model (50/50)
 
 
+class GeminiConfig(BaseModel):
+    """Gemini as an off-hours / budget-relief LLM. Routes analysis to Gemini when
+    it's off-hours OR Claude's daily budget is near-exhausted; falls back to
+    Claude if Gemini errors."""
+
+    enabled: bool = False
+    model: str = "gemini-2.5-flash"
+    # UTC hours to prefer Gemini (default = deep-night quiet hours).
+    off_hours_utc: list[int] = Field(default_factory=lambda: [4, 5, 6, 7, 8, 9])
+    # Switch to Gemini once Claude calls reach this fraction of the daily budget.
+    claude_budget_threshold: float = 0.8
+
+
 class ArbitrageConfig(BaseModel):
     enabled: bool = True
     min_profit_after_fees_pct: float = 1.5
@@ -342,6 +355,9 @@ class Settings(BaseSettings):
     kraken_api_key: str = ""
     kraken_api_secret: str = ""
 
+    # Google Gemini — LLM fallback for off-hours / when Claude budget is low.
+    gemini_api_key: str = ""
+
     # Safety
     auramaur_live: bool = False
     # Separate opt-in for on-chain redemption — real Polygon transactions.
@@ -373,6 +389,7 @@ class Settings(BaseSettings):
     transfers: TransfersConfig = Field(default_factory=lambda: TransfersConfig(**_DEFAULTS.get("transfers", {})))
     ensemble: EnsembleConfig = Field(default_factory=lambda: EnsembleConfig(**_DEFAULTS.get("ensemble", {})))
     llm_ensemble: LLMEnsembleConfig = Field(default_factory=lambda: LLMEnsembleConfig(**_DEFAULTS.get("llm_ensemble", {})))
+    gemini: GeminiConfig = Field(default_factory=lambda: GeminiConfig(**_DEFAULTS.get("gemini", {})))
     market_maker: MarketMakerConfig = Field(default_factory=lambda: MarketMakerConfig(**_DEFAULTS.get("market_maker", {})))
     technical: TechnicalConfig = Field(default_factory=lambda: TechnicalConfig(**_DEFAULTS.get("technical", {})))
     arbitrage: ArbitrageConfig = Field(default_factory=lambda: ArbitrageConfig(**_DEFAULTS.get("arbitrage", {})))
