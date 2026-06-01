@@ -271,6 +271,11 @@ class KrakenConfig(BaseModel):
     directional_entry_momentum_pct: float = 2.0
     directional_exit_momentum_pct: float = 4.0
     directional_lookback: int = 12        # OHLC candles (hourly) for the momentum read
+    # Hard downside stop: exit a held directional pair when it's down this many
+    # percent from entry, regardless of momentum. The momentum exit alone (with
+    # the asymmetric ride-winners bias) leaves no floor under a loser; this caps
+    # it. 0 disables the stop (pure momentum). Default conservative.
+    directional_stop_loss_pct: float = 12.0
     # Total $ the speculation engine may hold in open directional positions at
     # once — a hard ceiling so it can't consume the treasury reserve / CAD.
     directional_budget_usd: float = 50.0

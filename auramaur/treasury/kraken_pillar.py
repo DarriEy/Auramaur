@@ -120,11 +120,13 @@ class KrakenPillar:
     # Directional (gated, experimental, no validated edge)
     # ------------------------------------------------------------------
 
-    async def _reconcile_positions(self, bal: dict) -> None:
+    async def _reconcile_positions(self, bal: dict) -> dict[str, tuple[float, float, float]]:
         """Sync _dir_long to actual Kraken holdings so restarts don't lose track.
 
         A directional pair is "held" when we own a non-dust amount of its base
         asset. Adds discovered holdings, drops ones that were closed externally.
+        Returns the held book as ``pair -> (entry, current, qty)`` so the exit
+        path can sell the actual quantity held.
         """
         kcfg = self._s.kraken
         if self._pair_base is None:
@@ -165,6 +167,7 @@ class KrakenPillar:
         # dashboard with unrealized P&L. Kraken isn't a discovery, so check_exits
         # never touches these rows — the momentum logic owns the exits.
         await self._mirror_to_portfolio(held_prices, closed)
+        return held_prices
 
     async def _mirror_to_portfolio(
         self, held_prices: dict[str, tuple[float, float, float]], closed: list[str],
@@ -200,7 +203,7 @@ class KrakenPillar:
     async def _directional(self) -> None:
         kcfg = self._s.kraken
         bal = await self._k.get_balance()
-        await self._reconcile_positions(bal)
+        held_prices = await self._reconcile_positions(bal)
         for pair in kcfg.directional_pairs:
             mom = await self._momentum(pair)
             if mom is None:
@@ -215,6 +218,18 @@ class KrakenPillar:
             # threshold if the split ones aren't configured.
             entry_thr = getattr(kcfg, "directional_entry_momentum_pct", None) or kcfg.directional_momentum_pct
             exit_thr = getattr(kcfg, "directional_exit_momentum_pct", None) or kcfg.directional_momentum_pct
+
+            # Hard stop-loss: a held pair down more than directional_stop_loss_pct
+            # from entry exits regardless of momentum, so the ride-winners bias
+            # can't leave a loser uncapped. 0 disables.
+            stop_pct = getattr(kcfg, "directional_stop_loss_pct", 0.0) or 0.0
+            loss_pct = 0.0
+            stop_hit = False
+            if holding:
+                entry_px = self._dir_long.get(pair) or price
+                if entry_px > 0:
+                    loss_pct = (price - entry_px) / entry_px * 100.0
+                    stop_hit = stop_pct > 0 and loss_pct <= -stop_pct
 
             if not holding and mom >= entry_thr:
                 # Budget ceiling: each open position ~= max_order_usd. Scaled by
@@ -251,17 +266,26 @@ class KrakenPillar:
                 log.info("kraken.directional.entry", pair=pair, momentum=round(mom, 2),
                          status=res.status, err=res.error_message[:80])
 
-            elif holding and mom <= -exit_thr:
-                entry = self._dir_long.get(pair) or price
-                vol = await self._k.size_for_usd(pair, kcfg.max_order_usd * 0.98, entry)
-                if not vol or vol <= 0:
+            elif holding and (mom <= -exit_thr or stop_hit):
+                # Sell the ACTUAL held quantity (from balance reconciliation), not
+                # a recomputed USD notional — otherwise ordermin-bumped or
+                # fee-trimmed positions under-sell and leave a residual, or a
+                # too-large recompute trips insufficient-funds. Pass max_usd with
+                # headroom so an appreciated winner isn't blocked by the per-order
+                # entry cap (exits must always be allowed to fully close).
+                qty = held_prices.get(pair, (None, None, 0.0))[2]
+                if not qty or qty <= 0:
                     continue
-                vol = round(vol, 8)
+                vol = round(qty, 8)
+                notional = await self._k.usd_notional(pair, vol, price) or (vol * price)
                 res = await self._k.place_spot_order(
-                    pair, OrderSide.SELL, volume=vol, ordertype="market", purpose="directional")
+                    pair, OrderSide.SELL, volume=vol, ordertype="market",
+                    purpose="directional", max_usd=max(notional, kcfg.max_order_usd) * 1.1)
                 if res.order_id not in ("ERROR", "BLOCKED"):
                     self._dir_long.pop(pair, None)
-                log.info("kraken.directional.exit", pair=pair, momentum=round(mom, 2),
+                log.info("kraken.directional.exit", pair=pair,
+                         reason="stop_loss" if stop_hit else "momentum",
+                         momentum=round(mom, 2), loss_pct=round(loss_pct, 2),
                          status=res.status, err=res.error_message[:80])
 
     async def _momentum(self, pair: str) -> float | None:
