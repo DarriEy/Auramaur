@@ -216,9 +216,12 @@ class KrakenConfig(BaseModel):
 
     # --- Directional spot (gated; no validated edge — flip on deliberately) ---
     directional_enabled: bool = False
-    directional_pairs: list[str] = []     # e.g. ["XBTUSD", "ETHUSD"]
+    directional_pairs: list[str] = []     # e.g. ["XBTUSDC", "ETHUSDC"] (USDC-funded)
     directional_momentum_pct: float = 3.0  # |momentum| over the lookback to act
     directional_lookback: int = 12        # OHLC candles (hourly) for the momentum read
+    # Total $ the speculation engine may hold in open directional positions at
+    # once — a hard ceiling so it can't consume the treasury reserve / CAD.
+    directional_budget_usd: float = 50.0
 
 
 class TransfersConfig(BaseModel):

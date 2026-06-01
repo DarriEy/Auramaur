@@ -114,11 +114,16 @@ kraken:
   target_usdc: 50.0
   fiat_assets: ["ZCAD", "ZUSD", "ZEUR"]
   refill_cash_floor: 20.0
-  # Directional spot — gated; NO validated edge (Path B). Flip on deliberately.
-  directional_enabled: false
-  directional_pairs: []          # e.g. ["XBTUSD", "ETHUSD"]
+  # Directional spot — speculation. NO validated edge (Path B momentum); bounded
+  # by directional_budget_usd + max_order_usd. USDC-funded pairs (you hold USDC).
+  directional_enabled: true
+  # Major crypto, USDC-funded (you hold USDC). True fiat/FX spot isn't fundable
+  # with current holdings — spot can't short a currency. Budget caps concurrent
+  # positions regardless of list length.
+  directional_pairs: ["XBTUSDC", "ETHUSDC", "SOLUSDC", "ADAUSDC", "AVAXUSDC", "DOTUSDC", "LINKUSDC", "LTCUSDC"]
   directional_momentum_pct: 3.0
   directional_lookback: 12
+  directional_budget_usd: 50.0   # max total open speculative exposure
 
 transfers:
   # Cross-venue fund movement (Kraken -> Polymarket, Polygon USDC only).

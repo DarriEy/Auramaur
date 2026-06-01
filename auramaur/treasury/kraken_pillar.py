@@ -114,7 +114,15 @@ class KrakenPillar:
             holding = pair in self._dir_long
 
             if not holding and mom >= kcfg.directional_momentum_pct:
-                vol = round(kcfg.max_order_usd / price, 6)
+                # Budget ceiling: each open position ~= max_order_usd. Don't open
+                # a new one if it would push total speculation over budget.
+                allocated = len(self._dir_long) * kcfg.max_order_usd
+                if allocated + kcfg.max_order_usd > kcfg.directional_budget_usd:
+                    log.info("kraken.directional.budget_full", pair=pair,
+                             allocated=allocated, budget=kcfg.directional_budget_usd)
+                    continue
+                # 2% buffer so float rounding never trips the per-order cap.
+                vol = round(kcfg.max_order_usd * 0.98 / price, 6)
                 res = await self._k.place_spot_order(
                     pair, OrderSide.BUY, volume=vol, ordertype="market", purpose="directional")
                 if res.order_id not in ("ERROR", "BLOCKED"):
@@ -124,7 +132,7 @@ class KrakenPillar:
 
             elif holding and mom <= -kcfg.directional_momentum_pct:
                 entry = self._dir_long.get(pair) or price
-                vol = round(kcfg.max_order_usd / entry, 6)
+                vol = round(kcfg.max_order_usd * 0.98 / entry, 6)
                 res = await self._k.place_spot_order(
                     pair, OrderSide.SELL, volume=vol, ordertype="market", purpose="directional")
                 if res.order_id not in ("ERROR", "BLOCKED"):
