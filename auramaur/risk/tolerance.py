@@ -42,14 +42,20 @@ def scale_budget(base_usd: float, tolerance: float) -> float:
     return base_usd * _aggr(max(0.0, min(100.0, tolerance)) / 100.0)
 
 
+# Multiplier at YOLO (t=1); 1/_SPAN at most-conservative (t=0). Geometric so the
+# lever is symmetric in log-space and far more sensitive near the extremes than a
+# linear ramp (e.g. 65 -> 1.39x vs the old 1.18x; 100 -> 3x vs 1.6x).
+_SPAN = 3.0
+
+
 def _aggr(t: float) -> float:
-    """Multiplier for params that GROW with aggression. 0->0.4, .5->1.0, 1->1.6."""
-    return 0.4 + 1.2 * max(0.0, min(1.0, t))
+    """Multiplier for params that GROW with aggression. 0->0.33, .5->1.0, 1->3.0."""
+    return _SPAN ** (2.0 * max(0.0, min(1.0, t)) - 1.0)
 
 
 def _cons(t: float) -> float:
-    """Multiplier for params that SHRINK with aggression. 0->1.6, .5->1.0, 1->0.4."""
-    return 1.6 - 1.2 * max(0.0, min(1.0, t))
+    """Multiplier for params that SHRINK with aggression (inverse of _aggr)."""
+    return 1.0 / _aggr(t)
 
 
 def _confidence_floor(base: str, t: float) -> str:
