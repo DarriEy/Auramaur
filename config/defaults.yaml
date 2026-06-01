@@ -100,6 +100,17 @@ ibkr:
   live_port: 7496
   client_id: 1
   max_contracts_per_symbol: 10
+  market_data_type: 3
+  readonly: true   # set false to let the equity pillar place orders
+  # Directional equity speculation — gated; NO validated edge. Own socket
+  # (equity_client_id). Needs readonly:false + a funded/permissioned account.
+  directional_equity_enabled: false
+  directional_equity_symbols: ["SPY", "QQQ", "AAPL", "MSFT", "NVDA"]
+  directional_equity_budget_usd: 100.0
+  equity_max_order_usd: 50.0
+  directional_equity_momentum_pct: 2.0
+  directional_equity_lookback: 12
+  equity_client_id: 2
 
 kraken:
   # Spot venue for treasury/conversion (sell POL -> USDC, etc). Not a binary
@@ -120,10 +131,14 @@ kraken:
   # Major crypto, USDC-funded (you hold USDC). True fiat/FX spot isn't fundable
   # with current holdings — spot can't short a currency. Budget caps concurrent
   # positions regardless of list length.
-  directional_pairs: ["XBTUSDC", "ETHUSDC", "SOLUSDC", "ADAUSDC", "AVAXUSDC", "DOTUSDC", "LINKUSDC", "LTCUSDC"]
+  directional_pairs: ["XBTUSDC", "ETHUSDC", "SOLUSDC", "XRPUSDC", "ADAUSDC", "AVAXUSDC",
+    "DOTUSDC", "LINKUSDC", "LTCUSDC", "BCHUSDC", "ATOMUSDC", "ALGOUSDC", "BNBUSDC",
+    "TONUSDC", "XMRUSDC", "XTZUSDC", "MANAUSDC", "APEUSDC", "VETUSDC", "XDGUSDC"]
   directional_momentum_pct: 3.0
   directional_lookback: 12
-  directional_budget_usd: 50.0   # max total open speculative exposure
+  # max total open speculative exposure (raised $50->$100 with the wider
+  # universe; ~4 concurrent $25 positions). Of ~$218 Kraken funds.
+  directional_budget_usd: 100.0
 
 transfers:
   # Cross-venue fund movement (Kraken -> Polymarket, Polygon USDC only).

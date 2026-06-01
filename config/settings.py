@@ -185,6 +185,20 @@ class IBKRConfig(BaseModel):
     # 3=delayed, 4=delayed-frozen. Default 3 so the scanner works WITHOUT an
     # OPRA/equity subscription (delayed quotes + greeks). Set 1 once subscribed.
     market_data_type: int = 3
+    # The options client connects read-only by default (data only). To place
+    # equity orders the trading connection must be read-only=False.
+    readonly: bool = True
+
+    # --- Directional equity speculation (gated; no validated edge) ---
+    # Mirrors the Kraken directional pillar. Uses its OWN socket connection
+    # (equity_client_id) so it doesn't clash with the options client.
+    directional_equity_enabled: bool = False
+    directional_equity_symbols: list[str] = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA"]
+    directional_equity_budget_usd: float = 100.0   # total open speculative exposure
+    equity_max_order_usd: float = 50.0             # hard per-order ceiling
+    directional_equity_momentum_pct: float = 2.0
+    directional_equity_lookback: int = 12          # bars of recent history
+    equity_client_id: int = 2                      # distinct from client_id
 
 
 class CryptoComConfig(BaseModel):
