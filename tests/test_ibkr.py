@@ -147,12 +147,55 @@ class TestIBKRPaperGate:
         paper.execute.assert_called_once()
 
 
+class TestIBKRPaperTradePrep:
+    """IBKR runs the full pipeline in paper mode while the live account is
+    unfunded: orders route to paper, sizing uses the paper budget."""
+
+    def _client(self, *, paper_trade=True, readonly=False, is_live=True, budget=5000.0):
+        client = IBKRClient.__new__(IBKRClient)
+        client._paper = MagicMock()
+        client._paper.execute = AsyncMock(return_value=MagicMock(is_paper=True, status="paper"))
+        client._live_pending = {}
+        client._settings = MagicMock()
+        client._settings.is_live = is_live
+        client._settings.ibkr.paper_trade = paper_trade
+        client._settings.ibkr.readonly = readonly
+        client._settings.ibkr.paper_budget_usd = budget
+        return client
+
+    @pytest.mark.asyncio
+    async def test_paper_trade_routes_live_order_to_paper(self):
+        """With paper_trade on, a non-dry-run order under live gates still goes
+        to the paper ledger (and never touches IB)."""
+        client = self._client(paper_trade=True, is_live=True)
+        order = Order(market_id="IB:AAPL:200:20260418:C", exchange="ibkr",
+                      side=OrderSide.BUY, size=1, price=5.50, dry_run=False)
+        result = await client.place_order(order)
+        assert result.is_paper is True
+        client._paper.execute.assert_awaited_once()
+        assert order.dry_run is True  # flipped before routing
+
+    @pytest.mark.asyncio
+    async def test_get_balance_uses_paper_budget_in_paper_mode(self):
+        client = self._client(paper_trade=True, budget=5000.0)
+        assert await client.get_balance() == 5000.0
+
+    def test_live_pending_starts_empty(self):
+        client = self._client()
+        assert client._live_pending == {}
+
+
 class TestIBKRConfig:
     def test_ibkr_config_defaults(self):
         from config.settings import Settings
         s = Settings()
+        # Ready-but-quiet: configured for the live port + paper-trade prep, but
+        # enabled stays false until OPRA data + funds land (~2026-06-08).
         assert s.ibkr.enabled is False
-        assert s.ibkr.environment == "paper"
+        assert s.ibkr.environment == "live"
+        assert s.ibkr.readonly is False
+        assert s.ibkr.paper_trade is True
+        assert s.ibkr.paper_budget_usd == 5000.0
         assert s.ibkr.paper_port == 7497
         assert s.ibkr.live_port == 7496
         assert "SPY" in s.ibkr.watchlist
@@ -166,4 +209,5 @@ class TestIBKRConfig:
             raw = yaml.safe_load(f)
 
         assert raw["ibkr"]["enabled"] is False
-        assert raw["ibkr"]["environment"] == "paper"
+        assert raw["ibkr"]["environment"] == "live"
+        assert raw["ibkr"]["paper_trade"] is True

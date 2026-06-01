@@ -330,6 +330,7 @@ class AuramaurBot:
                 from auramaur.exchange.ibkr import IBKRClient
                 ibkr = IBKRClient(settings=s, paper_trader=paper)
                 discoveries["ibkr"] = ibkr
+                exchanges_map["ibkr"] = ibkr
                 engines["ibkr"] = TradingEngine(
                     settings=s, db=db, discovery=ibkr, aggregator=aggregator,
                     analyzer=analyzer, cache=cache, risk_manager=risk_manager,
