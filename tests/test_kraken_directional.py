@@ -6,7 +6,53 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from auramaur.treasury.kraken_pillar import KrakenPillar
+from auramaur.exchange.kraken import KrakenSpotClient
 from auramaur.exchange.models import OrderResult, OrderSide
+
+
+# ---------------------------------------------------------------------------
+# Quote-currency-aware sizing — arbitrary pairs / quote currencies
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_quote_usd_rate_pegged_and_fiat():
+    c = KrakenSpotClient(MagicMock())
+    assert await c.quote_usd_rate("USDC") == 1.0
+    assert await c.quote_usd_rate("ZUSD") == 1.0
+    assert await c.quote_usd_rate("USDT") == 1.0
+    c.get_price = AsyncMock(return_value=1.16)  # EURUSD
+    assert await c.quote_usd_rate("ZEUR") == 1.16
+    # cached: a second call must not hit the API again
+    c.get_price = AsyncMock(side_effect=AssertionError("rate should be cached"))
+    assert await c.quote_usd_rate("ZEUR") == 1.16
+
+
+@pytest.mark.asyncio
+async def test_size_for_usd_usdc_no_fx():
+    c = KrakenSpotClient(MagicMock())
+    c.get_pair_quote = AsyncMock(return_value="USDC")
+    vol = await c.size_for_usd("XBTUSDC", 30.0, price=60000.0)
+    assert abs(vol - 30.0 / 60000.0) < 1e-12
+
+
+@pytest.mark.asyncio
+async def test_size_for_usd_is_quote_aware_for_eur():
+    """$30 of a EUR-quoted pair buys fewer base units than the raw price implies,
+    because EUR is worth >$1 — sizing must convert via the EURUSD rate."""
+    c = KrakenSpotClient(MagicMock())
+    c.get_pair_quote = AsyncMock(return_value="ZEUR")
+    c.get_price = AsyncMock(return_value=1.16)  # EURUSD rate lookup
+    vol = await c.size_for_usd("XBTEUR", 30.0, price=60000.0)
+    assert abs(vol - 30.0 / (60000.0 * 1.16)) < 1e-12
+
+
+@pytest.mark.asyncio
+async def test_usd_notional_converts_quote():
+    c = KrakenSpotClient(MagicMock())
+    c.get_pair_quote = AsyncMock(return_value="ZEUR")
+    c.get_price = AsyncMock(return_value=1.16)
+    # 1 unit at price 100 EUR = 116 USD
+    assert abs(await c.usd_notional("XEUR", 1.0, price=100.0) - 116.0) < 1e-9
 
 
 def _pillar(*, holding: bool):
@@ -22,6 +68,8 @@ def _pillar(*, holding: bool):
     client = MagicMock()
     client.get_balance = AsyncMock(return_value={})
     client.get_price = AsyncMock(return_value=100.0)
+    client.size_for_usd = AsyncMock(return_value=0.3)   # USD-aware volume
+    client.usd_notional = AsyncMock(return_value=30.0)
     client.place_spot_order = AsyncMock(return_value=OrderResult(
         order_id="OK", market_id="XBTUSDC", status="filled", is_paper=False))
     p = KrakenPillar(settings=s, kraken_client=client)
