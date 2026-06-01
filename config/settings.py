@@ -37,8 +37,14 @@ class ExecutionConfig(BaseModel):
     # redeploy into fresh edges. Only targets the winning side (tiny remaining
     # upside == price near the payout boundary).
     free_winners_enabled: bool = True
-    free_winners_max_upside_pct: float = 5.0
+    free_winners_max_upside_pct: float = 3.0
     free_winners_min_hours: float = 48.0
+    # Periodic dust sweep: close tiny stale positions to trim position count and
+    # free locked slots. Age-guarded so freshly-opened small entries are never
+    # swept (the bot opens $1-7 positions). Runs via the portfolio exit monitor.
+    dust_sweep_enabled: bool = True
+    dust_max_notional: float = 1.0
+    dust_min_age_hours: float = 24.0
 
 
 class RiskConfig(BaseModel):

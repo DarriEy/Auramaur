@@ -17,8 +17,12 @@ execution:
   # Free capital from near-certain winners far from resolution (sell early to
   # redeploy). Only fires on the winning side; see ExecutionConfig.
   free_winners_enabled: true
-  free_winners_max_upside_pct: 5.0
+  free_winners_max_upside_pct: 3.0
   free_winners_min_hours: 48.0
+  # Periodic dust sweep (age-guarded so fresh entries are never swept).
+  dust_sweep_enabled: true
+  dust_max_notional: 1.0
+  dust_min_age_hours: 24.0
 
 risk:
   max_drawdown_pct: 15.0
