@@ -17,7 +17,6 @@ from rich.console import Console
 from rich.live import Live
 from rich.table import Table
 from rich.panel import Panel
-from rich.layout import Layout
 from rich.text import Text
 
 from config.settings import Settings
@@ -26,200 +25,6 @@ from auramaur.db.database import Database
 
 console = Console()
 log = structlog.get_logger()
-
-
-def _make_dashboard_layout(stats: dict) -> Layout:
-    """Build the dashboard layout."""
-    layout = Layout()
-    layout.split_column(
-        Layout(name="header", size=3),
-        Layout(name="body"),
-        Layout(name="footer", size=3),
-    )
-
-    # Header
-    mode = "[bold red]LIVE[/]" if stats.get("live") else "[bold green]PAPER[/]"
-    header = Panel(
-        Text.from_markup(f"[bold]AURAMAUR[/] Polymarket Bot  |  Mode: {mode}  |  Kill Switch: {'[red]ACTIVE[/]' if stats.get('kill_switch') else '[green]OFF[/]'}"),
-        style="bold blue",
-    )
-    layout["header"].update(header)
-
-    # Body: positions + signals
-    layout["body"].split_row(
-        Layout(name="left"),
-        Layout(name="right"),
-    )
-
-    # Portfolio table
-    portfolio_table = Table(title="Portfolio", expand=True)
-    portfolio_table.add_column("Market", style="cyan", max_width=40)
-    portfolio_table.add_column("Side", style="bold")
-    portfolio_table.add_column("Size", justify="right")
-    portfolio_table.add_column("Avg Price", justify="right")
-    portfolio_table.add_column("Current", justify="right")
-    portfolio_table.add_column("PnL", justify="right")
-
-    for pos in stats.get("positions", []):
-        pnl = pos.get("pnl", 0)
-        pnl_style = "green" if pnl >= 0 else "red"
-        portfolio_table.add_row(
-            pos.get("question", pos.get("market_id", ""))[:40],
-            pos.get("side", ""),
-            f"${pos.get('size', 0):.2f}",
-            f"{pos.get('avg_price', 0):.3f}",
-            f"{pos.get('current_price', 0):.3f}",
-            f"[{pnl_style}]${pnl:.2f}[/]",
-        )
-
-    layout["left"].update(Panel(portfolio_table))
-
-    # Recent signals table
-    signals_table = Table(title="Recent Signals", expand=True)
-    signals_table.add_column("Market", style="cyan", max_width=35)
-    signals_table.add_column("Claude P", justify="right")
-    signals_table.add_column("Market P", justify="right")
-    signals_table.add_column("Edge", justify="right")
-    signals_table.add_column("Action", style="bold")
-
-    for sig in stats.get("signals", [])[:10]:
-        edge = sig.get("edge", 0)
-        edge_style = "green" if edge > 0 else "red"
-        signals_table.add_row(
-            sig.get("question", sig.get("market_id", ""))[:35],
-            f"{sig.get('claude_prob', 0):.3f}",
-            f"{sig.get('market_prob', 0):.3f}",
-            f"[{edge_style}]{edge:.1f}%[/]",
-            sig.get("action", ""),
-        )
-
-    layout["right"].update(Panel(signals_table))
-
-    # Footer
-    balance = stats.get("balance")
-    total_pnl = stats.get("total_pnl", 0)
-    pnl_style = "green" if total_pnl >= 0 else "red"
-    balance_str = "[dim]n/a[/]" if balance is None else f"[bold]${balance:.2f}[/]"
-    footer = Panel(
-        Text.from_markup(
-            f"Balance: {balance_str}  |  "
-            f"PnL: [{pnl_style}]${total_pnl:.2f}[/]  |  "
-            f"Trades: {stats.get('trade_count', 0)}  |  "
-            f"Drawdown: {stats.get('drawdown', 0):.1f}%  |  "
-            f"Positions: {stats.get('position_count', 0)}"
-        ),
-    )
-    layout["footer"].update(footer)
-
-    return layout
-
-
-async def _get_dashboard_stats(db: Database, settings: Settings) -> dict:
-    """Gather stats for dashboard display."""
-    stats = {
-        "live": settings.is_live,
-        "kill_switch": settings.kill_switch_active,
-    }
-
-    # Positions — scope to current mode so paper state doesn't show in live
-    # dashboards (and vice versa).
-    is_paper_flag = 0 if settings.is_live else 1
-    rows = await db.fetchall(
-        """SELECT p.*, m.question, cb.avg_cost AS cb_avg_cost FROM portfolio p
-           LEFT JOIN markets m ON p.market_id = m.id
-           LEFT JOIN cost_basis cb ON cb.market_id = p.market_id
-                                  AND cb.is_paper = p.is_paper
-           WHERE p.is_paper = ?""",
-        (is_paper_flag,),
-    )
-    stats["positions"] = [
-        {
-            "market_id": r["market_id"], "question": r["question"] or r["market_id"],
-            "side": r["side"], "size": r["size"], "avg_price": r["avg_price"],
-            "current_price": r["current_price"] or r["avg_price"],
-            "pnl": (
-                ((r["current_price"] or r["avg_price"]) - (r["cb_avg_cost"] or r["avg_price"]))
-                * (r["size"] or 0)
-            ),
-        }
-        for r in rows
-    ]
-    stats["position_count"] = len(stats["positions"])
-
-    # Recent signals
-    rows = await db.fetchall(
-        """SELECT s.*, m.question FROM signals s
-           LEFT JOIN markets m ON s.market_id = m.id
-           ORDER BY s.timestamp DESC LIMIT 20"""
-    )
-    stats["signals"] = [
-        {
-            "market_id": r["market_id"], "question": r["question"] or r["market_id"],
-            "claude_prob": r["claude_prob"], "market_prob": r["market_prob"],
-            "edge": r["edge"], "action": r["action"] or "",
-        }
-        for r in rows
-    ]
-
-    # Balance and PnL — use fills/cost_basis/resolution_pnl, not trades.pnl
-    # (legacy mirror rows never had authoritative P&L).
-    row = await db.fetchone(
-        "SELECT COUNT(*) as cnt FROM fills WHERE is_paper = ?",
-        (is_paper_flag,),
-    )
-    stats["trade_count"] = row["cnt"] if row else 0
-    resolved_component_sql = (
-        "COALESCE((SELECT SUM(r.pnl) FROM resolution_pnl r), 0)"
-        if settings.is_live else "0"
-    )
-    resolved_exclusion_sql = (
-        "AND cb.market_id NOT IN (SELECT market_id FROM resolution_pnl)"
-        if settings.is_live else ""
-    )
-    portfolio_resolved_exclusion_sql = (
-        "AND p.market_id NOT IN (SELECT market_id FROM resolution_pnl)"
-        if settings.is_live else ""
-    )
-    row = await db.fetchone(
-        f"""
-        SELECT
-            {resolved_component_sql}
-          + COALESCE((
-                SELECT SUM(cb.realized_pnl)
-                FROM cost_basis cb
-                WHERE cb.is_paper = ?
-                  {resolved_exclusion_sql}
-            ), 0)
-          + COALESCE((
-                SELECT SUM((COALESCE(p.current_price, p.avg_price)
-                            - COALESCE(cb.avg_cost, p.avg_price)) * p.size)
-                FROM portfolio p
-                LEFT JOIN cost_basis cb ON cb.market_id = p.market_id
-                                      AND cb.is_paper = p.is_paper
-                WHERE p.is_paper = ?
-                  {portfolio_resolved_exclusion_sql}
-            ), 0) AS total_pnl
-        """,
-        (is_paper_flag, is_paper_flag),
-    )
-    stats["total_pnl"] = row["total_pnl"] if row else 0
-
-    # Drawdown
-    row = await db.fetchone(
-        "SELECT max_drawdown FROM daily_stats ORDER BY date DESC LIMIT 1"
-    )
-    stats["drawdown"] = row["max_drawdown"] if row else 0
-
-    if settings.is_live:
-        # Live balance should be queried from the CLOB on demand. The running
-        # bot's portfolio monitor already displays on-chain cash via the
-        # syncer, so this dashboard just reports realized PnL from live fills
-        # and leaves balance undefined.
-        stats["balance"] = None
-    else:
-        stats["balance"] = settings.execution.paper_initial_balance + stats["total_pnl"]
-
-    return stats
 
 
 @click.group()
@@ -269,25 +74,12 @@ def run(agent: bool, hybrid: bool, exchange: str | None):
 
 
 @main.command()
-def dashboard():
-    """Show live dashboard (read-only)."""
-
-    async def _dashboard():
-        settings = Settings()
-        db = Database()
-        await db.connect()
-
-        with Live(console=console, refresh_per_second=1) as live:
-            while True:
-                try:
-                    stats = await _get_dashboard_stats(db, settings)
-                    layout = _make_dashboard_layout(stats)
-                    live.update(layout)
-                except Exception as e:
-                    console.print(f"[red]Dashboard error: {e}[/]")
-                await asyncio.sleep(settings.intervals.dashboard_refresh_seconds)
-
-    asyncio.run(_dashboard())
+@click.pass_context
+def dashboard(ctx):
+    """Deprecated alias for `cockpit` (the unified live view)."""
+    console.print("[yellow]`dashboard` is deprecated — running `cockpit` "
+                  "(the unified view). Use `auramaur cockpit` going forward.[/]")
+    ctx.invoke(cockpit)
 
 
 @main.command()
@@ -857,46 +649,38 @@ def dust_exit(max_notional: float, exchange: str | None, execute: bool, yes: boo
 
 @main.command()
 def status():
-    """Show current bot status."""
+    """One-shot snapshot — same view as `cockpit`, rendered once."""
+    from auramaur.monitoring import cockpit as ck
 
     async def _status():
         settings = Settings()
         db = Database()
         await db.connect()
-        stats = await _get_dashboard_stats(db, settings)
+        try:
+            # cache=None → fresh venue balances, no Live loop.
+            state = await ck.gather_state(db, settings, cache=None)
+            console.print(ck.make_layout(state, compact=True))
 
-        console.print(f"Mode: {'[red]LIVE[/]' if stats['live'] else '[green]PAPER[/]'}")
-        console.print(f"Kill Switch: {'[red]ACTIVE[/]' if stats['kill_switch'] else '[green]OFF[/]'}")
-
-        # Show real Polymarket balance when live
-        if settings.is_live and settings.polygon_private_key:
-            try:
-                from py_clob_client_v2 import ClobClient, ApiCreds
-                client = ClobClient(
-                    "https://clob.polymarket.com",
-                    chain_id=137,
-                    key=settings.polygon_private_key,
-                    creds=ApiCreds(
-                        api_key=settings.polymarket_api_key,
-                        api_secret=settings.polymarket_api_secret,
-                        api_passphrase=settings.polymarket_passphrase,
-                    ),
-                )
-                orders = client.get_orders()
-                console.print(f"Polymarket: [green]connected[/] — {len(orders)} open orders")
-            except Exception as e:
-                console.print(f"Polymarket: [red]error[/] — {str(e)[:60]}")
-
-        if stats['balance'] is None:
-            console.print("Balance: [dim]n/a (live — see running bot for on-chain cash)[/]")
-        else:
-            console.print(f"Balance: ${stats['balance']:.2f}")
-        console.print(f"PnL: ${stats['total_pnl']:.2f}")
-        console.print(f"Trades: {stats['trade_count']}")
-        console.print(f"Open Positions: {stats['position_count']}")
-        console.print(f"Drawdown: {stats['drawdown']:.1f}%")
-
-        await db.close()
+            # Extra, live-only: confirm the CLOB connection + open-order count.
+            if settings.is_live and settings.polygon_private_key:
+                try:
+                    from py_clob_client_v2 import ClobClient, ApiCreds
+                    client = ClobClient(
+                        "https://clob.polymarket.com",
+                        chain_id=137,
+                        key=settings.polygon_private_key,
+                        creds=ApiCreds(
+                            api_key=settings.polymarket_api_key,
+                            api_secret=settings.polymarket_api_secret,
+                            api_passphrase=settings.polymarket_passphrase,
+                        ),
+                    )
+                    orders = client.get_orders()
+                    console.print(f"Polymarket: [green]connected[/] — {len(orders)} open orders")
+                except Exception as e:
+                    console.print(f"Polymarket: [red]error[/] — {str(e)[:60]}")
+        finally:
+            await db.close()
 
     asyncio.run(_status())
 
