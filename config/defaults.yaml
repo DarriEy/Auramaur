@@ -157,16 +157,20 @@ kraken:
   # Directional spot — speculation. NO validated edge (Path B momentum); bounded
   # by directional_budget_usd + max_order_usd. USDC-funded pairs (you hold USDC).
   directional_enabled: true
-  # Major crypto, USDC-funded (you hold USDC). True fiat/FX spot isn't fundable
-  # with current holdings — spot can't short a currency. Budget caps concurrent
-  # positions regardless of list length.
-  # Low + medium risk only (liquid majors/midcaps). High-risk memes/new tokens
-  # (BERA, TRUMP, PENGU, VIRTUAL, FARTCOIN, MELANIA, PEAQ) deliberately excluded.
-  # Budget caps exposure regardless of list length, so breadth is low-risk.
+  # Pairs are ARBITRARY now: any base/quote works. Sizing + the per-order cap are
+  # quote-currency-aware (USD-converted via a live <fiat>USD rate), and each
+  # pair's ordermin is respected, so USDC / USD / USDT / EUR / … quotes all size
+  # correctly. NOTE: a pair only *fills* if you hold its quote currency — you
+  # hold USDC, so USDC pairs are the fundable set; USD/USDT/EUR pairs need a
+  # balance in that quote. Kraken spot is always 2-asset (base/quote) — no
+  # multi-leg pairs. Budget caps exposure regardless of list length.
+  # Liquid majors/midcaps; high-risk memes (TRUMP, PENGU, FARTCOIN, …) excluded.
   directional_pairs: ["XBTUSDC", "ETHUSDC", "SOLUSDC", "XRPUSDC", "ADAUSDC", "AVAXUSDC",
     "DOTUSDC", "LINKUSDC", "LTCUSDC", "BCHUSDC", "ATOMUSDC", "ALGOUSDC", "BNBUSDC",
     "TONUSDC", "XMRUSDC", "XTZUSDC", "MANAUSDC", "APEUSDC", "VETUSDC", "XDGUSDC",
-    "CROUSDC", "SHIBUSDC"]
+    "CROUSDC", "SHIBUSDC", "NEARUSDC", "ARBUSDC", "OPUSDC", "INJUSDC", "SUIUSDC",
+    "SEIUSDC", "FILUSDC", "RENDERUSDC", "FETUSDC", "TIAUSDC", "ICPUSDC", "AAVEUSDC",
+    "GRTUSDC", "JUPUSDC"]
   # Asymmetric long bias (more bullish): enter on a +2% up-move, exit only on a
   # -4% down-move so winners ride longer. (directional_momentum_pct kept as the
   # legacy symmetric fallback.)

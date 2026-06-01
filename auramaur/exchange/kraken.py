@@ -40,10 +40,17 @@ _RATE_LIMIT = 8  # conservative; Kraken counts private calls against a tier budg
 
 
 class KrakenSpotClient:
+    # Quote assets that trade ~1:1 with USD, so no FX conversion is needed for
+    # USD-denominated sizing / caps. Everything else (ZEUR, ZGBP, …) is converted
+    # via a live <fiat>USD rate so any quote currency can be sized correctly.
+    _USD_PEGGED = {"ZUSD", "USD", "USDC", "USDT", "DAI", "PYUSD", "USDG", "RLUSD"}
+
     def __init__(self, settings):
         self._settings = settings
         self._session: aiohttp.ClientSession | None = None
         self._sem = asyncio.Semaphore(_RATE_LIMIT)
+        self._quote_rate_cache: dict[str, float] = {}  # quote asset -> USD rate
+        self._pair_quote_cache: dict[str, str] = {}     # pair -> quote asset code
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -119,11 +126,55 @@ class KrakenSpotClient:
 
     async def get_pair_quote(self, pair: str) -> str | None:
         """Quote-currency asset code for a pair (e.g. PAXGUSD -> 'ZUSD')."""
+        if pair in self._pair_quote_cache:
+            return self._pair_quote_cache[pair]
         info = await self._public("AssetPairs", {"pair": pair})
         if not info:
             return None
         meta = next(iter(info.values()))
-        return meta.get("quote")
+        quote = meta.get("quote")
+        if quote:
+            self._pair_quote_cache[pair] = quote
+        return quote
+
+    async def quote_usd_rate(self, quote: str) -> float:
+        """USD value of one unit of a quote currency. 1.0 for USD-pegged quotes
+        (USD/USDC/USDT/…); otherwise the live <fiat>USD rate (ZEUR -> EURUSD).
+        Cached. Falls back to 1.0 if the rate can't be fetched."""
+        q = (quote or "").upper()
+        if q in self._USD_PEGGED:
+            return 1.0
+        if q in self._quote_rate_cache:
+            return self._quote_rate_cache[q]
+        # Kraken fiat codes are Z-prefixed (ZEUR, ZGBP); the FX pair drops it.
+        fiat = q[1:] if (q.startswith("Z") and len(q) == 4) else q
+        rate = 1.0
+        px = await self.get_price(f"{fiat}USD")
+        if px and px > 0:
+            rate = px
+        self._quote_rate_cache[q] = rate
+        return rate
+
+    async def usd_notional(self, pair: str, volume: float, price: float | None = None) -> float | None:
+        """USD value of `volume` base units of `pair`, accounting for the quote
+        currency. Returns None if price is unavailable."""
+        price = price if price is not None else await self.get_price(pair)
+        if not price or price <= 0:
+            return None
+        quote = await self.get_pair_quote(pair) or "ZUSD"
+        return volume * price * await self.quote_usd_rate(quote)
+
+    async def size_for_usd(self, pair: str, usd: float, price: float | None = None) -> float | None:
+        """Base-unit volume whose value is ~`usd`, for any quote currency.
+        Returns None if price/quote can't be resolved."""
+        price = price if price is not None else await self.get_price(pair)
+        if not price or price <= 0:
+            return None
+        quote = await self.get_pair_quote(pair) or "ZUSD"
+        usd_per_base = price * await self.quote_usd_rate(quote)
+        if usd_per_base <= 0:
+            return None
+        return usd / usd_per_base
 
     # ------------------------------------------------------------------
     # Spot order placement
@@ -164,10 +215,12 @@ class KrakenSpotClient:
                                error_message="directional trading disabled (no validated edge)")
 
         # 3. Per-order USD cap (manual CLI may pass a higher confirmed ceiling).
+        #    Convert to USD via the pair's quote currency so the cap holds for
+        #    any quote (USDC/USDT/EUR/…), not just USD-quoted pairs.
         cap = max_usd if max_usd is not None else self._settings.kraken.max_order_usd
         est_price = price or await self.get_price(pair)
         if est_price:
-            notional = volume * est_price
+            notional = await self.usd_notional(pair, volume, est_price) or (volume * est_price)
             if notional > cap:
                 return OrderResult(order_id="BLOCKED", market_id=pair, status="rejected",
                                    is_paper=True,

@@ -35,6 +35,7 @@ class KrakenPillar:
         # survives restarts instead of silently over-allocating.
         self._dir_long: dict[str, float] = {}
         self._pair_base: dict[str, str] | None = None  # pair -> base asset code
+        self._pair_min: dict[str, float] = {}          # pair -> ordermin (base units)
 
     async def run_once(self) -> None:
         try:
@@ -135,6 +136,10 @@ class KrakenPillar:
                     alt = meta.get("altname")
                     if alt:
                         self._pair_base[alt] = meta.get("base")
+                        try:
+                            self._pair_min[alt] = float(meta.get("ordermin", 0) or 0)
+                        except (TypeError, ValueError):
+                            self._pair_min[alt] = 0.0
             except Exception as e:  # noqa: BLE001
                 log.warning("kraken.reconcile_pairs_error", error=str(e))
 
@@ -221,8 +226,24 @@ class KrakenPillar:
                     log.info("kraken.directional.budget_full", pair=pair,
                              allocated=allocated, budget=round(budget, 2))
                     continue
-                # 2% buffer so float rounding never trips the per-order cap.
-                vol = round(kcfg.max_order_usd * 0.98 / price, 6)
+                # Size in USD terms via the pair's quote currency (works for any
+                # quote: USDC/USDT/EUR/…). 2% buffer so rounding never trips the
+                # per-order cap.
+                vol = await self._k.size_for_usd(pair, kcfg.max_order_usd * 0.98, price)
+                if not vol or vol <= 0:
+                    continue
+                # Respect the pair's minimum lot. Bump up to it only if the min
+                # still fits ~1.5x the per-order cap in USD; else the pair is too
+                # expensive per lot to trade within budget.
+                ordermin = self._pair_min.get(pair, 0.0)
+                if ordermin and vol < ordermin:
+                    min_usd = await self._k.usd_notional(pair, ordermin, price)
+                    if min_usd and min_usd > kcfg.max_order_usd * 1.5:
+                        log.info("kraken.directional.min_lot_too_large", pair=pair,
+                                 ordermin=ordermin, min_usd=round(min_usd, 2))
+                        continue
+                    vol = ordermin
+                vol = round(vol, 8)
                 res = await self._k.place_spot_order(
                     pair, OrderSide.BUY, volume=vol, ordertype="market", purpose="directional")
                 if res.order_id not in ("ERROR", "BLOCKED"):
@@ -232,7 +253,10 @@ class KrakenPillar:
 
             elif holding and mom <= -exit_thr:
                 entry = self._dir_long.get(pair) or price
-                vol = round(kcfg.max_order_usd * 0.98 / entry, 6)
+                vol = await self._k.size_for_usd(pair, kcfg.max_order_usd * 0.98, entry)
+                if not vol or vol <= 0:
+                    continue
+                vol = round(vol, 8)
                 res = await self._k.place_spot_order(
                     pair, OrderSide.SELL, volume=vol, ordertype="market", purpose="directional")
                 if res.order_id not in ("ERROR", "BLOCKED"):
