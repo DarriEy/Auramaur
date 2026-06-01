@@ -2587,6 +2587,34 @@ class AuramaurBot:
             except Exception as e:
                 log.debug("startup.balance_error", error=str(e))
 
+        # Kraken treasury/speculation pool (separate from prediction-market bankroll)
+        if self.settings.kraken.enabled and self._exchange_filter in (None, "kraken"):
+            try:
+                from auramaur.exchange.kraken import KrakenSpotClient
+                kclient = KrakenSpotClient(self.settings)
+                kb = await kclient.get_balance()
+                usdc = kb.get("USDC", 0.0)
+                cad = kb.get("ZCAD", 0.0)
+                cadpx = await kclient.get_price("USDCCAD") or 1.38
+                cad_usd = cad / cadpx if cadpx else 0.0
+                crypto = [a for a, v in kb.items() if v > 0 and a not in ("USDC", "ZCAD")]
+                spec = (f"[red]SPEC ON[/] ({len(self.settings.kraken.directional_pairs)} pairs, "
+                        f"${self.settings.kraken.directional_budget_usd:.0f} budget)"
+                        if self.settings.kraken.directional_enabled else "spec off")
+                console.print(
+                    f"  Kraken: [green]${usdc:.2f}[/] USDC + [green]${cad_usd:.0f}[/] CAD"
+                    f"{' + ' + ','.join(crypto) if crypto else ''} | {spec}"
+                )
+                await kclient.close()
+            except Exception as e:
+                log.debug("startup.kraken_balance_error", error=str(e))
+
+        # IBKR status (options client + gated equity speculation)
+        if self.settings.ibkr.enabled and self._exchange_filter in (None, "ibkr"):
+            eq = ("[red]equity SPEC ON[/]" if self.settings.ibkr.directional_equity_enabled
+                  else "equity spec off")
+            console.print(f"  IBKR: enabled ({self.settings.ibkr.environment}) | {eq}")
+
         show_startup(
             self._components["source_names"],
             startup_balance,
