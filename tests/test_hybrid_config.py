@@ -11,7 +11,7 @@ class TestHybridConfig:
         assert cfg.news_cycle_seconds == 30
         assert cfg.llm_domain_filter is True
         assert cfg.llm_whitelist_min_accuracy == 0.50
-        assert cfg.llm_whitelist_min_trades == 10
+        assert cfg.llm_whitelist_min_trades == 5
         assert cfg.market_maker_auto_enable is True
 
     def test_settings_has_hybrid(self):
