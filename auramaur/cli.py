@@ -251,6 +251,28 @@ def dashboard():
 
 
 @main.command()
+def cockpit():
+    """Live cockpit — read-only fused view (DB + venue balances + pillar liveness)."""
+    from auramaur.monitoring import cockpit as ck
+
+    async def _run():
+        settings = Settings()
+        db = Database()
+        await db.connect()
+        cache: dict = {}
+        with Live(console=console, refresh_per_second=2, screen=True) as live:
+            while True:
+                try:
+                    state = await ck.gather_state(db, settings, cache)
+                    live.update(ck.make_layout(state))
+                except Exception as e:
+                    console.print(f"[red]cockpit error: {e}[/]")
+                await asyncio.sleep(2)
+
+    asyncio.run(_run())
+
+
+@main.command()
 @click.argument("query")
 @click.option("--limit", default=20, help="Number of markets to show")
 def scan(query: str, limit: int):
