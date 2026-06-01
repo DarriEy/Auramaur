@@ -57,6 +57,21 @@ class KrakenPillar:
         log.info("kraken.treasury.balances", **{a: round(v, 4) for a, v in bal.items() if v > 0})
         usdc = bal.get("USDC", 0.0)
 
+        # Surface Kraken in the live console (not just the JSON log). Show actual
+        # crypto holdings (= open speculative exposure), not the in-memory count.
+        if self._console:
+            cad = bal.get("ZCAD", 0.0)
+            crypto = [a for a, v in bal.items()
+                      if v > 0 and a != "USDC" and not a.startswith("Z")]
+            if kcfg.directional_enabled:
+                spec = f"[red]spec: {','.join(crypto)}[/]" if crypto else "spec: flat"
+            else:
+                spec = "spec off"
+            self._console.print(
+                f"[magenta]kraken[/] [green]${usdc:.2f}[/] USDC"
+                f"{f' + {cad:.0f} CAD' if cad else ''} | {spec}"
+            )
+
         # Idle fiat -> USDC toward the target reserve (one conversion per cycle).
         if kcfg.auto_convert and usdc < kcfg.target_usdc:
             for fiat in kcfg.fiat_assets:
