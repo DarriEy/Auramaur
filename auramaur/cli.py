@@ -272,6 +272,13 @@ def cockpit():
     asyncio.run(_run())
 
 
+@main.command()
+def gates():
+    """Show feature gates — which experimental switches the data has earned."""
+    from auramaur.monitoring import gates as g
+    console.print(g.render(g.gather(Settings())))
+
+
 @main.group()
 def kraken():
     """Manual Kraken spot trading (gated + typed confirmation)."""

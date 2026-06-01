@@ -26,9 +26,10 @@ _NAME = {"BTC": "Bitcoin", "ETH": "Ethereum"}
 
 
 class MomentumCouplingPillar:
-    def __init__(self, settings, console=None):
+    def __init__(self, settings, console=None, polymarket_client=None):
         self._s = settings
         self._console = console
+        self._poly = polymarket_client   # PolymarketClient (client.py) for execution
         self._spot_hist: dict[str, list[tuple[float, float]]] = defaultdict(list)
         self._kraken = None
         self._gamma = None
@@ -77,6 +78,8 @@ class MomentumCouplingPillar:
             strike = float(mt.group(1).replace(",", ""))
             if strike <= 0 or abs(strike - spot) / spot > cfg.near_money_pct:
                 continue  # only near-the-money markets are spot-sensitive
+            if not (0.10 < m.outcome_yes_price < 0.90):
+                continue  # skip pinned markets — prob must be live to move with spot
             direction = "BUY_YES" if move > 0 else "BUY_NO"
             log.info("coupling.signal", asset=asset, move_pct=round(move, 2), spot=round(spot),
                      market=m.question[:50], strike=strike,
@@ -87,7 +90,31 @@ class MomentumCouplingPillar:
                     f"[cyan]coupling[/] {asset} spot {move:+.1f}% -> {direction} "
                     f"'{m.question[:38]}' (prob {m.outcome_yes_price:.2f})"
                     + ("" if cfg.execute else " [dim](detect-only)[/]"))
-            # Execution intentionally not wired until the coupling validates.
-            # When cfg.execute: route a strategy_source='momentum_coupling' order
-            # through the Polymarket engine here, bounded by max_position_usd.
+            if cfg.execute:
+                await self._execute(m, direction)
             break  # one signal per asset per cycle
+
+    async def _execute(self, market, direction: str) -> None:
+        """Place the coupling trade — only when execute=True. Bounded by
+        max_position_usd; the Polymarket client enforces the three live gates +
+        kill switch, so this is paper unless AURAMAUR_LIVE + execution.live."""
+        if self._poly is None:
+            log.warning("coupling.no_client", reason="no Polymarket client; detect-only")
+            return
+        from auramaur.exchange.models import Order, OrderSide, TokenType
+        token = TokenType.YES if direction == "BUY_YES" else TokenType.NO
+        token_id = market.clob_token_yes if token == TokenType.YES else market.clob_token_no
+        price = market.outcome_yes_price if token == TokenType.YES else market.outcome_no_price
+        if not token_id or price <= 0:
+            log.warning("coupling.no_token", market=market.id)
+            return
+        size = round(self._s.momentum_coupling.max_position_usd / price, 2)
+        order = Order(market_id=market.id, exchange="polymarket", token_id=token_id,
+                      side=OrderSide.BUY, token=token, size=size, price=price,
+                      dry_run=not self._s.is_live)
+        try:
+            res = await self._poly.place_order(order)
+            log.warning("coupling.executed", market=market.id, direction=direction,
+                        size=size, price=price, status=res.status, is_paper=res.is_paper)
+        except Exception as e:  # noqa: BLE001
+            log.error("coupling.execute_error", market=market.id, error=str(e)[:120])

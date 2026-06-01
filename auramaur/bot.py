@@ -1083,7 +1083,10 @@ class AuramaurBot:
         """
         from auramaur.strategy.momentum_coupling import MomentumCouplingPillar
         from auramaur.monitoring.display import console
-        pillar = MomentumCouplingPillar(self.settings, console=console)
+        poly_engine = self._components.get("engines", {}).get("polymarket")
+        poly_client = poly_engine.exchange if poly_engine else None
+        pillar = MomentumCouplingPillar(self.settings, console=console,
+                                        polymarket_client=poly_client)
         interval = self.settings.momentum_coupling.poll_seconds
         while self._running:
             if await self._check_kill_switch():
