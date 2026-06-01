@@ -130,12 +130,15 @@ class KrakenSpotClient:
         price: float | None = None,
         purpose: str = "treasury",
         dry_run: bool | None = None,
+        max_usd: float | None = None,
     ) -> OrderResult:
         """Place a spot order on Kraken.
 
         purpose: "treasury" (allowed by default) or "directional" (refused
         unless kraken.directional_enabled). dry_run None => derive from the live
         gates; True/validate-only sends Kraken's validate flag (no execution).
+        max_usd overrides the per-order cap (manual CLI passes the user-confirmed
+        ceiling; autonomous callers leave it None to use kraken.max_order_usd).
         """
         side_str = side.value if isinstance(side, OrderSide) else str(side)
         side_str = side_str.lower()
@@ -152,15 +155,15 @@ class KrakenSpotClient:
                                is_paper=True,
                                error_message="directional trading disabled (no validated edge)")
 
-        # 3. Per-order USD cap.
+        # 3. Per-order USD cap (manual CLI may pass a higher confirmed ceiling).
+        cap = max_usd if max_usd is not None else self._settings.kraken.max_order_usd
         est_price = price or await self.get_price(pair)
         if est_price:
             notional = volume * est_price
-            if notional > self._settings.kraken.max_order_usd:
+            if notional > cap:
                 return OrderResult(order_id="BLOCKED", market_id=pair, status="rejected",
                                    is_paper=True,
-                                   error_message=f"order ${notional:.2f} exceeds cap "
-                                                 f"${self._settings.kraken.max_order_usd:.2f}")
+                                   error_message=f"order ${notional:.2f} exceeds cap ${cap:.2f}")
 
         # 4. Three-gate live decision → validate-only unless explicitly live.
         if dry_run is None:

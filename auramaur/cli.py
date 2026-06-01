@@ -272,6 +272,111 @@ def cockpit():
     asyncio.run(_run())
 
 
+@main.group()
+def kraken():
+    """Manual Kraken spot trading (gated + typed confirmation)."""
+
+
+async def _kraken_spot(pair: str, side: str, usd: float, assume_yes: bool) -> None:
+    from auramaur.exchange.kraken import KrakenSpotClient
+    from auramaur.exchange.models import OrderSide
+    s = Settings()
+    k = KrakenSpotClient(s)
+    try:
+        price = await k.get_price(pair)
+        if not price:
+            console.print(f"[red]No price for {pair}[/]")
+            return
+        vol = round(usd / price, 8)
+        mode = "[bold red]LIVE — REAL ORDER[/]" if s.is_live else "[green]paper (validate-only)[/]"
+        console.print(f"\n{side.upper()} ~${usd:.2f} of [cyan]{pair}[/] "
+                      f"({vol} @ ~{price})  {mode}")
+        if not assume_yes and s.is_live:
+            ans = click.prompt(f"Type the amount ({usd:.2f}) to confirm", default="",
+                               show_default=False).strip()
+            if ans not in (f"{usd:.2f}", str(usd)):
+                console.print("[yellow]Not confirmed — aborted.[/]")
+                return
+        side_enum = OrderSide.BUY if side == "buy" else OrderSide.SELL
+        res = await k.place_spot_order(pair, side_enum, vol, ordertype="market",
+                                       purpose="manual", max_usd=usd * 1.1)
+        color = "green" if res.status in ("pending", "paper") else "red"
+        console.print(f"Result: [{color}]{res.status}[/] | id={res.order_id}"
+                      + (f" | {res.error_message}" if res.error_message else ""))
+    finally:
+        await k.close()
+
+
+@kraken.command("balance")
+def kraken_balance_cmd():
+    """Show Kraken balances."""
+    async def _run():
+        from auramaur.exchange.kraken import KrakenSpotClient
+        k = KrakenSpotClient(Settings())
+        bal = await k.get_balance()
+        for a, v in sorted(bal.items()):
+            if v > 0:
+                console.print(f"  [magenta]{a:8}[/] {v}")
+        await k.close()
+    asyncio.run(_run())
+
+
+@kraken.command("buy")
+@click.option("--pair", required=True, help="e.g. XBTUSDC")
+@click.option("--usd", required=True, type=float, help="USD/USDC amount")
+@click.option("--yes", "assume_yes", is_flag=True, help="skip typed confirmation")
+def kraken_buy(pair, usd, assume_yes):
+    """Buy ~--usd of --pair (market order)."""
+    asyncio.run(_kraken_spot(pair, "buy", usd, assume_yes))
+
+
+@kraken.command("sell")
+@click.option("--pair", required=True, help="e.g. TONUSDC")
+@click.option("--usd", required=True, type=float, help="USD/USDC amount to sell")
+@click.option("--yes", "assume_yes", is_flag=True, help="skip typed confirmation")
+def kraken_sell(pair, usd, assume_yes):
+    """Sell ~--usd of --pair (market order)."""
+    asyncio.run(_kraken_spot(pair, "sell", usd, assume_yes))
+
+
+@kraken.command("flatten")
+@click.option("--yes", "assume_yes", is_flag=True, help="skip typed confirmation")
+def kraken_flatten(assume_yes):
+    """Sell all non-USDC crypto holdings back to USDC."""
+    async def _run():
+        from auramaur.exchange.kraken import KrakenSpotClient
+        from auramaur.exchange.models import OrderSide
+        s = Settings()
+        k = KrakenSpotClient(s)
+        try:
+            bal = await k.get_balance()
+            crypto = {a: v for a, v in bal.items()
+                      if v > 0 and a != "USDC" and not a.startswith("Z")}
+            plans = []
+            for a, v in crypto.items():
+                price = await k.get_price(f"{a}USDC")
+                if price and v * price >= 2.0:
+                    plans.append((f"{a}USDC", v, v * price))
+            if not plans:
+                console.print("Nothing to flatten (no non-dust crypto with a USDC pair).")
+                return
+            for pair, v, val in plans:
+                console.print(f"  SELL {v} [cyan]{pair}[/] (~${val:.2f})")
+            console.print(f"  total ~${sum(p[2] for p in plans):.2f}  "
+                          + ("[bold red]LIVE[/]" if s.is_live else "[green]paper[/]"))
+            if not assume_yes and s.is_live:
+                if click.prompt("Type FLATTEN to confirm", default="").strip() != "FLATTEN":
+                    console.print("[yellow]Aborted.[/]")
+                    return
+            for pair, v, val in plans:
+                res = await k.place_spot_order(pair, OrderSide.SELL, round(v, 8),
+                                               purpose="manual", max_usd=val * 1.1)
+                console.print(f"  {pair}: {res.status} {res.error_message}")
+        finally:
+            await k.close()
+    asyncio.run(_run())
+
+
 @main.command()
 @click.argument("query")
 @click.option("--limit", default=20, help="Number of markets to show")
