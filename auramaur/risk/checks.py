@@ -134,6 +134,39 @@ async def check_min_edge(edge: float, min_edge_pct: float = 5.0) -> CheckResult:
     )
 
 
+async def check_divergence_band(
+    claude_prob: float,
+    market_prob: float,
+    confidence,
+    enabled: bool = False,
+    low: float = 0.05,
+    high: float = 0.20,
+    require_confidence: str = "HIGH",
+) -> CheckResult:
+    """Be skeptical in the adverse mid-divergence band (LLM-signal only).
+
+    Edge-gap analysis: trades where the LLM *moderately* disagrees with the
+    market (|claude-market| in ~[5%, 20%]) are adversely selected — the market
+    is usually right. When enabled, such trades are rejected unless confidence
+    meets `require_confidence`. Naturally inert for momentum/fast signals where
+    claude_prob ~= market_prob (divergence ~0 -> not in the band).
+    """
+    div = abs((claude_prob or 0.0) - (market_prob or 0.0))
+    if not enabled or not (low <= div < high):
+        return CheckResult(name="divergence_band", passed=True, reason="", value=div)
+    rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+    conf = (confidence.value if hasattr(confidence, "value") else str(confidence)).upper()
+    ok = rank.get(conf, 0) >= rank.get(require_confidence.upper(), 2)
+    return CheckResult(
+        name="divergence_band",
+        passed=ok,
+        reason=("" if ok else
+                f"divergence {div:.0%} in adverse band [{low:.0%},{high:.0%}) "
+                f"with confidence {conf} < {require_confidence}"),
+        value=div,
+    )
+
+
 # ---------------------------------------------------------------------------
 # 8. Min liquidity
 # ---------------------------------------------------------------------------
