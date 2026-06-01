@@ -92,6 +92,12 @@ class IBKRClient:
             self._ib = None
             self._connect_cooldown_until = _time.monotonic() + 300  # back off 5 min
             raise
+        # Use the configured market-data type (default delayed) so option
+        # scanning works without a paid OPRA/equity subscription.
+        try:
+            self._ib.reqMarketDataType(cfg.market_data_type)
+        except Exception as e:  # noqa: BLE001 — non-fatal; live data may still flow
+            log.warning("ibkr.market_data_type_failed", error=str(e)[:100])
         self._connected = True
         self._connect_warned = False
         log.info(
