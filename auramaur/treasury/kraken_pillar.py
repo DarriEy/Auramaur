@@ -30,9 +30,11 @@ class KrakenPillar:
         self._k = kraken_client
         self._bot = bot          # for _last_known_cash
         self._console = console
-        # In-memory open directional longs: pair -> entry price. Experimental;
-        # resets on restart (directional is off by default).
+        # Open directional longs: pair -> entry-price proxy. Reconciled from
+        # actual Kraken balances each cycle (see _reconcile_positions), so it
+        # survives restarts instead of silently over-allocating.
         self._dir_long: dict[str, float] = {}
+        self._pair_base: dict[str, str] | None = None  # pair -> base asset code
 
     async def run_once(self) -> None:
         try:
@@ -117,8 +119,44 @@ class KrakenPillar:
     # Directional (gated, experimental, no validated edge)
     # ------------------------------------------------------------------
 
+    async def _reconcile_positions(self, bal: dict) -> None:
+        """Sync _dir_long to actual Kraken holdings so restarts don't lose track.
+
+        A directional pair is "held" when we own a non-dust amount of its base
+        asset. Adds discovered holdings, drops ones that were closed externally.
+        """
+        kcfg = self._s.kraken
+        if self._pair_base is None:
+            self._pair_base = {}
+            try:
+                info = await self._k._public(
+                    "AssetPairs", {"pair": ",".join(kcfg.directional_pairs)})
+                for _, meta in info.items():
+                    alt = meta.get("altname")
+                    if alt:
+                        self._pair_base[alt] = meta.get("base")
+            except Exception as e:  # noqa: BLE001
+                log.warning("kraken.reconcile_pairs_error", error=str(e))
+
+        held: dict[str, float] = {}
+        for pair in kcfg.directional_pairs:
+            base = self._pair_base.get(pair)
+            amt = bal.get(base, 0.0) if base else 0.0
+            if amt <= 0:
+                continue
+            price = await self._k.get_price(pair)
+            if price and amt * price >= 2.0:   # non-dust threshold
+                held[pair] = self._dir_long.get(pair, price)  # keep known entry
+
+        for pair in list(self._dir_long):
+            if pair not in held:
+                self._dir_long.pop(pair, None)   # closed externally
+        self._dir_long.update(held)
+
     async def _directional(self) -> None:
         kcfg = self._s.kraken
+        bal = await self._k.get_balance()
+        await self._reconcile_positions(bal)
         for pair in kcfg.directional_pairs:
             mom = await self._momentum(pair)
             if mom is None:
