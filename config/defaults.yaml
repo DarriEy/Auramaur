@@ -27,6 +27,12 @@ risk:
   time_to_resolution_max_days: 0   # 0 = no ceiling; set to 90 to reject 3+ month markets
   max_correlated_positions: 10
   second_opinion_divergence_max: 0.25
+  # Divergence-aware filter (LLM signal). OFF — A/B once resolution_pnl confirms
+  # the mid-divergence adverse-selection pattern at scale.
+  divergence_filter_enabled: false
+  divergence_adverse_low: 0.05
+  divergence_adverse_high: 0.20
+  divergence_require_confidence: "HIGH"
 
 kelly:
   fraction: 0.30

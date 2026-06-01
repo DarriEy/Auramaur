@@ -49,6 +49,14 @@ class RiskConfig(BaseModel):
     time_to_resolution_max_days: int = 0  # 0 = no ceiling
     max_correlated_positions: int = 5
     second_opinion_divergence_max: float = 0.15
+    # Divergence-aware filter (LLM signal). Edge-gap analysis found trades where
+    # the LLM moderately disagrees with the market (|claude-market| in the band)
+    # are adversely selected. When enabled, those need >= require_confidence.
+    # OFF by default — A/B when resolution_pnl confirms the pattern at scale.
+    divergence_filter_enabled: bool = False
+    divergence_adverse_low: float = 0.05
+    divergence_adverse_high: float = 0.20
+    divergence_require_confidence: str = "HIGH"
     # sports: the LLM has no structural edge on game outcomes / spreads / O-U
     # (driven by live injury & lineup info we don't ingest), and resolved-market
     # performance bears that out. Blocked outright rather than left to the

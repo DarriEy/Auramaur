@@ -16,6 +16,7 @@ from auramaur.risk.checks import (
     check_confidence_floor,
     check_correlation,
     check_daily_loss,
+    check_divergence_band,
     check_drawdown_heat,
     check_implied_prob_bounds,
     check_kill_switch,
@@ -117,7 +118,7 @@ class RiskManager:
         cat_exp = category_exposure.get(market.category, 0.0)
 
         # ----------------------------------------------------------------
-        # Run 14 pre-sizing checks (max_stake validated after sizing)
+        # Run pre-sizing checks (max_stake validated after sizing)
         # ----------------------------------------------------------------
         pre_checks: list[CheckResult] = [
             await check_kill_switch(),
@@ -126,6 +127,10 @@ class RiskManager:
             await check_daily_loss(abs(daily_pnl), rc.daily_loss_limit),
             await check_max_positions(len(positions), rc.max_open_positions),
             await check_min_edge(signal.edge, regime.min_edge_pct),
+            await check_divergence_band(
+                signal.claude_prob, signal.market_prob, signal.claude_confidence,
+                rc.divergence_filter_enabled, rc.divergence_adverse_low,
+                rc.divergence_adverse_high, rc.divergence_require_confidence),
             await check_min_liquidity(max(market.liquidity, market.volume), rc.min_liquidity),
             await check_max_spread(market.spread, rc.max_spread_pct),
             await check_confidence_floor(signal.claude_confidence, rc.confidence_floor),

@@ -51,6 +51,10 @@ def _make_settings(
     rc.second_opinion_divergence_max = second_opinion_divergence_max
     rc.max_stake_per_market = max_stake_per_market
     rc.blocked_categories = blocked_categories or []
+    rc.divergence_filter_enabled = False
+    rc.divergence_adverse_low = 0.05
+    rc.divergence_adverse_high = 0.20
+    rc.divergence_require_confidence = "HIGH"
     s.risk = rc
     s.kelly = MagicMock()
     s.kelly.fraction = kelly_fraction
@@ -133,7 +137,7 @@ async def test_evaluate_passing_case(mock_kill):
 
     assert decision.approved is True
     assert decision.position_size > 0
-    assert len(decision.checks) == 15
+    assert len(decision.checks) == 16
     assert all(c.passed for c in decision.checks)
 
 
