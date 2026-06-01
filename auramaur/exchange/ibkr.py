@@ -86,7 +86,7 @@ class IBKRClient:
                 host=cfg.host,
                 port=port,
                 clientId=cfg.client_id,
-                readonly=cfg.environment == "paper",
+                readonly=cfg.readonly,
             )
         except Exception:
             self._ib = None

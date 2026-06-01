@@ -1054,6 +1054,28 @@ class AuramaurBot:
         finally:
             await client.close()
 
+    async def _task_ibkr_directional(self) -> None:
+        """IBKR directional equity speculation (gated; no validated edge).
+
+        Own socket (equity_client_id) so it coexists with the options client.
+        Momentum per symbol -> capped/budgeted long entry/exit.
+        """
+        from auramaur.exchange.ibkr_equity import IBKREquityClient
+        from auramaur.treasury.ibkr_pillar import IBKRDirectionalPillar
+        from auramaur.monitoring.display import console
+
+        client = IBKREquityClient(self.settings)
+        pillar = IBKRDirectionalPillar(self.settings, client, console=console)
+        interval = self.settings.intervals.market_scan_seconds
+        try:
+            while self._running:
+                if await self._check_kill_switch():
+                    return
+                await pillar.run_once()
+                await asyncio.sleep(interval)
+        finally:
+            await client.close()
+
     async def _task_recalibrate(self) -> None:
         """Periodically refit Platt scaling calibration parameters."""
         calibration: CalibrationTracker = self._components["calibration"]
@@ -2628,6 +2650,10 @@ class AuramaurBot:
         # Kraken treasury/capital pillar (+ gated directional spot)
         if self.settings.kraken.enabled:
             tasks.append(asyncio.create_task(self._task_kraken_pillar(), name="kraken_treasury"))
+
+        # IBKR directional equity speculation (gated by directional_equity_enabled)
+        if self.settings.ibkr.enabled and self.settings.ibkr.directional_equity_enabled:
+            tasks.append(asyncio.create_task(self._task_ibkr_directional(), name="ibkr_directional"))
 
         # Market maker (if enabled)
         if self._components.get("market_maker"):
