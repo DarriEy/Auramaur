@@ -385,6 +385,11 @@ class Settings(BaseSettings):
     # Google Gemini — LLM fallback for off-hours / when Claude budget is low.
     gemini_api_key: str = ""
 
+    # Global risk-tolerance lever: 0=most conservative, 50=neutral, 100=YOLO.
+    # Scales the whole prob/stat/risk surface at the RiskManager gateway.
+    # From defaults.yaml (risk_tolerance:) and overridable via env RISK_TOLERANCE.
+    risk_tolerance: float = Field(default_factory=lambda: float(_DEFAULTS.get("risk_tolerance", 50.0)))
+
     # Safety
     auramaur_live: bool = False
     # Separate opt-in for on-chain redemption — real Polygon transactions.

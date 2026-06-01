@@ -32,7 +32,17 @@ def _resolved_dollar_markets(db_path: str) -> int:
 def gather(settings, db_path: str = "auramaur.db") -> list[dict]:
     n_resolved = _resolved_dollar_markets(db_path)
     mc = settings.momentum_coupling
+    tol = settings.risk_tolerance
+    tol_label = ("most conservative" if tol <= 15 else "conservative" if tol < 45
+                 else "neutral" if tol <= 55 else "aggressive" if tol < 85 else "YOLO")
     rows = [
+        {
+            "feature": "Risk-tolerance lever",
+            "flag": f"risk_tolerance={tol:.0f}/100",
+            "criterion": "0=conservative · 50=neutral · 100=YOLO (scales prob/stat/risk)",
+            "status": tol_label,
+            "verdict": "operational",
+        },
         {
             "feature": "Divergence filter (slow loop)",
             "flag": f"divergence_filter_enabled={settings.risk.divergence_filter_enabled}",

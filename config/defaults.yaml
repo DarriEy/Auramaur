@@ -1,5 +1,10 @@
 # Auramaur default configuration
 
+# Global risk-tolerance lever: 0=most conservative, 50=neutral, 100=YOLO.
+# One dial scales Kelly/stake, edge bar, prob bounds, confidence floor,
+# drawdown/exposure caps at the RiskManager gateway. Override via env RISK_TOLERANCE.
+risk_tolerance: 50
+
 execution:
   live: true
   paper_initial_balance: 111.0
