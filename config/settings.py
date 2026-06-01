@@ -281,6 +281,25 @@ class LLMEnsembleConfig(BaseModel):
     default_weight: float = 0.5  # Starting weight per model (50/50)
 
 
+class MomentumCouplingConfig(BaseModel):
+    """Fast path — the short-turnaround spot->prediction lead-lag pillar.
+
+    Runs on a fast cadence with a momentum signal (NOT the LLM loop): when crypto
+    spot moves, the coupled prediction market is expected to reprice ~minutes
+    later, so we'd take the matching side early. OFF by default — detection-only
+    scaffold until coupling_tradeability.py confirms it's profitable after cost.
+    """
+
+    enabled: bool = False
+    poll_seconds: int = 60
+    lookback_seconds: int = 600        # window over which a spot move is measured
+    move_threshold_pct: float = 0.5    # |spot move| over lookback to fire
+    assets: list[str] = ["BTC", "ETH"]
+    near_money_pct: float = 0.05       # only trade markets whose strike is within this of spot
+    max_position_usd: float = 25.0
+    execute: bool = False              # detection-only until True (post-validation)
+
+
 class GeminiConfig(BaseModel):
     """Gemini as an off-hours / budget-relief LLM. Routes analysis to Gemini when
     it's off-hours OR Claude's daily budget is near-exhausted; falls back to
@@ -398,6 +417,7 @@ class Settings(BaseSettings):
     ensemble: EnsembleConfig = Field(default_factory=lambda: EnsembleConfig(**_DEFAULTS.get("ensemble", {})))
     llm_ensemble: LLMEnsembleConfig = Field(default_factory=lambda: LLMEnsembleConfig(**_DEFAULTS.get("llm_ensemble", {})))
     gemini: GeminiConfig = Field(default_factory=lambda: GeminiConfig(**_DEFAULTS.get("gemini", {})))
+    momentum_coupling: MomentumCouplingConfig = Field(default_factory=lambda: MomentumCouplingConfig(**_DEFAULTS.get("momentum_coupling", {})))
     market_maker: MarketMakerConfig = Field(default_factory=lambda: MarketMakerConfig(**_DEFAULTS.get("market_maker", {})))
     technical: TechnicalConfig = Field(default_factory=lambda: TechnicalConfig(**_DEFAULTS.get("technical", {})))
     arbitrage: ArbitrageConfig = Field(default_factory=lambda: ArbitrageConfig(**_DEFAULTS.get("arbitrage", {})))

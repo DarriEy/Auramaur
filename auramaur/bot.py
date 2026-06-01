@@ -1076,6 +1076,24 @@ class AuramaurBot:
         finally:
             await client.close()
 
+    async def _task_momentum_coupling(self) -> None:
+        """Fast path: spot->prediction momentum-coupling pillar (gated, detect-only).
+
+        Separate fast cadence + momentum signal, distinct from the LLM loop.
+        """
+        from auramaur.strategy.momentum_coupling import MomentumCouplingPillar
+        from auramaur.monitoring.display import console
+        pillar = MomentumCouplingPillar(self.settings, console=console)
+        interval = self.settings.momentum_coupling.poll_seconds
+        while self._running:
+            if await self._check_kill_switch():
+                return
+            try:
+                await pillar.run_once()
+            except Exception as e:  # noqa: BLE001
+                log.error("coupling.error", error=str(e))
+            await asyncio.sleep(interval)
+
     async def _task_recalibrate(self) -> None:
         """Periodically refit Platt scaling calibration parameters."""
         calibration: CalibrationTracker = self._components["calibration"]
@@ -2682,6 +2700,10 @@ class AuramaurBot:
         # IBKR directional equity speculation (gated by directional_equity_enabled)
         if self.settings.ibkr.enabled and self.settings.ibkr.directional_equity_enabled:
             tasks.append(asyncio.create_task(self._task_ibkr_directional(), name="ibkr_directional"))
+
+        # Fast path: momentum-coupling pillar (gated by momentum_coupling.enabled)
+        if self.settings.momentum_coupling.enabled:
+            tasks.append(asyncio.create_task(self._task_momentum_coupling(), name="momentum_coupling"))
 
         # Market maker (if enabled)
         if self._components.get("market_maker"):

@@ -176,6 +176,19 @@ llm_ensemble:
   min_samples_for_weights: 10
   default_weight: 0.5
 
+momentum_coupling:
+  # FAST PATH — spot->prediction lead-lag pillar. OFF + detection-only until
+  # coupling_tradeability.py confirms after-cost edge. Separate fast cadence +
+  # momentum signal, NOT the LLM loop.
+  enabled: false
+  poll_seconds: 60
+  lookback_seconds: 600
+  move_threshold_pct: 0.5
+  assets: ["BTC", "ETH"]
+  near_money_pct: 0.05
+  max_position_usd: 25.0
+  execute: false
+
 gemini:
   # Route analysis to Gemini during off-hours OR when Claude's daily budget is
   # near-exhausted; falls back to Claude on Gemini error. Needs GEMINI_API_KEY.
