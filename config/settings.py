@@ -181,6 +181,10 @@ class IBKRConfig(BaseModel):
     environment: str = "paper"  # "paper" | "live"
     watchlist: list[str] = ["SPY", "QQQ", "AAPL", "MSFT", "TSLA", "NVDA", "AMZN", "META", "GOOGL"]
     max_contracts_per_symbol: int = 10
+    # IB market-data type: 1=live (needs paid subscription), 2=frozen,
+    # 3=delayed, 4=delayed-frozen. Default 3 so the scanner works WITHOUT an
+    # OPRA/equity subscription (delayed quotes + greeks). Set 1 once subscribed.
+    market_data_type: int = 3
 
 
 class CryptoComConfig(BaseModel):
