@@ -30,9 +30,10 @@ def _resolved_dollar_markets(db_path: str) -> int:
 
 
 def gather(settings, db_path: str = "auramaur.db") -> list[dict]:
+    from auramaur.risk.tolerance import current_tolerance
     n_resolved = _resolved_dollar_markets(db_path)
     mc = settings.momentum_coupling
-    tol = settings.risk_tolerance
+    tol = current_tolerance(settings)
     tol_label = ("most conservative" if tol <= 15 else "conservative" if tol < 45
                  else "neutral" if tol <= 55 else "aggressive" if tol < 85 else "YOLO")
     rows = [

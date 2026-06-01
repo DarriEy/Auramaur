@@ -22,3 +22,4 @@ private-key.pem
 *.zip
 *.db.backup_*
 data/transfer_ledger.json
+data/risk_tolerance

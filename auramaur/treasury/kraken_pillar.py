@@ -167,12 +167,14 @@ class KrakenPillar:
             holding = pair in self._dir_long
 
             if not holding and mom >= kcfg.directional_momentum_pct:
-                # Budget ceiling: each open position ~= max_order_usd. Don't open
-                # a new one if it would push total speculation over budget.
+                # Budget ceiling: each open position ~= max_order_usd. Scaled by
+                # the global risk-tolerance lever so it moves with all exposure.
+                from auramaur.risk.tolerance import scale_budget, current_tolerance
+                budget = scale_budget(kcfg.directional_budget_usd, current_tolerance(self._s))
                 allocated = len(self._dir_long) * kcfg.max_order_usd
-                if allocated + kcfg.max_order_usd > kcfg.directional_budget_usd:
+                if allocated + kcfg.max_order_usd > budget:
                     log.info("kraken.directional.budget_full", pair=pair,
-                             allocated=allocated, budget=kcfg.directional_budget_usd)
+                             allocated=allocated, budget=round(budget, 2))
                     continue
                 # 2% buffer so float rounding never trips the per-order cap.
                 vol = round(kcfg.max_order_usd * 0.98 / price, 6)

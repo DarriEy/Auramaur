@@ -62,9 +62,9 @@ class RiskManager:
         """Run every risk check and, if all pass, compute position size."""
         # Apply the global risk-tolerance lever (0=conservative..100=YOLO) — one
         # dial scales the whole prob/stat/risk surface at this gateway.
-        from auramaur.risk.tolerance import scale_risk
+        from auramaur.risk.tolerance import scale_risk, current_tolerance
         rc, scaled_kelly = scale_risk(
-            self.settings.risk, self.settings.kelly.fraction, self.settings.risk_tolerance)
+            self.settings.risk, self.settings.kelly.fraction, current_tolerance(self.settings))
 
         # Gather portfolio state
         drawdown = await self.portfolio.get_drawdown()

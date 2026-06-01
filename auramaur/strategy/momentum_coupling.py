@@ -108,7 +108,10 @@ class MomentumCouplingPillar:
         if not token_id or price <= 0:
             log.warning("coupling.no_token", market=market.id)
             return
-        size = round(self._s.momentum_coupling.max_position_usd / price, 2)
+        from auramaur.risk.tolerance import scale_budget, current_tolerance
+        pos_usd = scale_budget(self._s.momentum_coupling.max_position_usd,
+                               current_tolerance(self._s))
+        size = round(pos_usd / price, 2)
         order = Order(market_id=market.id, exchange="polymarket", token_id=token_id,
                       side=OrderSide.BUY, token=token, size=size, price=price,
                       dry_run=not self._s.is_live)
