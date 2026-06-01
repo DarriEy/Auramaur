@@ -190,6 +190,53 @@ class CryptoComConfig(BaseModel):
     environment: str = "sandbox"  # "sandbox" | "prod"
 
 
+class KrakenConfig(BaseModel):
+    """Kraken SPOT venue — treasury/conversion + (gated) directional.
+
+    Not a binary prediction venue, so it is NOT wired into the binary
+    TradingEngine. Spot orders still pass the same three-gate live model;
+    until then they run validate-only against Kraken (no execution).
+    """
+
+    enabled: bool = False
+    quote_currency: str = "USD"
+    # Hard ceiling per spot order, independent of the binary risk manager.
+    max_order_usd: float = 25.0
+
+    # --- Treasury pillar (always-on when enabled) ---
+    treasury_interval_seconds: int = 300
+    auto_convert: bool = True             # auto idle-fiat -> USDC
+    target_usdc: float = 50.0             # convert fiat until USDC reserve hits this
+    fiat_assets: list[str] = ["ZCAD", "ZUSD", "ZEUR"]  # balances treated as idle fiat
+    refill_cash_floor: float = 20.0       # alert to refill Polymarket below this cash
+
+    # --- Directional spot (gated; no validated edge — flip on deliberately) ---
+    directional_enabled: bool = False
+    directional_pairs: list[str] = []     # e.g. ["XBTUSD", "ETHUSD"]
+    directional_momentum_pct: float = 3.0  # |momentum| over the lookback to act
+    directional_lookback: int = 12        # OHLC candles (hourly) for the momentum read
+
+
+class TransfersConfig(BaseModel):
+    """Cross-venue fund movement (Kraken <-> Polymarket, Polygon USDC only).
+
+    Gated by AURAMAUR_ENABLE_TRANSFERS *and* per-move approval. Withdrawals can
+    only target Kraken withdrawal-address KEYS you pre-whitelisted in the Kraken
+    UI — the API cannot send to an arbitrary address. Kalshi is bank-rail and
+    not automatable.
+    """
+
+    enabled: bool = False
+    per_transfer_cap_usd: float = 100.0
+    daily_cap_usd: float = 250.0
+    min_transfer_usd: float = 10.0
+    # Names of withdrawal-address keys configured in the Kraken UI that the bot
+    # is allowed to send to (e.g. your Polymarket Polygon USDC deposit address).
+    allowed_withdraw_keys: list[str] = []
+    # Require an explicit human approval for every transfer (recommended).
+    require_approval: bool = True
+
+
 class EnsembleConfig(BaseModel):
     enabled: bool = False
     source_weights_update_hours: int = 24
@@ -267,12 +314,23 @@ class Settings(BaseSettings):
     cryptodotcom_api_key: str = ""
     cryptodotcom_api_secret: str = ""
 
+    # Kraken (spot). Used for read-only wallet/balance checks today; no trading
+    # adapter is wired yet. Key needs only the "Query Funds" permission —
+    # leave "Withdraw Funds" OFF.
+    kraken_api_key: str = ""
+    kraken_api_secret: str = ""
+
     # Safety
     auramaur_live: bool = False
     # Separate opt-in for on-chain redemption — real Polygon transactions.
     # Gated independently of auramaur_live so you can run live-trading without
     # inadvertently enabling automated redemption submission.
     auramaur_enable_redemption: bool = False
+
+    # Separate opt-in for cross-venue fund transfers (Kraken -> Polymarket
+    # withdrawals). Gated independently of auramaur_live AND of redemption so
+    # that enabling live trading never implies the bot can move funds off-venue.
+    auramaur_enable_transfers: bool = False
 
     # Polygon RPC for on-chain redemption. Defaults to a public endpoint;
     # override with a paid provider (Alchemy/Infura/QuickNode) for reliability.
@@ -289,6 +347,8 @@ class Settings(BaseSettings):
     kalshi: KalshiConfig = Field(default_factory=lambda: KalshiConfig(**_DEFAULTS.get("kalshi", {})))
     ibkr: IBKRConfig = Field(default_factory=lambda: IBKRConfig(**_DEFAULTS.get("ibkr", {})))
     cryptodotcom: CryptoComConfig = Field(default_factory=lambda: CryptoComConfig(**_DEFAULTS.get("cryptodotcom", {})))
+    kraken: KrakenConfig = Field(default_factory=lambda: KrakenConfig(**_DEFAULTS.get("kraken", {})))
+    transfers: TransfersConfig = Field(default_factory=lambda: TransfersConfig(**_DEFAULTS.get("transfers", {})))
     ensemble: EnsembleConfig = Field(default_factory=lambda: EnsembleConfig(**_DEFAULTS.get("ensemble", {})))
     llm_ensemble: LLMEnsembleConfig = Field(default_factory=lambda: LLMEnsembleConfig(**_DEFAULTS.get("llm_ensemble", {})))
     market_maker: MarketMakerConfig = Field(default_factory=lambda: MarketMakerConfig(**_DEFAULTS.get("market_maker", {})))
@@ -315,3 +375,18 @@ class Settings(BaseSettings):
     def is_live(self) -> bool:
         """All three gates must be true for live trading."""
         return self.auramaur_live and self.execution.live and not self.kill_switch_active
+
+    @property
+    def transfers_armed(self) -> bool:
+        """Whether real cross-venue withdrawals may execute.
+
+        Independent of is_live: a transfer needs its OWN env gate
+        (AURAMAUR_ENABLE_TRANSFERS) plus config enablement, and is always
+        halted by the kill switch. Per-transfer caps, the whitelist, and
+        human approval are enforced at the transfer call site on top of this.
+        """
+        return (
+            self.auramaur_enable_transfers
+            and self.transfers.enabled
+            and not self.kill_switch_active
+        )

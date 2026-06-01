@@ -1,7 +1,19 @@
 """Crypto.com exchange client — implements both MarketDiscovery and ExchangeClient.
 
-Connects to the Crypto.com Exchange API for prediction/event market trading.
-Works internationally (including Canada).
+IMPORTANT — product mismatch (verified 2026-05):
+  This client talks to the Crypto.com *Exchange* v1 API
+  (``api.crypto.com/exchange/v1``), which serves SPOT pairs, PERPETUAL_SWAPs
+  and FUTUREs — NOT binary Yes/No prediction contracts. Crypto.com's
+  "Prediction" product is a separate CFTC-regulated venue (Crypto.com
+  Derivatives North America) that is app-only and exposes no public REST API.
+
+  Feeding spot/perp instruments into a prediction-market bot is a real-money
+  hazard: a $200 stock perp would otherwise be misread as a "probability".
+  To prevent that, ``_parse_market`` admits ONLY instruments that are genuine
+  binary contracts priced strictly within (0, 1). Since the Exchange API
+  exposes none of those today, this venue is effectively inert — it discovers
+  nothing and trades nothing — until/unless an official prediction API exists.
+  The venue is also disabled by default in config/defaults.yaml.
 
 Safety: Same three-gate model as other exchanges.
   1. AURAMAUR_LIVE=true env var
@@ -42,6 +54,17 @@ _RATE_LIMIT = 20
 # API endpoints
 _SANDBOX_BASE = "https://uat-api.3ona.co/exchange/v1"
 _PROD_BASE = "https://api.crypto.com/exchange/v1"
+
+# Instrument types the Exchange API returns that are categorically NOT binary
+# prediction contracts. Anything matching these is rejected outright so it can
+# never be mistaken for a Yes/No market (see module docstring).
+_NON_PREDICTION_INST_TYPES = {
+    "CCY_PAIR", "SPOT", "PERPETUAL_SWAP", "FUTURE", "WARRANT", "OPTION",
+}
+# A genuine prediction/event contract must advertise one of these markers in
+# its inst_type or product_type. The Exchange v1 API exposes none of these,
+# which is why this venue is currently inert.
+_PREDICTION_MARKERS = ("PREDICTION", "BINARY", "EVENT_CONTRACT", "YES_NO")
 
 
 def _sign_request(api_key: str, api_secret: str, method: str, params: dict, nonce: int) -> str:
@@ -120,7 +143,12 @@ class CryptoComClient:
     async def _private_post(self, method: str, params: dict | None = None) -> dict:
         """Make an authenticated POST request."""
         cfg = self._settings.cryptodotcom
-        if not cfg.api_key or not cfg.api_secret:
+        # Credentials may come from defaults.yaml (cfg.*) or, preferably, from
+        # env vars (CRYPTODOTCOM_API_KEY / CRYPTODOTCOM_API_SECRET) so secrets
+        # never land in a committed config file. Mirrors the Kalshi pattern.
+        api_key = cfg.api_key or self._settings.cryptodotcom_api_key
+        api_secret = cfg.api_secret or self._settings.cryptodotcom_api_secret
+        if not api_key or not api_secret:
             log.error("cryptodotcom.no_credentials")
             return {}
 
@@ -129,12 +157,12 @@ class CryptoComClient:
             nonce = int(time.time() * 1000)
             params = params or {}
 
-            sig = _sign_request(cfg.api_key, cfg.api_secret, method, params, nonce)
+            sig = _sign_request(api_key, api_secret, method, params, nonce)
 
             body = {
                 "id": nonce,
                 "method": method,
-                "api_key": cfg.api_key,
+                "api_key": api_key,
                 "params": params,
                 "sig": sig,
                 "nonce": nonce,
@@ -188,6 +216,16 @@ class CryptoComClient:
                 if len(markets) >= limit:
                     break
 
+            if instruments and not markets:
+                # Endpoint returned instruments but none were binary prediction
+                # contracts — expected for the Exchange v1 API. Surface why so a
+                # re-enable doesn't look like a silent failure.
+                log.warning(
+                    "cryptodotcom.no_prediction_markets",
+                    instruments_seen=len(instruments),
+                    reason="Exchange v1 API serves spot/perp/future, not Yes/No "
+                           "prediction contracts; no public Crypto.com Prediction API",
+                )
             log.info("cryptodotcom.markets_fetched", count=len(markets))
             return markets
         except Exception as e:
@@ -457,30 +495,35 @@ class CryptoComClient:
             if not instrument_name:
                 return None
 
-            # Crypto.com prediction markets use instrument_type = "PREDICTION"
-            # or may be under a different category. Accept broadly for now.
-            inst_type = (data.get("instrument_type", "") or "").upper()
+            # GUARD: only admit genuine binary prediction contracts. The Exchange
+            # v1 API serves spot/perp/future instruments that are NOT Yes/No
+            # markets; admitting them would let the bot trade, e.g., an AAPL
+            # perpetual as if its price were a probability. Reject anything that
+            # isn't explicitly a prediction/event-contract instrument.
+            inst_type = (data.get("inst_type", "") or data.get("instrument_type", "") or "").upper()
+            product_type = (data.get("product_type", "") or "").upper()
+            if inst_type in _NON_PREDICTION_INST_TYPES:
+                return None
+            markers = f"{inst_type} {product_type}"
+            if not any(m in markers for m in _PREDICTION_MARKERS):
+                return None
 
             # Extract question/title from instrument metadata
             question = data.get("display_name", "") or data.get("instrument_name", "")
             description = data.get("description", "") or ""
 
-            # Price data
+            # Price data. A binary contract is already priced in (0, 1); we do
+            # NOT rescale by /100 — that fudge is what manufactured fake
+            # probabilities from dollar-denominated instruments. Anything not
+            # already a clean probability is rejected below.
             last_price = float(data.get("last_price", 0) or 0)
             best_bid = float(data.get("best_bid", 0) or 0)
             best_ask = float(data.get("best_ask", 0) or 0)
 
-            # Normalize to 0-1 range if needed (some markets use cents)
-            if last_price > 1:
-                last_price = last_price / 100
-            if best_bid > 1:
-                best_bid = best_bid / 100
-            if best_ask > 1:
-                best_ask = best_ask / 100
-
             yes_price = best_bid if best_bid > 0 else last_price
-            if yes_price == 0:
-                yes_price = 0.5  # No data default
+            if not (0.0 < yes_price < 1.0):
+                # Not a valid probability → not a tradeable binary contract.
+                return None
             no_price = 1.0 - yes_price
 
             volume = float(data.get("volume_24h", 0) or data.get("volume", 0) or 0)

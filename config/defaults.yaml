@@ -79,17 +79,61 @@ kalshi:
   environment: "prod"
 
 cryptodotcom:
+  # Disabled: the Crypto.com *Exchange* API only serves spot/perp/future, not
+  # binary prediction contracts, and Crypto.com's "Prediction" (CDNA) product
+  # has no public API. The client now rejects non-binary instruments, so even
+  # if re-enabled it discovers nothing. Leave off until a real prediction API
+  # is integrated. See auramaur/exchange/cryptodotcom.py module docstring.
   enabled: false
   environment: "sandbox"
 
 ibkr:
+  # Off for now (re-enable once the Gateway is logged in with the API socket
+  # open). Client is import- and connection-lazy, so this loads/dials nothing.
+  # Ports when you do: TWS 7497 paper / 7496 live; IB Gateway 4002 / 4001.
   enabled: false
+  # "paper" connects to the paper TWS/Gateway on paper_port (read-only).
+  # Switch to "live" only with a live Gateway running and the live gates open.
   environment: "paper"
   host: "127.0.0.1"
   paper_port: 7497
   live_port: 7496
   client_id: 1
   max_contracts_per_symbol: 10
+
+kraken:
+  # Spot venue for treasury/conversion (sell POL -> USDC, etc). Not a binary
+  # prediction venue — not wired into the trading engine. Directional trading
+  # stays OFF until a validated edge exists.
+  enabled: true
+  quote_currency: "USD"
+  max_order_usd: 25.0
+  # Treasury pillar (always-on when enabled)
+  treasury_interval_seconds: 300
+  auto_convert: true
+  target_usdc: 50.0
+  fiat_assets: ["ZCAD", "ZUSD", "ZEUR"]
+  refill_cash_floor: 20.0
+  # Directional spot — gated; NO validated edge (Path B). Flip on deliberately.
+  directional_enabled: false
+  directional_pairs: []          # e.g. ["XBTUSD", "ETHUSD"]
+  directional_momentum_pct: 3.0
+  directional_lookback: 12
+
+transfers:
+  # Cross-venue fund movement (Kraken -> Polymarket, Polygon USDC only).
+  # Requires BOTH this and the AURAMAUR_ENABLE_TRANSFERS env gate, plus the
+  # withdrawal address pre-whitelisted in the Kraken UI and per-move approval.
+  # NOTE: config.enabled=true is only ONE of the two arming keys — real transfers
+  # still need AURAMAUR_ENABLE_TRANSFERS=true in .env (which you set), so this
+  # alone does not arm anything.
+  enabled: true
+  per_transfer_cap_usd: 100.0
+  daily_cap_usd: 250.0
+  min_transfer_usd: 10.0
+  # Must EXACTLY match the address description you create in the Kraken UI.
+  allowed_withdraw_keys: ["polymarket-usdc"]
+  require_approval: true
 
 ensemble:
   enabled: false
@@ -115,6 +159,10 @@ arbitrage:
   min_profit_after_fees_pct: 1.5  # minimum % profit after all exchange fees
   max_arb_size: 25.0              # max $ per leg
   cross_exchange_auto_execute: true
+  negrisk_auto_execute: false     # TEMPORARILY OFF: detection runs + logs/alerts,
+                                  # but no auto-execution until the Gamma negRisk
+                                  # field is verified against a real multi-candidate
+                                  # event. Flip to true once confirmed.
   exchange_fees:
     polymarket: 0.0    # 0% for reward tier accounts
     kalshi: 0.07       # ~7% on profits
