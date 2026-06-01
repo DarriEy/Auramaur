@@ -108,7 +108,17 @@ kraken:
   enabled: true
   quote_currency: "USD"
   max_order_usd: 25.0
+  # Treasury pillar (always-on when enabled)
+  treasury_interval_seconds: 300
+  auto_convert: true
+  target_usdc: 50.0
+  fiat_assets: ["ZCAD", "ZUSD", "ZEUR"]
+  refill_cash_floor: 20.0
+  # Directional spot — gated; NO validated edge (Path B). Flip on deliberately.
   directional_enabled: false
+  directional_pairs: []          # e.g. ["XBTUSD", "ETHUSD"]
+  directional_momentum_pct: 3.0
+  directional_lookback: 12
 
 transfers:
   # Cross-venue fund movement (Kraken -> Polymarket, Polygon USDC only).

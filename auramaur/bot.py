@@ -922,6 +922,29 @@ class AuramaurBot:
                 return
             await asyncio.sleep(1)
 
+    async def _task_kraken_pillar(self) -> None:
+        """Dual-purpose Kraken pillar: treasury (always) + directional (gated).
+
+        First-class loop citizen — syncs Kraken balances, auto-converts idle
+        fiat -> USDC, and alerts to refill Polymarket when cash is low. Directional
+        spot trading runs only when kraken.directional_enabled (off by default).
+        """
+        from auramaur.exchange.kraken import KrakenSpotClient
+        from auramaur.treasury.kraken_pillar import KrakenPillar
+        from auramaur.monitoring.display import console
+
+        client = KrakenSpotClient(self.settings)
+        pillar = KrakenPillar(self.settings, client, bot=self, console=console)
+        interval = self.settings.kraken.treasury_interval_seconds
+        try:
+            while self._running:
+                if await self._check_kill_switch():
+                    return
+                await pillar.run_once()
+                await asyncio.sleep(interval)
+        finally:
+            await client.close()
+
     async def _task_recalibrate(self) -> None:
         """Periodically refit Platt scaling calibration parameters."""
         calibration: CalibrationTracker = self._components["calibration"]
@@ -2205,6 +2228,10 @@ class AuramaurBot:
         # Arb scanner always runs (handles single-exchange gracefully)
         tasks.append(asyncio.create_task(self._task_arb_scanner(), name="arb_scanner"))
         tasks.append(asyncio.create_task(self._task_depth_research(), name="depth_research"))
+
+        # Kraken treasury/capital pillar (+ gated directional spot)
+        if self.settings.kraken.enabled:
+            tasks.append(asyncio.create_task(self._task_kraken_pillar(), name="kraken_treasury"))
 
         # Market maker (if enabled)
         if self._components.get("market_maker"):

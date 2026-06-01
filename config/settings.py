@@ -202,9 +202,19 @@ class KrakenConfig(BaseModel):
     quote_currency: str = "USD"
     # Hard ceiling per spot order, independent of the binary risk manager.
     max_order_usd: float = 25.0
-    # Directional/strategy trading stays OFF until a validated edge exists.
-    # Treasury/conversion can run with this False.
+
+    # --- Treasury pillar (always-on when enabled) ---
+    treasury_interval_seconds: int = 300
+    auto_convert: bool = True             # auto idle-fiat -> USDC
+    target_usdc: float = 50.0             # convert fiat until USDC reserve hits this
+    fiat_assets: list[str] = ["ZCAD", "ZUSD", "ZEUR"]  # balances treated as idle fiat
+    refill_cash_floor: float = 20.0       # alert to refill Polymarket below this cash
+
+    # --- Directional spot (gated; no validated edge — flip on deliberately) ---
     directional_enabled: bool = False
+    directional_pairs: list[str] = []     # e.g. ["XBTUSD", "ETHUSD"]
+    directional_momentum_pct: float = 3.0  # |momentum| over the lookback to act
+    directional_lookback: int = 12        # OHLC candles (hourly) for the momentum read
 
 
 class TransfersConfig(BaseModel):
