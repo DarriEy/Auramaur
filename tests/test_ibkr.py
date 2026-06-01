@@ -185,6 +185,50 @@ class TestIBKRPaperTradePrep:
         assert client._live_pending == {}
 
 
+class TestIBKRExit:
+    """Closing a held IBKR option sells the exact contract (not a reframed trade)."""
+
+    def _bot(self):
+        from auramaur.bot import AuramaurBot
+        settings = MagicMock()
+        settings.is_live = True
+        return AuramaurBot(settings=settings)
+
+    @pytest.mark.asyncio
+    async def test_execute_ibkr_exit_sells_held_contract(self):
+        from auramaur.exchange.models import ExitReason
+        from types import SimpleNamespace
+        bot = self._bot()
+        exch = SimpleNamespace(place_order=AsyncMock(return_value=SimpleNamespace(
+            status="pending", order_id="IB1", is_paper=False, error_message="")))
+        alerts = SimpleNamespace(send=AsyncMock())
+        pos = SimpleNamespace(
+            market_id="IB:AAPL:200:20260418:C",
+            token_id="123:buy_call:C:200:20260418",
+            token=TokenType.YES, size=2.0, current_price=4.0, unrealized_pnl=10.0)
+
+        ok = await bot._execute_ibkr_exit(pos, ExitReason.STOP_LOSS, None, exch, alerts)
+        assert ok is True
+        order = exch.place_order.await_args.args[0]
+        assert order.side == OrderSide.SELL
+        assert order.exchange == "ibkr"
+        assert order.token_id == "123:buy_call:C:200:20260418"
+        assert order.size == 2.0
+
+    @pytest.mark.asyncio
+    async def test_execute_ibkr_exit_skips_without_contract(self):
+        from auramaur.exchange.models import ExitReason
+        from types import SimpleNamespace
+        bot = self._bot()
+        exch = SimpleNamespace(place_order=AsyncMock())
+        pos = SimpleNamespace(market_id="x", token_id="", token=TokenType.YES,
+                              size=2.0, current_price=4.0, unrealized_pnl=0.0)
+        ok = await bot._execute_ibkr_exit(
+            pos, ExitReason.STOP_LOSS, None, exch, SimpleNamespace(send=AsyncMock()))
+        assert ok is False
+        exch.place_order.assert_not_called()
+
+
 class TestIBKRConfig:
     def test_ibkr_config_defaults(self):
         from config.settings import Settings

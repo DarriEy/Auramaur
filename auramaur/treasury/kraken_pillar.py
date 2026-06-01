@@ -139,6 +139,7 @@ class KrakenPillar:
                 log.warning("kraken.reconcile_pairs_error", error=str(e))
 
         held: dict[str, float] = {}
+        held_prices: dict[str, tuple[float, float, float]] = {}  # pair -> (entry, current, qty)
         for pair in kcfg.directional_pairs:
             base = self._pair_base.get(pair)
             amt = bal.get(base, 0.0) if base else 0.0
@@ -146,12 +147,50 @@ class KrakenPillar:
                 continue
             price = await self._k.get_price(pair)
             if price and amt * price >= 2.0:   # non-dust threshold
-                held[pair] = self._dir_long.get(pair, price)  # keep known entry
+                entry = self._dir_long.get(pair, price)  # keep known entry
+                held[pair] = entry
+                held_prices[pair] = (entry, price, amt)
 
-        for pair in list(self._dir_long):
-            if pair not in held:
-                self._dir_long.pop(pair, None)   # closed externally
+        closed = [pair for pair in self._dir_long if pair not in held]
+        for pair in closed:
+            self._dir_long.pop(pair, None)   # closed externally
         self._dir_long.update(held)
+
+        # Mirror the spec book into the portfolio table so it's visible in the
+        # dashboard with unrealized P&L. Kraken isn't a discovery, so check_exits
+        # never touches these rows — the momentum logic owns the exits.
+        await self._mirror_to_portfolio(held_prices, closed)
+
+    async def _mirror_to_portfolio(
+        self, held_prices: dict[str, tuple[float, float, float]], closed: list[str],
+    ) -> None:
+        db = self._bot._components.get("db") if self._bot else None
+        if db is None:
+            return
+        is_paper = 0 if self._s.is_live else 1
+        try:
+            for pair, (entry, current, qty) in held_prices.items():
+                await db.execute(
+                    """INSERT INTO portfolio
+                       (market_id, exchange, side, size, avg_price, current_price,
+                        unrealized_pnl, category, token, token_id, is_paper, updated_at)
+                       VALUES (?, 'kraken', 'BUY', ?, ?, ?, ?, 'crypto', 'YES', ?, ?, datetime('now'))
+                       ON CONFLICT(market_id, is_paper) DO UPDATE SET
+                           size = excluded.size,
+                           avg_price = excluded.avg_price,
+                           current_price = excluded.current_price,
+                           unrealized_pnl = excluded.unrealized_pnl,
+                           updated_at = excluded.updated_at""",
+                    (pair, qty, entry, current, (current - entry) * qty, pair, is_paper),
+                )
+            for pair in closed:
+                await db.execute(
+                    "DELETE FROM portfolio WHERE market_id = ? AND exchange = 'kraken' AND is_paper = ?",
+                    (pair, is_paper),
+                )
+            await db.commit()
+        except Exception as e:  # noqa: BLE001 — visibility only; never break the pillar
+            log.debug("kraken.portfolio_mirror_error", error=str(e)[:100])
 
     async def _directional(self) -> None:
         kcfg = self._s.kraken

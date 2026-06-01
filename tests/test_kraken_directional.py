@@ -74,6 +74,37 @@ async def test_holds_through_moderate_drop():
 
 
 @pytest.mark.asyncio
+async def test_mirror_to_portfolio_upserts_held_and_deletes_closed():
+    """The spec book is reflected into the portfolio table for dashboard
+    visibility: held pairs upsert with unrealized P&L, closed pairs are deleted."""
+    s = MagicMock()
+    s.is_live = True
+    db = AsyncMock()
+    bot = MagicMock()
+    bot._components = {"db": db}
+    p = KrakenPillar(settings=s, kraken_client=MagicMock(), bot=bot)
+
+    await p._mirror_to_portfolio({"XBTUSDC": (90.0, 100.0, 0.5)}, ["ETHUSDC"])
+
+    sqls = [c.args[0] for c in db.execute.await_args_list]
+    assert any("INSERT INTO portfolio" in q and "kraken" in q for q in sqls)
+    assert any("DELETE FROM portfolio" in q for q in sqls)
+    db.commit.assert_awaited_once()
+    # unrealized_pnl = (100-90)*0.5 = 5.0 passed for the held pair
+    insert_args = next(c.args[1] for c in db.execute.await_args_list
+                       if "INSERT INTO portfolio" in c.args[0])
+    assert 5.0 in insert_args
+
+
+@pytest.mark.asyncio
+async def test_mirror_to_portfolio_noop_without_bot():
+    """No bot/db wired -> mirror is a safe no-op."""
+    s = MagicMock()
+    p = KrakenPillar(settings=s, kraken_client=MagicMock(), bot=None)
+    await p._mirror_to_portfolio({"XBTUSDC": (90.0, 100.0, 0.5)}, [])  # must not raise
+
+
+@pytest.mark.asyncio
 async def test_exits_on_large_drop():
     """-4.5% (<= -4% exit) closes the long."""
     p, client = _pillar(holding=True)

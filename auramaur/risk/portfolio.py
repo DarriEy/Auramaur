@@ -274,31 +274,38 @@ class PortfolioTracker:
                 market = await discovery_client.get_market(pos.market_id)
                 if market is None:
                     continue
-                # Use the correct price for the token we actually hold
-                if pos.token == TokenType.NO:
-                    pos.current_price = (
-                        market.outcome_no_price
-                        if market.outcome_no_price > 0.01
-                        else 1.0 - market.outcome_yes_price
+                # IBKR holds options priced in premium dollars, not 0-1 resolution
+                # probabilities, and its discovery returns the *reframed* binary
+                # price — overwriting current_price from it would corrupt P&L. The
+                # IBKR syncer maintains current_price from live option quotes, so
+                # leave it untouched for that venue (we still need `market` below
+                # for end_date / profit-target logic).
+                if exchange != "ibkr":
+                    # Use the correct price for the token we actually hold
+                    if pos.token == TokenType.NO:
+                        pos.current_price = (
+                            market.outcome_no_price
+                            if market.outcome_no_price > 0.01
+                            else 1.0 - market.outcome_yes_price
+                        )
+                    else:
+                        pos.current_price = market.outcome_yes_price
+                    update_sql = (
+                        """UPDATE portfolio
+                           SET current_price = ?,
+                               unrealized_pnl = (? - avg_price) * size,
+                               updated_at = datetime('now')
+                           WHERE market_id = ?"""
                     )
-                else:
-                    pos.current_price = market.outcome_yes_price
-                update_sql = (
-                    """UPDATE portfolio
-                       SET current_price = ?,
-                           unrealized_pnl = (? - avg_price) * size,
-                           updated_at = datetime('now')
-                       WHERE market_id = ?"""
-                )
-                update_params: list[object] = [pos.current_price, pos.current_price, pos.market_id]
-                if exchange:
-                    update_sql += " AND exchange = ?"
-                    update_params.append(exchange)
-                if mode_flag is not None:
-                    update_sql += " AND is_paper = ?"
-                    update_params.append(mode_flag)
-                await self.db.execute(update_sql, tuple(update_params))
-                prices_updated = True
+                    update_params: list[object] = [pos.current_price, pos.current_price, pos.market_id]
+                    if exchange:
+                        update_sql += " AND exchange = ?"
+                        update_params.append(exchange)
+                    if mode_flag is not None:
+                        update_sql += " AND is_paper = ?"
+                        update_params.append(mode_flag)
+                    await self.db.execute(update_sql, tuple(update_params))
+                    prices_updated = True
             except Exception as e:
                 log.debug("check_exits.price_error", market_id=pos.market_id, error=str(e))
                 continue
@@ -369,49 +376,57 @@ class PortfolioTracker:
                 exits.append((pos, ExitReason.PROFIT_TARGET))
                 continue
 
-            # 4. Edge erosion — price converging on resolution boundary
-            #    measures how much room is left for the position to pay out
-            if pos.side == OrderSide.BUY:
-                # Bought YES: need price to go to 1.0
-                remaining_upside = (1.0 - pos.current_price) * 100.0
-            else:
-                # Bought NO / sold YES: need price to go to 0.0
-                remaining_upside = pos.current_price * 100.0
+            # Edge-erosion / capital-efficiency / time-decay assume binary 0-1
+            # resolution semantics (price converges to $0 or $1). They're
+            # meaningless for instruments priced in absolute terms — IBKR option
+            # premiums aren't probabilities — so they only run for prediction
+            # venues. Non-binary venues rely on the P&L-ratio exits above
+            # (stop-loss / profit-target / trailing) plus dust cleanup below.
+            binary_venue = exchange in (None, "polymarket", "kalshi", "cryptodotcom")
+            if binary_venue:
+                # 4. Edge erosion — price converging on resolution boundary
+                #    measures how much room is left for the position to pay out
+                if pos.side == OrderSide.BUY:
+                    # Bought YES: need price to go to 1.0
+                    remaining_upside = (1.0 - pos.current_price) * 100.0
+                else:
+                    # Bought NO / sold YES: need price to go to 0.0
+                    remaining_upside = pos.current_price * 100.0
 
-            # Exit if remaining upside is tiny (near resolution boundary)
-            if remaining_upside < settings.execution.edge_erosion_min_pct:
-                exits.append((pos, ExitReason.EDGE_EROSION))
-                continue
-
-            # 4b. Capital efficiency — near-certain winner (small upside left)
-            #     that is still far from resolution. Holding it locks capital for
-            #     little residual gain; free it to redeploy into fresh edges.
-            #     Small remaining_upside == the held side is near its payout
-            #     boundary, so this only ever sells winners (never dumps losers).
-            if (
-                settings.execution.free_winners_enabled
-                and remaining_upside < settings.execution.free_winners_max_upside_pct
-                and market.end_date is not None
-            ):
-                end = market.end_date if market.end_date.tzinfo else market.end_date.replace(tzinfo=timezone.utc)
-                hours_left = (end - datetime.now(timezone.utc)).total_seconds() / 3600.0
-                if hours_left > settings.execution.free_winners_min_hours:
-                    log.info(
-                        "exit.capital_efficiency",
-                        market_id=pos.market_id,
-                        remaining_upside_pct=round(remaining_upside, 2),
-                        hours_left=round(hours_left, 1),
-                    )
-                    exits.append((pos, ExitReason.CAPITAL_EFFICIENCY))
+                # Exit if remaining upside is tiny (near resolution boundary)
+                if remaining_upside < settings.execution.edge_erosion_min_pct:
+                    exits.append((pos, ExitReason.EDGE_EROSION))
                     continue
 
-            # 5. Time decay — market expiring soon with thin edge
-            if market.end_date is not None:
-                end = market.end_date if market.end_date.tzinfo else market.end_date.replace(tzinfo=timezone.utc)
-                hours_left = (end - datetime.now(timezone.utc)).total_seconds() / 3600.0
-                if hours_left <= settings.execution.time_decay_hours and remaining_upside < 5.0:
-                    exits.append((pos, ExitReason.TIME_DECAY))
-                    continue
+                # 4b. Capital efficiency — near-certain winner (small upside left)
+                #     that is still far from resolution. Holding it locks capital
+                #     for little residual gain; free it to redeploy. Small
+                #     remaining_upside == near the payout boundary, so this only
+                #     ever sells winners (never dumps losers).
+                if (
+                    settings.execution.free_winners_enabled
+                    and remaining_upside < settings.execution.free_winners_max_upside_pct
+                    and market.end_date is not None
+                ):
+                    end = market.end_date if market.end_date.tzinfo else market.end_date.replace(tzinfo=timezone.utc)
+                    hours_left = (end - datetime.now(timezone.utc)).total_seconds() / 3600.0
+                    if hours_left > settings.execution.free_winners_min_hours:
+                        log.info(
+                            "exit.capital_efficiency",
+                            market_id=pos.market_id,
+                            remaining_upside_pct=round(remaining_upside, 2),
+                            hours_left=round(hours_left, 1),
+                        )
+                        exits.append((pos, ExitReason.CAPITAL_EFFICIENCY))
+                        continue
+
+                # 5. Time decay — market expiring soon with thin edge
+                if market.end_date is not None:
+                    end = market.end_date if market.end_date.tzinfo else market.end_date.replace(tzinfo=timezone.utc)
+                    hours_left = (end - datetime.now(timezone.utc)).total_seconds() / 3600.0
+                    if hours_left <= settings.execution.time_decay_hours and remaining_upside < 5.0:
+                        exits.append((pos, ExitReason.TIME_DECAY))
+                        continue
 
             # 6. Dust cleanup (lowest priority — real exit reasons win first).
             #    Tiny stale positions clog the position count and lock small
