@@ -71,9 +71,11 @@ def scale_risk(risk, kelly_fraction: float, tolerance: float):
     a, c = _aggr(t), _cons(t)
     scaled = risk.model_copy(update={
         # --- risk appetite (grow with aggression) ---
+        # NOTE: the HARD ruin limits (max_drawdown_pct, daily_loss_limit) are
+        # deliberately NOT scaled — those are circuit-breakers, not appetite.
+        # Loosening them with aggression would remove the brake exactly when
+        # sizing is biggest.
         "max_stake_per_market": risk.max_stake_per_market * a,
-        "max_drawdown_pct": min(risk.max_drawdown_pct * a, 90.0),
-        "daily_loss_limit": risk.daily_loss_limit * a,
         "max_open_positions": max(1, round(risk.max_open_positions * a)),
         "category_exposure_cap_pct": min(risk.category_exposure_cap_pct * a, 100.0),
         "max_correlated_positions": max(1, round(risk.max_correlated_positions * a)),

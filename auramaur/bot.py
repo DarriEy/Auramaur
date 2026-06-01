@@ -1085,8 +1085,10 @@ class AuramaurBot:
         from auramaur.monitoring.display import console
         poly_engine = self._components.get("engines", {}).get("polymarket")
         poly_client = poly_engine.exchange if poly_engine else None
+        risk_mgr = poly_engine.risk_manager if poly_engine else None
         pillar = MomentumCouplingPillar(self.settings, console=console,
-                                        polymarket_client=poly_client)
+                                        polymarket_client=poly_client,
+                                        risk_manager=risk_mgr, bot=self)
         interval = self.settings.momentum_coupling.poll_seconds
         while self._running:
             if await self._check_kill_switch():

@@ -26,10 +26,13 @@ _NAME = {"BTC": "Bitcoin", "ETH": "Ethereum"}
 
 
 class MomentumCouplingPillar:
-    def __init__(self, settings, console=None, polymarket_client=None):
+    def __init__(self, settings, console=None, polymarket_client=None,
+                 risk_manager=None, bot=None):
         self._s = settings
         self._console = console
         self._poly = polymarket_client   # PolymarketClient (client.py) for execution
+        self._risk = risk_manager        # RiskManager gateway — no trade bypasses it
+        self._bot = bot                  # for available cash
         self._spot_hist: dict[str, list[tuple[float, float]]] = defaultdict(list)
         self._kraken = None
         self._gamma = None
@@ -91,33 +94,44 @@ class MomentumCouplingPillar:
                     f"'{m.question[:38]}' (prob {m.outcome_yes_price:.2f})"
                     + ("" if cfg.execute else " [dim](detect-only)[/]"))
             if cfg.execute:
-                await self._execute(m, direction)
+                await self._execute(m, direction, move)
             break  # one signal per asset per cycle
 
-    async def _execute(self, market, direction: str) -> None:
-        """Place the coupling trade — only when execute=True. Bounded by
-        max_position_usd; the Polymarket client enforces the three live gates +
-        kill switch, so this is paper unless AURAMAUR_LIVE + execution.live."""
-        if self._poly is None:
-            log.warning("coupling.no_client", reason="no Polymarket client; detect-only")
+    async def _execute(self, market, direction: str, move: float) -> None:
+        """Place the coupling trade through the RiskManager gateway (execute=True).
+
+        The momentum signal is framed as a spot-implied prob nudge vs the market,
+        so it flows through risk_manager.evaluate() — every check, the divergence
+        filter, Kelly sizing, AND the risk_tolerance lever apply. NOTHING bypasses
+        the gateway. Detection-only if the risk manager / client isn't wired.
+        """
+        if self._poly is None or self._risk is None:
+            log.warning("coupling.no_route", reason="no risk_manager/client; detect-only")
             return
-        from auramaur.exchange.models import Order, OrderSide, TokenType
-        token = TokenType.YES if direction == "BUY_YES" else TokenType.NO
-        token_id = market.clob_token_yes if token == TokenType.YES else market.clob_token_no
-        price = market.outcome_yes_price if token == TokenType.YES else market.outcome_no_price
-        if not token_id or price <= 0:
-            log.warning("coupling.no_token", market=market.id)
-            return
-        from auramaur.risk.tolerance import scale_budget, current_tolerance
-        pos_usd = scale_budget(self._s.momentum_coupling.max_position_usd,
-                               current_tolerance(self._s))
-        size = round(pos_usd / price, 2)
-        order = Order(market_id=market.id, exchange="polymarket", token_id=token_id,
-                      side=OrderSide.BUY, token=token, size=size, price=price,
-                      dry_run=not self._s.is_live)
+        from auramaur.exchange.models import Signal, OrderSide, Confidence
+        mp = market.outcome_yes_price
+        shift = (1 if direction == "BUY_YES" else -1) * min(abs(move) / 100.0 * 5, 0.15)
+        claude_prob = max(0.02, min(0.98, mp + shift))
+        signal = Signal(
+            market_id=market.id, market_question=market.question,
+            claude_prob=claude_prob, market_prob=mp,
+            claude_confidence=Confidence.HIGH if abs(move) >= 1.0 else Confidence.MEDIUM,
+            edge=abs(claude_prob - mp) * 100,
+            recommended_side=OrderSide.BUY if direction == "BUY_YES" else OrderSide.SELL,
+            strategy_source="momentum_coupling")
+        cash = getattr(self._bot, "_last_known_cash", None) if self._bot else None
         try:
+            decision = await self._risk.evaluate(signal, market, available_cash=cash)
+            if not decision.approved or decision.position_size <= 0:
+                log.info("coupling.risk_rejected", market=market.id,
+                         reason=decision.reason[:80])
+                return
+            order = self._poly.prepare_order(signal, market, decision.position_size,
+                                             self._s.is_live)
+            if not order:
+                return
             res = await self._poly.place_order(order)
             log.warning("coupling.executed", market=market.id, direction=direction,
-                        size=size, price=price, status=res.status, is_paper=res.is_paper)
+                        size=decision.position_size, status=res.status, is_paper=res.is_paper)
         except Exception as e:  # noqa: BLE001
             log.error("coupling.execute_error", market=market.id, error=str(e)[:120])
