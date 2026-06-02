@@ -36,6 +36,9 @@ def _client(price, *, base_amt=10.0):
     """Fake KrakenSpotClient. base asset APE; current `price` for APEUSDC."""
     k = SimpleNamespace()
     k.get_balance = AsyncMock(return_value={"APE": base_amt})
+    # _directional now sizes off FREE (tradable) balance; mirror get_balance.
+    k.get_free_balance = AsyncMock(return_value={"APE": base_amt, "USDC": 1000.0})
+    k.get_pair_quote = AsyncMock(return_value="USDC")
     k.get_price = AsyncMock(return_value=price)
     k._public = AsyncMock(return_value={
         "APEUSDC": {"altname": "APEUSDC", "base": "APE", "ordermin": "1"},
@@ -124,6 +127,44 @@ def test_momentum_reversal_still_exits_with_actual_qty():
         _, kwargs = p._k.place_spot_order.call_args
         assert kwargs["volume"] == 7.0  # actual held qty
         assert "APEUSDC" not in p._dir_long
+
+    asyncio.run(run())
+
+
+def test_exit_skipped_when_held_qty_below_ordermin():
+    """A position smaller than the pair's ordermin can't be closed with one
+    market sell — skip (and warn) instead of spamming rejected sells forever."""
+    async def run():
+        kcfg = _kcfg()
+        # Hold 0.5 APE; pair ordermin is 1 (from the AssetPairs mock). Stop-loss
+        # would otherwise fire (down 20%), but the lot is too small to sell.
+        p = _pillar(0.80, kcfg, base_amt=0.5)
+        p._k.get_free_balance = AsyncMock(return_value={"APE": 0.5})
+        p._momentum = AsyncMock(return_value=-1.0)
+
+        await p._directional()
+
+        p._k.place_spot_order.assert_not_called()  # no doomed sub-min order
+
+    asyncio.run(run())
+
+
+def test_entry_skipped_when_quote_unfunded():
+    """An entry signal is ignored when free quote currency can't pay for the
+    order — the notional budget ceiling alone would let it fire an order Kraken
+    rejects as insufficient funds."""
+    async def run():
+        kcfg = _kcfg()
+        p = _pillar(1.00, kcfg, base_amt=0.0)   # flat (not holding) -> entry path
+        p._dir_long = {}
+        # Strong up-momentum -> wants to enter; but only $0.50 USDC free.
+        p._momentum = AsyncMock(return_value=5.0)
+        p._k.get_free_balance = AsyncMock(return_value={"APE": 0.0, "USDC": 0.50})
+        p._k.size_for_usd = AsyncMock(return_value=20.0)  # wants ~$20 of APE
+
+        await p._directional()
+
+        p._k.place_spot_order.assert_not_called()  # skipped: unfunded
 
     asyncio.run(run())
 
@@ -288,6 +329,16 @@ def test_reentry_cooldown_blocks_then_clears():
         assert not p._in_cooldown("XBTUSDC")
 
     asyncio.run(run())
+
+
+def test_floor_lot_truncates_to_pair_precision():
+    """Both entry and exit sizing floor to the pair's lot precision so Kraken
+    never rejects an over-precise volume (and a sell can't exceed free balance)."""
+    p = _pillar(1.0, _kcfg())
+    p._pair_lot_dec = {"APEUSDC": 2}
+    assert p._floor_lot("APEUSDC", 10.12999) == 10.12   # floors, never rounds up
+    assert p._floor_lot("APEUSDC", 10.999) == 10.99
+    assert p._floor_lot("XBTUSDC", 1.123456789) == 1.12345678  # unknown -> 8 dp
 
 
 def test_resolve_pairs_prunes_unknown():

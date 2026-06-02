@@ -17,6 +17,7 @@ All real orders flow through KrakenSpotClient, so its safety model applies here.
 
 from __future__ import annotations
 
+import math
 import time
 
 import structlog
@@ -38,6 +39,7 @@ class KrakenPillar:
         self._dir_long: dict[str, float] = {}
         self._pair_base: dict[str, str] | None = None  # pair -> base asset code
         self._pair_min: dict[str, float] = {}          # pair -> ordermin (base units)
+        self._pair_lot_dec: dict[str, int] = {}        # pair -> lot_decimals (volume precision)
         self._valid_pairs: list[str] = []              # configured pairs Kraken recognizes
         self._pnl = None                               # lazy PnLTracker (needs db)
         self._cooldown_until: dict[str, float] = {}    # pair -> monotonic re-entry gate
@@ -85,6 +87,16 @@ class KrakenPillar:
             await db.commit()
         except Exception:  # noqa: BLE001
             pass
+
+    def _floor_lot(self, pair: str, qty: float) -> float:
+        """Floor a volume to the pair's lot precision (lot_decimals).
+
+        Kraken rejects orders whose volume has more precision than the pair
+        allows; flooring (not rounding) also guarantees a sell never exceeds the
+        free balance by a sliver. Used by both entry and exit sizing.
+        """
+        scale = 10 ** self._pair_lot_dec.get(pair, 8)
+        return math.floor(qty * scale) / scale
 
     @staticmethod
     def _exit_reason(mom, gain_pct, peak_pct, exit_thr, kcfg) -> str | None:
@@ -278,6 +290,10 @@ class KrakenPillar:
                     self._pair_min[pair] = float(meta.get("ordermin", 0) or 0)
                 except (TypeError, ValueError):
                     self._pair_min[pair] = 0.0
+                try:
+                    self._pair_lot_dec[pair] = int(meta.get("lot_decimals", 8))
+                except (TypeError, ValueError):
+                    self._pair_lot_dec[pair] = 8
             dropped = sorted(set(pairs) - set(self._valid_pairs))
             if dropped:
                 log.warning("kraken.directional.pruned_unknown_pairs",
@@ -312,7 +328,17 @@ class KrakenPillar:
                 # current price (which would silently reset cost basis).
                 entry = self._dir_long.get(pair)
                 if entry is None:
-                    entry = await self._recover_entry(pair) or price
+                    entry = await self._recover_entry(pair)
+                    if entry is None:
+                        # No persisted basis to recover. Anchoring to the current
+                        # price zeroes gain% every cycle, which silently DISABLES
+                        # the stop-loss and trailing-stop (they measure against
+                        # entry). Surface it loudly instead of masking a held,
+                        # unprotected position as a healthy 0-P&L row.
+                        entry = price
+                        log.warning("kraken.directional.basis_unknown", pair=pair,
+                                    anchored_to_price=round(price, 6),
+                                    note="stop-loss/trailing disabled until cost_basis is backfilled")
                 held[pair] = entry
                 held_prices[pair] = (entry, price, amt)
 
@@ -361,7 +387,10 @@ class KrakenPillar:
 
     async def _directional(self) -> None:
         kcfg = self._s.kraken
-        bal = await self._k.get_balance()
+        # Free (tradable) balances: total minus anything reserved by open orders.
+        # Sizing exits/entries off the free amount avoids requesting more than is
+        # actually sellable/spendable (which Kraken rejects as insufficient funds).
+        bal = await self._k.get_free_balance()
         held_prices = await self._reconcile_positions(bal)
         for pair in (self._valid_pairs or kcfg.directional_pairs):
             mom = await self._momentum(pair)
@@ -397,7 +426,17 @@ class KrakenPillar:
                 qty = held_prices.get(pair, (None, None, 0.0))[2]
                 if not qty or qty <= 0:
                     continue
-                vol = round(qty, 8)
+                # Floor to lot precision so the request never exceeds the free
+                # balance by a rounding sliver. If the held amount is below the
+                # pair's ordermin, a single market sell can't close it — log once
+                # and skip rather than spamming rejected orders forever.
+                vol = self._floor_lot(pair, qty)
+                ordermin = self._pair_min.get(pair, 0.0)
+                if vol <= 0 or (ordermin and vol < ordermin):
+                    log.warning("kraken.directional.exit_below_ordermin", pair=pair,
+                                reason=reason, held=round(qty, 8), ordermin=ordermin,
+                                note="position too small to close with one market sell")
+                    continue
                 notional = await self._k.usd_notional(pair, vol, price) or (vol * price)
                 res = await self._k.place_spot_order(
                     pair, OrderSide.SELL, volume=vol, ordertype="market",
@@ -431,9 +470,11 @@ class KrakenPillar:
                 vol = await self._k.size_for_usd(pair, kcfg.max_order_usd * 0.98, price)
                 if not vol or vol <= 0:
                     continue
-                # Respect the pair's minimum lot. Bump up to it only if the min
-                # still fits ~1.5x the per-order cap in USD; else the pair is too
-                # expensive per lot to trade within budget.
+                # Floor to the pair's lot precision first (Kraken rejects an
+                # over-precise volume), then respect the minimum lot — bump up to
+                # ordermin only if it still fits ~1.5x the per-order cap in USD;
+                # else the pair is too expensive per lot to trade within budget.
+                vol = self._floor_lot(pair, vol)
                 ordermin = self._pair_min.get(pair, 0.0)
                 if ordermin and vol < ordermin:
                     min_usd = await self._k.usd_notional(pair, ordermin, price)
@@ -441,8 +482,20 @@ class KrakenPillar:
                         log.info("kraken.directional.min_lot_too_large", pair=pair,
                                  ordermin=ordermin, min_usd=round(min_usd, 2))
                         continue
-                    vol = ordermin
-                vol = round(vol, 8)
+                    vol = ordermin  # ordermin is already a valid lot size
+                if vol <= 0:
+                    continue
+                # Funding gate: only fire if we actually hold enough FREE quote
+                # currency to pay for it. The notional budget ceiling above is far
+                # larger than available cash, so without this the loop spams orders
+                # Kraken rejects as insufficient funds every cycle.
+                quote = await self._k.get_pair_quote(pair) or "ZUSD"
+                free_quote = bal.get(quote, 0.0)
+                need_quote = vol * price * 1.005   # +0.5% for taker fee headroom
+                if free_quote < need_quote:
+                    log.info("kraken.directional.skip_unfunded", pair=pair, quote=quote,
+                             free=round(free_quote, 2), need=round(need_quote, 2))
+                    continue
                 res = await self._k.place_spot_order(
                     pair, OrderSide.BUY, volume=vol, ordertype="market", purpose="directional")
                 if res.order_id not in ("ERROR", "BLOCKED"):

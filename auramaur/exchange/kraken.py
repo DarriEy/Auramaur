@@ -113,6 +113,29 @@ class KrakenSpotClient:
             return {}
         return {k: float(v) for k, v in resp.get("result", {}).items()}
 
+    async def get_free_balance(self) -> dict[str, float]:
+        """Tradable balance per asset = total ``balance`` minus ``hold_trade``
+        (amount reserved by open orders), via BalanceEx.
+
+        ``Balance`` returns the *total* holding including anything reserved by a
+        resting order; sizing a sell off that total can request more than is
+        actually sellable and trip ``EOrder:Insufficient funds``. Falls back to
+        ``get_balance`` semantics if BalanceEx is unavailable.
+        """
+        resp = await self._private("BalanceEx")
+        result = resp.get("result", {}) if isinstance(resp, dict) else {}
+        if resp.get("error") or not result:
+            if resp.get("error"):
+                log.warning("kraken.balance_ex_error", error=resp["error"])
+            return await self.get_balance()
+        free: dict[str, float] = {}
+        for asset, v in result.items():
+            try:
+                free[asset] = float(v.get("balance", 0) or 0) - float(v.get("hold_trade", 0) or 0)
+            except (TypeError, ValueError, AttributeError):
+                continue
+        return free
+
     async def get_price(self, pair: str) -> float | None:
         """Last trade price for a pair (e.g. 'POLUSD', 'XBTUSD')."""
         result = await self._public("Ticker", {"pair": pair})
