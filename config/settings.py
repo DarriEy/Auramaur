@@ -143,10 +143,40 @@ class NLPConfig(BaseModel):
     # edge signal; "tool_use" forces it for every batched market;
     # "strategic_batch" disables the refinement path entirely.
     analysis_mode: Literal["strategic_batch", "tool_use", "auto"] = "auto"
-    tool_use_edge_threshold_pct: float = 5.0  # edge % above which tool-use fires in auto mode
+    # Lever 3: tool-use refinement is the single heaviest call (multi-turn web).
+    # Tightened from 5.0/4 — only strong edges earn a web-research pass, and at
+    # most 2 per cycle — which is where most of the realized token burn lived.
+    tool_use_edge_threshold_pct: float = 8.0  # edge % above which tool-use fires in auto mode
     tool_use_max_budget_usd: float = 0.50  # per-market tool-use budget cap
-    tool_use_max_markets_per_cycle: int = 4  # cap concurrent refinements per cycle
+    tool_use_max_markets_per_cycle: int = 2  # cap concurrent refinements per cycle
     tool_use_model: str = "claude-opus-4-7"  # can differ from strategic batch model
+
+    # Lever 1: effort tiering. `--effort` scales thinking-token burn per call,
+    # which is what eats the Max+ rate-limit window. Reserve `max` for the
+    # primary estimate; cheaper tiers for challenge/secondary passes. These are
+    # CLI effort levels (low|medium|high|max).
+    effort_primary: str = "max"               # primary strategic / single-market estimate
+    effort_adversarial: str = "medium"        # red-team second opinion (challenges, not re-derives)
+    effort_ensemble_secondary: str = "high"   # ensemble's non-primary model(s)
+    effort_tool_use: str = "high"             # web-research refinement
+
+    # Lever 5: cache the strategic batch path per-market (it was entirely
+    # uncached — the dominant call path had zero cache hits). Markets with a
+    # fresh, price-stable cached result are reused and excluded from the batch.
+    strategic_cache_enabled: bool = True
+
+    # Info-content tuning — maximize signal per token sent to the LLM.
+    # Evidence is globally re-ranked (recency x authority x relevance) before
+    # truncation, so the model sees the best N items, not the first N.
+    evidence_top_n: int = 8  # per-market evidence items kept after ranking
+    # Relevance backend: "embeddings" (semantic, needs the embeddings extra),
+    # "tfidf" (scikit-learn, no model download), or "heuristic" (no deps).
+    # Falls back automatically if the chosen backend is unavailable.
+    relevance_backend: Literal["embeddings", "tfidf", "heuristic"] = "embeddings"
+    embedding_model: str = "all-MiniLM-L6-v2"
+    # Calibration feedback as a reliability curve (over/under-confidence per
+    # probability band + top misses) instead of dumping raw resolved rows.
+    calibration_buckets: bool = True
 
     def model_post_init(self, __context) -> None:
         """Apply intensity preset as defaults — explicit overrides win."""
@@ -329,6 +359,11 @@ class LLMEnsembleConfig(BaseModel):
     models: list[str] = ["opus", "sonnet"]
     min_samples_for_weights: int = 10  # Min resolved predictions before weighting
     default_weight: float = 0.5  # Starting weight per model (50/50)
+    # Burn control: the ensemble doubles the heaviest (full-context) call on
+    # every cycle. Gate it so the extra model(s) only run when the primary
+    # already found a tradeable edge in the batch — quiet cycles stay 1-call.
+    gate_on_edge: bool = True
+    edge_threshold_pct: float = 5.0  # |primary_prob - market_price| to trigger the ensemble
 
 
 class MomentumCouplingConfig(BaseModel):

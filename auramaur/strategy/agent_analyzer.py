@@ -345,7 +345,7 @@ class AgentAnalyzer:
             "claude", "-p", prompt,
             "--output-format", "text",
             "--model", self._model,
-            "--effort", "max",
+            "--effort", self.settings.nlp.effort_tool_use,
             "--max-turns", str(self._max_turns),
             "--allowedTools", _ALLOWED_TOOLS,
         ]

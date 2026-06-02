@@ -129,7 +129,7 @@ class ToolUseAnalyzer:
             "--output-format", "json",
             "--json-schema", json.dumps(_OUTPUT_SCHEMA),
             "--model", self._model,
-            "--effort", "high",
+            "--effort", self._settings.nlp.effort_tool_use,
             "--no-session-persistence",
         ]
         # --max-budget-usd is only meaningful for API-key users; Max+

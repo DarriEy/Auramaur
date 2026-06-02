@@ -364,7 +364,7 @@ class EnsembleAnalyzer:
                     "claude", "-p", prompt,
                     "--output-format", "text",
                     "--model", model,
-                    "--effort", "max",
+                    "--effort", self._settings.nlp.effort_ensemble_secondary,
                     "--max-turns", "1",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,

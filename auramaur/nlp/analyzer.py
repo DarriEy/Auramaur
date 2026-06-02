@@ -86,15 +86,20 @@ class ClaudeAnalyzer:
         self._daily_calls = 0
         self._daily_calls_date = ""
 
-    async def _call_claude_cli(self, prompt: str) -> str:
+    async def _call_claude_cli(self, prompt: str, *, effort: str | None = None) -> str:
         """Call Claude via the CLI using the Max+ subscription.
 
         Uses `claude -p <prompt> --output-format text` which authenticates
         through the user's Max+ plan — no API credits needed.
 
+        ``effort`` is the CLI effort level (low|medium|high|max); defaults to
+        ``nlp.effort_primary``.
+
         Retries up to 3 times on transient failures (timeout, non-zero exit).
         """
         from datetime import date
+
+        use_effort = effort or self._settings.nlp.effort_primary
 
         today = date.today().isoformat()
         if self._daily_calls_date != today:
@@ -116,7 +121,7 @@ class ClaudeAnalyzer:
                     "claude", "-p", prompt,
                     "--output-format", "text",
                     "--model", self._model,
-                    "--effort", "max",
+                    "--effort", use_effort,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
@@ -150,10 +155,13 @@ class ClaudeAnalyzer:
 
         raise last_error  # type: ignore[misc]
 
-    async def _call_llm(self, prompt: str) -> str:
+    async def _call_llm(self, prompt: str, *, effort: str | None = None) -> str:
         """Route to Gemini (off-hours / Claude budget low) else Claude."""
+        from functools import partial
+
         from auramaur.nlp.llm_router import route
-        return await route(self._settings, self._daily_calls, prompt, self._call_claude_cli)
+        claude_fn = partial(self._call_claude_cli, effort=effort)
+        return await route(self._settings, self._daily_calls, prompt, claude_fn)
 
     # ------------------------------------------------------------------
     # Core estimation methods
@@ -173,7 +181,7 @@ class ClaudeAnalyzer:
             evidence=evidence_text,
         )
 
-        raw = await self._call_llm(prompt)
+        raw = await self._call_llm(prompt, effort=self._settings.nlp.effort_primary)
         parsed = _parse_claude_json(raw)
         return AnalysisResult(**parsed)
 
@@ -193,7 +201,7 @@ class ClaudeAnalyzer:
             evidence=evidence_text,
         )
 
-        raw = await self._call_llm(prompt)
+        raw = await self._call_llm(prompt, effort=self._settings.nlp.effort_adversarial)
         parsed = _parse_claude_json(raw)
         return AnalysisResult(**parsed)
 
