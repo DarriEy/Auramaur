@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 from auramaur.data_sources.base import NewsItem
 from auramaur.db.database import Database
 from auramaur.exchange.models import Market
+from auramaur.nlp.cache import NLPCache, coarse_evidence_digest, make_cache_key
 from auramaur.nlp.prompts import format_evidence
 
 log = structlog.get_logger()
@@ -72,10 +73,17 @@ class WorldModel(BaseModel):
         if self.macro_outlook:
             parts.append(f"MACRO STATE:\n{self.macro_outlook}")
 
-        # Entity graph — the primary relational structure
+        # Entity graph — the primary relational structure. Surface the most
+        # connected entities (by markets touched + relations), not whichever
+        # happened to be inserted last.
         if self.entity_graph:
+            ranked = sorted(
+                self.entity_graph.items(),
+                key=lambda kv: (len(kv[1].market_ids), len(kv[1].relations)),
+                reverse=True,
+            )[:12]
             entity_lines = []
-            for name, entity in list(self.entity_graph.items())[-12:]:
+            for name, entity in ranked:
                 rel_str = "; ".join(entity.relations[-3:]) if entity.relations else "no tracked relations"
                 entity_lines.append(f"- **{name}**: {entity.state[:120]} [{rel_str}]")
             parts.append("ENTITY GRAPH:\n" + "\n".join(entity_lines))
@@ -116,16 +124,15 @@ class StrategicAnalysis(BaseModel):
 # Prompts
 # ---------------------------------------------------------------------------
 
-STRATEGIC_BATCH_PROMPT = """\
+# The static half of the strategic prompt — role, framework, and response
+# schema. Kept identical across every call so the CLI's prompt-cache can reuse
+# it as a stable prefix (passed via --append-system-prompt with
+# --exclude-dynamic-system-prompt-sections). The per-cycle world model,
+# calibration, and markets go in the user prompt below.
+STRATEGIC_SYSTEM_PROMPT = """\
 You are an elite superforecaster with a persistent memory.  You maintain \
 a relational world model — entities connected by relations, not isolated \
 facts.  You are being paid for ACCURACY, not for having opinions.
-
-=== YOUR CURRENT WORLD MODEL ===
-{world_model}
-
-=== CALIBRATION FEEDBACK (how your past predictions resolved) ===
-{calibration_feedback}
 
 === ANALYTICAL FRAMEWORK ===
 You analyze markets in THREE PHASES.  The relational phase comes FIRST \
@@ -169,28 +176,25 @@ Review ALL estimates together:
 - Are you confusing "interesting narrative" with "high probability"?
 - Would you bet real money at these odds?
 
-=== TODAY'S MARKETS ===
-{markets_block}
-
 === YOUR RESPONSE ===
 Respond with valid JSON only (no markdown, no commentary outside JSON):
-{{
-  "entity_graph": {{
-    "<entity_name>": {{
+{
+  "entity_graph": {
+    "<entity_name>": {
       "state": "<current understanding of this entity>",
       "relations": ["<relation to other entity or force>", ...],
       "market_ids": ["<ids of markets this entity touches>"]
-    }}
-  }},
+    }
+  },
   "markets": [
-    {{
+    {
       "market_id": "<id>",
       "probability": <float 0-1>,
       "confidence": "<LOW|MEDIUM|HIGH>",
       "reasoning": "<relational: which entities/relations inform this + base rate → update → final>",
       "key_factors": ["<factor>", ...],
       "cross_market_notes": "<how this estimate constrains or is constrained by other estimates>"
-    }},
+    },
     ...
   ],
   "world_model_update": "<concise update: what has changed since last cycle? \
@@ -201,7 +205,24 @@ Respond with valid JSON only (no markdown, no commentary outside JSON):
   "retired_beliefs": ["<beliefs from your world model that are now WRONG or \
     OUTDATED based on new evidence — name them explicitly>"],
   "active_themes": ["<key themes driving markets right now>", ...]
-}}
+}
+"""
+
+# The per-cycle (dynamic) half of the strategic prompt. Sent as the user
+# message; the static framework + response schema live in
+# STRATEGIC_SYSTEM_PROMPT above so the cache prefix stays stable.
+STRATEGIC_BATCH_PROMPT = """\
+=== YOUR CURRENT WORLD MODEL ===
+{world_model}
+
+=== CALIBRATION FEEDBACK (how your past predictions resolved) ===
+{calibration_feedback}
+
+=== TODAY'S MARKETS ===
+{markets_block}
+
+Analyze every market above using your three-phase framework and respond with \
+the JSON object exactly as specified in your instructions.
 """
 
 STRATEGIC_ADVERSARIAL_PROMPT = """\
@@ -250,6 +271,7 @@ class StrategicAnalyzer:
         self._settings = settings
         self._model = settings.nlp.model
         self._db = db
+        self._cache = NLPCache(db)
         self._world_model = self._load_world_model()
         self._daily_calls = 0
         self._daily_calls_date = ""
@@ -321,28 +343,98 @@ class StrategicAnalyzer:
             return "(No calibration data yet — predictions haven't resolved.)"
 
         if rows:
-            lines = []
-            correct = 0
-            total = 0
-            for row in rows:
-                question = row["question"] or row["market_id"]
-                predicted = row["predicted_prob"] or row["claude_prob"]
-                actual = "YES" if row["actual_outcome"] else "NO"
-                was_right = (predicted > 0.5 and row["actual_outcome"]) or \
-                            (predicted <= 0.5 and not row["actual_outcome"])
-                if was_right:
-                    correct += 1
-                total += 1
-                icon = "correct" if was_right else "WRONG"
-                lines.append(
-                    f"- [{icon}] \"{question[:60]}\" — you said {predicted:.0%}, resolved {actual}"
-                )
-
-            accuracy = correct / total if total > 0 else 0
-            header = f"Track record: {correct}/{total} ({accuracy:.0%} accuracy)\n"
-            parts.append(header + "\n".join(lines[:_MAX_CALIBRATION_ENTRIES]))
+            if self._settings.nlp.calibration_buckets:
+                parts.append(self._calibration_curve(rows))
+            else:
+                parts.append(self._calibration_rows(rows))
 
         return "\n\n".join(parts)
+
+    @staticmethod
+    def _calibration_curve(rows: list) -> str:
+        """Compact reliability curve: per-band over/under-confidence + top misses.
+
+        Far higher signal-per-token than dumping every resolved outcome — it
+        tells the model exactly where its probabilities have been biased.
+        """
+        samples: list[tuple[float, float, str]] = []  # (predicted, actual, question)
+        for row in rows:
+            predicted = row["predicted_prob"] or row["claude_prob"]
+            if predicted is None:
+                continue
+            actual = 1.0 if row["actual_outcome"] else 0.0
+            samples.append((float(predicted), actual, row["question"] or row["market_id"]))
+
+        if not samples:
+            return "(No resolved predictions yet.)"
+
+        n = len(samples)
+        correct = sum(1 for p, a, _ in samples if (p > 0.5) == (a > 0.5))
+        brier = sum((p - a) ** 2 for p, a, _ in samples) / n
+
+        log.info(
+            "strategic.calibration_snapshot",
+            resolved=n,
+            directional_accuracy=round(correct / n, 3),
+            brier=round(brier, 4),
+        )
+
+        bands = [(0.0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.01)]
+        band_lines: list[str] = []
+        for lo, hi in bands:
+            bucket = [(p, a) for p, a, _ in samples if lo <= p < hi]
+            if not bucket:
+                continue
+            mean_pred = sum(p for p, _ in bucket) / len(bucket)
+            hit_rate = sum(a for _, a in bucket) / len(bucket)
+            gap = mean_pred - hit_rate
+            if abs(gap) < 0.05:
+                bias = "well-calibrated"
+            elif gap > 0:
+                bias = f"OVERconfident by {gap:+.0%} → shade toward 0.5"
+            else:
+                bias = f"UNDERconfident by {gap:+.0%} → push away from 0.5"
+            band_lines.append(
+                f"- {lo:.0%}-{hi if hi <= 1 else 1:.0%}: said ~{mean_pred:.0%}, "
+                f"resolved YES {hit_rate:.0%} (n={len(bucket)}) — {bias}"
+            )
+
+        # Largest errors as concrete cautionary examples.
+        worst = sorted(samples, key=lambda s: abs(s[0] - s[1]), reverse=True)[:3]
+        miss_lines = [
+            f"- \"{q[:60]}\": said {p:.0%}, resolved {'YES' if a > 0.5 else 'NO'}"
+            for p, a, q in worst
+        ]
+
+        return (
+            f"Track record: {correct}/{n} directional ({correct / n:.0%}), "
+            f"Brier {brier:.3f} (lower is better)\n"
+            "Reliability by confidence band:\n" + "\n".join(band_lines) +
+            "\nBiggest misses (avoid repeating):\n" + "\n".join(miss_lines)
+        )
+
+    @staticmethod
+    def _calibration_rows(rows: list) -> str:
+        """Legacy per-row calibration dump (used when buckets are disabled)."""
+        lines = []
+        correct = 0
+        total = 0
+        for row in rows:
+            question = row["question"] or row["market_id"]
+            predicted = row["predicted_prob"] or row["claude_prob"]
+            actual = "YES" if row["actual_outcome"] else "NO"
+            was_right = (predicted > 0.5 and row["actual_outcome"]) or \
+                        (predicted <= 0.5 and not row["actual_outcome"])
+            if was_right:
+                correct += 1
+            total += 1
+            icon = "correct" if was_right else "WRONG"
+            lines.append(
+                f"- [{icon}] \"{question[:60]}\" — you said {predicted:.0%}, resolved {actual}"
+            )
+        accuracy = correct / total if total > 0 else 0
+        header = f"Track record: {correct}/{total} ({accuracy:.0%} accuracy)\n"
+        return header + "\n".join(lines[:_MAX_CALIBRATION_ENTRIES])
 
     # ------------------------------------------------------------------
     # Batch Analysis
@@ -360,6 +452,9 @@ class StrategicAnalyzer:
         from auramaur.nlp.evidence_compressor import compress_evidence
 
         blocks = []
+        total_raw = 0
+        total_ev_chars = 0
+        markets_with_evidence = 0
         for i, market in enumerate(markets, 1):
             evidence = evidence_map.get(market.id, [])
 
@@ -371,6 +466,9 @@ class StrategicAnalyzer:
                     evidence,
                     max_chars=1500,  # ~375 tokens per market
                 )
+                total_raw += len(evidence)
+                total_ev_chars += len(ev_text)
+                markets_with_evidence += 1
             else:
                 ev_text = "(No evidence found)"
 
@@ -384,12 +482,24 @@ class StrategicAnalyzer:
             block = (
                 f"--- MARKET {i} (id: {market.id}) ---\n"
                 f"Q: {market.question}\n"
-                f"Desc: {market.description[:200]}\n"
+                f"Resolution criteria: {market.description[:400]}\n"
                 f"Cat: {market.category} | {micro} | "
                 f"End: {market.end_date.strftime('%Y-%m-%d') if market.end_date else '?'}\n"
                 f"Evidence:\n{ev_text}\n"
             )
             blocks.append(block)
+
+        # Prompt-signal logging: how much evidence we ingested vs how compactly
+        # it landed in the prompt. Lets us A/B the info-content changes.
+        log.info(
+            "strategic.evidence_signal",
+            markets=len(markets),
+            markets_with_evidence=markets_with_evidence,
+            raw_evidence_items=total_raw,
+            evidence_chars=total_ev_chars,
+            avg_items_per_market=round(total_raw / markets_with_evidence, 1) if markets_with_evidence else 0,
+            avg_chars_per_market=round(total_ev_chars / markets_with_evidence) if markets_with_evidence else 0,
+        )
 
         return "\n".join(blocks)
 
@@ -406,49 +516,143 @@ class StrategicAnalyzer:
         if not markets:
             return StrategicAnalysis()
 
-        # Build the prompt with full context
+        # Lever 5: reuse fresh, price-stable cached results and only send the
+        # markets that actually need (re)analysis to Claude. Quiet cycles where
+        # everything is cached skip the call entirely.
+        cached_results, to_analyze, cache_keys = await self._partition_cached(
+            markets, evidence_map,
+        )
+        if cached_results:
+            log.info(
+                "strategic.cache_partition",
+                cached=len(cached_results),
+                to_analyze=len(to_analyze),
+            )
+        if not to_analyze:
+            log.info("strategic.batch_all_cached", markets=len(cached_results))
+            return StrategicAnalysis(markets=cached_results)
+
+        # Build the (dynamic) user prompt; the static framework is sent once as a
+        # cacheable system prompt (Lever 4).
         world_model_text = self._world_model.summary()
         if len(world_model_text) > _MAX_WORLD_MODEL_CHARS:
             world_model_text = world_model_text[:_MAX_WORLD_MODEL_CHARS] + "\n...(truncated)"
 
         calibration = await self._get_calibration_feedback()
-        markets_block = self._format_markets_block(markets, evidence_map)
+        markets_block = self._format_markets_block(to_analyze, evidence_map)
 
         prompt = STRATEGIC_BATCH_PROMPT.format(
             world_model=world_model_text,
             calibration_feedback=calibration,
             markets_block=markets_block,
         )
+        system_prompt = STRATEGIC_SYSTEM_PROMPT
 
         log.info(
             "strategic.batch_start",
-            market_count=len(markets),
+            market_count=len(to_analyze),
             world_model_cycle=self._world_model.cycle_count,
             prompt_chars=len(prompt),
         )
 
-        # Primary batch analysis — optionally run through ensemble
+        # Lever 1 + 2: always run a single primary call; only fan out to the
+        # ensemble's extra models when the primary already found a tradeable edge.
         try:
-            if self._ensemble and self._settings.llm_ensemble.enabled:
-                result = await self._analyze_batch_ensemble(prompt, markets)
-            else:
-                raw = await self._call_llm(prompt)
-                result = self._parse_strategic_response(raw)
+            raw = await self._call_llm(
+                prompt,
+                system_prompt=system_prompt,
+                effort=self._settings.nlp.effort_primary,
+            )
+            result = self._parse_strategic_response(raw)
+
+            ens = self._settings.llm_ensemble
+            if self._ensemble and ens.enabled:
+                if not ens.gate_on_edge or self._batch_has_edge(result, to_analyze):
+                    result = await self._blend_ensemble(
+                        prompt, to_analyze, result, system_prompt=system_prompt,
+                    )
+                else:
+                    log.info("strategic.ensemble_skipped_no_edge", markets=len(to_analyze))
         except Exception as e:
             log.error("strategic.batch_failed", error=str(e))
-            return StrategicAnalysis()
+            # Still surface any cached results we had.
+            return StrategicAnalysis(markets=cached_results)
 
-        # Update world model from Claude's response
+        # Update world model from Claude's response (analyzed markets only)
         self._update_world_model(result)
+
+        # Lever 5: cache the freshly-analyzed per-market results.
+        await self._store_results(result, to_analyze, cache_keys)
+
+        # Merge reused cached results back in.
+        result.markets = list(result.markets) + cached_results
 
         log.info(
             "strategic.batch_complete",
             markets_analyzed=len(result.markets),
+            from_cache=len(cached_results),
             new_patterns=len(result.new_patterns),
             themes=result.active_themes,
         )
 
         return result
+
+    async def _partition_cached(
+        self,
+        markets: list[Market],
+        evidence_map: dict[str, list[NewsItem]],
+    ) -> tuple[list[BatchAnalysisResult], list[Market], dict[str, str]]:
+        """Split markets into (reusable cached results, markets to analyze, keys).
+
+        ``cache_keys`` maps market_id -> cache_key for every market, so analyzed
+        results can be written back with the same key.
+        """
+        cache_keys: dict[str, str] = {}
+        cached: list[BatchAnalysisResult] = []
+        to_analyze: list[Market] = []
+
+        for market in markets:
+            evidence = evidence_map.get(market.id, [])
+            key = make_cache_key(market.question, coarse_evidence_digest(evidence))
+            cache_keys[market.id] = key
+
+            if not self._settings.nlp.strategic_cache_enabled:
+                to_analyze.append(market)
+                continue
+
+            hit = await self._cache.get(key, current_price=market.outcome_yes_price)
+            if hit is not None:
+                try:
+                    cached.append(BatchAnalysisResult(**hit))
+                    continue
+                except Exception as e:
+                    log.warning("strategic.cache_decode_failed", market_id=market.id, error=str(e))
+            to_analyze.append(market)
+
+        return cached, to_analyze, cache_keys
+
+    async def _store_results(
+        self,
+        result: StrategicAnalysis,
+        analyzed: list[Market],
+        cache_keys: dict[str, str],
+    ) -> None:
+        """Write freshly-analyzed per-market results into the NLP cache."""
+        if not self._settings.nlp.strategic_cache_enabled:
+            return
+        ttl = self._settings.nlp.cache_ttl_breaking_seconds
+        price_by_id = {m.id: (m.outcome_yes_price or 0.0) for m in analyzed}
+        for mr in result.markets:
+            key = cache_keys.get(mr.market_id)
+            if not key:
+                continue
+            try:
+                await self._cache.put(
+                    key, mr.market_id, mr.model_dump(), ttl,
+                    market_price=price_by_id.get(mr.market_id, 0.0),
+                )
+            except Exception as e:
+                log.warning("strategic.cache_store_failed", market_id=mr.market_id, error=str(e))
 
     async def analyze_batch_with_adversarial(
         self,
@@ -480,7 +684,9 @@ class StrategicAnalyzer:
         )
 
         try:
-            raw = await self._call_llm(prompt)
+            raw = await self._call_llm(
+                prompt, effort=self._settings.nlp.effort_adversarial,
+            )
             adversarial = self._parse_strategic_response(raw)
 
             # Merge adversarial into primary results
@@ -501,44 +707,60 @@ class StrategicAnalyzer:
     # Ensemble Batch Analysis
     # ------------------------------------------------------------------
 
-    async def _analyze_batch_ensemble(
-        self, prompt: str, markets: list[Market],
-    ) -> StrategicAnalysis:
-        """Run batch analysis through all ensemble models, blend per-market probabilities.
+    def _batch_has_edge(self, result: StrategicAnalysis, markets: list[Market]) -> bool:
+        """True if any analyzed market diverges from its price by the ensemble threshold.
 
-        Each model gets the same prompt. Their per-market probability estimates
-        are blended using weights derived from per-model Brier scores.
-        Non-probability fields (world model update, patterns, beliefs) come from
-        the primary model (first in the list, typically opus).
+        Used to gate the (expensive) extra ensemble models: quiet cycles with no
+        tradeable edge run a single model; only cycles where the primary already
+        found edge pay for the ensemble.
         """
-        model_responses = await self._call_ensemble(prompt)
+        threshold = self._settings.llm_ensemble.edge_threshold_pct / 100.0
+        price_by_id = {m.id: (m.outcome_yes_price or 0.5) for m in markets}
+        for mr in result.markets:
+            price = price_by_id.get(mr.market_id, 0.5)
+            if abs(mr.probability - price) >= threshold:
+                return True
+        return False
 
-        if not model_responses:
-            raise RuntimeError("All ensemble models failed for batch analysis")
+    async def _blend_ensemble(
+        self,
+        prompt: str,
+        markets: list[Market],
+        primary_result: StrategicAnalysis,
+        *,
+        system_prompt: str | None = None,
+    ) -> StrategicAnalysis:
+        """Run the non-primary ensemble models and blend them with the primary result.
 
-        # Parse each model's response
-        parsed: list[tuple[str, StrategicAnalysis]] = []
-        for model, raw in model_responses:
-            try:
-                sa = self._parse_strategic_response(raw)
-                parsed.append((model, sa))
-            except Exception as e:
-                log.warning("strategic.ensemble_parse_failed", model=model, error=str(e))
+        The primary model's single call has already happened (and is reused here
+        as the base for world-model updates), so this only spends calls on the
+        remaining models.
+        """
+        primary_model = self._model
+        extra = [m for m in self._settings.llm_ensemble.models if m != primary_model]
 
-        if not parsed:
-            raise RuntimeError("All ensemble model responses failed to parse")
+        parsed: list[tuple[str, StrategicAnalysis]] = [(primary_model, primary_result)]
+        if extra:
+            raw_extra = await self._call_ensemble_extra(
+                prompt, extra, system_prompt=system_prompt,
+            )
+            for model, raw in raw_extra:
+                try:
+                    parsed.append((model, self._parse_strategic_response(raw)))
+                except Exception as e:
+                    log.warning("strategic.ensemble_parse_failed", model=model, error=str(e))
 
-        # If only one model succeeded, use it directly
-        if len(parsed) == 1:
-            model, sa = parsed[0]
-            # Record predictions
-            for mr in sa.markets:
-                category = self._get_market_category(mr.market_id, markets)
-                await self._ensemble.record_model_prediction(
-                    mr.market_id, model, mr.probability, category,
-                )
-            return sa
+        return await self._blend_results(parsed, markets)
 
+    async def _blend_results(
+        self, parsed: list[tuple[str, StrategicAnalysis]], markets: list[Market],
+    ) -> StrategicAnalysis:
+        """Blend per-market probabilities across model responses by Brier weight.
+
+        Non-probability fields (world model update, patterns, beliefs) come from
+        the primary model (first in ``parsed``, typically opus). Works for a
+        single response too (records its predictions, returns it unchanged).
+        """
         # Load weights for blending
         weights = await self._ensemble.load_model_weights()
 
@@ -707,12 +929,24 @@ class StrategicAnalyzer:
     # CLI + Parsing
     # ------------------------------------------------------------------
 
-    async def _call_claude_cli(self, prompt: str, *, model: str | None = None) -> str:
+    async def _call_claude_cli(
+        self,
+        prompt: str,
+        *,
+        model: str | None = None,
+        system_prompt: str | None = None,
+        effort: str | None = None,
+    ) -> str:
         """Call Claude CLI — same as ClaudeAnalyzer but with longer timeout for batch.
 
         Args:
-            prompt: The prompt to send.
+            prompt: The (per-cycle, dynamic) user prompt to send.
             model: Optional model override (used by ensemble to call different models).
+            system_prompt: Optional static system prompt. Appended via
+                ``--append-system-prompt`` with ``--exclude-dynamic-system-prompt-sections``
+                so the CLI's prompt cache can reuse it as a stable prefix.
+            effort: CLI effort level (low|medium|high|max). Defaults to
+                ``nlp.effort_primary``.
         """
         import asyncio
         from datetime import date
@@ -723,6 +957,22 @@ class StrategicAnalyzer:
             self._daily_calls_date = today
 
         use_model = model or self._model
+        use_effort = effort or self._settings.nlp.effort_primary
+
+        cmd = [
+            "claude", "-p", prompt,
+            "--output-format", "text",
+            "--model", use_model,
+            "--effort", use_effort,
+        ]
+        if system_prompt:
+            # Keep the default system prompt (so tooling context survives) but
+            # strip its dynamic sections, which would otherwise bust the cache
+            # prefix on every call.
+            cmd += [
+                "--append-system-prompt", system_prompt,
+                "--exclude-dynamic-system-prompt-sections",
+            ]
 
         max_attempts = 3
         backoff = [10, 20, 40]
@@ -731,10 +981,7 @@ class StrategicAnalyzer:
         for attempt in range(1, max_attempts + 1):
             try:
                 proc = await asyncio.create_subprocess_exec(
-                    "claude", "-p", prompt,
-                    "--output-format", "text",
-                    "--model", use_model,
-                    "--effort", "max",
+                    *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
@@ -746,7 +993,13 @@ class StrategicAnalyzer:
                     raise RuntimeError(f"Claude CLI ({use_model}) failed (rc={proc.returncode}): {err}")
 
                 self._daily_calls += 1
-                log.info("strategic.claude_call", model=use_model, daily_calls=self._daily_calls)
+                log.info(
+                    "strategic.claude_call",
+                    model=use_model,
+                    effort=use_effort,
+                    cached_prefix=bool(system_prompt),
+                    daily_calls=self._daily_calls,
+                )
                 return stdout.decode().strip()
 
             except (TimeoutError, asyncio.TimeoutError, RuntimeError) as e:
@@ -756,24 +1009,36 @@ class StrategicAnalyzer:
 
         raise last_error  # type: ignore[misc]
 
-    async def _call_llm(self, prompt: str) -> str:
+    async def _call_llm(
+        self, prompt: str, *, system_prompt: str | None = None, effort: str | None = None,
+    ) -> str:
         """Single-model call, routed to Gemini off-hours / when Claude budget low."""
+        from functools import partial
+
         from auramaur.nlp.llm_router import route
-        return await route(self._settings, self._daily_calls, prompt, self._call_claude_cli)
 
-    async def _call_ensemble(self, prompt: str) -> list[tuple[str, str]]:
-        """Call all ensemble models in parallel, returning [(model, raw_response), ...].
+        # route() calls the fn with just the prompt; bind the extra CLI options.
+        claude_fn = partial(self._call_claude_cli, system_prompt=system_prompt, effort=effort)
+        return await route(self._settings, self._daily_calls, prompt, claude_fn)
 
-        Falls back to single-model call if ensemble is disabled.
+    async def _call_ensemble_extra(
+        self, prompt: str, extra_models: list[str], *, system_prompt: str | None = None,
+    ) -> list[tuple[str, str]]:
+        """Call the non-primary ensemble models in parallel at secondary effort.
+
+        Returns [(model, raw_response), ...] for the models that succeeded.
         """
         import asyncio
 
-        models = self._settings.llm_ensemble.models
-        tasks = [self._call_claude_cli(prompt, model=m) for m in models]
+        effort = self._settings.nlp.effort_ensemble_secondary
+        tasks = [
+            self._call_claude_cli(prompt, model=m, system_prompt=system_prompt, effort=effort)
+            for m in extra_models
+        ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         model_responses: list[tuple[str, str]] = []
-        for model, result in zip(models, results):
+        for model, result in zip(extra_models, results):
             if isinstance(result, Exception):
                 log.warning("strategic.ensemble_model_failed", model=model, error=str(result))
             else:

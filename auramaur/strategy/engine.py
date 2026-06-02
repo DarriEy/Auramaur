@@ -238,6 +238,35 @@ class TradingEngine:
         cash = await self._get_available_cash()
         return positions, cash
 
+    async def _held_market_ids(self) -> set[str]:
+        """market_ids we already hold in the current mode + exchange.
+
+        Used to keep already-held markets out of the BUY-candidate set: the
+        allocator won't average into an open position (skip_held), so analyzing
+        them only burns LLM calls and yields approved-but-unexecutable
+        candidates. Exit/management of held positions runs through the dedicated
+        venue-exit path and the portfolio monitor, not this cycle, so dropping
+        them here does not affect closing positions. The allocator's skip_held
+        remains the correctness backstop; this is a pure efficiency filter.
+        """
+        is_paper_flag = 0 if self.settings.is_live else 1
+        try:
+            if self.exchange_name:
+                rows = await self.db.fetchall(
+                    """SELECT p.market_id FROM portfolio p
+                       JOIN markets m ON p.market_id = m.id
+                       WHERE p.size > 0 AND p.is_paper = ? AND m.exchange = ?""",
+                    (is_paper_flag, self.exchange_name),
+                )
+            else:
+                rows = await self.db.fetchall(
+                    "SELECT market_id FROM portfolio WHERE size > 0 AND is_paper = ?",
+                    (is_paper_flag,),
+                )
+            return {r["market_id"] for r in rows}
+        except Exception:
+            return set()
+
     async def scan_and_store_markets(self, limit: int = 300) -> list[Market]:
         """Fetch markets from Gamma API and store in DB."""
         markets = await self.discovery.get_markets(limit=limit)
@@ -894,6 +923,18 @@ class TradingEngine:
         except Exception:
             pass  # Table may not exist yet
 
+        # Drop markets we already hold — the allocator won't average into an
+        # open position, so analyzing them wastes LLM calls and produces
+        # approved-but-unexecutable candidates. Exits are managed elsewhere.
+        held_ids = await self._held_market_ids()
+        if held_ids:
+            before = len(fresh_candidates)
+            fresh_candidates = [m for m in fresh_candidates if m.id not in held_ids]
+            held_filtered = before - len(fresh_candidates)
+            if held_filtered > 0:
+                log.info("engine.held_filtered", count=held_filtered)
+                filtered_count += held_filtered
+
         show_scan_results(len(markets), len(fresh_candidates), filtered_count, exchange=self.exchange_name)
 
         # Smart ranking — prioritize markets most likely to be mispriced
@@ -1116,7 +1157,6 @@ class TradingEngine:
         markets = [m for m, _score in ranked_markets[:_MAX_STRATEGIC_BATCH]]
 
         # Gather evidence for all markets first
-        from auramaur.data_sources.base import NewsItem as _NI
         from auramaur.nlp.query_decomposer import extract_search_queries
 
         # Evidence gathering is the dominant cycle cost — each market fans out
@@ -1153,17 +1193,9 @@ class TradingEngine:
                     all_evidence: list = []
                     seen_ids: set[str] = set()
 
-                    # Add market description as synthetic evidence (resolution criteria)
-                    if market.description and len(market.description) > 20:
-                        all_evidence.append(_NI(
-                            id=f"polymarket_desc:{market.id}",
-                            source="polymarket_context",
-                            title=f"Resolution criteria: {market.question}",
-                            content=market.description[:800],
-                            url=f"https://polymarket.com/event/{market.id}",
-                        ))
-                        seen_ids.add(f"polymarket_desc:{market.id}")
-
+                    # Resolution criteria are carried in the market block's Desc
+                    # field, not duplicated here as synthetic evidence — the
+                    # Evidence section is real-world news only.
                     for query in queries:
                         items = await self.aggregator.gather(
                             query, limit_per_source=8, category=market.category or None,
@@ -1172,9 +1204,20 @@ class TradingEngine:
                             if item.id not in seen_ids:
                                 seen_ids.add(item.id)
                                 all_evidence.append(item)
-                    # Cap evidence per market to keep total prompt under context window
-                    # 12 markets × 8 items × ~500 chars = ~48k chars of evidence
-                    return (market.id, all_evidence[:8])
+
+                    # Lever A: globally re-rank the merged candidate set against
+                    # the market question (recency x authority x relevance) and
+                    # keep the best N — not the first N by query order.
+                    from auramaur.nlp.evidence_ranker import rank_evidence
+                    nlp = self.settings.nlp
+                    ranked = rank_evidence(
+                        market.question,
+                        all_evidence,
+                        top_n=nlp.evidence_top_n,
+                        backend=nlp.relevance_backend,
+                        model_name=nlp.embedding_model,
+                    )
+                    return (market.id, ranked)
                 except Exception as e:
                     log.error("strategic.evidence_error", market_id=market.id, error=str(e))
                     return (market.id, [])

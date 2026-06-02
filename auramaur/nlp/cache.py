@@ -12,6 +12,32 @@ from auramaur.db.database import Database
 log = structlog.get_logger()
 
 
+def coarse_evidence_digest(items: list, top_n: int = 8) -> str:
+    """Build a churn-tolerant digest from the strongest evidence items.
+
+    Keys on the sorted, normalized titles of the top-N items rather than the
+    full evidence blob, so minor reshuffling or low-signal additions don't bust
+    the cache. Pair with price-move invalidation (see ``NLPCache.get``) so a
+    genuine repricing still forces fresh analysis.
+
+    Args:
+        items: Evidence items (NewsItem-like, with a ``.title`` attribute).
+        top_n: Number of titles to fold into the digest.
+
+    Returns:
+        A short hex digest string.
+    """
+    titles = []
+    for it in items:
+        title = getattr(it, "title", None) or ""
+        norm = " ".join(title.strip().lower().split())
+        if norm:
+            titles.append(norm)
+    titles = sorted(set(titles))[:top_n]
+    raw = "||".join(titles)
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
 def make_cache_key(question: str, evidence_digest: str) -> str:
     """Generate a deterministic cache key from question text and evidence digest.
 

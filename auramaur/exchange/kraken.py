@@ -113,6 +113,29 @@ class KrakenSpotClient:
             return {}
         return {k: float(v) for k, v in resp.get("result", {}).items()}
 
+    async def get_free_balance(self) -> dict[str, float]:
+        """Tradable balance per asset = total ``balance`` minus ``hold_trade``
+        (amount reserved by open orders), via BalanceEx.
+
+        ``Balance`` returns the *total* holding including anything reserved by a
+        resting order; sizing a sell off that total can request more than is
+        actually sellable and trip ``EOrder:Insufficient funds``. Falls back to
+        ``get_balance`` semantics if BalanceEx is unavailable.
+        """
+        resp = await self._private("BalanceEx")
+        result = resp.get("result", {}) if isinstance(resp, dict) else {}
+        if resp.get("error") or not result:
+            if resp.get("error"):
+                log.warning("kraken.balance_ex_error", error=resp["error"])
+            return await self.get_balance()
+        free: dict[str, float] = {}
+        for asset, v in result.items():
+            try:
+                free[asset] = float(v.get("balance", 0) or 0) - float(v.get("hold_trade", 0) or 0)
+            except (TypeError, ValueError, AttributeError):
+                continue
+        return free
+
     async def get_price(self, pair: str) -> float | None:
         """Last trade price for a pair (e.g. 'POLUSD', 'XBTUSD')."""
         result = await self._public("Ticker", {"pair": pair})
@@ -257,6 +280,36 @@ class KrakenSpotClient:
             filled_price=est_price or 0.0,
             is_paper=validate,
         )
+
+    async def query_fill(self, txid: str) -> dict | None:
+        """Actual executed price/volume/fee for a placed order, via QueryOrders.
+
+        Returns ``{"price", "vol", "fee", "cost"}`` in the pair's quote currency,
+        or None when unavailable (paper/validate orders, not-yet-filled, or API
+        error). Lets callers record the real fill instead of the pre-trade ticker
+        estimate, so realized P&L reflects actual slippage + fees.
+        """
+        if not txid or txid in ("VALIDATED", "ERROR", "BLOCKED", "unknown", "pending"):
+            return None
+        resp = await self._private("QueryOrders", {"txid": txid})
+        if resp.get("error"):
+            log.warning("kraken.query_orders_error", txid=txid, error=resp["error"])
+            return None
+        info = (resp.get("result") or {}).get(txid)
+        if not info:
+            return None
+        try:
+            vol = float(info.get("vol_exec", 0) or 0)
+            if vol <= 0:
+                return None
+            return {
+                "price": float(info.get("price", 0) or 0),
+                "vol": vol,
+                "fee": float(info.get("fee", 0) or 0),
+                "cost": float(info.get("cost", 0) or 0),
+            }
+        except (TypeError, ValueError):
+            return None
 
     async def convert(
         self,

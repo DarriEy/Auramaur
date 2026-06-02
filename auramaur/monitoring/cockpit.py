@@ -17,6 +17,7 @@ import time
 from collections import OrderedDict
 from datetime import datetime, timezone
 
+from rich.console import Group
 from rich.layout import Layout
 from rich.panel import Panel
 from rich.table import Table
@@ -110,37 +111,145 @@ def recent_activity(lines: list[dict], limit: int = 12) -> list[tuple[str, str]]
     return out[-limit:]
 
 
-async def gather_state(db, settings, cache: dict) -> dict:
-    """Collect cockpit state. `cache` persists balances between refreshes."""
+async def _portfolio_pnl(db, settings, is_paper_flag: int) -> dict:
+    """Authoritative positions + P&L, ported from the old dashboard path.
+
+    P&L = resolved (live only) + realized cost-basis + unrealized mark-to-market.
+    Deliberately does NOT sum ``trades.pnl`` — that legacy mirror field is
+    unreliable, which is exactly why the cockpit and dashboard used to disagree.
+    """
+    rows = await db.fetchall(
+        """SELECT p.*, m.question, cb.avg_cost AS cb_avg_cost FROM portfolio p
+           LEFT JOIN markets m ON p.market_id = m.id
+           LEFT JOIN cost_basis cb ON cb.market_id = p.market_id
+                                  AND cb.is_paper = p.is_paper
+           WHERE p.is_paper = ?""",
+        (is_paper_flag,),
+    )
+    positions = [
+        {
+            "market_id": r["market_id"], "question": r["question"] or r["market_id"],
+            "side": r["side"], "size": r["size"], "avg_price": r["avg_price"],
+            "current_price": r["current_price"] or r["avg_price"],
+            "pnl": (
+                ((r["current_price"] or r["avg_price"]) - (r["cb_avg_cost"] or r["avg_price"]))
+                * (r["size"] or 0)
+            ),
+        }
+        for r in rows
+    ]
+    position_value = sum((p["current_price"] or 0) * (p["size"] or 0) for p in positions)
+
+    # Recent signals (edge feed)
+    sig_rows = await db.fetchall(
+        """SELECT s.*, m.question FROM signals s
+           LEFT JOIN markets m ON s.market_id = m.id
+           ORDER BY s.timestamp DESC LIMIT 20"""
+    )
+    signals = [
+        {
+            "market_id": r["market_id"], "question": r["question"] or r["market_id"],
+            "claude_prob": r["claude_prob"], "market_prob": r["market_prob"],
+            "edge": r["edge"], "action": r["action"] or "",
+        }
+        for r in sig_rows
+    ]
+
+    # Trade count from fills (authoritative), not the trades mirror.
+    cnt_row = await db.fetchone(
+        "SELECT COUNT(*) as cnt FROM fills WHERE is_paper = ?", (is_paper_flag,))
+    trade_count = cnt_row["cnt"] if cnt_row else 0
+
+    # Authoritative total P&L.
+    resolved_component_sql = (
+        "COALESCE((SELECT SUM(r.pnl) FROM resolution_pnl r), 0)"
+        if settings.is_live else "0"
+    )
+    resolved_exclusion_sql = (
+        "AND cb.market_id NOT IN (SELECT market_id FROM resolution_pnl)"
+        if settings.is_live else ""
+    )
+    portfolio_resolved_exclusion_sql = (
+        "AND p.market_id NOT IN (SELECT market_id FROM resolution_pnl)"
+        if settings.is_live else ""
+    )
+    pnl_row = await db.fetchone(
+        f"""
+        SELECT
+            {resolved_component_sql}
+          + COALESCE((
+                SELECT SUM(cb.realized_pnl)
+                FROM cost_basis cb
+                WHERE cb.is_paper = ?
+                  {resolved_exclusion_sql}
+            ), 0)
+          + COALESCE((
+                SELECT SUM((COALESCE(p.current_price, p.avg_price)
+                            - COALESCE(cb.avg_cost, p.avg_price)) * p.size)
+                FROM portfolio p
+                LEFT JOIN cost_basis cb ON cb.market_id = p.market_id
+                                      AND cb.is_paper = p.is_paper
+                WHERE p.is_paper = ?
+                  {portfolio_resolved_exclusion_sql}
+            ), 0) AS total_pnl
+        """,
+        (is_paper_flag, is_paper_flag),
+    )
+    total_pnl = pnl_row["total_pnl"] if pnl_row else 0
+
+    dd_row = await db.fetchone(
+        "SELECT max_drawdown FROM daily_stats ORDER BY date DESC LIMIT 1")
+    drawdown = dd_row["max_drawdown"] if dd_row else 0
+
+    if settings.is_live:
+        balance = None  # on-chain cash is shown by the running bot's syncer
+    else:
+        balance = settings.execution.paper_initial_balance + total_pnl
+
+    return {
+        "positions": positions,
+        "position_count": len(positions),
+        "position_value": position_value,
+        "signals": signals,
+        "trade_count": trade_count,
+        "total_pnl": total_pnl,
+        "drawdown": drawdown,
+        "balance": balance,
+    }
+
+
+async def gather_state(db, settings, cache: dict | None = None) -> dict:
+    """Collect cockpit state. `cache` persists venue balances between refreshes.
+
+    Pass ``cache=None`` for a one-shot snapshot (e.g. ``status``); venue
+    balances are then always fetched fresh.
+    """
     now = datetime.now(timezone.utc)
     is_paper_flag = 0 if settings.is_live else 1
 
-    # Positions + P&L from DB
-    rows = await db.fetchall(
-        "SELECT COUNT(*) c, COALESCE(SUM(size*COALESCE(current_price,avg_price)),0) v "
-        "FROM portfolio WHERE is_paper = ?", (is_paper_flag,))
-    pos = rows[0] if rows else {"c": 0, "v": 0}
-    pnl_row = await db.fetchone(
-        "SELECT COUNT(*) cnt, COALESCE(SUM(pnl),0) pnl FROM trades WHERE is_paper = ?",
-        (is_paper_flag,))
+    pf = await _portfolio_pnl(db, settings, is_paper_flag)
 
-    # Live venue balances — refreshed at most every 20s (rate-limit friendly)
-    if time.time() - cache.get("bal_ts", 0) > 20:
-        cache["bal_ts"] = time.time()
-        cache["venues"] = await _venue_balances(settings)
+    # Live venue balances — refreshed at most every 20s (rate-limit friendly).
+    if cache is None:
+        venues = await _venue_balances(settings)
+    else:
+        if time.time() - cache.get("bal_ts", 0) > 20:
+            cache["bal_ts"] = time.time()
+            cache["venues"] = await _venue_balances(settings)
+        venues = cache.get("venues", {})
 
     lines = read_log_tail(settings.logging.file)
+    from auramaur.monitoring.diagnostics import summarize_errors
     return {
         "now": now,
         "is_live": settings.is_live,
         "transfers_armed": settings.transfers_armed,
         "kill_switch": settings.kill_switch_active,
-        "position_count": pos["c"], "position_value": pos["v"],
-        "trade_count": pnl_row["cnt"] if pnl_row else 0,
-        "total_pnl": pnl_row["pnl"] if pnl_row else 0,
-        "venues": cache.get("venues", {}),
+        "venues": venues,
         "pillars": pillar_liveness(lines),
         "activity": recent_activity(lines),
+        "health": summarize_errors(lines, top=4),
+        **pf,
     }
 
 
@@ -172,59 +281,152 @@ async def _venue_balances(settings) -> dict:
     return out
 
 
-def make_layout(s: dict) -> Layout:
-    now = s["now"]
-    layout = Layout()
-    layout.split_column(
-        Layout(name="header", size=3),
-        Layout(name="body"),
-        Layout(name="footer", size=3),
-    )
-    layout["body"].split_row(Layout(name="left"), Layout(name="right"))
+# --- panel builders (shared by the live layout and the one-shot snapshot) ---
 
-    # Header — mode + gates
+def _header_panel(s: dict) -> Panel:
     mode = "[bold red]● LIVE[/]" if s["is_live"] else "[bold green]● PAPER[/]"
     gates = []
     if s["kill_switch"]:
         gates.append("[bold red]KILL SWITCH[/]")
     if s["transfers_armed"]:
         gates.append("[yellow]transfers armed[/]")
-    layout["header"].update(Panel(Text.from_markup(
-        f"  AURAMAUR cockpit   {mode}   {now.strftime('%H:%M:%S UTC')}   "
-        + "  ".join(gates))))
+    return Panel(Text.from_markup(
+        f"  AURAMAUR cockpit   {mode}   {s['now'].strftime('%H:%M:%S UTC')}   "
+        + "  ".join(gates)))
 
-    # Left — venues + pillar liveness
+
+def _venues_panel(s: dict) -> Panel:
     venues = Table.grid(padding=(0, 1))
     venues.add_column(style="magenta")
     venues.add_column()
     venues.add_row("polymarket", f"{s['position_count']} pos, ${s['position_value']:.0f}")
     for name, val in s["venues"].items():
         venues.add_row(name, val)
+    return Panel(venues, title="venues")
 
+
+def _pillars_panel(s: dict) -> Panel:
     pillars = Table(title="pillars", expand=True)
     pillars.add_column("pillar", style="cyan")
     pillars.add_column("last seen")
     for pillar, ts in s["pillars"].items():
-        txt, color = _ago(ts, now)
+        txt, color = _ago(ts, s["now"])
         pillars.add_row(pillar, f"[{color}]{txt}[/]")
+    return Panel(pillars)
 
-    left = Layout()
-    left.split_column(Layout(Panel(venues, title="venues"), size=len(s["venues"]) + 4),
-                      Layout(Panel(pillars)))
-    layout["left"].update(left)
 
-    # Right — activity feed
+def _positions_panel(s: dict) -> Panel:
+    t = Table(title="positions", expand=True)
+    t.add_column("market", style="cyan", max_width=34, no_wrap=True)
+    t.add_column("side", style="bold")
+    t.add_column("size", justify="right")
+    t.add_column("avg", justify="right")
+    t.add_column("cur", justify="right")
+    t.add_column("pnl", justify="right")
+    # Show the biggest movers first so the live view is information-dense.
+    for p in sorted(s["positions"], key=lambda p: abs(p.get("pnl", 0)), reverse=True)[:12]:
+        pnl = p.get("pnl", 0)
+        pc = "green" if pnl >= 0 else "red"
+        t.add_row(
+            (p.get("question") or p.get("market_id") or "")[:34],
+            p.get("side", ""),
+            f"{p.get('size', 0):.0f}",
+            f"{p.get('avg_price', 0):.3f}",
+            f"{p.get('current_price', 0):.3f}",
+            f"[{pc}]${pnl:+.2f}[/]",
+        )
+    return Panel(t)
+
+
+def _signals_panel(s: dict) -> Panel:
+    t = Table(title="recent signals", expand=True)
+    t.add_column("market", style="cyan", max_width=34, no_wrap=True)
+    t.add_column("clP", justify="right")
+    t.add_column("mkP", justify="right")
+    t.add_column("edge", justify="right")
+    t.add_column("action", style="bold")
+    for sig in s["signals"][:10]:
+        edge = sig.get("edge", 0) or 0
+        ec = "green" if edge > 0 else "red"
+        t.add_row(
+            (sig.get("question") or sig.get("market_id") or "")[:34],
+            f"{sig.get('claude_prob', 0) or 0:.3f}",
+            f"{sig.get('market_prob', 0) or 0:.3f}",
+            f"[{ec}]{edge:+.1f}%[/]",
+            sig.get("action", ""),
+        )
+    return Panel(t)
+
+
+def _activity_panel(s: dict) -> Panel:
     feed = Table.grid(padding=(0, 1))
     feed.add_column(style="dim", no_wrap=True)
     feed.add_column()
     for hhmm, txt in s["activity"]:
         feed.add_row(hhmm, txt[:70])
-    layout["right"].update(Panel(feed, title="activity"))
+    return Panel(feed, title="activity")
 
-    # Footer — P&L
+
+def _health_panel(s: dict) -> Panel:
+    from auramaur.monitoring.diagnostics import error_panel_compact
+    return error_panel_compact(s.get("health", {"errors": 0, "warnings": 0, "top": []}))
+
+
+def _footer_panel(s: dict) -> Panel:
     pnl = s["total_pnl"]
     pc = "green" if pnl >= 0 else "red"
-    layout["footer"].update(Panel(Text.from_markup(
-        f"  PnL: [{pc}]${pnl:+.2f}[/]   Trades: {s['trade_count']}   "
-        f"Positions: {s['position_count']}   (${s['position_value']:.0f})")))
+    bal = s.get("balance")
+    bal_str = "n/a" if bal is None else f"${bal:,.2f}"
+    return Panel(Text.from_markup(
+        f"  Balance: [bold]{bal_str}[/]   PnL: [{pc}]${pnl:+.2f}[/]   "
+        f"Trades: {s['trade_count']}   Positions: {s['position_count']} "
+        f"(${s['position_value']:.0f})   Drawdown: {s['drawdown']:.1f}%"))
+
+
+def make_layout(s: dict, *, compact: bool = False):
+    """Render cockpit state.
+
+    ``compact=False`` → a full-screen ``rich.Layout`` for the live cockpit.
+    ``compact=True``  → a stacked ``rich.Group`` snapshot for one-shot ``status``.
+    Both share the same panel builders, so the numbers can never diverge.
+    """
+    if compact:
+        return Group(
+            _header_panel(s),
+            _venues_panel(s),
+            _pillars_panel(s),
+            _health_panel(s),
+            _positions_panel(s),
+            _signals_panel(s),
+            _footer_panel(s),
+        )
+
+    layout = Layout()
+    layout.split_column(
+        Layout(name="header", size=3),
+        Layout(name="body"),
+        Layout(name="footer", size=3),
+    )
+    layout["body"].split_row(
+        Layout(name="left", ratio=1),
+        Layout(name="center", ratio=2),
+        Layout(name="right", ratio=1),
+    )
+
+    layout["header"].update(_header_panel(s))
+
+    left = Layout()
+    left.split_column(
+        Layout(_venues_panel(s), size=len(s["venues"]) + 4),
+        Layout(_pillars_panel(s)),
+        Layout(_health_panel(s), size=8),
+    )
+    layout["left"].update(left)
+
+    center = Layout()
+    center.split_column(Layout(_positions_panel(s)), Layout(_signals_panel(s)))
+    layout["center"].update(center)
+
+    layout["right"].update(_activity_panel(s))
+    layout["footer"].update(_footer_panel(s))
     return layout
