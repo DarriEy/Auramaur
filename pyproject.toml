@@ -35,6 +35,9 @@ dependencies = [
 [project.optional-dependencies]
 kalshi = ["kalshi-python>=2.1.0"]
 ibkr = ["ib_async>=1.0.0"]
+# Semantic evidence ranking. Optional: without it, relevance scoring falls back
+# to scikit-learn TF-IDF and then a no-dependency heuristic.
+embeddings = ["sentence-transformers>=3.0"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

@@ -88,23 +88,12 @@ class Aggregator:
                 seen_titles.add(norm)
                 unique.append(item)
 
-        # Rank: combined score of recency, source reliability, and relevance
-        now = datetime.now(tz=timezone.utc)
+        # Rank: combined score of recency, source reliability, and relevance.
+        # Source authority is centralized in auramaur.nlp.sources so the
+        # aggregator and the evidence compressor agree on trust weights.
+        from auramaur.nlp.sources import authority
 
-        # Source reliability tiers (higher = more trustworthy)
-        _SOURCE_WEIGHTS = {
-            "reuters": 3.0, "ap": 3.0, "bbc": 2.5, "nyt": 2.5,
-            "guardian": 2.0, "npr": 2.0, "politico": 2.0, "cnbc": 2.0,
-            "bloomberg": 2.5, "ft": 2.5, "wsj": 2.5,
-            "web": 1.5, "newsapi": 1.5,
-            "rss": 1.0, "reddit": 0.8, "fred": 2.0,
-            "market_data": 2.5, "polymarket_context": 2.0,
-            "cointelegraph": 1.0, "coindesk": 1.2,
-            "manifold": 2.0,
-            "coingecko": 2.0, "espn": 1.5, "usgs": 2.5,
-            "hackernews": 1.0, "gdelt": 1.0, "google_trends": 0.8,
-            "bluesky": 0.8,
-        }
+        now = datetime.now(tz=timezone.utc)
 
         def _rank(item: NewsItem) -> float:
             pub = item.published_at
@@ -112,15 +101,7 @@ class Aggregator:
                 pub = pub.replace(tzinfo=timezone.utc)
             age_hours = max((now - pub).total_seconds() / 3600, 0.01)
             recency = 1.0 / age_hours
-            # Source reliability bonus
-            source_lower = item.source.lower()
-            source_weight = _SOURCE_WEIGHTS.get(source_lower, 1.0)
-            # Check URL for high-quality domains
-            url_lower = (item.url or "").lower()
-            for domain, weight in _SOURCE_WEIGHTS.items():
-                if domain in url_lower:
-                    source_weight = max(source_weight, weight)
-                    break
+            source_weight = authority(item.source, item.url)
             return (recency * source_weight) + item.relevance_score
 
         unique.sort(key=_rank, reverse=True)

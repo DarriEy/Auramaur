@@ -22,6 +22,8 @@ import re
 import structlog
 
 from auramaur.data_sources.base import NewsItem
+from auramaur.nlp.relevance import relevance_scores
+from auramaur.nlp.sources import authority
 
 log = structlog.get_logger()
 
@@ -52,7 +54,7 @@ def compress_evidence(
         parts.append("FACTS: " + " | ".join(facts[:8]))
 
     # 2. DIRECTIONAL SIGNALS — what points YES vs NO
-    yes_signals, no_signals = _extract_directional(question, unique)
+    yes_signals, no_signals, used_titles = _extract_directional(question, unique)
     if yes_signals:
         parts.append("FOR YES: " + "; ".join(yes_signals[:4]))
     if no_signals:
@@ -68,8 +70,9 @@ def compress_evidence(
     if consensus:
         parts.append("CONSENSUS: " + consensus)
 
-    # 5. RAW EXCERPTS — top 3 most relevant snippets (for Claude to reason over)
-    excerpts = _extract_top_excerpts(question, unique, max_excerpts=3)
+    # 5. RAW EXCERPTS — top relevant snippets, skipping items already surfaced
+    #    as directional signals so we don't pay tokens for the same headline twice.
+    excerpts = _extract_top_excerpts(question, unique, max_excerpts=3, exclude_titles=used_titles)
     if excerpts:
         parts.append("KEY EXCERPTS:\n" + "\n".join(f"- [{e[0]}] {e[1]}" for e in excerpts))
 
@@ -90,21 +93,34 @@ def compress_evidence(
 
 
 def _deduplicate(evidence: list[NewsItem]) -> list[NewsItem]:
-    """Remove near-duplicate evidence items by title similarity."""
-    seen_words: list[set[str]] = []
+    """Remove near-duplicate evidence items by title AND lead-content similarity.
+
+    Syndicated copies often reword the headline but share the body, so title
+    similarity alone misses them. We compare both and treat an item as a
+    duplicate if either the title or the content lead substantially overlaps a
+    kept item (Jaccard over word sets).
+    """
+    def _jaccard(a: set[str], b: set[str]) -> float:
+        if not a or not b:
+            return 0.0
+        return len(a & b) / len(a | b)
+
+    seen_titles: list[set[str]] = []
+    seen_bodies: list[set[str]] = []
     unique: list[NewsItem] = []
 
     for item in evidence:
-        words = set(item.title.lower().split())
-        # Check overlap with existing items
+        t_words = set((item.title or "").lower().split())
+        b_words = set((item.content or "")[:300].lower().split())
         is_dup = False
-        for seen in seen_words:
-            if len(words) > 0 and len(words & seen) / max(len(words), 1) > 0.6:
+        for st, sb in zip(seen_titles, seen_bodies):
+            if _jaccard(t_words, st) > 0.6 or (len(b_words) >= 4 and _jaccard(b_words, sb) > 0.7):
                 is_dup = True
                 break
         if not is_dup:
             unique.append(item)
-            seen_words.append(words)
+            seen_titles.append(t_words)
+            seen_bodies.append(b_words)
 
     return unique
 
@@ -113,13 +129,15 @@ def _extract_facts(evidence: list[NewsItem]) -> list[str]:
     """Extract concrete factual statements from evidence."""
     facts: list[str] = []
 
-    # Patterns that indicate factual content
+    # Patterns that indicate factual content. Attribution boilerplate
+    # ("according to", "said") was dropped — it matched non-facts and wasted
+    # tokens. Concrete figures, dates, and decisive actions carry the signal.
     fact_patterns = [
         r'\$[\d,.]+[BMK]?\b',           # Dollar amounts
         r'\d+\.?\d*%',                    # Percentages
         r'\b\d{1,2}/\d{1,2}/\d{2,4}\b', # Dates
-        r'\b(?:signed|announced|confirmed|approved|rejected|passed|failed)\b',
-        r'\b(?:according to|reported|stated|said)\b',
+        r'\b(?:signed|announced|confirmed|approved|rejected|passed|failed|'
+        r'vetoed|resigned|launched|banned|ruled|sentenced|acquired|merged)\b',
     ]
 
     for item in evidence[:10]:
@@ -141,44 +159,60 @@ def _extract_facts(evidence: list[NewsItem]) -> list[str]:
 
 def _extract_directional(
     question: str, evidence: list[NewsItem],
-) -> tuple[list[str], list[str]]:
-    """Classify evidence as supporting YES or NO."""
+) -> tuple[list[str], list[str], set[str]]:
+    """Classify evidence as supporting YES or NO.
+
+    Returns (yes_signals, no_signals, used_titles). ``used_titles`` lets the
+    caller avoid repeating these headlines in the excerpt section. A simple
+    negation guard flips a polarity word when it's immediately preceded by a
+    negator ("not approved" -> NO, not YES).
+    """
     yes_signals: list[str] = []
     no_signals: list[str] = []
+    used_titles: set[str] = set()
 
-    # Simple keyword-based directional classification
     positive_words = {
-        "will", "likely", "expected", "confirmed", "approved", "agreed",
+        "likely", "expected", "confirmed", "approved", "agreed",
         "advancing", "progress", "success", "growth", "increase", "rising",
-        "support", "momentum", "boost",
+        "support", "momentum", "boost", "wins", "won", "passed",
     }
     negative_words = {
         "unlikely", "rejected", "failed", "denied", "blocked", "delayed",
         "declined", "falling", "collapse", "opposition", "against",
-        "stalled", "uncertain", "doubt",
+        "stalled", "uncertain", "doubt", "loses", "lost", "vetoed",
     }
+    negators = {"not", "no", "never", "without", "fails", "fail", "denies"}
 
-    q_words = set(question.lower().split())
+    # Rank candidates by relevance so we describe the most on-topic items first.
+    titles = [f"{it.title or ''}. {(it.content or '')[:200]}" for it in evidence[:10]]
+    rel = relevance_scores(question, titles, backend="heuristic")
 
-    for item in evidence[:10]:
-        text = f"{item.title} {item.content or ''}".lower()
-        text_words = set(text.split())
-
-        # Check relevance to question
-        relevance = len(q_words & text_words) / max(len(q_words), 1)
-        if relevance < 0.15:
+    for item, r in sorted(zip(evidence[:10], rel), key=lambda x: x[1], reverse=True):
+        if r < 0.12:
             continue
+        tokens = re.findall(r"[a-z]+", f"{item.title} {item.content or ''}".lower())
+        pos = neg = 0
+        for idx, tok in enumerate(tokens):
+            # A negator anywhere in the preceding 3-token window flips polarity
+            # ("will not be approved" -> negative).
+            window = tokens[max(0, idx - 3):idx]
+            negated = any(w in negators for w in window)
+            if tok in positive_words:
+                neg += 1 if negated else 0
+                pos += 0 if negated else 1
+            elif tok in negative_words:
+                pos += 1 if negated else 0
+                neg += 0 if negated else 1
 
-        pos_count = len(positive_words & text_words)
-        neg_count = len(negative_words & text_words)
-
-        snippet = item.title[:100]
-        if pos_count > neg_count:
+        snippet = (item.title or "")[:100]
+        if pos > neg:
             yes_signals.append(f"({item.source}) {snippet}")
-        elif neg_count > pos_count:
+            used_titles.add(item.title or "")
+        elif neg > pos:
             no_signals.append(f"({item.source}) {snippet}")
+            used_titles.add(item.title or "")
 
-    return yes_signals, no_signals
+    return yes_signals, no_signals, used_titles
 
 
 def _extract_temporal(evidence: list[NewsItem]) -> str:
@@ -233,27 +267,32 @@ def _extract_top_excerpts(
     question: str,
     evidence: list[NewsItem],
     max_excerpts: int = 3,
+    exclude_titles: set[str] | None = None,
 ) -> list[tuple[str, str]]:
-    """Extract the most relevant text excerpts."""
-    q_words = set(question.lower().split()) - {"will", "the", "a", "an", "of", "in", "on", "by", "to", "be", "is"}
+    """Extract the most relevant text excerpts, skipping already-surfaced items.
+
+    Relevance uses the rarity-weighted scorer (so common words don't dominate)
+    and is multiplied by centralized source authority. Items whose headline was
+    already emitted as a directional signal are skipped to avoid duplication.
+    """
+    exclude_titles = exclude_titles or set()
+    candidates = [
+        it for it in evidence
+        if (it.content or it.title) and (it.title or "") not in exclude_titles
+    ]
+    if not candidates:
+        return []
+
+    texts = [it.content or it.title or "" for it in candidates]
+    rel = relevance_scores(question, texts, backend="heuristic")
 
     scored: list[tuple[float, str, str]] = []
-    for item in evidence:
-        content = item.content or item.title
-        if not content:
-            continue
-
-        # Score by word overlap with question
-        content_words = set(content.lower().split())
-        overlap = len(q_words & content_words)
-        # Bonus for source reliability
-        source_bonus = {"reuters": 2, "ap": 2, "bbc": 1.5, "web": 1, "newsapi": 1}.get(item.source.lower(), 0.5)
-
-        score = overlap * source_bonus
+    for item, r in zip(candidates, rel):
+        content = item.content or item.title or ""
+        score = (0.1 + r) * authority(item.source, item.url)
         snippet = content[:200].strip()
         if len(content) > 200:
             snippet += "..."
-
         scored.append((score, item.source, snippet))
 
     scored.sort(key=lambda x: x[0], reverse=True)

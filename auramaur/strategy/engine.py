@@ -1157,7 +1157,6 @@ class TradingEngine:
         markets = [m for m, _score in ranked_markets[:_MAX_STRATEGIC_BATCH]]
 
         # Gather evidence for all markets first
-        from auramaur.data_sources.base import NewsItem as _NI
         from auramaur.nlp.query_decomposer import extract_search_queries
 
         # Evidence gathering is the dominant cycle cost — each market fans out
@@ -1194,17 +1193,9 @@ class TradingEngine:
                     all_evidence: list = []
                     seen_ids: set[str] = set()
 
-                    # Add market description as synthetic evidence (resolution criteria)
-                    if market.description and len(market.description) > 20:
-                        all_evidence.append(_NI(
-                            id=f"polymarket_desc:{market.id}",
-                            source="polymarket_context",
-                            title=f"Resolution criteria: {market.question}",
-                            content=market.description[:800],
-                            url=f"https://polymarket.com/event/{market.id}",
-                        ))
-                        seen_ids.add(f"polymarket_desc:{market.id}")
-
+                    # Resolution criteria are carried in the market block's Desc
+                    # field, not duplicated here as synthetic evidence — the
+                    # Evidence section is real-world news only.
                     for query in queries:
                         items = await self.aggregator.gather(
                             query, limit_per_source=8, category=market.category or None,
@@ -1213,9 +1204,20 @@ class TradingEngine:
                             if item.id not in seen_ids:
                                 seen_ids.add(item.id)
                                 all_evidence.append(item)
-                    # Cap evidence per market to keep total prompt under context window
-                    # 12 markets × 8 items × ~500 chars = ~48k chars of evidence
-                    return (market.id, all_evidence[:8])
+
+                    # Lever A: globally re-rank the merged candidate set against
+                    # the market question (recency x authority x relevance) and
+                    # keep the best N — not the first N by query order.
+                    from auramaur.nlp.evidence_ranker import rank_evidence
+                    nlp = self.settings.nlp
+                    ranked = rank_evidence(
+                        market.question,
+                        all_evidence,
+                        top_n=nlp.evidence_top_n,
+                        backend=nlp.relevance_backend,
+                        model_name=nlp.embedding_model,
+                    )
+                    return (market.id, ranked)
                 except Exception as e:
                     log.error("strategic.evidence_error", market_id=market.id, error=str(e))
                     return (market.id, [])

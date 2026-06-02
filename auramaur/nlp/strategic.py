@@ -73,10 +73,17 @@ class WorldModel(BaseModel):
         if self.macro_outlook:
             parts.append(f"MACRO STATE:\n{self.macro_outlook}")
 
-        # Entity graph — the primary relational structure
+        # Entity graph — the primary relational structure. Surface the most
+        # connected entities (by markets touched + relations), not whichever
+        # happened to be inserted last.
         if self.entity_graph:
+            ranked = sorted(
+                self.entity_graph.items(),
+                key=lambda kv: (len(kv[1].market_ids), len(kv[1].relations)),
+                reverse=True,
+            )[:12]
             entity_lines = []
-            for name, entity in list(self.entity_graph.items())[-12:]:
+            for name, entity in ranked:
                 rel_str = "; ".join(entity.relations[-3:]) if entity.relations else "no tracked relations"
                 entity_lines.append(f"- **{name}**: {entity.state[:120]} [{rel_str}]")
             parts.append("ENTITY GRAPH:\n" + "\n".join(entity_lines))
@@ -336,28 +343,98 @@ class StrategicAnalyzer:
             return "(No calibration data yet — predictions haven't resolved.)"
 
         if rows:
-            lines = []
-            correct = 0
-            total = 0
-            for row in rows:
-                question = row["question"] or row["market_id"]
-                predicted = row["predicted_prob"] or row["claude_prob"]
-                actual = "YES" if row["actual_outcome"] else "NO"
-                was_right = (predicted > 0.5 and row["actual_outcome"]) or \
-                            (predicted <= 0.5 and not row["actual_outcome"])
-                if was_right:
-                    correct += 1
-                total += 1
-                icon = "correct" if was_right else "WRONG"
-                lines.append(
-                    f"- [{icon}] \"{question[:60]}\" — you said {predicted:.0%}, resolved {actual}"
-                )
-
-            accuracy = correct / total if total > 0 else 0
-            header = f"Track record: {correct}/{total} ({accuracy:.0%} accuracy)\n"
-            parts.append(header + "\n".join(lines[:_MAX_CALIBRATION_ENTRIES]))
+            if self._settings.nlp.calibration_buckets:
+                parts.append(self._calibration_curve(rows))
+            else:
+                parts.append(self._calibration_rows(rows))
 
         return "\n\n".join(parts)
+
+    @staticmethod
+    def _calibration_curve(rows: list) -> str:
+        """Compact reliability curve: per-band over/under-confidence + top misses.
+
+        Far higher signal-per-token than dumping every resolved outcome — it
+        tells the model exactly where its probabilities have been biased.
+        """
+        samples: list[tuple[float, float, str]] = []  # (predicted, actual, question)
+        for row in rows:
+            predicted = row["predicted_prob"] or row["claude_prob"]
+            if predicted is None:
+                continue
+            actual = 1.0 if row["actual_outcome"] else 0.0
+            samples.append((float(predicted), actual, row["question"] or row["market_id"]))
+
+        if not samples:
+            return "(No resolved predictions yet.)"
+
+        n = len(samples)
+        correct = sum(1 for p, a, _ in samples if (p > 0.5) == (a > 0.5))
+        brier = sum((p - a) ** 2 for p, a, _ in samples) / n
+
+        log.info(
+            "strategic.calibration_snapshot",
+            resolved=n,
+            directional_accuracy=round(correct / n, 3),
+            brier=round(brier, 4),
+        )
+
+        bands = [(0.0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.01)]
+        band_lines: list[str] = []
+        for lo, hi in bands:
+            bucket = [(p, a) for p, a, _ in samples if lo <= p < hi]
+            if not bucket:
+                continue
+            mean_pred = sum(p for p, _ in bucket) / len(bucket)
+            hit_rate = sum(a for _, a in bucket) / len(bucket)
+            gap = mean_pred - hit_rate
+            if abs(gap) < 0.05:
+                bias = "well-calibrated"
+            elif gap > 0:
+                bias = f"OVERconfident by {gap:+.0%} → shade toward 0.5"
+            else:
+                bias = f"UNDERconfident by {gap:+.0%} → push away from 0.5"
+            band_lines.append(
+                f"- {lo:.0%}-{hi if hi <= 1 else 1:.0%}: said ~{mean_pred:.0%}, "
+                f"resolved YES {hit_rate:.0%} (n={len(bucket)}) — {bias}"
+            )
+
+        # Largest errors as concrete cautionary examples.
+        worst = sorted(samples, key=lambda s: abs(s[0] - s[1]), reverse=True)[:3]
+        miss_lines = [
+            f"- \"{q[:60]}\": said {p:.0%}, resolved {'YES' if a > 0.5 else 'NO'}"
+            for p, a, q in worst
+        ]
+
+        return (
+            f"Track record: {correct}/{n} directional ({correct / n:.0%}), "
+            f"Brier {brier:.3f} (lower is better)\n"
+            "Reliability by confidence band:\n" + "\n".join(band_lines) +
+            "\nBiggest misses (avoid repeating):\n" + "\n".join(miss_lines)
+        )
+
+    @staticmethod
+    def _calibration_rows(rows: list) -> str:
+        """Legacy per-row calibration dump (used when buckets are disabled)."""
+        lines = []
+        correct = 0
+        total = 0
+        for row in rows:
+            question = row["question"] or row["market_id"]
+            predicted = row["predicted_prob"] or row["claude_prob"]
+            actual = "YES" if row["actual_outcome"] else "NO"
+            was_right = (predicted > 0.5 and row["actual_outcome"]) or \
+                        (predicted <= 0.5 and not row["actual_outcome"])
+            if was_right:
+                correct += 1
+            total += 1
+            icon = "correct" if was_right else "WRONG"
+            lines.append(
+                f"- [{icon}] \"{question[:60]}\" — you said {predicted:.0%}, resolved {actual}"
+            )
+        accuracy = correct / total if total > 0 else 0
+        header = f"Track record: {correct}/{total} ({accuracy:.0%} accuracy)\n"
+        return header + "\n".join(lines[:_MAX_CALIBRATION_ENTRIES])
 
     # ------------------------------------------------------------------
     # Batch Analysis
@@ -375,6 +452,9 @@ class StrategicAnalyzer:
         from auramaur.nlp.evidence_compressor import compress_evidence
 
         blocks = []
+        total_raw = 0
+        total_ev_chars = 0
+        markets_with_evidence = 0
         for i, market in enumerate(markets, 1):
             evidence = evidence_map.get(market.id, [])
 
@@ -386,6 +466,9 @@ class StrategicAnalyzer:
                     evidence,
                     max_chars=1500,  # ~375 tokens per market
                 )
+                total_raw += len(evidence)
+                total_ev_chars += len(ev_text)
+                markets_with_evidence += 1
             else:
                 ev_text = "(No evidence found)"
 
@@ -399,12 +482,24 @@ class StrategicAnalyzer:
             block = (
                 f"--- MARKET {i} (id: {market.id}) ---\n"
                 f"Q: {market.question}\n"
-                f"Desc: {market.description[:200]}\n"
+                f"Resolution criteria: {market.description[:400]}\n"
                 f"Cat: {market.category} | {micro} | "
                 f"End: {market.end_date.strftime('%Y-%m-%d') if market.end_date else '?'}\n"
                 f"Evidence:\n{ev_text}\n"
             )
             blocks.append(block)
+
+        # Prompt-signal logging: how much evidence we ingested vs how compactly
+        # it landed in the prompt. Lets us A/B the info-content changes.
+        log.info(
+            "strategic.evidence_signal",
+            markets=len(markets),
+            markets_with_evidence=markets_with_evidence,
+            raw_evidence_items=total_raw,
+            evidence_chars=total_ev_chars,
+            avg_items_per_market=round(total_raw / markets_with_evidence, 1) if markets_with_evidence else 0,
+            avg_chars_per_market=round(total_ev_chars / markets_with_evidence) if markets_with_evidence else 0,
+        )
 
         return "\n".join(blocks)
 
