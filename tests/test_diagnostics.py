@@ -105,6 +105,40 @@ def test_doctor_killswitch_drives_verdict():
     asyncio.run(run())
 
 
+def test_doctor_distinguishes_stale_from_dormant(tmp_path):
+    """A pillar that went silent (stale) warns; one never seen (dormant) is just
+    informational context (e.g. IBKR pre-funding) and does not warn."""
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    recent = (now - timedelta(seconds=30)).isoformat()
+    old = (now - timedelta(minutes=40)).isoformat()
+    logf = tmp_path / "auramaur.log"
+    rows = [
+        {"event": "boot", "level": "info", "timestamp": old},          # sacrificial 1st line
+        {"event": "kalshi.scan", "level": "info", "timestamp": recent},   # alive
+        {"event": "polymarket.cycle", "level": "info", "timestamp": old},  # went stale
+        # ibkr never appears -> dormant
+    ]
+    logf.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        settings = SimpleNamespace(is_live=False, kill_switch_active=False,
+                                   logging=SimpleNamespace(file=str(logf)))
+        s = await gather_doctor(settings, db)
+        pillars = next(c for c in s["checks"] if c["name"] == "pillars")
+        assert pillars["status"] == "warn"          # polymarket went silent
+        assert "polymarket" in pillars["detail"]
+        assert "ibkr" in pillars["detail"]           # dormant context, not a fault
+        assert "dormant" in pillars["detail"]
+        await db.close()
+
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     test_summarize_counts_and_excludes_info()
     test_summarize_empty()

@@ -180,8 +180,10 @@ async def gather_doctor(settings, db, *, max_bytes: int = 8_000_000) -> dict:
 
     records = _read_tail_records(settings.logging.file, max_bytes)
 
-    # Log freshness — is the process even writing?
+    # Log freshness — is the process even writing? Also gives us the time span
+    # the scanned tail covers, so error counts below are interpretable as a rate.
     stamps = [t for t in (_parse_ts(r.get("timestamp", "")) for r in records) if t]
+    span_min = (max(stamps) - min(stamps)).total_seconds() / 60.0 if len(stamps) >= 2 else None
     if not stamps:
         checks.append(_chk("log freshness", "warn", "no recent log lines"))
     else:
@@ -189,20 +191,41 @@ async def gather_doctor(settings, db, *, max_bytes: int = 8_000_000) -> dict:
         checks.append(_chk("log freshness", "ok" if age < 600 else "warn",
                            f"last line {int(age)}s ago"))
 
-    # Pillar liveness — anything stale (>15m) or never-seen.
+    # Pillar liveness. Distinguish a pillar that WAS alive and went silent
+    # (stale → died, a real problem) from one never seen in the window (dormant
+    # → disabled or not-yet-active, e.g. IBKR pre-funding; informational, not a
+    # fault). Only the former warns.
     pillars = pillar_liveness(records)
-    alive, stale = [], []
+    alive, stale, dormant = [], [], []
     for p, ts in pillars.items():
-        (alive if ts is not None and (now - ts).total_seconds() <= 900 else stale).append(p)
-    checks.append(_chk("pillars", "ok", f"all {len(alive)} alive")
-                  if not stale else
-                  _chk("pillars", "warn", f"{len(alive)} alive; stale/never: {', '.join(stale)}"))
+        if ts is None:
+            dormant.append(p)
+        elif (now - ts).total_seconds() <= 900:
+            alive.append(p)
+        else:
+            stale.append(p)
+    dorm_note = f" ({len(dormant)} dormant: {', '.join(dormant)})" if dormant else ""
+    if stale:
+        checks.append(_chk("pillars", "warn",
+                           f"{len(alive)} alive; STALE (went silent): {', '.join(stale)}{dorm_note}"))
+    else:
+        checks.append(_chk("pillars", "ok", f"all {len(alive)} alive{dorm_note}"))
 
-    # Error rate + data-source failures.
+    # Error rate + data-source failures. Severity is rate-aware (errors/min over
+    # the scanned span) so a burst isn't hidden by a long window, nor a long
+    # quiet window flagged by a stale absolute count.
     err = summarize_errors(records, top=50)
-    elvl = "fail" if err["errors"] > 500 else ("warn" if err["errors"] or err["warnings"] else "ok")
+    err_rate = (err["errors"] / span_min) if span_min else None
+    if err_rate is not None and err_rate >= 5:
+        elvl = "fail"
+    elif err["errors"] or err["warnings"]:
+        elvl = "warn"
+    else:
+        elvl = "ok"
+    span_note = (f" over ~{int(span_min)}m (~{err_rate:.1f} err/min)"
+                 if span_min else f" (last ~{round(max_bytes/1e6, 1)} MB)")
     checks.append(_chk("errors", elvl,
-                       f"{err['errors']} err / {err['warnings']} warn (last ~{round(max_bytes/1e6,1)} MB)"))
+                       f"{err['errors']} err / {err['warnings']} warn{span_note}"))
     bad_sources = sorted({
         e["event"] for e in err["top"]
         if any(h in e["event"] for h in _SOURCE_ERROR_HINTS)
