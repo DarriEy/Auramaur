@@ -203,6 +203,25 @@ def kraken_balance_cmd():
     asyncio.run(_run())
 
 
+@kraken.command("pnl")
+def kraken_pnl():
+    """Performance readout for the directional (spec) book — is it net positive?"""
+    from auramaur.monitoring.spec_report import (
+        gather_spec_performance, render_spec_performance,
+    )
+
+    async def _run():
+        db = Database()
+        await db.connect()
+        try:
+            state = await gather_spec_performance(db, Settings())
+            console.print(render_spec_performance(state))
+        finally:
+            await db.close()
+
+    asyncio.run(_run())
+
+
 @kraken.command("buy")
 @click.option("--pair", required=True, help="e.g. XBTUSDC")
 @click.option("--usd", required=True, type=float, help="USD/USDC amount")
