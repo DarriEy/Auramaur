@@ -239,6 +239,7 @@ async def gather_state(db, settings, cache: dict | None = None) -> dict:
         venues = cache.get("venues", {})
 
     lines = read_log_tail(settings.logging.file)
+    from auramaur.monitoring.diagnostics import summarize_errors
     return {
         "now": now,
         "is_live": settings.is_live,
@@ -247,6 +248,7 @@ async def gather_state(db, settings, cache: dict | None = None) -> dict:
         "venues": venues,
         "pillars": pillar_liveness(lines),
         "activity": recent_activity(lines),
+        "health": summarize_errors(lines, top=4),
         **pf,
     }
 
@@ -365,6 +367,11 @@ def _activity_panel(s: dict) -> Panel:
     return Panel(feed, title="activity")
 
 
+def _health_panel(s: dict) -> Panel:
+    from auramaur.monitoring.diagnostics import error_panel_compact
+    return error_panel_compact(s.get("health", {"errors": 0, "warnings": 0, "top": []}))
+
+
 def _footer_panel(s: dict) -> Panel:
     pnl = s["total_pnl"]
     pc = "green" if pnl >= 0 else "red"
@@ -388,6 +395,7 @@ def make_layout(s: dict, *, compact: bool = False):
             _header_panel(s),
             _venues_panel(s),
             _pillars_panel(s),
+            _health_panel(s),
             _positions_panel(s),
             _signals_panel(s),
             _footer_panel(s),
@@ -411,6 +419,7 @@ def make_layout(s: dict, *, compact: bool = False):
     left.split_column(
         Layout(_venues_panel(s), size=len(s["venues"]) + 4),
         Layout(_pillars_panel(s)),
+        Layout(_health_panel(s), size=8),
     )
     layout["left"].update(left)
 

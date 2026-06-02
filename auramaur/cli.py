@@ -133,6 +133,40 @@ def gates():
     console.print(g.render(g.gather(Settings())))
 
 
+@main.command()
+def attribution():
+    """Where the bot makes/loses money — per-category and per-strategy P&L."""
+    from auramaur.monitoring.attribution import PerformanceAttributor
+    from auramaur.monitoring.diagnostics import render_attribution
+
+    async def _run():
+        settings = Settings()
+        db = Database()
+        await db.connect()
+        try:
+            attr = PerformanceAttributor(db=db)
+            cats = await attr.get_category_summary(is_live=settings.is_live)
+            strats = await attr.get_strategy_summary()
+            mode = "live" if settings.is_live else "paper"
+            console.print(render_attribution(cats, strats, mode=mode))
+        finally:
+            await db.close()
+
+    asyncio.run(_run())
+
+
+@main.command()
+@click.option("--mb", "max_mb", default=8.0, type=float,
+              help="How many MB from the end of the log to scan.")
+@click.option("--top", default=15, help="Number of distinct events to show.")
+def errors(max_mb: float, top: int):
+    """Digest of recent errors/warnings from the JSON log — top events by count."""
+    from auramaur.monitoring.diagnostics import gather_log_errors, render_error_digest
+    settings = Settings()
+    s = gather_log_errors(settings.logging.file, max_bytes=int(max_mb * 1_000_000), top=top)
+    console.print(render_error_digest(s))
+
+
 @main.group()
 def kraken():
     """Manual Kraken spot trading (gated + typed confirmation)."""

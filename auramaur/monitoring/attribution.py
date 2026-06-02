@@ -184,6 +184,7 @@ class PerformanceAttributor:
                 "positions": row["positions"],
                 "exposure": row["exposure"] or 0,
                 "unrealized_pnl": row["unrealized_pnl"] or 0,
+                "realized_pnl": stats.get("total_pnl", 0) or 0,
                 "accuracy": accuracy_map.get(cat),
                 "kelly_multiplier": stats.get("kelly_multiplier", 1.0),
             })
