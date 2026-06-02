@@ -295,6 +295,13 @@ class KrakenConfig(BaseModel):
     # --- Directional spot (gated; no validated edge — flip on deliberately) ---
     directional_enabled: bool = False
     directional_pairs: list[str] = []     # e.g. ["XBTUSDC", "ETHUSDC"] (USDC-funded)
+    # Liquidate "orphaned" directional positions — crypto we still hold on Kraken
+    # whose pair was pruned from the valid set or removed from directional_pairs.
+    # Without this they sit unsold forever (the exit loop only iterates configured
+    # pairs). Safe because treasury holds only USDC/fiat, so non-stable crypto on
+    # the account is by definition directional exposure. Set False to only detect
+    # + log orphans without auto-selling.
+    directional_liquidate_orphans: bool = True
     directional_momentum_pct: float = 3.0  # legacy symmetric threshold (fallback)
     # Asymmetric long bias: enter on a smaller up-move, exit only on a larger
     # down-move so winners ride longer. Fall back to directional_momentum_pct.
