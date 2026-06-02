@@ -146,7 +146,7 @@ def attribution():
         try:
             attr = PerformanceAttributor(db=db)
             cats = await attr.get_category_summary(is_live=settings.is_live)
-            strats = await attr.get_strategy_summary()
+            strats = await attr.get_strategy_summary(is_live=settings.is_live)
             mode = "live" if settings.is_live else "paper"
             console.print(render_attribution(cats, strats, mode=mode))
         finally:

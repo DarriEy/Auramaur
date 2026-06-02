@@ -1212,7 +1212,7 @@ class AuramaurBot:
         while self._running:
             await asyncio.sleep(3600)
             try:
-                summary = await attributor.get_strategy_summary()
+                summary = await attributor.get_strategy_summary(is_live=self.settings.is_live)
                 if summary:
                     log.info("hybrid.strategy_report", pillars=summary)
                     from auramaur.monitoring.display import console

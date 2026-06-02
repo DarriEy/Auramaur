@@ -38,6 +38,7 @@ class KrakenPillar:
         self._dir_long: dict[str, float] = {}
         self._pair_base: dict[str, str] | None = None  # pair -> base asset code
         self._pair_min: dict[str, float] = {}          # pair -> ordermin (base units)
+        self._valid_pairs: list[str] = []              # configured pairs Kraken recognizes
         self._pnl = None                               # lazy PnLTracker (needs db)
         self._cooldown_until: dict[str, float] = {}    # pair -> monotonic re-entry gate
 
@@ -250,6 +251,41 @@ class KrakenPillar:
     # Directional (gated, experimental, no validated edge)
     # ------------------------------------------------------------------
 
+    async def _resolve_pairs(self, pairs: list[str]) -> None:
+        """Validate configured pairs against Kraken's catalog (once).
+
+        Queries the full AssetPairs catalog (no pair filter) and matches by
+        altname, so a single bad pair can't fail the whole batch — and, more
+        importantly, invalid pairs are pruned from ``_valid_pairs`` instead of
+        spamming "Unknown asset pair" on every OHLC/Ticker call each cycle.
+        """
+        self._pair_base = {}
+        self._valid_pairs = []
+        try:
+            info = await self._k._public("AssetPairs")
+            by_altname = {}
+            for meta in info.values():
+                alt = meta.get("altname")
+                if alt:
+                    by_altname[alt] = meta
+            for pair in pairs:
+                meta = by_altname.get(pair)
+                if meta is None:
+                    continue
+                self._valid_pairs.append(pair)
+                self._pair_base[pair] = meta.get("base")
+                try:
+                    self._pair_min[pair] = float(meta.get("ordermin", 0) or 0)
+                except (TypeError, ValueError):
+                    self._pair_min[pair] = 0.0
+            dropped = sorted(set(pairs) - set(self._valid_pairs))
+            if dropped:
+                log.warning("kraken.directional.pruned_unknown_pairs",
+                            count=len(dropped), pairs=dropped)
+        except Exception as e:  # noqa: BLE001
+            log.warning("kraken.reconcile_pairs_error", error=str(e))
+            self._valid_pairs = list(pairs)  # fall back to all; per-call errors absorb
+
     async def _reconcile_positions(self, bal: dict) -> dict[str, tuple[float, float, float]]:
         """Sync _dir_long to actual Kraken holdings so restarts don't lose track.
 
@@ -260,24 +296,11 @@ class KrakenPillar:
         """
         kcfg = self._s.kraken
         if self._pair_base is None:
-            self._pair_base = {}
-            try:
-                info = await self._k._public(
-                    "AssetPairs", {"pair": ",".join(kcfg.directional_pairs)})
-                for _, meta in info.items():
-                    alt = meta.get("altname")
-                    if alt:
-                        self._pair_base[alt] = meta.get("base")
-                        try:
-                            self._pair_min[alt] = float(meta.get("ordermin", 0) or 0)
-                        except (TypeError, ValueError):
-                            self._pair_min[alt] = 0.0
-            except Exception as e:  # noqa: BLE001
-                log.warning("kraken.reconcile_pairs_error", error=str(e))
+            await self._resolve_pairs(kcfg.directional_pairs)
 
         held: dict[str, float] = {}
         held_prices: dict[str, tuple[float, float, float]] = {}  # pair -> (entry, current, qty)
-        for pair in kcfg.directional_pairs:
+        for pair in (self._valid_pairs or kcfg.directional_pairs):
             base = self._pair_base.get(pair)
             amt = bal.get(base, 0.0) if base else 0.0
             if amt <= 0:
@@ -340,7 +363,7 @@ class KrakenPillar:
         kcfg = self._s.kraken
         bal = await self._k.get_balance()
         held_prices = await self._reconcile_positions(bal)
-        for pair in kcfg.directional_pairs:
+        for pair in (self._valid_pairs or kcfg.directional_pairs):
             mom = await self._momentum(pair)
             if mom is None:
                 continue

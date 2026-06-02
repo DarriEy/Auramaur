@@ -290,6 +290,40 @@ def test_reentry_cooldown_blocks_then_clears():
     asyncio.run(run())
 
 
+def test_resolve_pairs_prunes_unknown():
+    """Pairs Kraken doesn't list are dropped from the working set (no per-cycle
+    'Unknown asset pair' spam), validated against the full catalog."""
+    async def run():
+        kcfg = _kcfg()
+        kcfg.directional_pairs = ["APEUSDC", "FAKEPAIR", "MANAUSDC"]
+        p = _pillar(1.0, kcfg)
+        # Catalog returns only APE and MANA (keyed by Kraken internal name).
+        p._k._public = AsyncMock(return_value={
+            "XAPEZUSD": {"altname": "APEUSDC", "base": "APE", "ordermin": "1"},
+            "MANAUSD": {"altname": "MANAUSDC", "base": "MANA", "ordermin": "5"},
+        })
+        await p._resolve_pairs(kcfg.directional_pairs)
+
+        assert p._valid_pairs == ["APEUSDC", "MANAUSDC"]  # FAKEPAIR pruned
+        assert p._pair_base == {"APEUSDC": "APE", "MANAUSDC": "MANA"}
+        assert p._pair_min["MANAUSDC"] == 5.0
+
+    asyncio.run(run())
+
+
+def test_resolve_pairs_catalog_error_falls_back_to_all():
+    async def run():
+        kcfg = _kcfg()
+        kcfg.directional_pairs = ["APEUSDC", "MANAUSDC"]
+        p = _pillar(1.0, kcfg)
+        p._k._public = AsyncMock(side_effect=RuntimeError("kraken down"))
+        await p._resolve_pairs(kcfg.directional_pairs)
+        # On a catalog fetch failure, keep all pairs (per-call errors absorb).
+        assert p._valid_pairs == ["APEUSDC", "MANAUSDC"]
+
+    asyncio.run(run())
+
+
 def test_peak_tracks_high_water_mark():
     """Trailing-stop foundation: peak only ratchets up, persists, clears on exit."""
     async def run():

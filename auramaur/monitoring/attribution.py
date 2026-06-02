@@ -201,15 +201,56 @@ class PerformanceAttributor:
             return 1.0
         return float(row["kelly_multiplier"])
 
-    async def get_strategy_summary(self) -> list[dict]:
-        """Per-strategy-type P&L summary for hybrid mode reporting."""
+    async def get_strategy_summary(self, *, is_live: bool = False) -> list[dict]:
+        """Per-strategy realized P&L, attributed from authoritative sources.
+
+        The old version summed ``trades.pnl`` — the unreliable legacy mirror —
+        so every strategy showed $0 / 0 wins. Realized P&L actually lives in two
+        places (mirroring the cockpit's split): ``resolution_pnl`` for
+        oracle-resolved markets (live) and ``cost_basis.realized_pnl`` for
+        positions closed by selling. Each market is attributed to the strategy
+        that traded it (most recent ``trades.strategy_source``, falling back to
+        the signal's). ``trade_count`` is markets attributed; ``wins`` counts
+        markets that ended net-positive.
+        """
+        paper_flag = 0 if is_live else 1
+        # resolution_pnl is live-only; for the rest use cost_basis, excluding
+        # already-resolved markets so they aren't double-counted.
+        resolved_union = (
+            "SELECT market_id, pnl AS realized FROM resolution_pnl UNION ALL "
+            if is_live else ""
+        )
+        resolved_exclusion = (
+            "AND market_id NOT IN (SELECT market_id FROM resolution_pnl)"
+            if is_live else ""
+        )
         rows = await self._db.fetchall(
-            """SELECT strategy_source,
-                      COUNT(*) AS trade_count,
-                      COALESCE(SUM(pnl), 0) AS total_pnl,
-                      SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins
-               FROM trades
-               WHERE strategy_source IS NOT NULL
-               GROUP BY strategy_source"""
+            f"""SELECT strat AS strategy_source,
+                       COUNT(*) AS trade_count,
+                       COALESCE(SUM(realized), 0) AS total_pnl,
+                       SUM(CASE WHEN realized > 0 THEN 1 ELSE 0 END) AS wins,
+                       SUM(CASE WHEN realized < 0 THEN 1 ELSE 0 END) AS losses
+                FROM (
+                    SELECT mp.realized,
+                           COALESCE(
+                               (SELECT t.strategy_source FROM trades t
+                                WHERE t.market_id = mp.market_id
+                                  AND t.strategy_source IS NOT NULL
+                                ORDER BY t.timestamp DESC LIMIT 1),
+                               (SELECT s.strategy_source FROM signals s
+                                WHERE s.market_id = mp.market_id
+                                  AND s.strategy_source IS NOT NULL
+                                ORDER BY s.timestamp DESC LIMIT 1)
+                           ) AS strat
+                    FROM (
+                        {resolved_union}
+                        SELECT market_id, realized_pnl AS realized FROM cost_basis
+                        WHERE is_paper = ? {resolved_exclusion}
+                    ) mp
+                )
+                WHERE strat IS NOT NULL
+                GROUP BY strat
+                ORDER BY total_pnl ASC""",
+            (paper_flag,),
         )
         return [dict(row) for row in rows]

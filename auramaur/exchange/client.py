@@ -601,10 +601,21 @@ class PolymarketClient:
             raise
 
     async def cancel_order(self, order_id: str) -> bool:
-        """Cancel a live order on the CLOB. Returns True on success."""
+        """Cancel a live order on the CLOB. Returns True on success.
+
+        The v2 client has no ``cancel`` method — use ``cancel_orders([hash])``,
+        whose response splits into ``canceled`` / ``not_canceled``. (The old
+        ``self._clob_client.cancel(order_id)`` raised AttributeError on every
+        call, so live cancels silently never happened.)
+        """
         self._init_clob_client()
         try:
-            self._clob_client.cancel(order_id)
+            resp = self._clob_client.cancel_orders([order_id])
+            not_canceled = resp.get("not_canceled", {}) if isinstance(resp, dict) else {}
+            if order_id in not_canceled:
+                log.warning("order_cancel.rejected", order_id=order_id,
+                            reason=str(not_canceled.get(order_id))[:120])
+                return False
             self._live_pending.pop(order_id, None)
             log.info("order.cancelled", order_id=order_id)
             return True
