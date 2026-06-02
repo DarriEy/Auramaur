@@ -258,6 +258,36 @@ class KrakenSpotClient:
             is_paper=validate,
         )
 
+    async def query_fill(self, txid: str) -> dict | None:
+        """Actual executed price/volume/fee for a placed order, via QueryOrders.
+
+        Returns ``{"price", "vol", "fee", "cost"}`` in the pair's quote currency,
+        or None when unavailable (paper/validate orders, not-yet-filled, or API
+        error). Lets callers record the real fill instead of the pre-trade ticker
+        estimate, so realized P&L reflects actual slippage + fees.
+        """
+        if not txid or txid in ("VALIDATED", "ERROR", "BLOCKED", "unknown", "pending"):
+            return None
+        resp = await self._private("QueryOrders", {"txid": txid})
+        if resp.get("error"):
+            log.warning("kraken.query_orders_error", txid=txid, error=resp["error"])
+            return None
+        info = (resp.get("result") or {}).get(txid)
+        if not info:
+            return None
+        try:
+            vol = float(info.get("vol_exec", 0) or 0)
+            if vol <= 0:
+                return None
+            return {
+                "price": float(info.get("price", 0) or 0),
+                "vol": vol,
+                "fee": float(info.get("fee", 0) or 0),
+                "cost": float(info.get("cost", 0) or 0),
+            }
+        except (TypeError, ValueError):
+            return None
+
     async def convert(
         self,
         asset: str,

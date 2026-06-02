@@ -128,9 +128,105 @@ def test_momentum_reversal_still_exits_with_actual_qty():
     asyncio.run(run())
 
 
+# ---------------------------------------------------------------------------
+# Live-mode: realized P&L recording (#1) + entry-basis recovery (#2)
+# ---------------------------------------------------------------------------
+
+from auramaur.db.database import Database  # noqa: E402
+
+
+def _live_pillar(db, query_fills):
+    """Live pillar wired to a real in-memory DB; query_fills feeds query_fill."""
+    settings = SimpleNamespace(kraken=_kcfg(), is_live=True)
+    k = _client(1.0)
+    k.query_fill = AsyncMock(side_effect=query_fills)
+    bot = SimpleNamespace(_components={"db": db})
+    return KrakenPillar(settings, k, bot=bot)
+
+
+def test_directional_fills_record_realized_pnl():
+    """A live BUY then SELL writes fills + realized P&L into cost_basis."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        p = _live_pillar(db, query_fills=[
+            {"price": 1.00, "vol": 10.0, "fee": 0.026},   # entry fill
+            {"price": 1.20, "vol": 10.0, "fee": 0.0312},  # exit fill
+        ])
+        res = SimpleNamespace(order_id="TX1")
+
+        await p._record_directional_fill("APEUSDC", OrderSide.BUY, res, 1.00, 10.0)
+        await p._record_directional_fill("APEUSDC", OrderSide.SELL, res, 1.20, 10.0)
+
+        # Realized = (1.20 - 1.00) * 10 - sell_fee(0.0312) = 1.9688 (live → is_paper 0)
+        row = await db.fetchone(
+            "SELECT realized_pnl, size FROM cost_basis WHERE market_id='APEUSDC' AND is_paper=0")
+        assert row is not None
+        assert abs(row["realized_pnl"] - 1.9688) < 1e-6
+        assert row["size"] == 0.0  # fully closed
+
+        fills = await db.fetchone("SELECT COUNT(*) c FROM fills WHERE market_id='APEUSDC'")
+        assert fills["c"] == 2
+        await db.close()
+
+    asyncio.run(run())
+
+
+def test_paper_mode_records_nothing():
+    """Paper orders are validate-only; no fills/cost_basis should be written."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        settings = SimpleNamespace(kraken=_kcfg(), is_live=False)
+        bot = SimpleNamespace(_components={"db": db})
+        p = KrakenPillar(settings, _client(1.0), bot=bot)
+
+        out = await p._record_directional_fill(
+            "APEUSDC", OrderSide.BUY, SimpleNamespace(order_id="VALIDATED"), 1.0, 10.0)
+        assert out is None
+        row = await db.fetchone("SELECT COUNT(*) c FROM fills")
+        assert row["c"] == 0
+        await db.close()
+
+    asyncio.run(run())
+
+
+def test_entry_basis_recovered_from_cost_basis_on_restart():
+    """After a 'restart' (_dir_long cleared), reconcile recovers the true entry
+    from cost_basis instead of resetting it to the current price."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        p = _live_pillar(db, query_fills=[{"price": 1.00, "vol": 10.0, "fee": 0.026}])
+        # Establish a real entry basis of 1.00 via a recorded BUY fill.
+        await p._record_directional_fill(
+            "APEUSDC", OrderSide.BUY, SimpleNamespace(order_id="TX1"), 1.00, 10.0)
+
+        # Simulate a restart: no in-memory entry, price has since risen to 1.50.
+        p._dir_long = {}
+        p._k.get_balance = AsyncMock(return_value={"APE": 10.0})
+        p._k.get_price = AsyncMock(return_value=1.50)
+
+        held_prices = await p._reconcile_positions({"APE": 10.0})
+
+        entry, current, qty = held_prices["APEUSDC"]
+        assert entry == 1.00     # recovered true basis, NOT reset to 1.50
+        assert current == 1.50
+        assert qty == 10.0
+        # And a stop-loss now measures from the real entry: 1.50 vs 1.00 = +50%,
+        # correctly NOT stopped (a reset to 1.50 would have hidden the real gain).
+        assert p._dir_long["APEUSDC"] == 1.00
+        await db.close()
+
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     test_stop_loss_exits_and_sells_actual_held_qty()
     test_no_exit_when_neither_momentum_nor_stop_triggers()
     test_stop_disabled_falls_back_to_momentum_only()
     test_momentum_reversal_still_exits_with_actual_qty()
+    test_directional_fills_record_realized_pnl()
+    test_paper_mode_records_nothing()
+    test_entry_basis_recovered_from_cost_basis_on_restart()
     print("ok")

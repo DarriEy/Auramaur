@@ -19,9 +19,14 @@ from __future__ import annotations
 
 import structlog
 
-from auramaur.exchange.models import OrderSide
+from auramaur.exchange.models import Fill, OrderSide, TokenType
 
 log = structlog.get_logger()
+
+# Kraken taker fee for the lowest volume tier (~0.26%). Used to model the fee on
+# paper/validate fills where Kraken returns no real execution; live fills use the
+# actual fee from QueryOrders.
+_TAKER_FEE = 0.0026
 
 
 class KrakenPillar:
@@ -36,6 +41,66 @@ class KrakenPillar:
         self._dir_long: dict[str, float] = {}
         self._pair_base: dict[str, str] | None = None  # pair -> base asset code
         self._pair_min: dict[str, float] = {}          # pair -> ordermin (base units)
+        self._pnl = None                               # lazy PnLTracker (needs db)
+
+    def _pnl_tracker(self):
+        """Lazy PnLTracker so directional fills land in fills/cost_basis/daily_stats
+        via the same machinery the binary venues use. None if no db is wired."""
+        if self._pnl is None:
+            db = self._bot._components.get("db") if self._bot else None
+            if db is None:
+                return None
+            from auramaur.broker.pnl import PnLTracker
+            self._pnl = PnLTracker(db, self._s)
+        return self._pnl
+
+    async def _record_directional_fill(self, pair, side, res, est_price, qty) -> float | None:
+        """Record a directional entry/exit as a Fill so fills + realized P&L land
+        in the books (cost_basis / daily_stats), the same path the binary venues
+        use. Uses the real Kraken fill (price/vol/fee) when available; otherwise
+        the ticker estimate + a modeled taker fee. Returns the fill price.
+
+        Scoped to live mode: paper orders are validate-only (never execute), so
+        the real balance never reflects them and there is nothing to record.
+        """
+        if not self._s.is_live:
+            return None
+        pnl = self._pnl_tracker()
+        if pnl is None:
+            return None
+        price, vol, fee = est_price, qty, est_price * qty * _TAKER_FEE
+        actual = await self._k.query_fill(getattr(res, "order_id", ""))
+        if actual:
+            price = actual["price"] or est_price
+            vol = actual["vol"] or qty
+            fee = actual["fee"]
+        fill = Fill(
+            order_id=str(getattr(res, "order_id", "")), market_id=pair, token_id=pair,
+            side=side, token=TokenType.YES, size=vol, price=price, fee=fee,
+            is_paper=not self._s.is_live,
+        )
+        try:
+            await pnl.record_fill(fill)
+        except Exception as e:  # noqa: BLE001 — bookkeeping must not break the pillar
+            log.warning("kraken.directional.fill_record_error", pair=pair, error=str(e)[:120])
+        return price
+
+    async def _recover_entry(self, pair: str) -> float | None:
+        """True entry basis for a held pair, recovered from cost_basis.avg_cost.
+
+        After a restart ``_dir_long`` is empty; without this the entry would
+        default to the *current* price, silently resetting cost basis (and
+        defeating the stop-loss). cost_basis is the persisted, fee-weighted
+        entry written on the BUY fill.
+        """
+        pnl = self._pnl_tracker()
+        if pnl is None:
+            return None
+        try:
+            avg_cost, _ = await pnl.get_cost_basis(pair)
+            return avg_cost if avg_cost and avg_cost > 0 else None
+        except Exception:  # noqa: BLE001
+            return None
 
     async def run_once(self) -> None:
         try:
@@ -154,7 +219,12 @@ class KrakenPillar:
                 continue
             price = await self._k.get_price(pair)
             if price and amt * price >= 2.0:   # non-dust threshold
-                entry = self._dir_long.get(pair, price)  # keep known entry
+                # Keep the in-memory entry; on a cold start recover the true
+                # fee-weighted basis from cost_basis before falling back to the
+                # current price (which would silently reset cost basis).
+                entry = self._dir_long.get(pair)
+                if entry is None:
+                    entry = await self._recover_entry(pair) or price
                 held[pair] = entry
                 held_prices[pair] = (entry, price, amt)
 
@@ -262,7 +332,11 @@ class KrakenPillar:
                 res = await self._k.place_spot_order(
                     pair, OrderSide.BUY, volume=vol, ordertype="market", purpose="directional")
                 if res.order_id not in ("ERROR", "BLOCKED"):
-                    self._dir_long[pair] = price
+                    # Record the fill (live) and anchor the entry to the actual
+                    # fill price so cost basis + the stop-loss use real numbers.
+                    fill_price = await self._record_directional_fill(
+                        pair, OrderSide.BUY, res, price, vol)
+                    self._dir_long[pair] = fill_price or price
                 log.info("kraken.directional.entry", pair=pair, momentum=round(mom, 2),
                          status=res.status, err=res.error_message[:80])
 
@@ -282,6 +356,9 @@ class KrakenPillar:
                     pair, OrderSide.SELL, volume=vol, ordertype="market",
                     purpose="directional", max_usd=max(notional, kcfg.max_order_usd) * 1.1)
                 if res.order_id not in ("ERROR", "BLOCKED"):
+                    # Record the SELL fill — this realizes P&L into cost_basis +
+                    # daily_stats so the spec book is finally measurable.
+                    await self._record_directional_fill(pair, OrderSide.SELL, res, price, vol)
                     self._dir_long.pop(pair, None)
                 log.info("kraken.directional.exit", pair=pair,
                          reason="stop_loss" if stop_hit else "momentum",
