@@ -41,8 +41,23 @@ class KrakenPillar:
         self._pair_min: dict[str, float] = {}          # pair -> ordermin (base units)
         self._pair_lot_dec: dict[str, int] = {}        # pair -> lot_decimals (volume precision)
         self._valid_pairs: list[str] = []              # configured pairs Kraken recognizes
+        # Reverse index over the FULL Kraken catalog (base asset -> a preferred
+        # sellable pair), so a held position whose pair was pruned or de-configured
+        # can still be mapped to a pair and liquidated. Built in _resolve_pairs.
+        self._base_to_pair: dict[str, str] = {}        # base asset -> liquidation pair (altname)
+        self._base_pair_meta: dict[str, tuple] = {}    # pair -> (base, ordermin, lot_decimals)
         self._pnl = None                               # lazy PnLTracker (needs db)
         self._cooldown_until: dict[str, float] = {}    # pair -> monotonic re-entry gate
+
+    # Cash-like assets that are NOT directional crypto exposure: stablecoins,
+    # Kraken fiat (Z-prefixed), and staked/earn variants ("DOT.S", "ETH2.S").
+    _STABLES = frozenset({
+        "USDC", "USDT", "DAI", "USDG", "PYUSD", "RLUSD", "TUSD", "USDP", "USD", "ZUSD",
+    })
+
+    def _is_cash_asset(self, asset: str) -> bool:
+        a = (asset or "").upper()
+        return a in self._STABLES or a.startswith("Z") or "." in a
 
     def _db(self):
         return self._bot._components.get("db") if self._bot else None
@@ -273,13 +288,35 @@ class KrakenPillar:
         """
         self._pair_base = {}
         self._valid_pairs = []
+        self._base_to_pair = {}
+        self._base_pair_meta = {}
         try:
             info = await self._k._public("AssetPairs")
             by_altname = {}
+            # Quote preference for the orphan-liquidation reverse index (lower = better).
+            _quote_rank = {"ZUSD": 0, "USD": 0, "USDC": 1, "USDT": 2, "ZEUR": 3, "EUR": 3}
+            best_rank: dict[str, int] = {}
             for meta in info.values():
                 alt = meta.get("altname")
+                base = meta.get("base")
+                quote = meta.get("quote")
                 if alt:
                     by_altname[alt] = meta
+                # Build base -> preferred sellable pair across the WHOLE catalog.
+                if alt and base:
+                    rank = _quote_rank.get(quote, 9)
+                    if base not in best_rank or rank < best_rank[base]:
+                        try:
+                            omin = float(meta.get("ordermin", 0) or 0)
+                        except (TypeError, ValueError):
+                            omin = 0.0
+                        try:
+                            ldec = int(meta.get("lot_decimals", 8))
+                        except (TypeError, ValueError):
+                            ldec = 8
+                        best_rank[base] = rank
+                        self._base_to_pair[base] = alt
+                        self._base_pair_meta[alt] = (base, omin, ldec)
             for pair in pairs:
                 meta = by_altname.get(pair)
                 if meta is None:
@@ -302,21 +339,73 @@ class KrakenPillar:
             log.warning("kraken.reconcile_pairs_error", error=str(e))
             self._valid_pairs = list(pairs)  # fall back to all; per-call errors absorb
 
-    async def _reconcile_positions(self, bal: dict) -> dict[str, tuple[float, float, float]]:
+    def _register_orphan_pair(self, pair: str) -> None:
+        """Populate pair metadata for an orphan liquidation pair from the reverse
+        index, so exit sizing (base lookup, ordermin, lot precision) works."""
+        meta = self._base_pair_meta.get(pair)
+        if not meta:
+            return
+        base, omin, ldec = meta
+        if self._pair_base is None:
+            self._pair_base = {}
+        self._pair_base.setdefault(pair, base)
+        self._pair_min.setdefault(pair, omin)
+        self._pair_lot_dec.setdefault(pair, ldec)
+
+    def _managed_pairs(self, bal: dict) -> list[str]:
+        """Pairs to evaluate this cycle: the configured/valid set UNION every
+        pair we currently hold the base asset for.
+
+        The exit loop previously iterated only configured pairs, so a held
+        position whose pair was pruned (or removed from config) was never checked
+        and sat unsold. Here we add any non-cash crypto balance as an "orphan"
+        pair mapped through the catalog reverse index, so it gets liquidated.
+        """
+        kcfg = self._s.kraken
+        pairs = list(self._valid_pairs or kcfg.directional_pairs)
+        seen = set(pairs)
+        covered_bases = {
+            (self._pair_base or {}).get(p) for p in pairs
+        }
+        for asset, amt in bal.items():
+            if amt <= 0 or self._is_cash_asset(asset):
+                continue
+            if asset in covered_bases:
+                continue  # already handled by a managed pair
+            lp = self._base_to_pair.get(asset)
+            if not lp:
+                log.warning("kraken.directional.orphan_unmappable", asset=asset,
+                            amt=round(amt, 8),
+                            note="held crypto with no sellable pair in catalog")
+                continue
+            if lp not in seen:
+                self._register_orphan_pair(lp)
+                pairs.append(lp)
+                seen.add(lp)
+        return pairs
+
+    async def _reconcile_positions(
+        self, bal: dict, managed: list[str] | None = None,
+    ) -> dict[str, tuple[float, float, float]]:
         """Sync _dir_long to actual Kraken holdings so restarts don't lose track.
 
         A directional pair is "held" when we own a non-dust amount of its base
         asset. Adds discovered holdings, drops ones that were closed externally.
         Returns the held book as ``pair -> (entry, current, qty)`` so the exit
         path can sell the actual quantity held.
-        """
-        kcfg = self._s.kraken
-        if self._pair_base is None:
-            await self._resolve_pairs(kcfg.directional_pairs)
 
+        ``managed`` is the union of configured pairs and currently-held (incl.
+        orphan) pairs — iterating it means a held position whose pair was pruned
+        is reconciled and exited instead of being silently dropped as "closed".
+        Defaults to the computed union when not supplied.
+        """
+        if self._pair_base is None:
+            await self._resolve_pairs(self._s.kraken.directional_pairs)
+        if managed is None:
+            managed = self._managed_pairs(bal)
         held: dict[str, float] = {}
         held_prices: dict[str, tuple[float, float, float]] = {}  # pair -> (entry, current, qty)
-        for pair in (self._valid_pairs or kcfg.directional_pairs):
+        for pair in managed:
             base = self._pair_base.get(pair)
             amt = bal.get(base, 0.0) if base else 0.0
             if amt <= 0:
@@ -391,30 +480,52 @@ class KrakenPillar:
         # Sizing exits/entries off the free amount avoids requesting more than is
         # actually sellable/spendable (which Kraken rejects as insufficient funds).
         bal = await self._k.get_free_balance()
-        held_prices = await self._reconcile_positions(bal)
-        for pair in (self._valid_pairs or kcfg.directional_pairs):
-            mom = await self._momentum(pair)
-            if mom is None:
-                continue
+        if self._pair_base is None:
+            await self._resolve_pairs(kcfg.directional_pairs)
+        # Evaluate the UNION of configured pairs and everything we actually hold,
+        # so a position whose pair was pruned/de-configured still gets exited.
+        managed = self._managed_pairs(bal)
+        held_prices = await self._reconcile_positions(bal, managed)
+        valid_set = set(self._valid_pairs or kcfg.directional_pairs)
+        liquidate_orphans = getattr(kcfg, "directional_liquidate_orphans", True)
+
+        # Asymmetric long bias: enter on a smaller up-move, hold through a larger
+        # down-move (ride winners). Fall back to the legacy symmetric threshold.
+        entry_thr = getattr(kcfg, "directional_entry_momentum_pct", None) or kcfg.directional_momentum_pct
+        exit_thr = getattr(kcfg, "directional_exit_momentum_pct", None) or kcfg.directional_momentum_pct
+
+        for pair in managed:
+            orphaned = pair not in valid_set
             price = await self._k.get_price(pair)
             if not price or price <= 0:
+                if (pair in self._dir_long) and orphaned:
+                    log.warning("kraken.directional.orphan_no_price", pair=pair,
+                                note="held position Kraken won't price; manual close may be needed")
                 continue
             holding = pair in self._dir_long
-
-            # Asymmetric long bias: enter on a smaller up-move, hold through a
-            # larger down-move (ride winners). Fall back to the legacy symmetric
-            # threshold if the split ones aren't configured.
-            entry_thr = getattr(kcfg, "directional_entry_momentum_pct", None) or kcfg.directional_momentum_pct
-            exit_thr = getattr(kcfg, "directional_exit_momentum_pct", None) or kcfg.directional_momentum_pct
+            mom: float | None = None
 
             if holding:
-                # Exit side: stop-loss / take-profit / trailing-stop / momentum,
-                # all measured against the real entry basis and the persisted
-                # peak. _exit_reason owns the priority + fee-netting.
+                # Exit side. For orphans (pair pruned/de-configured while still
+                # held) force-close regardless of momentum — we no longer manage
+                # it. Otherwise stop-loss / take-profit / trailing-stop / momentum
+                # via _exit_reason (priority + fee-netting), against real basis.
                 entry_px = self._dir_long.get(pair) or price
                 gain_pct = (price - entry_px) / entry_px * 100.0 if entry_px > 0 else 0.0
-                peak_pct = await self._update_and_get_peak(pair, gain_pct)
-                reason = self._exit_reason(mom, gain_pct, peak_pct, exit_thr, kcfg)
+                if orphaned:
+                    if not liquidate_orphans:
+                        log.warning("kraken.directional.orphan_detected", pair=pair,
+                                    gain_pct=round(gain_pct, 2),
+                                    note="liquidation disabled; position left open")
+                        continue
+                    reason = "orphaned"
+                    peak_pct = gain_pct
+                else:
+                    peak_pct = await self._update_and_get_peak(pair, gain_pct)
+                    mom = await self._momentum(pair)
+                    if mom is None:
+                        continue
+                    reason = self._exit_reason(mom, gain_pct, peak_pct, exit_thr, kcfg)
                 if not reason:
                     continue
                 # Sell the ACTUAL held quantity (from balance reconciliation), not
@@ -449,11 +560,17 @@ class KrakenPillar:
                     await self._clear_peak(pair)
                     self._set_cooldown(pair)   # damp whipsaw re-entry
                 log.info("kraken.directional.exit", pair=pair, reason=reason,
-                         momentum=round(mom, 2), gain_pct=round(gain_pct, 2),
+                         orphaned=orphaned,
+                         momentum=(round(mom, 2) if mom is not None else None),
+                         gain_pct=round(gain_pct, 2),
                          peak_pct=round(peak_pct, 2),
                          status=res.status, err=res.error_message[:80])
 
-            elif mom >= entry_thr and not self._in_cooldown(pair):
+            elif not orphaned:
+                # Entry side — configured pairs only; never re-enter an orphan.
+                mom = await self._momentum(pair)
+                if mom is None or mom < entry_thr or self._in_cooldown(pair):
+                    continue
                 # Budget ceiling: cap TOTAL open directional exposure at the
                 # tolerance-scaled budget, measured by ACTUAL notional (count×cap
                 # understates appreciated winners).

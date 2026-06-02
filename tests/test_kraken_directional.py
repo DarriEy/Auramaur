@@ -58,6 +58,7 @@ async def test_usd_notional_converts_quote():
 def _pillar(*, holding: bool):
     s = MagicMock()
     s.risk_tolerance = 50.0
+    s.is_live = False                      # paper: skip live fill recording
     k = s.kraken
     k.directional_pairs = ["XBTUSDC"]
     k.directional_entry_momentum_pct = 2.0
@@ -65,15 +66,36 @@ def _pillar(*, holding: bool):
     k.directional_momentum_pct = 3.0       # legacy fallback (unused when split set)
     k.directional_budget_usd = 600.0
     k.max_order_usd = 30.0
+    # Numeric exit params so _exit_reason isn't evaluated against MagicMocks.
+    k.directional_stop_loss_pct = 12.0
+    k.directional_take_profit_pct = 0.0
+    k.directional_trailing_stop_pct = 0.0
+    k.directional_fee_pct = 0.26
+    k.directional_reentry_cooldown_min = 0.0
+    k.directional_liquidate_orphans = True
     client = MagicMock()
-    client.get_balance = AsyncMock(return_value={})
+    # _directional sizes off FREE balance; exits read the reconciled held qty.
+    bal = {"XBT": 0.5, "USDC": 1000.0} if holding else {"USDC": 1000.0}
+    client.get_balance = AsyncMock(return_value=bal)
+    client.get_free_balance = AsyncMock(return_value=bal)
     client.get_price = AsyncMock(return_value=100.0)
+    client.get_pair_quote = AsyncMock(return_value="USDC")
     client.size_for_usd = AsyncMock(return_value=0.3)   # USD-aware volume
     client.usd_notional = AsyncMock(return_value=30.0)
     client.place_spot_order = AsyncMock(return_value=OrderResult(
         order_id="OK", market_id="XBTUSDC", status="filled", is_paper=False))
     p = KrakenPillar(settings=s, kraken_client=client)
-    p._reconcile_positions = AsyncMock()   # don't touch _dir_long from balances
+    # Pre-resolve pair metadata so _directional skips the catalog fetch and
+    # _managed_pairs treats XBT as a configured (non-orphan) base.
+    p._pair_base = {"XBTUSDC": "XBT"}
+    p._valid_pairs = ["XBTUSDC"]
+    p._pair_min = {"XBTUSDC": 0.0}
+    p._pair_lot_dec = {"XBTUSDC": 8}
+    p._base_to_pair = {"XBT": "XBTUSDC"}
+    # Reconcile is covered by its own tests; here return a fixed held book so the
+    # exit path sizes off the actual qty without re-reading balances.
+    held = {"XBTUSDC": (90.0, 100.0, 0.5)} if holding else {}
+    p._reconcile_positions = AsyncMock(return_value=held)
     if holding:
         p._dir_long = {"XBTUSDC": 90.0}
     return p, client
