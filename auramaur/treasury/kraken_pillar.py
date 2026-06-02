@@ -17,16 +17,13 @@ All real orders flow through KrakenSpotClient, so its safety model applies here.
 
 from __future__ import annotations
 
+import time
+
 import structlog
 
 from auramaur.exchange.models import Fill, OrderSide, TokenType
 
 log = structlog.get_logger()
-
-# Kraken taker fee for the lowest volume tier (~0.26%). Used to model the fee on
-# paper/validate fills where Kraken returns no real execution; live fills use the
-# actual fee from QueryOrders.
-_TAKER_FEE = 0.0026
 
 
 class KrakenPillar:
@@ -42,6 +39,73 @@ class KrakenPillar:
         self._pair_base: dict[str, str] | None = None  # pair -> base asset code
         self._pair_min: dict[str, float] = {}          # pair -> ordermin (base units)
         self._pnl = None                               # lazy PnLTracker (needs db)
+        self._cooldown_until: dict[str, float] = {}    # pair -> monotonic re-entry gate
+
+    def _db(self):
+        return self._bot._components.get("db") if self._bot else None
+
+    def _in_cooldown(self, pair: str) -> bool:
+        return self._cooldown_until.get(pair, 0.0) > time.monotonic()
+
+    def _set_cooldown(self, pair: str) -> None:
+        mins = getattr(self._s.kraken, "directional_reentry_cooldown_min", 0.0) or 0.0
+        if mins > 0:
+            self._cooldown_until[pair] = time.monotonic() + mins * 60.0
+
+    async def _update_and_get_peak(self, pair: str, gain_pct: float) -> float:
+        """Record the running high-water-mark gain% for a held pair (reusing
+        position_peaks) and return it, so a trailing stop can fire on give-back.
+        Survives restarts because the peak is persisted."""
+        db = self._db()
+        if db is None:
+            return gain_pct
+        try:
+            await db.execute(
+                """INSERT INTO position_peaks (market_id, peak_pnl_pct, updated_at)
+                   VALUES (?, ?, datetime('now'))
+                   ON CONFLICT(market_id) DO UPDATE SET
+                       peak_pnl_pct = MAX(excluded.peak_pnl_pct, position_peaks.peak_pnl_pct),
+                       updated_at = excluded.updated_at""",
+                (pair, gain_pct),
+            )
+            await db.commit()
+            row = await db.fetchone(
+                "SELECT peak_pnl_pct FROM position_peaks WHERE market_id = ?", (pair,))
+            return float(row["peak_pnl_pct"]) if row else gain_pct
+        except Exception:  # noqa: BLE001
+            return gain_pct
+
+    async def _clear_peak(self, pair: str) -> None:
+        db = self._db()
+        if db is None:
+            return
+        try:
+            await db.execute("DELETE FROM position_peaks WHERE market_id = ?", (pair,))
+            await db.commit()
+        except Exception:  # noqa: BLE001
+            pass
+
+    @staticmethod
+    def _exit_reason(mom, gain_pct, peak_pct, exit_thr, kcfg) -> str | None:
+        """First applicable exit trigger for a held pair, or None to hold.
+
+        Priority: cut losers (stop) → bank a target (TP, net of fees) → protect
+        a winner's gains (trailing) → follow momentum down. TP/trailing are
+        measured net of round-trip fees so they only fire on a real edge.
+        """
+        stop_pct = getattr(kcfg, "directional_stop_loss_pct", 0.0) or 0.0
+        tp_pct = getattr(kcfg, "directional_take_profit_pct", 0.0) or 0.0
+        trail_pct = getattr(kcfg, "directional_trailing_stop_pct", 0.0) or 0.0
+        rt_fee = 2.0 * (getattr(kcfg, "directional_fee_pct", 0.0) or 0.0)
+        if stop_pct > 0 and gain_pct <= -stop_pct:
+            return "stop_loss"
+        if tp_pct > 0 and (gain_pct - rt_fee) >= tp_pct:
+            return "take_profit"
+        if trail_pct > 0 and peak_pct > rt_fee and (peak_pct - gain_pct) >= trail_pct:
+            return "trailing_stop"
+        if mom <= -exit_thr:
+            return "momentum"
+        return None
 
     def _pnl_tracker(self):
         """Lazy PnLTracker so directional fills land in fills/cost_basis/daily_stats
@@ -68,7 +132,8 @@ class KrakenPillar:
         pnl = self._pnl_tracker()
         if pnl is None:
             return None
-        price, vol, fee = est_price, qty, est_price * qty * _TAKER_FEE
+        fee_rate = (getattr(self._s.kraken, "directional_fee_pct", 0.0) or 0.0) / 100.0
+        price, vol, fee = est_price, qty, est_price * qty * fee_rate
         actual = await self._k.query_fill(getattr(res, "order_id", ""))
         if actual:
             price = actual["price"] or est_price
@@ -231,6 +296,7 @@ class KrakenPillar:
         closed = [pair for pair in self._dir_long if pair not in held]
         for pair in closed:
             self._dir_long.pop(pair, None)   # closed externally
+            await self._clear_peak(pair)     # drop stale trailing high-water mark
         self._dir_long.update(held)
 
         # Mirror the spec book into the portfolio table so it's visible in the
@@ -289,27 +355,52 @@ class KrakenPillar:
             entry_thr = getattr(kcfg, "directional_entry_momentum_pct", None) or kcfg.directional_momentum_pct
             exit_thr = getattr(kcfg, "directional_exit_momentum_pct", None) or kcfg.directional_momentum_pct
 
-            # Hard stop-loss: a held pair down more than directional_stop_loss_pct
-            # from entry exits regardless of momentum, so the ride-winners bias
-            # can't leave a loser uncapped. 0 disables.
-            stop_pct = getattr(kcfg, "directional_stop_loss_pct", 0.0) or 0.0
-            loss_pct = 0.0
-            stop_hit = False
             if holding:
+                # Exit side: stop-loss / take-profit / trailing-stop / momentum,
+                # all measured against the real entry basis and the persisted
+                # peak. _exit_reason owns the priority + fee-netting.
                 entry_px = self._dir_long.get(pair) or price
-                if entry_px > 0:
-                    loss_pct = (price - entry_px) / entry_px * 100.0
-                    stop_hit = stop_pct > 0 and loss_pct <= -stop_pct
+                gain_pct = (price - entry_px) / entry_px * 100.0 if entry_px > 0 else 0.0
+                peak_pct = await self._update_and_get_peak(pair, gain_pct)
+                reason = self._exit_reason(mom, gain_pct, peak_pct, exit_thr, kcfg)
+                if not reason:
+                    continue
+                # Sell the ACTUAL held quantity (from balance reconciliation), not
+                # a recomputed USD notional — otherwise ordermin-bumped or
+                # fee-trimmed positions under-sell and leave a residual, or a
+                # too-large recompute trips insufficient-funds. Pass max_usd with
+                # headroom so an appreciated winner isn't blocked by the per-order
+                # entry cap (exits must always be allowed to fully close).
+                qty = held_prices.get(pair, (None, None, 0.0))[2]
+                if not qty or qty <= 0:
+                    continue
+                vol = round(qty, 8)
+                notional = await self._k.usd_notional(pair, vol, price) or (vol * price)
+                res = await self._k.place_spot_order(
+                    pair, OrderSide.SELL, volume=vol, ordertype="market",
+                    purpose="directional", max_usd=max(notional, kcfg.max_order_usd) * 1.1)
+                if res.order_id not in ("ERROR", "BLOCKED"):
+                    # Record the SELL fill — this realizes P&L into cost_basis +
+                    # daily_stats so the spec book is finally measurable.
+                    await self._record_directional_fill(pair, OrderSide.SELL, res, price, vol)
+                    self._dir_long.pop(pair, None)
+                    await self._clear_peak(pair)
+                    self._set_cooldown(pair)   # damp whipsaw re-entry
+                log.info("kraken.directional.exit", pair=pair, reason=reason,
+                         momentum=round(mom, 2), gain_pct=round(gain_pct, 2),
+                         peak_pct=round(peak_pct, 2),
+                         status=res.status, err=res.error_message[:80])
 
-            if not holding and mom >= entry_thr:
-                # Budget ceiling: each open position ~= max_order_usd. Scaled by
-                # the global risk-tolerance lever so it moves with all exposure.
+            elif mom >= entry_thr and not self._in_cooldown(pair):
+                # Budget ceiling: cap TOTAL open directional exposure at the
+                # tolerance-scaled budget, measured by ACTUAL notional (count×cap
+                # understates appreciated winners).
                 from auramaur.risk.tolerance import scale_budget, current_tolerance
                 budget = scale_budget(kcfg.directional_budget_usd, current_tolerance(self._s))
-                allocated = len(self._dir_long) * kcfg.max_order_usd
+                allocated = sum(cur * q for (_e, cur, q) in held_prices.values())
                 if allocated + kcfg.max_order_usd > budget:
                     log.info("kraken.directional.budget_full", pair=pair,
-                             allocated=allocated, budget=round(budget, 2))
+                             allocated=round(allocated, 2), budget=round(budget, 2))
                     continue
                 # Size in USD terms via the pair's quote currency (works for any
                 # quote: USDC/USDT/EUR/…). 2% buffer so rounding never trips the
@@ -333,36 +424,11 @@ class KrakenPillar:
                     pair, OrderSide.BUY, volume=vol, ordertype="market", purpose="directional")
                 if res.order_id not in ("ERROR", "BLOCKED"):
                     # Record the fill (live) and anchor the entry to the actual
-                    # fill price so cost basis + the stop-loss use real numbers.
+                    # fill price so cost basis + the stops use real numbers.
                     fill_price = await self._record_directional_fill(
                         pair, OrderSide.BUY, res, price, vol)
                     self._dir_long[pair] = fill_price or price
                 log.info("kraken.directional.entry", pair=pair, momentum=round(mom, 2),
-                         status=res.status, err=res.error_message[:80])
-
-            elif holding and (mom <= -exit_thr or stop_hit):
-                # Sell the ACTUAL held quantity (from balance reconciliation), not
-                # a recomputed USD notional — otherwise ordermin-bumped or
-                # fee-trimmed positions under-sell and leave a residual, or a
-                # too-large recompute trips insufficient-funds. Pass max_usd with
-                # headroom so an appreciated winner isn't blocked by the per-order
-                # entry cap (exits must always be allowed to fully close).
-                qty = held_prices.get(pair, (None, None, 0.0))[2]
-                if not qty or qty <= 0:
-                    continue
-                vol = round(qty, 8)
-                notional = await self._k.usd_notional(pair, vol, price) or (vol * price)
-                res = await self._k.place_spot_order(
-                    pair, OrderSide.SELL, volume=vol, ordertype="market",
-                    purpose="directional", max_usd=max(notional, kcfg.max_order_usd) * 1.1)
-                if res.order_id not in ("ERROR", "BLOCKED"):
-                    # Record the SELL fill — this realizes P&L into cost_basis +
-                    # daily_stats so the spec book is finally measurable.
-                    await self._record_directional_fill(pair, OrderSide.SELL, res, price, vol)
-                    self._dir_long.pop(pair, None)
-                log.info("kraken.directional.exit", pair=pair,
-                         reason="stop_loss" if stop_hit else "momentum",
-                         momentum=round(mom, 2), loss_pct=round(loss_pct, 2),
                          status=res.status, err=res.error_message[:80])
 
     async def _momentum(self, pair: str) -> float | None:

@@ -221,6 +221,93 @@ def test_entry_basis_recovered_from_cost_basis_on_restart():
     asyncio.run(run())
 
 
+# ---------------------------------------------------------------------------
+# Exit-reason priority, fee-netting, trailing stop (#3/#4, #6) + cooldown (#7)
+# ---------------------------------------------------------------------------
+
+def _exit_kcfg(**over):
+    base = dict(
+        directional_stop_loss_pct=12.0,
+        directional_take_profit_pct=10.0,
+        directional_trailing_stop_pct=8.0,
+        directional_fee_pct=0.26,
+    )
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def _reason(mom, gain, peak, exit_thr=4.0, **over):
+    return KrakenPillar._exit_reason(mom, gain, peak, exit_thr, _exit_kcfg(**over))
+
+
+def test_exit_reason_stop_loss_wins():
+    # Down past the stop — even if momentum is calm, cut the loser first.
+    assert _reason(mom=0.0, gain=-15.0, peak=-15.0) == "stop_loss"
+
+
+def test_exit_reason_take_profit_is_net_of_fees():
+    # Gross +11 with round-trip fee 0.52 -> net 10.48 >= 10 target.
+    assert _reason(mom=0.0, gain=11.0, peak=11.0) == "take_profit"
+    # Gross +10.3 -> net 9.78 < 10: NOT a take-profit (fees fold into the bar).
+    assert _reason(mom=0.0, gain=10.3, peak=10.3) is None
+
+
+def test_exit_reason_trailing_protects_a_winner():
+    # Peaked +20, now +11 -> gave back 9 >= 8 trailing.
+    assert _reason(mom=0.0, gain=11.0, peak=20.0, directional_take_profit_pct=0.0) == "trailing_stop"
+    # Give-back only 5 (<8): still holding.
+    assert _reason(mom=0.0, gain=15.0, peak=20.0, directional_take_profit_pct=0.0) is None
+
+
+def test_exit_reason_trailing_ignored_when_never_in_profit():
+    # Peak barely positive (< round-trip fee): not a real winner, no trailing.
+    assert _reason(mom=0.0, gain=-3.0, peak=0.3,
+                   directional_stop_loss_pct=0.0, directional_take_profit_pct=0.0) is None
+
+
+def test_exit_reason_momentum_is_last_resort():
+    assert _reason(mom=-5.0, gain=2.0, peak=2.0,
+                   directional_take_profit_pct=0.0, directional_trailing_stop_pct=0.0) == "momentum"
+
+
+def test_exit_reason_hold_when_calm():
+    assert _reason(mom=-1.0, gain=2.0, peak=3.0) is None
+
+
+def test_reentry_cooldown_blocks_then_clears():
+    async def run():
+        kcfg = _kcfg()
+        kcfg.directional_reentry_cooldown_min = 30.0
+        p = _pillar(1.0, kcfg)
+        assert not p._in_cooldown("APEUSDC")
+        p._set_cooldown("APEUSDC")
+        assert p._in_cooldown("APEUSDC")
+        # A zero cooldown config never gates.
+        kcfg.directional_reentry_cooldown_min = 0.0
+        p._set_cooldown("XBTUSDC")
+        assert not p._in_cooldown("XBTUSDC")
+
+    asyncio.run(run())
+
+
+def test_peak_tracks_high_water_mark():
+    """Trailing-stop foundation: peak only ratchets up, persists, clears on exit."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        p = _live_pillar(db, query_fills=[])
+        assert await p._update_and_get_peak("APEUSDC", 5.0) == 5.0
+        assert await p._update_and_get_peak("APEUSDC", 12.0) == 12.0
+        # A pullback does NOT lower the high-water mark.
+        assert await p._update_and_get_peak("APEUSDC", 7.0) == 12.0
+        await p._clear_peak("APEUSDC")
+        # After an exit clears it, the peak resets to the next observation.
+        assert await p._update_and_get_peak("APEUSDC", 3.0) == 3.0
+        await db.close()
+
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     test_stop_loss_exits_and_sells_actual_held_qty()
     test_no_exit_when_neither_momentum_nor_stop_triggers()

@@ -276,6 +276,21 @@ class KrakenConfig(BaseModel):
     # the asymmetric ride-winners bias) leaves no floor under a loser; this caps
     # it. 0 disables the stop (pure momentum). Default conservative.
     directional_stop_loss_pct: float = 12.0
+    # Per-side taker fee estimate (round trip = 2x). Models the fee on
+    # paper/validate fills and is folded into the take-profit threshold so a TP
+    # only fires once the move clears costs. Live fills use the actual fee.
+    directional_fee_pct: float = 0.26
+    # Take-profit: exit a winner up this much from entry, NET of round-trip fees.
+    # 0 (default) disables it — winners ride, protected by the trailing stop.
+    directional_take_profit_pct: float = 0.0
+    # Trailing stop: once a position has been in profit, exit if it gives back
+    # this many percent from its peak gain. Lets winners run while protecting
+    # unrealized gains the from-entry stop can't (peak tracked in position_peaks,
+    # so it survives restarts). 0 disables.
+    directional_trailing_stop_pct: float = 8.0
+    # After any exit, block re-entry on the same pair for this many minutes —
+    # damps whipsaw churn (and the fees it bleeds). 0 disables.
+    directional_reentry_cooldown_min: float = 30.0
     # Total $ the speculation engine may hold in open directional positions at
     # once — a hard ceiling so it can't consume the treasury reserve / CAD.
     directional_budget_usd: float = 50.0
