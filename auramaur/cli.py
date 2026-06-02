@@ -156,14 +156,35 @@ def attribution():
 
 
 @main.command()
+def doctor():
+    """Operational health snapshot — is anything broken right now?"""
+    from auramaur.monitoring.diagnostics import gather_doctor, render_doctor
+
+    async def _run():
+        settings = Settings()
+        db = Database()
+        await db.connect()
+        try:
+            state = await gather_doctor(settings, db)
+            console.print(render_doctor(state))
+        finally:
+            await db.close()
+
+    asyncio.run(_run())
+
+
+@main.command()
 @click.option("--mb", "max_mb", default=8.0, type=float,
               help="How many MB from the end of the log to scan.")
 @click.option("--top", default=15, help="Number of distinct events to show.")
-def errors(max_mb: float, top: int):
+@click.option("--all", "include_benign", is_flag=True,
+              help="Include benign visibility-warnings (order.live, kraken.order, …).")
+def errors(max_mb: float, top: int, include_benign: bool):
     """Digest of recent errors/warnings from the JSON log — top events by count."""
     from auramaur.monitoring.diagnostics import gather_log_errors, render_error_digest
     settings = Settings()
-    s = gather_log_errors(settings.logging.file, max_bytes=int(max_mb * 1_000_000), top=top)
+    s = gather_log_errors(settings.logging.file, max_bytes=int(max_mb * 1_000_000),
+                          top=top, include_benign=include_benign)
     console.print(render_error_digest(s))
 
 

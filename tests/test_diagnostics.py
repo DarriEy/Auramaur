@@ -1,8 +1,14 @@
 """Diagnostics: error digest + attribution/error rendering."""
 
+import asyncio
+from types import SimpleNamespace
+
+from auramaur.db.database import Database
 from auramaur.monitoring.diagnostics import (
     error_panel_compact,
+    gather_doctor,
     render_attribution,
+    render_doctor,
     render_error_digest,
     summarize_errors,
 )
@@ -35,7 +41,7 @@ def test_summarize_counts_and_excludes_info():
 
 def test_summarize_empty():
     s = summarize_errors([])
-    assert s == {"errors": 0, "warnings": 0, "total": 0, "top": []}
+    assert s == {"errors": 0, "warnings": 0, "total": 0, "suppressed": 0, "top": []}
 
 
 def test_top_is_bounded():
@@ -57,6 +63,46 @@ def test_renderers_build():
              "accuracy": 0.73, "kelly_multiplier": 0.36}]
     strats = [{"strategy_source": "llm", "trade_count": 565, "wins": 10, "total_pnl": 3.2}]
     assert render_attribution(cats, strats, mode="live") is not None
+
+
+def test_benign_events_filtered_by_default():
+    records = [
+        _rec("warning", "order.live"), _rec("warning", "order.live"),
+        _rec("warning", "kraken.order"),
+        _rec("error", "real.bug", error="boom"),
+    ]
+    s = summarize_errors(records)
+    assert s["suppressed"] == 3            # 2x order.live + 1x kraken.order
+    assert s["warnings"] == 0 and s["errors"] == 1
+    assert [e["event"] for e in s["top"]] == ["real.bug"]
+    # --all surfaces them again.
+    s2 = summarize_errors(records, include_benign=True)
+    assert s2["suppressed"] == 0 and s2["warnings"] == 3
+
+
+def test_doctor_killswitch_drives_verdict():
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        settings = SimpleNamespace(
+            is_live=False, kill_switch_active=False,
+            logging=SimpleNamespace(file="/nonexistent/auramaur.log"),
+        )
+        s = await gather_doctor(settings, db)
+        names = {c["name"]: c for c in s["checks"]}
+        assert names["mode"]["detail"] == "PAPER"
+        assert names["kill switch"]["status"] == "ok"
+        assert "positions" in names
+        assert render_doctor(s) is not None
+
+        # An active kill switch forces a PROBLEM verdict.
+        settings.kill_switch_active = True
+        s2 = await gather_doctor(settings, db)
+        assert {c["name"]: c for c in s2["checks"]}["kill switch"]["status"] == "fail"
+        assert s2["verdict"] == "fail"
+        await db.close()
+
+    asyncio.run(run())
 
 
 if __name__ == "__main__":
