@@ -531,6 +531,11 @@ class Settings(BaseSettings):
     model_config = {
         "env_file": str(Path(__file__).resolve().parent.parent / ".env"),
         "env_file_encoding": "utf-8",
+        # Ignore env vars we don't declare. The process shares its environment
+        # with libraries that read their own tokens directly (e.g. HF_TOKEN /
+        # hf_token for huggingface_hub via sentence-transformers), and an
+        # unrelated stray var shouldn't crash Settings on startup.
+        "extra": "ignore",
     }
 
     @property
