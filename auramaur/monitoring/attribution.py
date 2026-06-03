@@ -175,16 +175,57 @@ class PerformanceAttributor:
             for r in cal_rows
         }
 
+        # category_stats.total_pnl only covers oracle-resolved markets
+        # (resolution_pnl). Positions closed by *selling* book their realized
+        # P&L solely in cost_basis.realized_pnl, which this view used to drop —
+        # under-reporting the loss. Sum that bucket per category, excluding
+        # already-resolved markets so it isn't double-counted, mirroring the
+        # union the cockpit and get_strategy_summary already use.
+        resolved_exclusion = (
+            "AND cb.market_id NOT IN (SELECT market_id FROM resolution_pnl)"
+            if is_live else ""
+        )
+        sold_rows = await self._db.fetchall(
+            f"""SELECT COALESCE(NULLIF(p.category, ''), NULLIF(m.category, ''), 'other') AS cat,
+                      SUM(cb.realized_pnl) AS realized_sold
+               FROM cost_basis cb
+               LEFT JOIN portfolio p ON cb.market_id = p.market_id
+                                     AND p.is_paper = cb.is_paper
+               LEFT JOIN markets m ON cb.market_id = m.id
+               WHERE cb.is_paper = ? {resolved_exclusion}
+               GROUP BY cat""",
+            (paper_flag,),
+        )
+        sold_map = {r["cat"]: (r["realized_sold"] or 0) for r in sold_rows}
+
         result = []
+        seen: set[str] = set()
         for row in portfolio_rows:
             cat = row["cat"]
+            seen.add(cat)
             stats = stats_map.get(cat, {})
             result.append({
                 "category": cat,
                 "positions": row["positions"],
                 "exposure": row["exposure"] or 0,
                 "unrealized_pnl": row["unrealized_pnl"] or 0,
-                "realized_pnl": stats.get("total_pnl", 0) or 0,
+                "realized_pnl": (stats.get("total_pnl", 0) or 0) + sold_map.get(cat, 0),
+                "accuracy": accuracy_map.get(cat),
+                "kelly_multiplier": stats.get("kelly_multiplier", 1.0),
+            })
+
+        # Categories that exist only as sold-to-close positions (no open
+        # portfolio row) would otherwise vanish along with their realized P&L.
+        for cat, realized_sold in sold_map.items():
+            if cat in seen or not realized_sold:
+                continue
+            stats = stats_map.get(cat, {})
+            result.append({
+                "category": cat,
+                "positions": 0,
+                "exposure": 0,
+                "unrealized_pnl": 0,
+                "realized_pnl": (stats.get("total_pnl", 0) or 0) + realized_sold,
                 "accuracy": accuracy_map.get(cat),
                 "kelly_multiplier": stats.get("kelly_multiplier", 1.0),
             })
