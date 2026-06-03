@@ -29,6 +29,17 @@ _NEGATIVE_CACHE_TTL = 3600.0
 _GAMMA_TIMEOUT = aiohttp.ClientTimeout(total=20, sock_connect=10, sock_read=15)
 
 
+def _is_transient(e: BaseException) -> bool:
+    """Network blips — DNS resolution, connection refused, TLS/cert, timeouts —
+    are environmental and self-healing. They arrive in bursts during a
+    connectivity outage (hundreds in one cycle), so logging each at ERROR
+    spikes the health monitor into DEGRADED and buries genuine faults. Treat
+    them as warnings; reserve ERROR for unexpected client errors (e.g. malformed
+    responses) that actually indicate something is broken on our side.
+    """
+    return isinstance(e, (aiohttp.ClientConnectionError, asyncio.TimeoutError))
+
+
 class GammaClient:
     """Unauthenticated Gamma API for market discovery and filtering."""
 
@@ -80,7 +91,8 @@ class GammaClient:
             return markets
 
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            log.error("gamma.fetch_error", error=str(e), kind=type(e).__name__)
+            logf = log.warning if _is_transient(e) else log.error
+            logf("gamma.fetch_error", error=str(e), kind=type(e).__name__)
             return []
 
     async def get_market(self, market_id: str) -> Market | None:
@@ -116,7 +128,8 @@ class GammaClient:
                 data = await resp.json()
                 return self._parse_market(data)
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            log.error(
+            logf = log.warning if _is_transient(e) else log.error
+            logf(
                 "gamma.market_fetch_error",
                 market_id=market_id,
                 error=str(e),
@@ -163,7 +176,8 @@ class GammaClient:
             return markets
 
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            log.error("gamma.search_error", query=query, error=str(e), kind=type(e).__name__)
+            logf = log.warning if _is_transient(e) else log.error
+            logf("gamma.search_error", query=query, error=str(e), kind=type(e).__name__)
             return []
 
     def _parse_market(self, data: dict) -> Market | None:
