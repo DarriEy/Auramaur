@@ -81,6 +81,38 @@ def test_primary_winner_boilerplate_not_sports():
     assert cat == "politics_us"
 
 
+def test_foreign_election_is_politics_intl():
+    """Generic governance terms (president/election) must not pull a foreign
+    election into politics_us — country context routes it to politics_intl."""
+    assert classify_market(
+        "Will Jordan Bardella win the 2027 French presidential election?"
+    ) == "politics_intl"
+    assert classify_market("Rodrigo Paz out as President of Bolivia?") == "politics_intl"
+    assert classify_market("Will Germany hold a snap election in 2026?") == "politics_intl"
+
+
+def test_us_election_stays_politics_us():
+    """US-marked elections must still classify as politics_us after the split."""
+    assert classify_market("Will Trump win the 2024 election?") == "politics_us"
+    assert classify_market(
+        "Will the Democratic Party win the NY-21 House seat?"
+    ) == "politics_us"
+
+
+def test_unmarked_governance_defaults_us():
+    """Governance terms with no country marker default to politics_us (the bulk
+    of prediction-market election markets), preserving prior behavior."""
+    assert classify_market("Who will win the presidential election?") == "politics_us"
+
+
+def test_commodity_not_politics():
+    """A commodities/price market must not land in any politics bucket."""
+    assert classify_market("Will WTI Crude Oil close above $88 on Friday?") not in (
+        "politics_us",
+        "politics_intl",
+    )
+
+
 def test_ncaa_is_sports():
     assert classify_market("NCAA Tournament: No. 15 seed to pull off an upset?") == "sports"
 

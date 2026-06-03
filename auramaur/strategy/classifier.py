@@ -49,8 +49,6 @@ GAMBLING_KEYWORDS: list[str] = [
 
 # --- General keyword scoring (used when no priority category matches) ---
 CATEGORY_KEYWORDS: dict[str, list[str]] = {
-    "politics_us": ["president", "congress", "senate", "house", "democrat", "republican", "biden", "trump", "election", "vote", "primary", "gop"],
-    "politics_intl": ["ukraine", "russia", "china", "eu", "nato", "war", "un", "geopoliti"],
     "economics": ["gdp", "inflation", "fed", "interest rate", "unemployment", "recession", "cpi", "jobs report", "treasury"],
     "crypto": ["bitcoin", "ethereum", "crypto", "btc", "eth", "defi", "nft", "token"],
     "tech": ["ai", "artificial intelligence", "openai", "google", "apple", "meta", "microsoft", "tech"],
@@ -58,6 +56,33 @@ CATEGORY_KEYWORDS: dict[str, list[str]] = {
     "science": ["climate", "nasa", "space", "vaccine", "covid", "health", "fda"],
     "legal": ["supreme court", "lawsuit", "trial", "verdict", "indictment", "ruling"],
 }
+
+# Politics is split US vs. international by COUNTRY CONTEXT, not handled in the
+# generic dict above. Generic governance terms (president, election, vote, ...)
+# describe both, so they must not by themselves pull a market into politics_us —
+# that previously misfiled every foreign election (a French presidential race, a
+# Bolivian president question) as politics_us, because politics_intl carried no
+# governance or country markers to compete. We score US-specific markers,
+# foreign country/demonym markers, and shared governance terms separately, then
+# let country context decide the bucket (see classify_market).
+POLITICS_US_KEYWORDS: list[str] = [
+    "congress", "senate", "house", "democrat", "republican", "biden", "trump",
+    "gop", "white house", "american", "governor", "midterm",
+]
+POLITICS_INTL_KEYWORDS: list[str] = [
+    "ukraine", "russia", "china", "eu", "nato", "war", "un", "geopoliti",
+    "france", "french", "germany", "german", "uk", "britain", "british",
+    "canada", "canadian", "mexico", "mexican", "brazil", "brazilian",
+    "india", "indian", "japan", "japanese", "israel", "israeli",
+    "iran", "iranian", "venezuela", "argentina", "bolivia", "bolivian",
+    "poland", "polish", "italy", "italian", "spain", "spanish",
+    "turkey", "turkish", "taiwan", "pakistan", "nigeria",
+    "south korea", "north korea",
+]
+POLITICS_GOVERNANCE_KEYWORDS: list[str] = [
+    "president", "presidential", "election", "vote", "primary", "parliament",
+    "prime minister", "referendum", "chancellor", "coalition",
+]
 
 
 def _compile_one(keyword: str) -> re.Pattern:
@@ -101,6 +126,10 @@ _CATEGORY_RES: dict[str, list[re.Pattern]] = {
     cat: _compile_many(kws) for cat, kws in CATEGORY_KEYWORDS.items()
 }
 
+_POLITICS_US_RE = _compile_many(POLITICS_US_KEYWORDS)
+_POLITICS_INTL_RE = _compile_many(POLITICS_INTL_KEYWORDS)
+_POLITICS_GOV_RE = _compile_many(POLITICS_GOVERNANCE_KEYWORDS)
+
 
 def classify_market(question: str, description: str = "") -> str:
     """Classify a market question into a category.
@@ -129,6 +158,21 @@ def classify_market(question: str, description: str = "") -> str:
         score = sum(1 for p in patterns if p.search(full))
         if score > 0:
             scores[category] = score
+
+    # Politics: decide US vs. international by country context. Governance terms
+    # (president/election/...) count toward whichever bucket the country markers
+    # select, so a foreign election lands in politics_intl instead of defaulting
+    # to politics_us. With no country marker, generic governance defaults to US
+    # (the bulk of prediction-market election markets), preserving prior behavior.
+    us = sum(1 for p in _POLITICS_US_RE if p.search(full))
+    intl = sum(1 for p in _POLITICS_INTL_RE if p.search(full))
+    gov = sum(1 for p in _POLITICS_GOV_RE if p.search(full))
+    if intl and not us:
+        scores["politics_intl"] = intl + gov
+    elif us:
+        scores["politics_us"] = us + gov
+    elif gov:
+        scores["politics_us"] = gov
 
     if not scores:
         return "other"
