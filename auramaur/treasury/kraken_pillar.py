@@ -17,6 +17,7 @@ All real orders flow through KrakenSpotClient, so its safety model applies here.
 
 from __future__ import annotations
 
+import asyncio
 import math
 import time
 
@@ -146,36 +147,69 @@ class KrakenPillar:
             self._pnl = PnLTracker(db, self._s)
         return self._pnl
 
+    async def _await_fill(self, order_id: str, retries: int = 5, delay: float = 1.0) -> dict | None:
+        """Poll the exchange for a CONFIRMED fill (``vol_exec > 0``).
+
+        ``place_spot_order`` returns ``pending`` the instant Kraken accepts the
+        order — *before* it knows the order actually executed. A market order
+        fills near-instantly, but QueryOrders can lag a beat, so retry briefly.
+        Returns the real fill dict, or None if it never confirms (the caller then
+        records nothing — see ``_record_directional_fill``).
+        """
+        if not order_id:
+            return None
+        for attempt in range(retries):
+            actual = await self._k.query_fill(order_id)
+            if actual and actual.get("vol", 0) > 0:
+                return actual
+            if attempt < retries - 1:
+                await asyncio.sleep(delay)
+        return None
+
     async def _record_directional_fill(self, pair, side, res, est_price, qty) -> float | None:
         """Record a directional entry/exit as a Fill so fills + realized P&L land
         in the books (cost_basis / daily_stats), the same path the binary venues
-        use. Uses the real Kraken fill (price/vol/fee) when available; otherwise
-        the ticker estimate + a modeled taker fee. Returns the fill price.
+        use. Returns the CONFIRMED fill price, or None if nothing was recorded.
 
         Scoped to live mode: paper orders are validate-only (never execute), so
         the real balance never reflects them and there is nothing to record.
+
+        Only a CONFIRMED fill is recorded. Previously this fell back to the
+        pre-trade ticker estimate whenever ``query_fill`` hadn't confirmed yet,
+        which booked phantom closes (zeroing a sold-but-not-actually-filled
+        position's cost basis) and fabricated entry bases — the root cause of the
+        ``basis_unknown`` cascade that silently disabled every gain-based exit. If
+        the fill can't be confirmed we record nothing and return None; the caller
+        leaves the position untouched so balance reconciliation re-detects it.
         """
         if not self._s.is_live:
             return None
-        pnl = self._pnl_tracker()
-        if pnl is None:
+        # Confirmation comes from the EXCHANGE, not from bookkeeping. An order
+        # that filled must clear the position even if recording P&L fails — else
+        # the position would be re-sold next cycle (double close). So await the
+        # fill first; only then (best-effort) record it.
+        actual = await self._await_fill(getattr(res, "order_id", ""))
+        if not actual:
+            log.warning("kraken.directional.fill_unconfirmed", pair=pair,
+                        side=getattr(side, "value", str(side)),
+                        order_id=str(getattr(res, "order_id", "")),
+                        note="fill not confirmed — recording nothing to avoid a "
+                             "phantom close / fabricated basis")
             return None
-        fee_rate = (getattr(self._s.kraken, "directional_fee_pct", 0.0) or 0.0) / 100.0
-        price, vol, fee = est_price, qty, est_price * qty * fee_rate
-        actual = await self._k.query_fill(getattr(res, "order_id", ""))
-        if actual:
-            price = actual["price"] or est_price
-            vol = actual["vol"] or qty
-            fee = actual["fee"]
-        fill = Fill(
-            order_id=str(getattr(res, "order_id", "")), market_id=pair, token_id=pair,
-            side=side, token=TokenType.YES, size=vol, price=price, fee=fee,
-            is_paper=not self._s.is_live,
-        )
-        try:
-            await pnl.record_fill(fill)
-        except Exception as e:  # noqa: BLE001 — bookkeeping must not break the pillar
-            log.warning("kraken.directional.fill_record_error", pair=pair, error=str(e)[:120])
+        price = actual["price"] or est_price
+        vol = actual["vol"] or qty
+        fee = actual["fee"]
+        pnl = self._pnl_tracker()
+        if pnl is not None:
+            fill = Fill(
+                order_id=str(getattr(res, "order_id", "")), market_id=pair, token_id=pair,
+                side=side, token=TokenType.YES, size=vol, price=price, fee=fee,
+                is_paper=not self._s.is_live,
+            )
+            try:
+                await pnl.record_fill(fill)
+            except Exception as e:  # noqa: BLE001 — bookkeeping must not break the pillar
+                log.warning("kraken.directional.fill_record_error", pair=pair, error=str(e)[:120])
         return price
 
     async def _recover_entry(self, pair: str) -> float | None:
@@ -552,15 +586,31 @@ class KrakenPillar:
                 res = await self._k.place_spot_order(
                     pair, OrderSide.SELL, volume=vol, ordertype="market",
                     purpose="directional", max_usd=max(notional, kcfg.max_order_usd) * 1.1)
-                if res.order_id not in ("ERROR", "BLOCKED"):
-                    # Record the SELL fill — this realizes P&L into cost_basis +
-                    # daily_stats so the spec book is finally measurable.
-                    await self._record_directional_fill(pair, OrderSide.SELL, res, price, vol)
+                placed = res.order_id not in ("ERROR", "BLOCKED")
+                fill_price = None
+                if placed:
+                    # Record the SELL fill — realizes P&L into cost_basis +
+                    # daily_stats so the spec book is measurable. In live mode this
+                    # returns None unless the fill is CONFIRMED.
+                    fill_price = await self._record_directional_fill(
+                        pair, OrderSide.SELL, res, price, vol)
+                # Only forget the position once the sell is real. In paper mode
+                # nothing executes, so simulate the close unconditionally; in live
+                # mode require a confirmed fill — otherwise a sell that never
+                # actually filled would drop the position from the book (phantom
+                # close) and leave the held crypto stranded + basis-blind.
+                closed = placed and (not self._s.is_live or fill_price is not None)
+                if closed:
                     self._dir_long.pop(pair, None)
                     await self._clear_peak(pair)
                     self._set_cooldown(pair)   # damp whipsaw re-entry
+                elif placed:   # live, but the fill never confirmed
+                    log.warning("kraken.directional.exit_unconfirmed", pair=pair,
+                                reason=reason, order_id=str(res.order_id),
+                                note="sell not confirmed filled — position retained, "
+                                     "retried next cycle")
                 log.info("kraken.directional.exit", pair=pair, reason=reason,
-                         orphaned=orphaned,
+                         orphaned=orphaned, confirmed=closed,
                          momentum=(round(mom, 2) if mom is not None else None),
                          gain_pct=round(gain_pct, 2),
                          peak_pct=round(peak_pct, 2),
@@ -620,8 +670,21 @@ class KrakenPillar:
                     # fill price so cost basis + the stops use real numbers.
                     fill_price = await self._record_directional_fill(
                         pair, OrderSide.BUY, res, price, vol)
-                    self._dir_long[pair] = fill_price or price
+                    if not self._s.is_live:
+                        self._dir_long[pair] = price          # paper: simulate the entry
+                    elif fill_price is not None:
+                        self._dir_long[pair] = fill_price     # live: track only a CONFIRMED buy
+                    else:
+                        # Live buy we couldn't confirm: don't fabricate a basis.
+                        # If it did fill, balance reconciliation re-detects the
+                        # holding next cycle (basis anchored to price, surfaced via
+                        # the basis_unknown warning) — and it still counts against
+                        # the budget since that's measured off actual balances.
+                        log.warning("kraken.directional.entry_unconfirmed", pair=pair,
+                                    order_id=str(res.order_id),
+                                    note="buy not confirmed — not tracking; reconcile re-detects")
                 log.info("kraken.directional.entry", pair=pair, momentum=round(mom, 2),
+                         confirmed=(pair in self._dir_long),
                          status=res.status, err=res.error_message[:80])
 
     async def _momentum(self, pair: str) -> float | None:

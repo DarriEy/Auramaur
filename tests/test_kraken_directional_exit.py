@@ -10,7 +10,7 @@ Two gaps were fixed:
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from auramaur.exchange.models import OrderSide
 from auramaur.treasury.kraken_pillar import KrakenPillar
@@ -227,6 +227,61 @@ def test_paper_mode_records_nothing():
         assert out is None
         row = await db.fetchone("SELECT COUNT(*) c FROM fills")
         assert row["c"] == 0
+        await db.close()
+
+    asyncio.run(run())
+
+
+def test_live_sell_not_recorded_when_fill_unconfirmed():
+    """A live SELL whose fill never confirms must NOT book realized P&L, must NOT
+    zero cost basis, and must leave the position held (retried next cycle) — the
+    bug that booked phantom closes and destroyed cost basis."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        # Seed a real open position via a confirmed BUY.
+        p = _live_pillar(db, query_fills=[{"price": 1.00, "vol": 10.0, "fee": 0.026}])
+        await p._record_directional_fill(
+            "APEUSDC", OrderSide.BUY, SimpleNamespace(order_id="TX1"), 1.00, 10.0)
+        before = await db.fetchone(
+            "SELECT size, avg_cost, realized_pnl FROM cost_basis WHERE market_id='APEUSDC' AND is_paper=0")
+        assert before["size"] == 10.0 and before["avg_cost"] == 1.00
+
+        # SELL but the exchange never confirms a fill (vol stays 0).
+        p._k.query_fill = AsyncMock(return_value=None)
+        with patch("auramaur.treasury.kraken_pillar.asyncio.sleep", new=AsyncMock()):
+            out = await p._record_directional_fill(
+                "APEUSDC", OrderSide.SELL, SimpleNamespace(order_id="TX2"), 1.20, 10.0)
+
+        assert out is None  # signals "not confirmed" → caller retains the position
+        after = await db.fetchone(
+            "SELECT size, avg_cost, realized_pnl FROM cost_basis WHERE market_id='APEUSDC' AND is_paper=0")
+        assert after["size"] == 10.0       # position intact, NOT zeroed
+        assert after["avg_cost"] == 1.00   # basis preserved
+        assert after["realized_pnl"] == 0.0  # no phantom realized loss
+        # Only the BUY fill exists — no phantom SELL fill was written.
+        n = await db.fetchone("SELECT COUNT(*) c FROM fills WHERE market_id='APEUSDC'")
+        assert n["c"] == 1
+        await db.close()
+
+    asyncio.run(run())
+
+
+def test_await_fill_retries_then_confirms():
+    """_await_fill polls past a transient empty read and returns the real fill."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        p = _live_pillar(db, query_fills=[])
+        p._k.query_fill = AsyncMock(side_effect=[
+            None,                                    # not filled yet
+            {"price": 1.5, "vol": 0.0, "fee": 0.0},  # present but vol 0 (still open)
+            {"price": 1.5, "vol": 4.0, "fee": 0.01}, # filled
+        ])
+        with patch("auramaur.treasury.kraken_pillar.asyncio.sleep", new=AsyncMock()):
+            out = await p._await_fill("TXX")
+        assert out == {"price": 1.5, "vol": 4.0, "fee": 0.01}
+        assert p._k.query_fill.await_count == 3
         await db.close()
 
     asyncio.run(run())
