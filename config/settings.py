@@ -318,8 +318,11 @@ class KrakenConfig(BaseModel):
     # only fires once the move clears costs. Live fills use the actual fee.
     directional_fee_pct: float = 0.26
     # Take-profit: exit a winner up this much from entry, NET of round-trip fees.
-    # 0 (default) disables it — winners ride, protected by the trailing stop.
-    directional_take_profit_pct: float = 0.0
+    # 0 disables it (winners ride, protected only by the trailing stop) — but with
+    # a wide trailing_stop a sub-(trailing)% rally can never be banked, so winners
+    # decay back into a momentum/stop loss (observed: 0W/7L). Default to a real
+    # target so the book can actually realize gains.
+    directional_take_profit_pct: float = 4.0
     # Trailing stop: once a position has been in profit, exit if it gives back
     # this many percent from its peak gain. Lets winners run while protecting
     # unrealized gains the from-entry stop can't (peak tracked in position_peaks,

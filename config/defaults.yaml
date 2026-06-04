@@ -165,13 +165,15 @@ kraken:
   # hold USDC, so USDC pairs are the fundable set; USD/USDT/EUR pairs need a
   # balance in that quote. Kraken spot is always 2-asset (base/quote) — no
   # multi-leg pairs. Budget caps exposure regardless of list length.
-  # Liquid majors/midcaps; high-risk memes (TRUMP, PENGU, FARTCOIN, …) excluded.
+  # De-risked set: liquid large-caps only for NEW entries. The thinner mid/meme
+  # names were dropped to cut churn-on-illiquidity. NOTE: pairs we currently still
+  # hold (XTZ, MANA, APE, VET, XDG, SHIB, TON) are kept in the list ON PURPOSE so
+  # they exit gracefully via the (now-enabled) take-profit / stop / momentum logic
+  # rather than being force-market-sold at a loss as orphans. They drop off once
+  # closed; the $150 budget keeps new exposure capped meanwhile.
   directional_pairs: ["XBTUSDC", "ETHUSDC", "SOLUSDC", "XRPUSDC", "ADAUSDC", "AVAXUSDC",
-    "DOTUSDC", "LINKUSDC", "LTCUSDC", "BCHUSDC", "ATOMUSDC", "ALGOUSDC", "BNBUSDC",
-    "TONUSDC", "XMRUSDC", "XTZUSDC", "MANAUSDC", "APEUSDC", "VETUSDC", "XDGUSDC",
-    "CROUSDC", "SHIBUSDC", "NEARUSDC", "ARBUSDC", "OPUSDC", "INJUSDC", "SUIUSDC",
-    "SEIUSDC", "FILUSDC", "RENDERUSDC", "FETUSDC", "TIAUSDC", "ICPUSDC", "AAVEUSDC",
-    "GRTUSDC", "JUPUSDC"]
+    "DOTUSDC", "LINKUSDC", "LTCUSDC", "BCHUSDC", "ATOMUSDC",
+    "TONUSDC", "XTZUSDC", "MANAUSDC", "APEUSDC", "VETUSDC", "XDGUSDC", "SHIBUSDC"]
   # Asymmetric long bias (more bullish): enter on a +2% up-move, exit only on a
   # -4% down-move so winners ride longer. (directional_momentum_pct kept as the
   # legacy symmetric fallback.)
@@ -179,10 +181,17 @@ kraken:
   directional_entry_momentum_pct: 2.0
   directional_exit_momentum_pct: 4.0
   directional_lookback: 12
-  # Max total open speculative exposure. $600 ceiling = up to 20 concurrent $30
-  # positions. Actual fills are still gated by available USDC (~$234 incl.
-  # auto-converted CAD), so it scales toward 20 as capital grows.
-  directional_budget_usd: 600.0
+  # Bank winners at +4% from entry, NET of round-trip fees (~0.52%). Previously
+  # unset -> class default 0.0 -> take-profit DISABLED, so a winner could only be
+  # realized via the 8% trailing stop (impossible for sub-8% rallies). Result was
+  # 0W/7L: every position decayed back into a momentum/stop loss. This re-enables
+  # profit-taking so the book can actually close trades green.
+  directional_take_profit_pct: 4.0
+  # Max total open speculative exposure. De-risked $600 -> $150 (~5 concurrent
+  # $30 positions). The current open book (~$362) already exceeds this, so NO new
+  # entries fire until it bleeds down — i.e. entries are effectively paused while
+  # the existing positions wind down through the now-working take-profit/stops.
+  directional_budget_usd: 150.0
 
 transfers:
   # Cross-venue fund movement (Kraken -> Polymarket, Polygon USDC only).
