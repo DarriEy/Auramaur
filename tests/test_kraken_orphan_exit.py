@@ -45,13 +45,17 @@ class FakeKraken:
         return "ZUSD"
 
     async def query_fill(self, txid):
-        return None
+        # A real market order fills; report the last order's executed fill so the
+        # pillar can confirm the close (vol > 0 == filled).
+        return getattr(self, "_last_fill", None)
 
     async def _public(self, endpoint, params=None):
         return {}
 
     async def place_spot_order(self, pair, side, **kw):
-        rec = (pair, kw.get("volume"))
+        vol = kw.get("volume")
+        self._last_fill = {"price": self._price, "vol": vol or 0.0, "fee": 0.0}
+        rec = (pair, vol)
         (self.sells if side == OrderSide.SELL else self.buys).append(rec)
         return SimpleNamespace(order_id="OK", status="ok", error_message="")
 
