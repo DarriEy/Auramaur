@@ -145,7 +145,7 @@ class PerformanceAttributor:
                       SUM(p.size * p.avg_price) AS exposure,
                       SUM(
                           (COALESCE(p.current_price, p.avg_price)
-                           - COALESCE(cb.avg_cost, p.avg_price)) * p.size
+                           - COALESCE(NULLIF(cb.avg_cost, 0), p.avg_price)) * p.size
                       ) AS unrealized_pnl
                FROM portfolio p
                LEFT JOIN markets m ON p.market_id = m.id
@@ -262,8 +262,13 @@ class PerformanceAttributor:
                       COUNT(*) AS positions,
                       SUM(p.size * p.avg_price) AS exposure,
                       SUM(
+                          -- NULLIF(...,0): the Kraken spec book writes cost_basis
+                          -- rows with avg_cost=0, so a plain COALESCE (NULL-only)
+                          -- treated cost as $0 and booked the whole position value
+                          -- as "unrealized" (+$246 vs the true -$3.85). Fall back
+                          -- to the position's own avg_price when cost basis is 0.
                           (COALESCE(p.current_price, p.avg_price)
-                           - COALESCE(cb.avg_cost, p.avg_price)) * p.size
+                           - COALESCE(NULLIF(cb.avg_cost, 0), p.avg_price)) * p.size
                       ) AS unrealized_pnl
                FROM portfolio p
                LEFT JOIN cost_basis cb ON p.market_id = cb.market_id
@@ -438,7 +443,7 @@ class PerformanceAttributor:
                        COALESCE(SUM(unrealized), 0) AS unrealized_pnl
                 FROM (
                     SELECT (COALESCE(p.current_price, p.avg_price)
-                            - COALESCE(cb.avg_cost, p.avg_price)) * p.size AS unrealized,
+                            - COALESCE(NULLIF(cb.avg_cost, 0), p.avg_price)) * p.size AS unrealized,
                            p.market_id, {open_strat} AS strat
                     FROM portfolio p
                     LEFT JOIN cost_basis cb ON p.market_id = cb.market_id

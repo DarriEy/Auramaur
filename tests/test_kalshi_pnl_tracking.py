@@ -148,6 +148,34 @@ def test_venue_summary_breaks_down_by_exchange():
     asyncio.run(run())
 
 
+def test_venue_summary_ignores_zero_cost_basis():
+    """cost_basis.avg_cost=0 (Kraken spec book) must fall back to avg_price.
+
+    Otherwise unrealized = (current - 0) * size books the whole position value
+    as a gain (the +$246-vs-actual-(-$3.85) Kraken bug).
+    """
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        await db.execute(
+            "INSERT INTO portfolio (market_id, exchange, side, size, avg_price, "
+            "current_price, is_paper) VALUES ('XBTUSDC', 'kraken', 'BUY', 10, 0.50, 0.60, 0)"
+        )
+        # Kraken writes a cost_basis row with avg_cost = 0.
+        await db.execute(
+            "INSERT INTO cost_basis (market_id, token, size, avg_cost, total_cost, "
+            "realized_pnl, is_paper) VALUES ('XBTUSDC', 'YES', 10, 0, 0, 0, 0)"
+        )
+        await db.commit()
+        attr = PerformanceAttributor(db=db)
+        rows = {r["venue"]: r for r in await attr.get_venue_summary(is_live=True)}
+        # (0.60 - 0.50) * 10 = +1.0, NOT (0.60 - 0) * 10 = +6.0
+        assert abs(rows["kraken"]["unrealized_pnl"] - 1.0) < 1e-9
+        await db.close()
+
+    asyncio.run(run())
+
+
 def test_venue_summary_paper_scopes_out_live():
     """Paper mode excludes live Polymarket rows but keeps non-Polymarket venues."""
     async def run():
