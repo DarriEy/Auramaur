@@ -335,6 +335,21 @@ class KrakenConfig(BaseModel):
     # once — a hard ceiling so it can't consume the treasury reserve / CAD.
     directional_budget_usd: float = 50.0
 
+    # --- LLM/news-driven directional signal (replaces price-only momentum) ---
+    # Price-only momentum has no edge (backtested: every variant net-negative
+    # after fees). This routes the bot's proven news->LLM crypto pipeline (72%
+    # accuracy on resolved crypto markets) into the directional book instead: a
+    # per-asset P(up over horizon) gates long entries. Default OFF; when on it
+    # is PAPER-forced (validate-only orders) until the paper track record proves
+    # edge — flip directional_llm_paper to False to go live.
+    directional_llm_enabled: bool = False
+    directional_llm_paper: bool = True       # force validate-only orders until proven
+    directional_llm_min_prob: float = 0.60   # enter long when P(up) >= this
+    directional_llm_exit_prob: float = 0.45  # exit long when P(up) falls below this
+    directional_llm_min_confidence: str = "MEDIUM"  # Confidence floor to act
+    directional_llm_horizon_days: int = 3    # prediction horizon in the question
+    directional_llm_refresh_hours: float = 8.0  # re-run the LLM per pair at most this often
+
 
 class TransfersConfig(BaseModel):
     """Cross-venue fund movement (Kraken <-> Polymarket, Polygon USDC only).
