@@ -38,14 +38,32 @@ class ResolutionTracker:
 
         Returns the count of newly resolved markets.
         """
-        # Get market_ids with predictions but no resolution yet.
-        # Join against markets table to get the exchange, falling back to
-        # "polymarket" when the row is missing (e.g. paper-only runs).
+        # Resolve two groups of markets:
+        #   1. Markets we have an open prediction for (calibration), and
+        #   2. Markets we currently hold a position in (portfolio).
+        # The portfolio arm is essential: a held position must settle when it
+        # resolves even if no calibration prediction was ever recorded for it.
+        # Kalshi/Crypto.com positions historically fell into exactly this gap —
+        # their strategic-path predictions weren't logged, so they never entered
+        # calibration, were never checked here, and their realized P&L was never
+        # booked. Driving settlement off open positions makes it robust for any
+        # venue regardless of how the prediction was (or wasn't) recorded.
+        # The exchange is taken from the markets join for the calibration arm
+        # and from the portfolio row directly for the position arm; MAX() picks
+        # a non-NULL value when a market appears in both, falling back to
+        # "polymarket" below when neither knows the venue.
         rows = await self._db.fetchall(
-            """SELECT DISTINCT c.market_id, m.exchange
-               FROM calibration c
-               LEFT JOIN markets m ON c.market_id = m.id
-               WHERE c.actual_outcome IS NULL"""
+            """SELECT market_id, MAX(exchange) AS exchange FROM (
+                   SELECT c.market_id AS market_id, m.exchange AS exchange
+                   FROM calibration c
+                   LEFT JOIN markets m ON c.market_id = m.id
+                   WHERE c.actual_outcome IS NULL
+                   UNION ALL
+                   SELECT p.market_id AS market_id, p.exchange AS exchange
+                   FROM portfolio p
+                   WHERE p.size > 0
+               )
+               GROUP BY market_id"""
         )
 
         resolved_count = 0

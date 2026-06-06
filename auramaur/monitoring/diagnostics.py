@@ -264,8 +264,14 @@ def render_doctor(s: dict) -> Panel:
     return Panel(Group(head, Text(""), t), title="doctor", border_style=border)
 
 
-def render_attribution(category_rows: list[dict], strategy_rows: list[dict], *, mode: str) -> Panel:
-    """Per-category and per-strategy P&L / accuracy / Kelly."""
+def render_attribution(
+    category_rows: list[dict],
+    strategy_rows: list[dict],
+    *,
+    mode: str,
+    venue_rows: list[dict] | None = None,
+) -> Panel:
+    """Per-venue, per-category and per-strategy P&L / accuracy / Kelly."""
     cat = Table(title="by category", expand=True)
     cat.add_column("category", style="cyan")
     cat.add_column("pos", justify="right")
@@ -301,5 +307,25 @@ def render_attribution(category_rows: list[dict], strategy_rows: list[dict], *, 
         )
 
     head = Text.from_markup(f"[bold]Performance attribution[/]  ([dim]{mode}[/])")
-    return Panel(Group(head, Text(""), cat, Text(""), strat),
-                 title="attribution", border_style="blue")
+
+    sections = [head, Text("")]
+    if venue_rows is not None:
+        venue = Table(title="by venue", expand=True)
+        venue.add_column("venue", style="green")
+        venue.add_column("pos", justify="right")
+        venue.add_column("exposure", justify="right")
+        venue.add_column("realized", justify="right")
+        venue.add_column("unrealized", justify="right")
+        venue.add_column("resolved", justify="right")
+        for r in venue_rows:
+            venue.add_row(
+                r.get("venue", "?") or "?", str(r.get("positions", 0)),
+                f"${r.get('exposure', 0):.0f}",
+                _money(r.get("realized_pnl", 0) or 0),
+                _money(r.get("unrealized_pnl", 0) or 0),
+                str(r.get("resolved_count", 0) or 0),
+            )
+        sections.extend([venue, Text("")])
+
+    sections.extend([cat, Text(""), strat])
+    return Panel(Group(*sections), title="attribution", border_style="blue")
