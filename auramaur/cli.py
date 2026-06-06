@@ -145,10 +145,11 @@ def attribution():
         await db.connect()
         try:
             attr = PerformanceAttributor(db=db)
+            venues = await attr.get_venue_summary(is_live=settings.is_live)
             cats = await attr.get_category_summary(is_live=settings.is_live)
             strats = await attr.get_strategy_summary(is_live=settings.is_live)
             mode = "live" if settings.is_live else "paper"
-            console.print(render_attribution(cats, strats, mode=mode))
+            console.print(render_attribution(cats, strats, mode=mode, venue_rows=venues))
         finally:
             await db.close()
 

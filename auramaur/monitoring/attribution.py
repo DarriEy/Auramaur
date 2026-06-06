@@ -242,6 +242,109 @@ class PerformanceAttributor:
             return 1.0
         return float(row["kelly_multiplier"])
 
+    async def get_venue_summary(self, *, is_live: bool = False) -> list[dict]:
+        """Per-venue (exchange) summary: exposure, unrealized and realized P&L.
+
+        Mirrors ``get_category_summary`` but groups by exchange so each trading
+        venue (polymarket, kalshi, cryptodotcom, …) is visible on its own.
+        Without this, a venue whose settlements lag or whose realized P&L is
+        small is indistinguishable from one that is genuinely flat — the exact
+        blind spot that hid Kalshi's unbooked settlements. Realized P&L is
+        attributed to a venue via ``markets.exchange`` (falling back to the
+        portfolio row, then "polymarket"), combining the same two authoritative
+        sources the category/strategy views use: ``resolution_pnl`` for
+        oracle-resolved markets (live) and ``cost_basis.realized_pnl`` for
+        positions closed by selling.
+        """
+        paper_flag = 0 if is_live else 1
+        portfolio_rows = await self._db.fetchall(
+            """SELECT COALESCE(NULLIF(p.exchange, ''), 'polymarket') AS venue,
+                      COUNT(*) AS positions,
+                      SUM(p.size * p.avg_price) AS exposure,
+                      SUM(
+                          (COALESCE(p.current_price, p.avg_price)
+                           - COALESCE(cb.avg_cost, p.avg_price)) * p.size
+                      ) AS unrealized_pnl
+               FROM portfolio p
+               LEFT JOIN cost_basis cb ON p.market_id = cb.market_id
+                                       AND cb.is_paper = p.is_paper
+               WHERE (p.is_paper = ? OR p.exchange != 'polymarket') AND p.size > 0
+               GROUP BY venue""",
+            (paper_flag,),
+        )
+
+        # resolution_pnl is live-only; for the rest use cost_basis, excluding
+        # already-resolved markets so they aren't double-counted (mirrors
+        # get_strategy_summary).
+        resolved_union = (
+            "SELECT market_id, pnl AS realized FROM resolution_pnl UNION ALL "
+            if is_live else ""
+        )
+        resolved_exclusion = (
+            "AND market_id NOT IN (SELECT market_id FROM resolution_pnl)"
+            if is_live else ""
+        )
+        realized_rows = await self._db.fetchall(
+            f"""SELECT venue,
+                       COALESCE(SUM(realized), 0) AS realized_pnl,
+                       SUM(CASE WHEN realized > 0 THEN 1 ELSE 0 END) AS wins,
+                       SUM(CASE WHEN realized < 0 THEN 1 ELSE 0 END) AS losses,
+                       COUNT(*) AS resolved_count
+                FROM (
+                    SELECT mp.realized,
+                           COALESCE(
+                               (SELECT m.exchange FROM markets m WHERE m.id = mp.market_id),
+                               (SELECT p.exchange FROM portfolio p
+                                WHERE p.market_id = mp.market_id LIMIT 1),
+                               'polymarket'
+                           ) AS venue
+                    FROM (
+                        {resolved_union}
+                        SELECT market_id, realized_pnl AS realized FROM cost_basis
+                        WHERE is_paper = ? {resolved_exclusion}
+                    ) mp
+                )
+                GROUP BY venue""",
+            (paper_flag,),
+        )
+        realized_map = {r["venue"]: dict(r) for r in realized_rows}
+
+        result: list[dict] = []
+        seen: set[str] = set()
+        for row in portfolio_rows:
+            venue = row["venue"]
+            seen.add(venue)
+            rz = realized_map.get(venue, {})
+            result.append({
+                "venue": venue,
+                "positions": row["positions"],
+                "exposure": row["exposure"] or 0,
+                "unrealized_pnl": row["unrealized_pnl"] or 0,
+                "realized_pnl": rz.get("realized_pnl", 0) or 0,
+                "wins": rz.get("wins", 0) or 0,
+                "losses": rz.get("losses", 0) or 0,
+                "resolved_count": rz.get("resolved_count", 0) or 0,
+            })
+
+        # Venues with only resolved/sold history (no open positions) would
+        # otherwise vanish along with their realized P&L.
+        for venue, rz in realized_map.items():
+            if venue in seen:
+                continue
+            result.append({
+                "venue": venue,
+                "positions": 0,
+                "exposure": 0,
+                "unrealized_pnl": 0,
+                "realized_pnl": rz.get("realized_pnl", 0) or 0,
+                "wins": rz.get("wins", 0) or 0,
+                "losses": rz.get("losses", 0) or 0,
+                "resolved_count": rz.get("resolved_count", 0) or 0,
+            })
+
+        result.sort(key=lambda r: r["exposure"], reverse=True)
+        return result
+
     async def get_strategy_summary(self, *, is_live: bool = False) -> list[dict]:
         """Per-strategy realized P&L, attributed from authoritative sources.
 

@@ -1266,10 +1266,22 @@ class TradingEngine:
                 log.debug("strategic.market_id_mismatch", result_id=batch_result.market_id)
                 continue
 
-            claude_prob = batch_result.probability
+            raw_prob = batch_result.probability
+            claude_prob = raw_prob
             # Apply Platt scaling calibration to raw probability
             if self.calibration:
-                claude_prob = await self.calibration.adjust(claude_prob, market.category or "")
+                claude_prob = await self.calibration.adjust(raw_prob, market.category or "")
+                # Record the raw prediction so (a) the resolution tracker can
+                # later settle this market and (b) Platt scaling can learn from
+                # the outcome. The legacy analyze_market path records this too,
+                # but it only runs for Polymarket (the price-monitor WebSocket
+                # path). The strategic path is the ONLY path Kalshi and
+                # Crypto.com take, so without this their markets never enter the
+                # calibration table and consequently never get settled — their
+                # realized P&L was silently never booked.
+                await self.calibration.record_prediction(
+                    market.id, raw_prob, market.category or ""
+                )
             market_prob = market.outcome_yes_price
 
             # Edge calculation (same as detect_edge)
