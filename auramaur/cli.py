@@ -278,6 +278,61 @@ def kraken_pnl():
     asyncio.run(_run())
 
 
+@kraken.command("signal")
+def kraken_signal():
+    """Latest LLM/news directional view per pair (P(up) + LONG/hold/exit).
+
+    Reads the views the running bot records to calibration when
+    kraken.directional_llm_enabled is on. Empty until the bot has run with it.
+    """
+    async def _run():
+        settings = Settings()
+        db = Database()
+        await db.connect()
+        try:
+            rows = await db.fetchall(
+                """SELECT market_id, predicted_prob, created_at FROM calibration c
+                   WHERE market_id LIKE 'kraken-dir:%'
+                     AND created_at = (SELECT MAX(created_at) FROM calibration c2
+                                       WHERE c2.market_id = c.market_id)
+                   ORDER BY predicted_prob DESC"""
+            )
+            if not rows:
+                console.print(
+                    "[dim]No LLM directional views recorded yet. Set "
+                    "kraken.directional_llm_enabled=true and let the bot run.[/]"
+                )
+                return
+            min_prob = settings.kraken.directional_llm_min_prob
+            exit_prob = settings.kraken.directional_llm_exit_prob
+            paper = settings.kraken.directional_llm_paper
+            mode = "PAPER" if paper else "LIVE"
+            table = Table(title=f"Kraken LLM directional views  ({mode})")
+            table.add_column("pair", style="magenta")
+            table.add_column("P(up)", justify="right")
+            table.add_column("signal", justify="right")
+            table.add_column("as of")
+            for r in rows:
+                pair = r["market_id"].split(":", 1)[1]
+                p = r["predicted_prob"]
+                if p >= min_prob:
+                    sig = "[green]LONG[/]"
+                elif p < exit_prob:
+                    sig = "[red]exit[/]"
+                else:
+                    sig = "[dim]hold[/]"
+                table.add_row(pair, f"{p:.0%}", sig, str(r["created_at"]))
+            console.print(table)
+            console.print(
+                f"[dim]LONG >= {min_prob:.0%} · exit < {exit_prob:.0%} · "
+                f"mode={mode} (directional_llm_paper={paper})[/]"
+            )
+        finally:
+            await db.close()
+
+    asyncio.run(_run())
+
+
 @kraken.command("buy")
 @click.option("--pair", required=True, help="e.g. XBTUSDC")
 @click.option("--usd", required=True, type=float, help="USD/USDC amount")

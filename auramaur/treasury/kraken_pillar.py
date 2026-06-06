@@ -49,6 +49,26 @@ class KrakenPillar:
         self._base_pair_meta: dict[str, tuple] = {}    # pair -> (base, ordermin, lot_decimals)
         self._pnl = None                               # lazy PnLTracker (needs db)
         self._cooldown_until: dict[str, float] = {}    # pair -> monotonic re-entry gate
+        # LLM directional view cache: pair -> (monotonic_ts, prob, confidence).
+        # Throttles LLM calls to directional_llm_refresh_hours per pair (cost).
+        self._llm_views: dict[str, tuple[float, float, str]] = {}
+
+    # Kraken pair -> human asset name for the LLM directional question. Only
+    # pairs listed here are eligible for the LLM signal (keeps it to assets the
+    # news/LLM pipeline can actually reason about).
+    _PAIR_ASSET = {
+        "XBTUSDC": "Bitcoin", "ETHUSDC": "Ethereum", "SOLUSDC": "Solana",
+        "XRPUSDC": "XRP", "ADAUSDC": "Cardano", "AVAXUSDC": "Avalanche",
+        "DOTUSDC": "Polkadot", "LINKUSDC": "Chainlink", "LTCUSDC": "Litecoin",
+        "BCHUSDC": "Bitcoin Cash", "ATOMUSDC": "Cosmos", "TONUSDC": "Toncoin",
+        "XTZUSDC": "Tezos", "MANAUSDC": "Decentraland", "APEUSDC": "ApeCoin",
+        "VETUSDC": "VeChain", "XDGUSDC": "Dogecoin", "SHIBUSDC": "Shiba Inu",
+    }
+
+    # Confidence floor ordering (mirrors exchange.models.Confidence).
+    _CONF_RANK = {
+        "LOW": 0, "MEDIUM_LOW": 1, "MEDIUM": 2, "MEDIUM_HIGH": 3, "HIGH": 4,
+    }
 
     # Cash-like assets that are NOT directional crypto exposure: stablecoins,
     # Kraken fiat (Z-prefixed), and staked/earn variants ("DOT.S", "ETH2.S").
@@ -136,6 +156,19 @@ class KrakenPillar:
             return "momentum"
         return None
 
+    async def _llm_exit_reason(self, pair: str, gain_pct: float, kcfg) -> str | None:
+        """Exit a held LLM-driven long: hard stop floor, else exit when the LLM
+        view turns bearish. A missing view holds (don't churn on a transient gap)."""
+        stop_pct = getattr(kcfg, "directional_stop_loss_pct", 0.0) or 0.0
+        if stop_pct > 0 and gain_pct <= -stop_pct:
+            return "stop_loss"
+        view = await self._llm_view(pair)
+        if view is None:
+            return None
+        prob, _conf = view
+        exit_prob = getattr(kcfg, "directional_llm_exit_prob", 0.45) or 0.45
+        return "llm_bearish" if prob < exit_prob else None
+
     def _pnl_tracker(self):
         """Lazy PnLTracker so directional fills land in fills/cost_basis/daily_stats
         via the same machinery the binary venues use. None if no db is wired."""
@@ -166,10 +199,15 @@ class KrakenPillar:
                 await asyncio.sleep(delay)
         return None
 
-    async def _record_directional_fill(self, pair, side, res, est_price, qty) -> float | None:
+    async def _record_directional_fill(self, pair, side, res, est_price, qty, paper=False) -> float | None:
         """Record a directional entry/exit as a Fill so fills + realized P&L land
         in the books (cost_basis / daily_stats), the same path the binary venues
-        use. Returns the CONFIRMED fill price, or None if nothing was recorded.
+        use. Returns the fill price, or None if nothing was recorded.
+
+        ``paper=True`` (LLM paper-validation, or a paper bot run) books a
+        SIMULATED fill at the estimate price with is_paper=1 — no real order
+        executed, but `kraken pnl` (paper) can then measure the strategy. Live
+        mode (paper=False) only records a CONFIRMED fill.
 
         Scoped to live mode: paper orders are validate-only (never execute), so
         the real balance never reflects them and there is nothing to record.
@@ -182,6 +220,22 @@ class KrakenPillar:
         the fill can't be confirmed we record nothing and return None; the caller
         leaves the position untouched so balance reconciliation re-detects it.
         """
+        if paper:
+            # Simulated fill — no real execution to confirm. Book at the estimate
+            # price with is_paper=1 so the strategy is measurable via `kraken pnl`.
+            pnl = self._pnl_tracker()
+            if pnl is not None:
+                fee_pct = (getattr(self._s.kraken, "directional_fee_pct", 0.26) or 0.0) / 100.0
+                fill = Fill(
+                    order_id=str(getattr(res, "order_id", "")) or f"paper-{pair}",
+                    market_id=pair, token_id=pair, side=side, token=TokenType.YES,
+                    size=qty, price=est_price, fee=est_price * qty * fee_pct, is_paper=True,
+                )
+                try:
+                    await pnl.record_fill(fill)
+                except Exception as e:  # noqa: BLE001 — bookkeeping must not break the pillar
+                    log.warning("kraken.directional.paper_fill_record_error", pair=pair, error=str(e)[:120])
+            return est_price
         if not self._s.is_live:
             return None
         # Confirmation comes from the EXCHANGE, not from bookkeeping. An order
@@ -528,6 +582,15 @@ class KrakenPillar:
         entry_thr = getattr(kcfg, "directional_entry_momentum_pct", None) or kcfg.directional_momentum_pct
         exit_thr = getattr(kcfg, "directional_exit_momentum_pct", None) or kcfg.directional_momentum_pct
 
+        # LLM/news gate. When enabled it REPLACES the price-momentum entry/exit
+        # signal with the bot's news->LLM crypto read. While unproven it is
+        # paper-forced: orders go in validate-only and positions are simulated +
+        # booked as paper fills, so `kraken pnl` measures it without risking
+        # capital even when the bot runs live for other venues.
+        llm_on = bool(getattr(kcfg, "directional_llm_enabled", False))
+        llm_paper = llm_on and bool(getattr(kcfg, "directional_llm_paper", True))
+        effective_paper = (not self._s.is_live) or llm_paper
+
         for pair in managed:
             orphaned = pair not in valid_set
             price = await self._k.get_price(pair)
@@ -556,10 +619,13 @@ class KrakenPillar:
                     peak_pct = gain_pct
                 else:
                     peak_pct = await self._update_and_get_peak(pair, gain_pct)
-                    mom = await self._momentum(pair)
-                    if mom is None:
-                        continue
-                    reason = self._exit_reason(mom, gain_pct, peak_pct, exit_thr, kcfg)
+                    if llm_on:
+                        reason = await self._llm_exit_reason(pair, gain_pct, kcfg)
+                    else:
+                        mom = await self._momentum(pair)
+                        if mom is None:
+                            continue
+                        reason = self._exit_reason(mom, gain_pct, peak_pct, exit_thr, kcfg)
                 if not reason:
                     continue
                 # Sell the ACTUAL held quantity (from balance reconciliation), not
@@ -585,21 +651,22 @@ class KrakenPillar:
                 notional = await self._k.usd_notional(pair, vol, price) or (vol * price)
                 res = await self._k.place_spot_order(
                     pair, OrderSide.SELL, volume=vol, ordertype="market",
-                    purpose="directional", max_usd=max(notional, kcfg.max_order_usd) * 1.1)
+                    purpose="directional", max_usd=max(notional, kcfg.max_order_usd) * 1.1,
+                    dry_run=True if effective_paper else None)
                 placed = res.order_id not in ("ERROR", "BLOCKED")
                 fill_price = None
                 if placed:
                     # Record the SELL fill — realizes P&L into cost_basis +
-                    # daily_stats so the spec book is measurable. In live mode this
-                    # returns None unless the fill is CONFIRMED.
+                    # daily_stats so the spec book is measurable. Live confirms
+                    # the fill; paper books a simulated one at the est price.
                     fill_price = await self._record_directional_fill(
-                        pair, OrderSide.SELL, res, price, vol)
+                        pair, OrderSide.SELL, res, price, vol, paper=effective_paper)
                 # Only forget the position once the sell is real. In paper mode
                 # nothing executes, so simulate the close unconditionally; in live
                 # mode require a confirmed fill — otherwise a sell that never
                 # actually filled would drop the position from the book (phantom
                 # close) and leave the held crypto stranded + basis-blind.
-                closed = placed and (not self._s.is_live or fill_price is not None)
+                closed = placed and (effective_paper or fill_price is not None)
                 if closed:
                     self._dir_long.pop(pair, None)
                     await self._clear_peak(pair)
@@ -618,9 +685,20 @@ class KrakenPillar:
 
             elif not orphaned:
                 # Entry side — configured pairs only; never re-enter an orphan.
-                mom = await self._momentum(pair)
-                if mom is None or mom < entry_thr or self._in_cooldown(pair):
+                if self._in_cooldown(pair):
                     continue
+                if llm_on:
+                    view = await self._llm_view(pair)
+                    if view is None:
+                        continue
+                    prob, conf = view
+                    min_prob = getattr(kcfg, "directional_llm_min_prob", 0.60) or 0.60
+                    if prob < min_prob or not self._conf_ok(conf):
+                        continue
+                else:
+                    mom = await self._momentum(pair)
+                    if mom is None or mom < entry_thr:
+                        continue
                 # Budget ceiling: cap TOTAL open directional exposure at the
                 # tolerance-scaled budget, measured by ACTUAL notional (count×cap
                 # understates appreciated winners).
@@ -656,21 +734,27 @@ class KrakenPillar:
                 # currency to pay for it. The notional budget ceiling above is far
                 # larger than available cash, so without this the loop spams orders
                 # Kraken rejects as insufficient funds every cycle.
-                quote = await self._k.get_pair_quote(pair) or "ZUSD"
-                free_quote = bal.get(quote, 0.0)
-                need_quote = vol * price * 1.005   # +0.5% for taker fee headroom
-                if free_quote < need_quote:
-                    log.info("kraken.directional.skip_unfunded", pair=pair, quote=quote,
-                             free=round(free_quote, 2), need=round(need_quote, 2))
-                    continue
+                # Paper validation simulates entries, so it needs no real quote
+                # balance — skip the funding gate (else a fully-deployed wallet
+                # would block the paper book from ever opening a position).
+                if not effective_paper:
+                    quote = await self._k.get_pair_quote(pair) or "ZUSD"
+                    free_quote = bal.get(quote, 0.0)
+                    need_quote = vol * price * 1.005   # +0.5% for taker fee headroom
+                    if free_quote < need_quote:
+                        log.info("kraken.directional.skip_unfunded", pair=pair, quote=quote,
+                                 free=round(free_quote, 2), need=round(need_quote, 2))
+                        continue
                 res = await self._k.place_spot_order(
-                    pair, OrderSide.BUY, volume=vol, ordertype="market", purpose="directional")
+                    pair, OrderSide.BUY, volume=vol, ordertype="market", purpose="directional",
+                    dry_run=True if effective_paper else None)
                 if res.order_id not in ("ERROR", "BLOCKED"):
-                    # Record the fill (live) and anchor the entry to the actual
-                    # fill price so cost basis + the stops use real numbers.
+                    # Record the fill and anchor the entry to the actual fill price
+                    # so cost basis + the stops use real numbers. Paper books a
+                    # simulated fill at the current price.
                     fill_price = await self._record_directional_fill(
-                        pair, OrderSide.BUY, res, price, vol)
-                    if not self._s.is_live:
+                        pair, OrderSide.BUY, res, price, vol, paper=effective_paper)
+                    if effective_paper:
                         self._dir_long[pair] = price          # paper: simulate the entry
                     elif fill_price is not None:
                         self._dir_long[pair] = fill_price     # live: track only a CONFIRMED buy
@@ -683,7 +767,9 @@ class KrakenPillar:
                         log.warning("kraken.directional.entry_unconfirmed", pair=pair,
                                     order_id=str(res.order_id),
                                     note="buy not confirmed — not tracking; reconcile re-detects")
-                log.info("kraken.directional.entry", pair=pair, momentum=round(mom, 2),
+                log.info("kraken.directional.entry", pair=pair,
+                         momentum=(round(mom, 2) if mom is not None else None),
+                         signal=("llm" if llm_on else "momentum"), paper=effective_paper,
                          confirmed=(pair in self._dir_long),
                          status=res.status, err=res.error_message[:80])
 
@@ -697,3 +783,77 @@ class KrakenPillar:
         closes = [float(c[4]) for c in candles]
         old, cur = closes[-1 - lb], closes[-1]
         return None if old <= 0 else (cur - old) / old * 100.0
+
+    def _conf_ok(self, conf: str) -> bool:
+        kcfg = self._s.kraken
+        floor = getattr(kcfg, "directional_llm_min_confidence", "MEDIUM")
+        return self._CONF_RANK.get(str(conf).upper(), 0) >= self._CONF_RANK.get(str(floor).upper(), 2)
+
+    async def _llm_view(self, pair: str, force: bool = False) -> tuple[float, str] | None:
+        """LLM/news-driven P(asset higher over the horizon) for a pair.
+
+        Reuses the proven news->LLM pipeline (aggregator + analyzer + calibration)
+        the prediction-market side runs — the same path that scores ~72% on
+        resolved crypto markets. Throttled to directional_llm_refresh_hours per
+        pair to cap LLM spend; cached views are reused between refreshes. Returns
+        (prob_up, confidence) or None if unavailable. Records each fresh read into
+        calibration (market_id "kraken-dir:<pair>") so accuracy is measurable.
+        """
+        asset = self._PAIR_ASSET.get(pair)
+        if asset is None or self._bot is None:
+            return None
+        kcfg = self._s.kraken
+        refresh_s = (getattr(kcfg, "directional_llm_refresh_hours", 8.0) or 8.0) * 3600.0
+        cached = self._llm_views.get(pair)
+        if cached and not force and (time.monotonic() - cached[0]) < refresh_s:
+            return (cached[1], cached[2])
+
+        comp = self._bot._components
+        aggregator = comp.get("aggregator")
+        analyzer = comp.get("analyzer")
+        cache = comp.get("cache")
+        calibration = comp.get("calibration")
+        if aggregator is None or analyzer is None:
+            return None
+
+        horizon = getattr(kcfg, "directional_llm_horizon_days", 3)
+        from auramaur.exchange.models import Market
+        market = Market(
+            id=f"kraken-dir:{pair}",
+            exchange="kraken",
+            question=(f"Will {asset} trade higher {horizon} days from now than it "
+                      f"does today?"),
+            description=(f"Short-term directional read on {asset} ({pair}) spot price "
+                         f"over the next {horizon} days, for a long-only spot position."),
+            category="crypto",
+            outcome_yes_price=0.5,
+            outcome_no_price=0.5,
+        )
+        try:
+            queries = [f"{asset} crypto price outlook", f"{asset} news"]
+            evidence: list = []
+            seen: set[str] = set()
+            for q in queries:
+                items = await aggregator.gather(q, limit_per_source=3, category="crypto")
+                for it in items:
+                    if it.id not in seen:
+                        seen.add(it.id)
+                        evidence.append(it)
+            analysis = await analyzer.analyze(market, evidence, cache)
+        except Exception as e:
+            log.warning("kraken.llm_view_error", pair=pair, error=str(e))
+            return None
+        if analysis is None or analysis.skipped_reason:
+            return None
+
+        prob = float(analysis.probability)
+        conf = str(analysis.confidence)
+        self._llm_views[pair] = (time.monotonic(), prob, conf)
+        # Log the raw prediction so its accuracy can be measured over time.
+        if calibration is not None:
+            try:
+                await calibration.record_prediction(f"kraken-dir:{pair}", prob, "crypto")
+            except Exception:
+                pass
+        log.info("kraken.llm_view", pair=pair, asset=asset, prob=round(prob, 3), confidence=conf)
+        return (prob, conf)

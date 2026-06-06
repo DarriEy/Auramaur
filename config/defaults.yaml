@@ -192,6 +192,18 @@ kraken:
   # entries fire until it bleeds down — i.e. entries are effectively paused while
   # the existing positions wind down through the now-working take-profit/stops.
   directional_budget_usd: 150.0
+  # LLM/news-driven directional signal. Price-only momentum backtested net-negative
+  # in every variant; this gates entries on the bot's proven news->LLM crypto read
+  # (P(up) over a multi-day horizon) instead. OFF by default; PAPER-forced when on
+  # (validate-only orders) until the paper record proves edge — then set
+  # directional_llm_paper: false to go live. Inspect with `auramaur kraken signal`.
+  directional_llm_enabled: false
+  directional_llm_paper: true
+  directional_llm_min_prob: 0.60
+  directional_llm_exit_prob: 0.45
+  directional_llm_min_confidence: "MEDIUM"
+  directional_llm_horizon_days: 3
+  directional_llm_refresh_hours: 8.0
 
 transfers:
   # Cross-venue fund movement (Kraken -> Polymarket, Polygon USDC only).
