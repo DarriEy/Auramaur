@@ -509,6 +509,54 @@ def repair_pnl(write: bool):
     asyncio.run(_run())
 
 
+@main.command("reconcile-kalshi-orders")
+@click.option("--write", is_flag=True,
+              help="Persist the reconciled trade statuses (default is a dry-run).")
+def reconcile_kalshi_orders(write: bool):
+    """Reconcile stale 'pending' Kalshi trade rows against the venue.
+
+    Kalshi orders inserted at placement stayed 'pending' because the client
+    historically wasn't monitored. This re-queries each one and flips it to its
+    real terminal status (filled/cancelled/expired). Ledger hygiene only — it
+    does not touch P&L. Default mode is a dry-run.
+    """
+
+    async def _run():
+        from auramaur.broker.order_reconcile import reconcile_pending_kalshi_orders
+        from auramaur.exchange.kalshi import KalshiClient
+        from auramaur.exchange.paper import PaperTrader
+
+        settings = Settings()
+        db = Database()
+        await db.connect()
+        try:
+            paper = PaperTrader(db=db)
+            exchange = KalshiClient(settings=settings, paper_trader=paper)
+            res = await reconcile_pending_kalshi_orders(
+                db, exchange, dry_run=not write,
+            )
+            mode = "WRITE" if write else "DRY RUN"
+            console.print(f"[bold]{mode}[/] Kalshi order reconcile")
+            console.print(
+                f"Pending rows scanned: [cyan]{res.scanned}[/]  "
+                f"{'updated' if write else 'would update'}: [cyan]{res.updated}[/]  "
+                f"still pending: [cyan]{res.still_pending}[/]"
+            )
+            if res.by_status:
+                table = Table(title="Reconciled by status")
+                table.add_column("status", style="cyan")
+                table.add_column("count", justify="right")
+                for status, n in sorted(res.by_status.items()):
+                    table.add_row(status, str(n))
+                console.print(table)
+            if not write:
+                console.print("\n[dim]Preview only. Re-run with [cyan]--write[/] to persist.[/]")
+        finally:
+            await db.close()
+
+    asyncio.run(_run())
+
+
 @main.command("dust-exit")
 @click.option("--max-notional", default=5.0, type=float,
               help="Treat open positions worth less than this (current value, $) as dust.")
