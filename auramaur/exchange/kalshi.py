@@ -15,6 +15,7 @@ from auramaur.exchange.models import (
     OrderBookLevel,
     OrderResult,
     OrderSide,
+    OrderType,
     Signal,
     TokenType,
 )
@@ -51,6 +52,13 @@ class KalshiClient:
         self._markets_api = None
         self._portfolio_api = None
         self._semaphore = asyncio.Semaphore(_RATE_LIMIT)
+        # order_id -> Order for live order tracking. The order monitor polls
+        # this dict to reconcile fills and TTL-cancel resting orders; its
+        # presence is also the duck-typed signal that tells the monitor this
+        # client supports live order tracking (bot._task_order_monitor skips
+        # clients without it). Kalshi previously lacked it entirely, so its
+        # orders were never monitored and their trade rows stayed 'pending'.
+        self._live_pending: dict[str, Order] = {}
 
     def _init_api(self):
         """Lazily initialize the kalshi-python client."""
@@ -386,6 +394,12 @@ class KalshiClient:
                 status=order_data.get("status"),
             )
 
+            # Track the live order so the order monitor can poll it for fills,
+            # reconcile trades.status, and TTL-cancel it if it rests unfilled.
+            # Without this the row inserted at placement stays 'pending' forever.
+            if order_id and order_id != "unknown":
+                self._live_pending[order_id] = order
+
             return OrderResult(
                 order_id=order_id,
                 market_id=order.market_id,
@@ -483,6 +497,87 @@ class KalshiClient:
         except Exception as e:
             log.error("kalshi.cancel_error", order_id=order_id, error=str(e))
             return False
+
+    async def reconcile_open_orders(self) -> int:
+        """Pull resting Kalshi orders into ``_live_pending`` at startup.
+
+        Orders left resting by a prior session ("orphans") are otherwise
+        untracked, so the order monitor can neither record their fills nor
+        TTL-cancel them (freeing locked collateral). Reconstruct lightweight
+        Order records stamped with each order's real ``created_at`` so stale
+        ones are reaped on the first monitor pass. Mirrors the Polymarket
+        client's reconcile_open_orders. Best-effort: returns the number
+        reconciled, 0 if live trading is off or the query fails.
+        """
+        if not self._settings.is_live:
+            return 0
+        import json as _json
+        from datetime import datetime, timezone
+
+        self._init_api()
+        try:
+            raw = await self._call_raw(
+                self._portfolio_api.get_orders_without_preload_content,
+            )
+            data = _json.loads(raw)
+        except Exception as e:
+            log.warning("kalshi.reconcile_failed", error=str(e))
+            return 0
+
+        count = 0
+        for o in data.get("orders", []):
+            if o.get("status") != "resting":
+                continue
+            oid = str(o.get("order_id") or "")
+            if not oid or oid in self._live_pending:
+                continue
+            try:
+                side = (
+                    OrderSide.BUY
+                    if str(o.get("action", "")).lower() == "buy"
+                    else OrderSide.SELL
+                )
+                token = (
+                    TokenType.NO
+                    if str(o.get("side", "")).lower() == "no"
+                    else TokenType.YES
+                )
+                ticker = str(o.get("ticker") or "")
+                # Kalshi quotes everything as a yes_price in cents; a NO order's
+                # own price is the complement.
+                yes_price = float(o.get("yes_price", 0) or 0) / 100
+                price = (1 - yes_price) if token == TokenType.NO else yes_price
+                created_raw = o.get("created_time") or o.get("created_ts")
+                try:
+                    created = (
+                        datetime.fromisoformat(str(created_raw).replace("Z", "+00:00"))
+                        if created_raw
+                        else datetime.now(timezone.utc)
+                    )
+                except (TypeError, ValueError):
+                    created = datetime.now(timezone.utc)
+                remaining = float(
+                    o.get("remaining_count", o.get("count", 0)) or 0
+                )
+                self._live_pending[oid] = Order(
+                    market_id=ticker,
+                    exchange="kalshi",
+                    token_id=ticker,
+                    side=side,
+                    token=token,
+                    size=remaining,
+                    price=price,
+                    order_type=OrderType.LIMIT,
+                    dry_run=False,
+                    created_at=created,
+                )
+                count += 1
+            except (TypeError, ValueError) as e:
+                log.debug("kalshi.reconcile_parse_skip", order_id=oid, error=str(e))
+                continue
+        if count:
+            log.info("kalshi.reconciled_open_orders", count=count)
+        return count
 
     async def get_balance(self) -> float:
         """Get account balance in dollars."""
