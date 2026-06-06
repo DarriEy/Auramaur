@@ -345,17 +345,57 @@ class PerformanceAttributor:
         result.sort(key=lambda r: r["exposure"], reverse=True)
         return result
 
-    async def get_strategy_summary(self, *, is_live: bool = False) -> list[dict]:
-        """Per-strategy realized P&L, attributed from authoritative sources.
+    @staticmethod
+    def _entry_strategy_expr(alias: str) -> str:
+        """SQL that resolves a market's *entry* strategy.
 
-        The old version summed ``trades.pnl`` — the unreliable legacy mirror —
-        so every strategy showed $0 / 0 wins. Realized P&L actually lives in two
-        places (mirroring the cockpit's split): ``resolution_pnl`` for
-        oracle-resolved markets (live) and ``cost_basis.realized_pnl`` for
-        positions closed by selling. Each market is attributed to the strategy
-        that traded it (most recent ``trades.strategy_source``, falling back to
-        the signal's). ``trade_count`` is markets attributed; ``wins`` counts
-        markets that ended net-positive.
+        Attribution must credit the strategy that DECIDED to open a position,
+        not the last thing to touch it. The old version used the most-recent
+        ``trades.strategy_source``, which meant exits — recorded by the order
+        monitor as ``strategy_source = 'order_monitor'`` — stole every closed
+        position's P&L from the strategy that actually opened it. Here we take
+        the earliest non-``order_monitor`` trade, fall back to the earliest such
+        signal, and only as a last resort accept ``order_monitor`` itself (for
+        markets that genuinely have no other source).
+        """
+        return f"""COALESCE(
+            (SELECT t.strategy_source FROM trades t
+             WHERE t.market_id = {alias}.market_id
+               AND t.strategy_source IS NOT NULL
+               AND t.strategy_source != 'order_monitor'
+             ORDER BY t.timestamp ASC LIMIT 1),
+            (SELECT s.strategy_source FROM signals s
+             WHERE s.market_id = {alias}.market_id
+               AND s.strategy_source IS NOT NULL
+               AND s.strategy_source != 'order_monitor'
+             ORDER BY s.timestamp ASC LIMIT 1),
+            (SELECT t.strategy_source FROM trades t
+             WHERE t.market_id = {alias}.market_id
+               AND t.strategy_source IS NOT NULL
+             ORDER BY t.timestamp ASC LIMIT 1)
+        )"""
+
+    async def get_strategy_summary(self, *, is_live: bool = False) -> list[dict]:
+        """Per-strategy performance, attributed to the strategy that opened each
+        position.
+
+        Two earlier blind spots are fixed here:
+
+        * **Open positions were counted as completed trades.** ``cost_basis``
+          carries a row for every position, open or closed, with
+          ``realized_pnl = 0`` until it closes. Summing them blind made a
+          strategy actively building a book (e.g. news_speed, 21 open / 1
+          closed) read as "21 trades, 0 wins, $0.00". ``trade_count`` now counts
+          only *closed* markets — ``cost_basis`` rows with ``size = 0`` plus
+          oracle-resolved markets — and the open book is reported separately as
+          ``open_positions`` / ``unrealized_pnl``.
+
+        * **Exits stole the wins.** See :meth:`_entry_strategy_expr` — P&L is now
+          credited to the entry strategy, not ``order_monitor``.
+
+        Realized P&L still comes from the two authoritative sources:
+        ``resolution_pnl`` (oracle-resolved, live) and ``cost_basis.realized_pnl``
+        (closed by selling).
         """
         paper_flag = 0 if is_live else 1
         # resolution_pnl is live-only; for the rest use cost_basis, excluding
@@ -368,33 +408,66 @@ class PerformanceAttributor:
             "AND market_id NOT IN (SELECT market_id FROM resolution_pnl)"
             if is_live else ""
         )
-        rows = await self._db.fetchall(
+        realized_strat = self._entry_strategy_expr("mp")
+        # Realized arm: closed positions only (cost_basis.size = 0) + resolved.
+        realized_rows = await self._db.fetchall(
             f"""SELECT strat AS strategy_source,
                        COUNT(*) AS trade_count,
                        COALESCE(SUM(realized), 0) AS total_pnl,
                        SUM(CASE WHEN realized > 0 THEN 1 ELSE 0 END) AS wins,
                        SUM(CASE WHEN realized < 0 THEN 1 ELSE 0 END) AS losses
                 FROM (
-                    SELECT mp.realized,
-                           COALESCE(
-                               (SELECT t.strategy_source FROM trades t
-                                WHERE t.market_id = mp.market_id
-                                  AND t.strategy_source IS NOT NULL
-                                ORDER BY t.timestamp DESC LIMIT 1),
-                               (SELECT s.strategy_source FROM signals s
-                                WHERE s.market_id = mp.market_id
-                                  AND s.strategy_source IS NOT NULL
-                                ORDER BY s.timestamp DESC LIMIT 1)
-                           ) AS strat
+                    SELECT mp.realized, {realized_strat} AS strat
                     FROM (
                         {resolved_union}
                         SELECT market_id, realized_pnl AS realized FROM cost_basis
-                        WHERE is_paper = ? {resolved_exclusion}
+                        WHERE is_paper = ? AND size = 0 {resolved_exclusion}
                     ) mp
                 )
                 WHERE strat IS NOT NULL
-                GROUP BY strat
-                ORDER BY total_pnl ASC""",
+                GROUP BY strat""",
             (paper_flag,),
         )
-        return [dict(row) for row in rows]
+
+        # Open arm: live/non-polymarket open positions, with unrealized P&L,
+        # attributed to the same entry strategy.
+        open_strat = self._entry_strategy_expr("p")
+        open_rows = await self._db.fetchall(
+            f"""SELECT strat AS strategy_source,
+                       COUNT(*) AS open_positions,
+                       COALESCE(SUM(unrealized), 0) AS unrealized_pnl
+                FROM (
+                    SELECT (COALESCE(p.current_price, p.avg_price)
+                            - COALESCE(cb.avg_cost, p.avg_price)) * p.size AS unrealized,
+                           p.market_id, {open_strat} AS strat
+                    FROM portfolio p
+                    LEFT JOIN cost_basis cb ON p.market_id = cb.market_id
+                                            AND cb.is_paper = p.is_paper
+                    WHERE (p.is_paper = ? OR p.exchange != 'polymarket') AND p.size > 0
+                ) op
+                WHERE strat IS NOT NULL
+                GROUP BY strat""",
+            (paper_flag,),
+        )
+
+        merged: dict[str, dict] = {}
+        for r in realized_rows:
+            merged[r["strategy_source"]] = {
+                "strategy_source": r["strategy_source"],
+                "trade_count": r["trade_count"],
+                "total_pnl": r["total_pnl"] or 0,
+                "wins": r["wins"] or 0,
+                "losses": r["losses"] or 0,
+                "open_positions": 0,
+                "unrealized_pnl": 0,
+            }
+        for r in open_rows:
+            entry = merged.setdefault(r["strategy_source"], {
+                "strategy_source": r["strategy_source"],
+                "trade_count": 0, "total_pnl": 0, "wins": 0, "losses": 0,
+                "open_positions": 0, "unrealized_pnl": 0,
+            })
+            entry["open_positions"] = r["open_positions"]
+            entry["unrealized_pnl"] = r["unrealized_pnl"] or 0
+
+        return sorted(merged.values(), key=lambda r: r["total_pnl"])

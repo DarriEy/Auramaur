@@ -293,10 +293,12 @@ def render_attribution(
 
     strat = Table(title="by strategy", expand=True)
     strat.add_column("strategy", style="magenta")
-    strat.add_column("trades", justify="right")
+    strat.add_column("closed", justify="right")
     strat.add_column("wins", justify="right")
     strat.add_column("win%", justify="right")
-    strat.add_column("pnl", justify="right")
+    strat.add_column("realized", justify="right")
+    strat.add_column("open", justify="right")
+    strat.add_column("unrealized", justify="right")
     for r in strategy_rows:
         n = r.get("trade_count", 0) or 0
         w = r.get("wins", 0) or 0
@@ -304,6 +306,8 @@ def render_attribution(
         strat.add_row(
             r.get("strategy_source", "?") or "?", str(n), str(w), wr,
             _money(r.get("total_pnl", 0) or 0),
+            str(r.get("open_positions", 0) or 0),
+            _money(r.get("unrealized_pnl", 0) or 0),
         )
 
     head = Text.from_markup(f"[bold]Performance attribution[/]  ([dim]{mode}[/])")
