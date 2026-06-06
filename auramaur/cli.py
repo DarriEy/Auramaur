@@ -540,7 +540,8 @@ def reconcile_kalshi_orders(write: bool):
             console.print(
                 f"Pending rows scanned: [cyan]{res.scanned}[/]  "
                 f"{'updated' if write else 'would update'}: [cyan]{res.updated}[/]  "
-                f"still pending: [cyan]{res.still_pending}[/]"
+                f"still pending: [cyan]{res.still_pending}[/]  "
+                f"errors (left untouched): [yellow]{res.errors}[/]"
             )
             if res.by_status:
                 table = Table(title="Reconciled by status")

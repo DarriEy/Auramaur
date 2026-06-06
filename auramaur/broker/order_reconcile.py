@@ -30,7 +30,18 @@ class ReconcileResult:
     scanned: int = 0
     updated: int = 0
     still_pending: int = 0
+    errors: int = 0
     by_status: dict[str, int] = field(default_factory=dict)
+
+
+def _is_not_found(err: Exception) -> bool:
+    """True if the error means the venue has no such order (so it's expired).
+
+    Anything else (a parse bug, a transient network/API error) must NOT be
+    treated as a terminal state — guessing would corrupt the ledger.
+    """
+    msg = str(err).lower()
+    return "404" in msg or "not found" in msg or "not_found" in msg
 
 
 async def reconcile_pending_kalshi_orders(
@@ -66,10 +77,15 @@ async def reconcile_pending_kalshi_orders(
                     size = status_result.filled_size
                 if status_result.filled_price > 0:
                     price = status_result.filled_price
-        except Exception:
-            # The venue no longer knows this order (too old / pruned). It is by
-            # definition no longer resting and can never fill — treat as expired.
-            status = "expired"
+        except Exception as e:
+            if _is_not_found(e):
+                # The venue has no such order (too old / pruned). It is by
+                # definition no longer resting and can never fill — expired.
+                status = "expired"
+            else:
+                # Transient / unexpected error — don't guess a terminal state.
+                result.errors += 1
+                continue
 
         if status not in _TERMINAL:
             result.still_pending += 1
@@ -96,6 +112,7 @@ async def reconcile_pending_kalshi_orders(
         scanned=result.scanned,
         updated=result.updated,
         still_pending=result.still_pending,
+        errors=result.errors,
         by_status=result.by_status,
         dry_run=dry_run,
     )

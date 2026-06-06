@@ -82,22 +82,83 @@ async def test_reconcile_open_orders_noop_when_not_live():
 def _make_exchange(status_by_oid: dict[str, str]):
     """Mock exchange whose get_order_status returns mapped statuses.
 
-    A missing oid raises (simulating an order the venue no longer knows).
+    A missing oid raises a 'not found' error (order the venue no longer knows).
+    The sentinel value '__transient__' raises a non-not-found error.
     """
     exch = MagicMock()
 
     async def _status(oid):
         if oid not in status_by_oid:
             raise RuntimeError("order not found")
+        val = status_by_oid[oid]
+        if val == "__transient__":
+            raise RuntimeError("connection reset by peer")
         return OrderResult(
-            order_id=oid, market_id="m", status=status_by_oid[oid],
-            filled_size=10 if status_by_oid[oid] == "filled" else 0,
-            filled_price=0.5 if status_by_oid[oid] == "filled" else 0,
+            order_id=oid, market_id="m", status=val,
+            filled_size=10 if val == "filled" else 0,
+            filled_price=0.5 if val == "filled" else 0,
             is_paper=False,
         )
 
     exch.get_order_status = AsyncMock(side_effect=_status)
     return exch
+
+
+def test_reconcile_leaves_transient_errors_pending():
+    """A non-'not found' error must NOT be guessed as a terminal status."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        for oid in ("o-flaky", "o-filled"):
+            await db.execute(
+                "INSERT INTO trades (market_id, side, size, price, is_paper, "
+                "order_id, status, exchange, strategy_source) "
+                "VALUES ('m', 'BUY', 1, 0.4, 0, ?, 'pending', 'kalshi', 'llm')",
+                (oid,),
+            )
+        await db.commit()
+        exch = _make_exchange({"o-flaky": "__transient__", "o-filled": "filled"})
+
+        res = await reconcile_pending_kalshi_orders(db, exch, dry_run=False)
+        assert res.errors == 1
+        assert res.updated == 1
+        statuses = {
+            r["order_id"]: r["status"]
+            for r in await db.fetchall("SELECT order_id, status FROM trades")
+        }
+        # The flaky one is untouched; only the cleanly-filled one moved.
+        assert statuses["o-flaky"] == "pending"
+        assert statuses["o-filled"] == "filled"
+        await db.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.asyncio
+async def test_get_order_status_handles_none_fields():
+    """Terminal/historical orders return None count/price — must not crash.
+
+    This was the bug that made every reconcile query on an old order fail with
+    'unsupported operand type(s) for -: NoneType and NoneType'.
+    """
+    client = _client(is_live=True)
+    client._init_api = MagicMock()
+    client._portfolio_api = MagicMock()  # normally set by _init_api
+
+    order_data = MagicMock()
+    order_data.status = "executed"
+    order_data.ticker = "KXFOO-1"
+    order_data.count = None
+    order_data.remaining_count = None
+    order_data.yes_price = None
+    response = MagicMock()
+    response.order = order_data
+    client._call = AsyncMock(return_value=response)
+
+    result = await client.get_order_status("o1")
+    assert result.status == "filled"
+    assert result.filled_size == 0
+    assert result.filled_price == 0
 
 
 def test_reconcile_pending_orders_updates_terminal_only():
@@ -158,5 +219,7 @@ if __name__ == "__main__":
     test_client_exposes_live_pending()
     asyncio.run(test_reconcile_open_orders_rehydrates_resting())
     asyncio.run(test_reconcile_open_orders_noop_when_not_live())
+    asyncio.run(test_get_order_status_handles_none_fields())
+    test_reconcile_leaves_transient_errors_pending()
     test_reconcile_pending_orders_updates_terminal_only()
     print("ok")

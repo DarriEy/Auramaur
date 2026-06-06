@@ -473,14 +473,20 @@ class KalshiClient:
             raw_status = str(getattr(order_data, "status", "pending")).lower()
             status = status_map.get(raw_status, "pending")
 
+            # Terminal/historical orders come back with count, remaining_count
+            # and yes_price all None — coerce to 0 so the arithmetic below
+            # doesn't raise (which previously made every status query on an old
+            # order fail).
+            count = getattr(order_data, "count", 0) or 0
+            remaining = getattr(order_data, "remaining_count", 0) or 0
+            yes_price = getattr(order_data, "yes_price", 0) or 0
+
             return OrderResult(
                 order_id=order_id,
-                market_id=getattr(order_data, "ticker", ""),
+                market_id=getattr(order_data, "ticker", "") or "",
                 status=status,  # type: ignore[arg-type]
-                filled_size=float(
-                    getattr(order_data, "count", 0) - getattr(order_data, "remaining_count", 0)
-                ),
-                filled_price=float(getattr(order_data, "yes_price", 0)) / 100,
+                filled_size=float(count - remaining),
+                filled_price=float(yes_price) / 100,
                 is_paper=False,
             )
         except Exception as e:
