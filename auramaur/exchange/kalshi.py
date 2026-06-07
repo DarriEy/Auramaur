@@ -685,7 +685,7 @@ class KalshiClient:
                        (market_id, exchange, side, size, avg_price, current_price,
                         unrealized_pnl, category, token, token_id, is_paper, updated_at)
                        VALUES (?, 'kalshi', 'BUY', ?, ?, ?, ?, ?, ?, ?, 0, datetime('now'))
-                       ON CONFLICT(market_id, is_paper) DO UPDATE SET
+                       ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
                            exchange = excluded.exchange,
                            size = excluded.size,
                            avg_price = excluded.avg_price,
@@ -704,7 +704,7 @@ class KalshiClient:
                        (market_id, token, token_id, size, avg_cost, total_cost,
                         is_paper, updated_at)
                        VALUES (?, ?, ?, ?, ?, ?, 0, datetime('now'))
-                       ON CONFLICT(market_id, is_paper) DO UPDATE SET
+                       ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
                            token = excluded.token,
                            token_id = excluded.token_id,
                            size = excluded.size,

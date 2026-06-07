@@ -150,12 +150,17 @@ def test_exit_skipped_when_held_qty_below_ordermin():
 
 
 def test_entry_skipped_when_quote_unfunded():
-    """An entry signal is ignored when free quote currency can't pay for the
+    """A LIVE entry signal is ignored when free quote currency can't pay for the
     order — the notional budget ceiling alone would let it fire an order Kraken
-    rejects as insufficient funds."""
+    rejects as insufficient funds.
+
+    The funding gate only applies to real (non-paper) orders: paper/validate-only
+    entries are simulated so the paper book can open positions even on a fully
+    deployed wallet, so this test runs the pillar in live mode."""
     async def run():
         kcfg = _kcfg()
         p = _pillar(1.00, kcfg, base_amt=0.0)   # flat (not holding) -> entry path
+        p._s.is_live = True                     # exercise the live funding gate
         p._dir_long = {}
         # Strong up-momentum -> wants to enter; but only $0.50 USDC free.
         p._momentum = AsyncMock(return_value=5.0)

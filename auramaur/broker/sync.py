@@ -229,7 +229,7 @@ class PositionSyncer:
                    (market_id, exchange, side, size, avg_price, current_price,
                     unrealized_pnl, category, token, token_id, is_paper, updated_at)
                    VALUES (?, 'polymarket', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(market_id, is_paper) DO UPDATE SET
+                   ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
                        exchange = excluded.exchange,
                        size = excluded.size,
                        avg_price = excluded.avg_price,
@@ -299,7 +299,7 @@ class PositionSyncer:
                    (market_id, exchange, side, size, avg_price, current_price,
                     unrealized_pnl, category, token, token_id, is_paper, updated_at)
                    VALUES (?, 'polymarket', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(market_id, is_paper) DO UPDATE SET
+                   ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
                        exchange = excluded.exchange,
                        side = excluded.side,
                        size = excluded.size,
@@ -404,7 +404,7 @@ class KalshiPositionSyncer:
                    (market_id, exchange, side, size, avg_price, current_price,
                     unrealized_pnl, category, token, token_id, is_paper, updated_at)
                    VALUES (?, 'kalshi', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
-                   ON CONFLICT(market_id, is_paper) DO UPDATE SET
+                   ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
                        exchange = excluded.exchange,
                        side = excluded.side,
                        size = excluded.size,

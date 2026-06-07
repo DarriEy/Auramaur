@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -87,7 +87,7 @@ CREATE TABLE IF NOT EXISTS portfolio (
     token_id TEXT DEFAULT '',
     is_paper INTEGER NOT NULL DEFAULT 1,
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (market_id, is_paper),
+    PRIMARY KEY (market_id, is_paper, token),
     FOREIGN KEY (market_id) REFERENCES markets(id)
 );
 
@@ -195,7 +195,7 @@ CREATE TABLE IF NOT EXISTS cost_basis (
     realized_pnl REAL DEFAULT 0,
     is_paper INTEGER NOT NULL DEFAULT 1,
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (market_id, is_paper)
+    PRIMARY KEY (market_id, is_paper, token)
 );
 
 -- Realized dollar P&L per market, written when a market resolves. Lets us

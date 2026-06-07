@@ -1192,13 +1192,19 @@ class TradingEngine:
                     queries = extract_search_queries(market.question, market.description, market.category or "")
                     all_evidence: list = []
                     seen_ids: set[str] = set()
+                    # Cap fan-out by config (mirrors the tool-use path above) so a
+                    # market with many queries doesn't over-fetch across sources.
+                    per_query_limit = (
+                        max(1, self.settings.nlp.evidence_per_source // len(queries))
+                        if queries else self.settings.nlp.evidence_per_source
+                    )
 
                     # Resolution criteria are carried in the market block's Desc
                     # field, not duplicated here as synthetic evidence — the
                     # Evidence section is real-world news only.
                     for query in queries:
                         items = await self.aggregator.gather(
-                            query, limit_per_source=8, category=market.category or None,
+                            query, limit_per_source=per_query_limit, category=market.category or None,
                         )
                         for item in items:
                             if item.id not in seen_ids:

@@ -558,7 +558,12 @@ class Settings(BaseSettings):
 
     @property
     def kill_switch_active(self) -> bool:
-        return Path("KILL_SWITCH").exists()
+        # Anchor the kill switch to the repo root (two levels up from this
+        # file: config/ -> repo root), not the caller's CWD. A bare
+        # Path("KILL_SWITCH") would be CWD-relative and could miss the switch
+        # when the bot is launched from the inner package directory.
+        repo_root = Path(__file__).resolve().parent.parent
+        return (repo_root / "KILL_SWITCH").exists() or Path("KILL_SWITCH").exists()
 
     @property
     def is_live(self) -> bool:
