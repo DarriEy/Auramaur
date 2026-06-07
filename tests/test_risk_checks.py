@@ -161,13 +161,15 @@ async def test_min_liquidity_insufficient():
 # 9. Max spread
 @pytest.mark.asyncio
 async def test_max_spread_within_limit():
-    result = await check_max_spread(3.0, 5.0)
+    # spread is a price-unit fraction (0.03 == 3%); cap is a percent (5.0 == 5%)
+    result = await check_max_spread(0.03, 5.0)
     assert result.passed is True
 
 
 @pytest.mark.asyncio
 async def test_max_spread_exceeded():
-    result = await check_max_spread(7.0, 5.0)
+    # 0.07 == 7% spread exceeds the 5% cap
+    result = await check_max_spread(0.07, 5.0)
     assert result.passed is False
 
 

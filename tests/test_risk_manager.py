@@ -85,7 +85,7 @@ def _make_market(
     *,
     yes_price=0.50,
     liquidity=10000.0,
-    spread=1.0,
+    spread=0.01,  # price-unit fraction: 0.01 == 1% spread (within the 5% cap)
     category="politics",
     days_until_resolution=7,
 ):

@@ -513,7 +513,7 @@ class PortfolioTracker:
                 (market_id, exchange, side, size, avg_price, current_price,
                  unrealized_pnl, category, token, token_id, is_paper, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(market_id, is_paper) DO UPDATE SET
+            ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
                 exchange = excluded.exchange,
                 side = excluded.side,
                 size = excluded.size,

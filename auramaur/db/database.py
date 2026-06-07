@@ -70,6 +70,8 @@ class Database:
             await self._migrate_v11_to_v12()
         if from_version < 13:
             await self._migrate_v12_to_v13()
+        if from_version < 14:
+            await self._migrate_v13_to_v14()
 
     async def _migrate_v1_to_v2(self) -> None:
         """Add category to calibration, add new tables."""
@@ -310,6 +312,82 @@ class Database:
         await self._db.execute("UPDATE schema_version SET version = 11")
         await self._db.commit()
         log.info("database.migrated", from_version=10, to_version=11)
+
+    async def _migrate_v13_to_v14(self) -> None:
+        """Add ``token`` to the cost_basis and portfolio primary keys.
+
+        The PKs were ``(market_id, is_paper)``, allowing only one row per
+        market per mode. But a strategy can hold BOTH the YES and NO outcome in
+        the same market, so the second side overwrote the first — corrupting
+        cost basis, PnL, exits, and exposure attribution. ``token`` ('YES'/'NO',
+        NOT NULL) is the field that distinguishes the two sides, so it belongs
+        in the key. (token_id is not used: it defaults to '' and can be empty on
+        legacy/Kalshi rows, which would re-introduce collisions.)
+
+        Existing rows have at most one row per (market_id, is_paper) and each
+        carries a token value, so they map to unique (market_id, is_paper,
+        token) keys — INSERT OR IGNORE preserves them with no loss.
+        """
+        cursor = await self._db.execute(
+            """SELECT market_id, is_paper, COUNT(*) AS c FROM cost_basis
+               GROUP BY market_id, is_paper HAVING c > 1"""
+        )
+        for row in await cursor.fetchall():
+            log.warning(
+                "migration.v13_to_v14.preexisting_dup", table="cost_basis",
+                market_id=row[0], is_paper=row[1], rows=row[2],
+            )
+
+        await self._db.executescript("""
+            CREATE TABLE IF NOT EXISTS cost_basis_new (
+                market_id TEXT NOT NULL,
+                token TEXT NOT NULL DEFAULT 'YES',
+                token_id TEXT DEFAULT '',
+                size REAL NOT NULL,
+                avg_cost REAL NOT NULL,
+                total_cost REAL NOT NULL,
+                realized_pnl REAL DEFAULT 0,
+                is_paper INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (market_id, is_paper, token)
+            );
+            INSERT OR IGNORE INTO cost_basis_new
+                (market_id, token, token_id, size, avg_cost, total_cost,
+                 realized_pnl, is_paper, updated_at)
+            SELECT market_id, token, token_id, size, avg_cost, total_cost,
+                   realized_pnl, is_paper, updated_at
+            FROM cost_basis;
+            DROP TABLE cost_basis;
+            ALTER TABLE cost_basis_new RENAME TO cost_basis;
+
+            CREATE TABLE IF NOT EXISTS portfolio_new (
+                market_id TEXT NOT NULL,
+                exchange TEXT DEFAULT 'polymarket',
+                side TEXT NOT NULL,
+                size REAL NOT NULL,
+                avg_price REAL NOT NULL,
+                current_price REAL,
+                unrealized_pnl REAL DEFAULT 0,
+                category TEXT,
+                token TEXT NOT NULL DEFAULT 'YES',
+                token_id TEXT DEFAULT '',
+                is_paper INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (market_id, is_paper, token),
+                FOREIGN KEY (market_id) REFERENCES markets(id)
+            );
+            INSERT OR IGNORE INTO portfolio_new
+                (market_id, exchange, side, size, avg_price, current_price,
+                 unrealized_pnl, category, token, token_id, is_paper, updated_at)
+            SELECT market_id, exchange, side, size, avg_price, current_price,
+                   unrealized_pnl, category, token, token_id, is_paper, updated_at
+            FROM portfolio;
+            DROP TABLE portfolio;
+            ALTER TABLE portfolio_new RENAME TO portfolio;
+        """)
+        await self._db.execute("UPDATE schema_version SET version = 14")
+        await self._db.commit()
+        log.info("database.migrated", from_version=13, to_version=14)
 
     async def _migrate_v11_to_v12(self) -> None:
         """Add strategy_source column to signals and trades for hybrid mode attribution."""

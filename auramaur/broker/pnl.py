@@ -144,7 +144,7 @@ class PnLTracker:
             """INSERT INTO cost_basis
                (market_id, token, token_id, size, avg_cost, total_cost, realized_pnl, is_paper, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(market_id, is_paper) DO UPDATE SET
+               ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
                    token = excluded.token,
                    token_id = excluded.token_id,
                    size = excluded.size,

@@ -6,7 +6,11 @@
 risk_tolerance: 50
 
 execution:
-  live: true
+  # Paper trading is the documented default. Live trading additionally
+  # requires the AURAMAUR_LIVE env gate and dry_run=False per order, so
+  # flipping this to true alone never arms real orders — but the tracked
+  # default must match the docs (README: paper is default).
+  live: false
   paper_initial_balance: 111.0
   limit_order_ttl_seconds: 120
   spread_capture_min_bps: 50

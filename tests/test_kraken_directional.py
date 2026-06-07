@@ -73,6 +73,10 @@ def _pillar(*, holding: bool):
     k.directional_fee_pct = 0.26
     k.directional_reentry_cooldown_min = 0.0
     k.directional_liquidate_orphans = True
+    # Force the price-momentum path: `k` is a MagicMock, so an unset
+    # directional_llm_enabled would read as a truthy Mock and silently switch
+    # these momentum tests onto the LLM/news gate (no momentum order placed).
+    k.directional_llm_enabled = False
     client = MagicMock()
     # _directional sizes off FREE balance; exits read the reconciled held qty.
     bal = {"XBT": 0.5, "USDC": 1000.0} if holding else {"USDC": 1000.0}

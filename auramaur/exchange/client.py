@@ -47,6 +47,10 @@ class PolymarketClient:
         self._real_positions: dict[str, dict] = {}
         self._positions_loaded = False
         self._geoblocked = False  # Set on first 403 geoblock; routes to paper for session
+        # market_id -> set of CLOB token ids. Initialized here (not lazily) so
+        # get_sellable_token_id() can read it safely even before any market
+        # tokens have been registered.
+        self._market_token_map: dict[str, set[str]] = {}
 
     def _load_real_positions(self) -> None:
         """Load actual on-chain positions from CLOB trade history."""
@@ -126,7 +130,7 @@ class PolymarketClient:
     def register_market_tokens(self, market_id: str, clob_yes: str, clob_no: str) -> None:
         """Register the CLOB token IDs for a market so sells can be matched."""
         if not hasattr(self, '_market_token_map'):
-            self._market_token_map: dict[str, set[str]] = {}
+            self._market_token_map = {}
         tokens = set()
         if clob_yes:
             tokens.add(clob_yes)

@@ -545,7 +545,7 @@ class KrakenPillar:
                        (market_id, exchange, side, size, avg_price, current_price,
                         unrealized_pnl, category, token, token_id, is_paper, updated_at)
                        VALUES (?, 'kraken', 'BUY', ?, ?, ?, ?, 'crypto', 'YES', ?, ?, datetime('now'))
-                       ON CONFLICT(market_id, is_paper) DO UPDATE SET
+                       ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
                            size = excluded.size,
                            avg_price = excluded.avg_price,
                            current_price = excluded.current_price,

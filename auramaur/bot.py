@@ -432,7 +432,7 @@ class AuramaurBot:
         # Use first available discovery/exchange as primary (for portfolio monitor etc.)
         primary_discovery = gamma if gamma else next(iter(discoveries.values()), None)
         primary_exchange = exchange if exchange else next(
-            (engines[k]._exchange for k in engines if hasattr(engines[k], '_exchange')), None  # type: ignore[attr-defined]
+            (engines[k].exchange for k in engines if getattr(engines[k], 'exchange', None) is not None), None
         )
 
         self._components = {
@@ -694,6 +694,25 @@ class AuramaurBot:
             except Exception as e:
                 log.debug("portfolio_monitor_error", error=str(e))
             await asyncio.sleep(interval)
+
+    def _clear_exit_suppression(self, exchange_name: str, order, status: str) -> None:
+        """Release the exit-retry suppression for a terminated exit order.
+
+        The portfolio monitor sets ``exit:{exchange}:{market_id}`` in
+        ``_exit_pending`` (or ``_exit_failures``) when it places an exit sell so
+        it won't spam duplicates while the order rests. When that order reaches a
+        terminal state the order monitor only clears the exchange-level
+        ``_live_pending`` dict — without this, a cancelled/expired exit would
+        keep the bot-level key set and suppress all future exits for that market
+        until restart. Mirror the key construction in the portfolio monitor and
+        clear both sets for SELL (exit) orders, on any terminal status.
+        """
+        if order is None or getattr(order, "side", None) != OrderSide.SELL:
+            return
+        exit_key = f"exit:{exchange_name}:{order.market_id}"
+        self._exit_pending.discard(exit_key)
+        self._exit_failures.discard(exit_key)
+        log.debug("exit.suppression_cleared", exit_key=exit_key, status=status)
 
     async def _execute_poly_exit(
         self,
@@ -2427,7 +2446,7 @@ class AuramaurBot:
                         await self._components["db"].execute(
                             """INSERT INTO cost_basis (market_id, token, token_id, size, avg_cost, total_cost, is_paper, updated_at)
                                VALUES (?, ?, ?, ?, ?, ?, 0, datetime('now'))
-                               ON CONFLICT(market_id, is_paper) DO UPDATE SET
+                               ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
                                    token = excluded.token,
                                    token_id = excluded.token_id,
                                    size = excluded.size,
@@ -2629,6 +2648,7 @@ class AuramaurBot:
                                         )
 
                                 pending.pop(order_id, None)
+                                self._clear_exit_suppression(exchange_name, order, result.status)
                                 log.info(
                                     "order_monitor.live_terminal",
                                     exchange=exchange_name,
@@ -2649,6 +2669,7 @@ class AuramaurBot:
                                 if age > ttl:
                                     cancelled = await live_exchange.cancel_order(order_id)
                                     pending.pop(order_id, None)
+                                    self._clear_exit_suppression(exchange_name, order, "ttl_cancelled")
                                     log.info(
                                         "order_monitor.live_ttl_cancel",
                                         exchange=exchange_name,

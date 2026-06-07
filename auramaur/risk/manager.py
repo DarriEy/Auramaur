@@ -128,7 +128,7 @@ class RiskManager:
             await check_kill_switch(),
             await check_max_drawdown(drawdown, rc.max_drawdown_pct),
             await check_drawdown_heat(drawdown, rc.max_drawdown_pct),
-            await check_daily_loss(abs(daily_pnl), rc.daily_loss_limit),
+            await check_daily_loss(max(0.0, -daily_pnl), rc.daily_loss_limit),
             await check_max_positions(len(positions), rc.max_open_positions),
             await check_min_edge(signal.edge, regime.min_edge_pct),
             await check_divergence_band(

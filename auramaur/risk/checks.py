@@ -187,12 +187,19 @@ async def check_min_liquidity(liquidity: float, min_liquidity: float = 1000.0) -
 # ---------------------------------------------------------------------------
 
 async def check_max_spread(spread: float, max_spread_pct: float = 5.0) -> CheckResult:
-    """Fail if the bid-ask spread is too wide."""
-    too_wide = spread > max_spread_pct
+    """Fail if the bid-ask spread is too wide.
+
+    `spread` is the raw bid/ask gap in price units (dollars on a $0-1 contract,
+    e.g. 0.20 for a 20-cent spread), while `max_spread_pct` is a percentage
+    (5.0 == 5%). Convert the cap to price units before comparing, otherwise a
+    20-cent spread (0.20) would never exceed a "5%" cap of 5.0.
+    """
+    spread_pct = spread * 100.0
+    too_wide = spread_pct > max_spread_pct
     return CheckResult(
         name="max_spread",
         passed=not too_wide,
-        reason=f"Spread {spread:.2f}% exceeds limit {max_spread_pct:.1f}%" if too_wide else "",
+        reason=f"Spread {spread_pct:.2f}% exceeds limit {max_spread_pct:.1f}%" if too_wide else "",
         value=spread,
     )
 

@@ -145,7 +145,7 @@ class TestCheckResolutions:
         discoveries = {"polymarket": _make_discovery(resolved_yes_market)}
 
         tracker = ResolutionTracker(db=db, calibration=calibration, discoveries=discoveries)
-        count = asyncio.get_event_loop().run_until_complete(tracker.check_resolutions())
+        count = asyncio.run(tracker.check_resolutions())
 
         assert count == 1
         calibration.record_resolution.assert_awaited_once_with("mkt-1", True)
@@ -157,7 +157,7 @@ class TestCheckResolutions:
         discoveries = {"polymarket": _make_discovery(resolved_no_market)}
 
         tracker = ResolutionTracker(db=db, calibration=calibration, discoveries=discoveries)
-        count = asyncio.get_event_loop().run_until_complete(tracker.check_resolutions())
+        count = asyncio.run(tracker.check_resolutions())
 
         assert count == 1
         calibration.record_resolution.assert_awaited_once_with("mkt-2", False)
@@ -169,7 +169,7 @@ class TestCheckResolutions:
         discoveries = {"polymarket": _make_discovery(active_market)}
 
         tracker = ResolutionTracker(db=db, calibration=calibration, discoveries=discoveries)
-        count = asyncio.get_event_loop().run_until_complete(tracker.check_resolutions())
+        count = asyncio.run(tracker.check_resolutions())
 
         assert count == 0
         calibration.record_resolution.assert_not_awaited()
@@ -181,7 +181,7 @@ class TestCheckResolutions:
         discoveries = {}  # No discoveries at all
 
         tracker = ResolutionTracker(db=db, calibration=calibration, discoveries=discoveries)
-        count = asyncio.get_event_loop().run_until_complete(tracker.check_resolutions())
+        count = asyncio.run(tracker.check_resolutions())
 
         assert count == 0
 
@@ -191,7 +191,7 @@ class TestCheckResolutions:
         discoveries = {"polymarket": _make_discovery(None)}
 
         tracker = ResolutionTracker(db=db, calibration=calibration, discoveries=discoveries)
-        count = asyncio.get_event_loop().run_until_complete(tracker.check_resolutions())
+        count = asyncio.run(tracker.check_resolutions())
 
         assert count == 0
 
@@ -202,7 +202,7 @@ class TestCheckResolutions:
         discoveries = {"polymarket": _make_discovery(None)}  # get_market returns None
 
         tracker = ResolutionTracker(db=db, calibration=calibration, discoveries=discoveries)
-        count = asyncio.get_event_loop().run_until_complete(tracker.check_resolutions())
+        count = asyncio.run(tracker.check_resolutions())
 
         assert count == 0
 
@@ -223,7 +223,7 @@ class TestCheckResolutions:
         }
 
         tracker = ResolutionTracker(db=db, calibration=calibration, discoveries=discoveries)
-        count = asyncio.get_event_loop().run_until_complete(tracker.check_resolutions())
+        count = asyncio.run(tracker.check_resolutions())
 
         assert count == 2
         calls = calibration.record_resolution.await_args_list
@@ -248,7 +248,7 @@ class TestSettlePosition:
         calibration = AsyncMock()
         tracker = ResolutionTracker(db=db, calibration=calibration, discoveries={})
 
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             tracker._settle_position("mkt-1", outcome=True)
         )
 
@@ -266,7 +266,7 @@ class TestSettlePosition:
         tracker = ResolutionTracker(db=db, calibration=calibration, discoveries={})
 
         # Should not raise
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             tracker._settle_position("mkt-1", outcome=True)
         )
 
