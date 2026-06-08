@@ -324,8 +324,10 @@ class AuramaurBot:
             except ImportError:
                 log.warning("optional.missing", component="CryptoComClient")
 
-        # Interactive Brokers (optional, guarded import)
-        if s.ibkr.enabled and (self._exchange_filter is None or self._exchange_filter == "ibkr"):
+        # Interactive Brokers options scanner (optional, guarded import). Gated
+        # by options_enabled so the equity book can run without waking the
+        # OPRA-less option scanner (which otherwise spams Error 200/10091).
+        if s.ibkr.enabled and s.ibkr.options_enabled and (self._exchange_filter is None or self._exchange_filter == "ibkr"):
             try:
                 from auramaur.exchange.ibkr import IBKRClient
                 ibkr = IBKRClient(settings=s, paper_trader=paper)
@@ -2798,11 +2800,13 @@ class AuramaurBot:
             except Exception as e:
                 log.debug("startup.kraken_balance_error", error=str(e))
 
-        # IBKR status (options client + gated equity speculation)
+        # IBKR status (independently-gated options scanner + equity speculation)
         if self.settings.ibkr.enabled and self._exchange_filter in (None, "ibkr"):
+            opt = ("[red]options ON[/]" if self.settings.ibkr.options_enabled
+                   else "options off")
             eq = ("[red]equity SPEC ON[/]" if self.settings.ibkr.directional_equity_enabled
                   else "equity spec off")
-            console.print(f"  IBKR: enabled ({self.settings.ibkr.environment}) | {eq}")
+            console.print(f"  IBKR: enabled ({self.settings.ibkr.environment}) | {opt} | {eq}")
 
         show_startup(
             self._components["source_names"],

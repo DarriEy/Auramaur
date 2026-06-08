@@ -120,6 +120,11 @@ ibkr:
   # active AND funds clear; then flip paper_trade:false to go fully live.
   # Ports: TWS 7497 paper / 7496 live; IB Gateway 4002 / 4001.
   enabled: false
+  # Master switch above just connects. The two books are gated independently
+  # (both also need enabled:true): options_enabled = the option-chain scanner
+  # (needs OPRA data; off = no Error 200/10091 scan spam); directional_equity_
+  # enabled (below) = the stocks book. Run equities with options_enabled:false.
+  options_enabled: false
   # "paper" connects to the paper TWS/Gateway on paper_port (read-only).
   # Switch to "live" only with a live Gateway running and the live gates open.
   environment: "live"
@@ -145,6 +150,17 @@ ibkr:
   directional_equity_momentum_pct: 2.0
   directional_equity_lookback: 12
   equity_client_id: 2
+  # Auto FX top-up: convert idle CAD -> USD so the USD-priced stock book has
+  # settled buying power (the account base is CAD; US shares settle in USD).
+  # Mirrors the Kraken fiat->USDC convert. Off by default; a real conversion
+  # needs the three live gates, else it dry-runs (logs the intended convert).
+  # Cash account => converted funds settle T+1, so this keeps a buffer ahead of
+  # trading. Small orders auto-route as odd lots (under the IDEALPRO 25k min).
+  auto_fx_enabled: false
+  fx_source_currency: "CAD"
+  fx_target_usd: 120.0
+  fx_max_convert_usd: 150.0
+  fx_min_convert_usd: 20.0
 
 kraken:
   # Spot venue for treasury/conversion (sell POL -> USDC, etc). Not a binary
