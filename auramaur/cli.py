@@ -327,6 +327,47 @@ def kraken_signal():
                 f"[dim]LONG >= {min_prob:.0%} · exit < {exit_prob:.0%} · "
                 f"mode={mode} (directional_llm_paper={paper})[/]"
             )
+
+            # Calibration scoreboard — the closed feedback loop. Each tracked bet
+            # is resolved at horizon (spot vs the reference price) under the
+            # isolated 'kraken_spot' category, so directional edge is measurable.
+            resolved = await db.fetchall(
+                "SELECT predicted_prob, actual_outcome FROM calibration "
+                "WHERE category='kraken_spot' AND actual_outcome IS NOT NULL"
+            )
+            if resolved:
+                n = len(resolved)
+                hits = sum(1 for r in resolved
+                           if (r["predicted_prob"] >= 0.5) == (r["actual_outcome"] == 1))
+                brier = sum((r["predicted_prob"] - r["actual_outcome"]) ** 2 for r in resolved) / n
+                color = "green" if hits / n > 0.5 else "red"
+                console.print(
+                    f"[bold]Directional scoreboard[/] (resolved): "
+                    f"[{color}]{hits}/{n} correct ({hits / n:.0%})[/] · "
+                    f"Brier {brier:.3f} [dim](lower=better; 0.25=coin-flip)[/]"
+                )
+            else:
+                console.print(
+                    "[dim]No resolved directional bets yet — edge unmeasurable "
+                    "until bets reach their horizon.[/]"
+                )
+
+            outstanding = await db.fetchall(
+                "SELECT pair, prob, ref_price, due_at FROM kraken_dir_signals ORDER BY due_at"
+            )
+            if outstanding:
+                console.print(f"[dim]{len(outstanding)} bet(s) outstanding; "
+                              f"next resolves {outstanding[0]['due_at']}[/]")
+
+            conv = settings.kraken
+            if getattr(conv, "directional_conviction_budget_enabled", False):
+                console.print(
+                    f"[dim]Conviction budget ON (min_mult="
+                    f"{getattr(conv, 'directional_conviction_min_mult', 0.34)}); "
+                    f"live multiplier is logged as conv_mult on budget_full.[/]"
+                )
+            else:
+                console.print("[dim]Conviction budget OFF (static ceiling).[/]")
         finally:
             await db.close()
 
