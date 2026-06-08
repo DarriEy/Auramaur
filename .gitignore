@@ -15,6 +15,7 @@ venv/
 .pytest_cache/
 .ruff_cache/
 *.log
+*.log.*
 .DS_Store
 uv.lock
 world_model.json

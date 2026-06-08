@@ -349,6 +349,14 @@ class KrakenConfig(BaseModel):
     directional_llm_min_confidence: str = "MEDIUM"  # Confidence floor to act
     directional_llm_horizon_days: int = 3    # prediction horizon in the question
     directional_llm_refresh_hours: float = 8.0  # re-run the LLM per pair at most this often
+    # Conviction-weighted crypto budget (Tier 1). When enabled, the directional
+    # budget ceiling is multiplied by an aggregate-conviction factor in
+    # [min_mult, 1.0] derived from the cached LLM P(up) views — so a broadly
+    # bullish+confident book leans toward the full ceiling, while a neutral one
+    # holds more USDC. The factor is <=1.0 by construction, so this can only
+    # REDUCE crypto exposure vs the static ceiling, never increase it.
+    directional_conviction_budget_enabled: bool = False
+    directional_conviction_min_mult: float = 0.34  # floor on the budget multiplier
 
 
 class TransfersConfig(BaseModel):

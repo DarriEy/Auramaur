@@ -591,6 +591,15 @@ class KrakenPillar:
         llm_paper = llm_on and bool(getattr(kcfg, "directional_llm_paper", True))
         effective_paper = (not self._s.is_live) or llm_paper
 
+        # LLM-eligible pairs (those the news/LLM pipeline can reason about).
+        # Drives both the calibration feedback loop and the conviction-weighted
+        # budget. conv_mult is 1.0 unless the conviction budget is enabled.
+        eligible = [p for p in (self._valid_pairs or kcfg.directional_pairs)
+                    if p in self._PAIR_ASSET]
+        if llm_on:
+            await self._track_dir_signals(eligible)
+        conv_mult = self._conviction_mult(eligible)
+
         for pair in managed:
             orphaned = pair not in valid_set
             price = await self._k.get_price(pair)
@@ -703,11 +712,15 @@ class KrakenPillar:
                 # tolerance-scaled budget, measured by ACTUAL notional (count×cap
                 # understates appreciated winners).
                 from auramaur.risk.tolerance import scale_budget, current_tolerance
-                budget = scale_budget(kcfg.directional_budget_usd, current_tolerance(self._s))
+                # Conviction-weighted: conv_mult in [min_mult, 1.0] shrinks the
+                # ceiling when the LLM book is broadly neutral, holding more USDC.
+                # It is <=1.0, so it can only reduce exposure vs the static budget.
+                budget = scale_budget(kcfg.directional_budget_usd, current_tolerance(self._s)) * conv_mult
                 allocated = sum(cur * q for (_e, cur, q) in held_prices.values())
                 if allocated + kcfg.max_order_usd > budget:
                     log.info("kraken.directional.budget_full", pair=pair,
-                             allocated=round(allocated, 2), budget=round(budget, 2))
+                             allocated=round(allocated, 2), budget=round(budget, 2),
+                             conv_mult=round(conv_mult, 3))
                     continue
                 # Size in USD terms via the pair's quote currency (works for any
                 # quote: USDC/USDT/EUR/…). 2% buffer so rounding never trips the
@@ -812,7 +825,6 @@ class KrakenPillar:
         aggregator = comp.get("aggregator")
         analyzer = comp.get("analyzer")
         cache = comp.get("cache")
-        calibration = comp.get("calibration")
         if aggregator is None or analyzer is None:
             return None
 
@@ -849,11 +861,115 @@ class KrakenPillar:
         prob = float(analysis.probability)
         conf = str(analysis.confidence)
         self._llm_views[pair] = (time.monotonic(), prob, conf)
-        # Log the raw prediction so its accuracy can be measured over time.
-        if calibration is not None:
-            try:
-                await calibration.record_prediction(f"kraken-dir:{pair}", prob, "crypto")
-            except Exception:
-                pass
+        # Calibration recording is owned by _track_dir_signals (one tracked,
+        # horizon-resolved bet per pair) so the feedback loop actually closes —
+        # see kraken_dir_signals.
         log.info("kraken.llm_view", pair=pair, asset=asset, prob=round(prob, 3), confidence=conf)
         return (prob, conf)
+
+    async def _track_dir_signals(self, eligible: list[str]) -> None:
+        """Close the calibration feedback loop for the LLM directional book.
+
+        Keeps at most one outstanding tracked prediction per pair in
+        kraken_dir_signals: when a bet's horizon elapses, resolve it (spot now
+        vs the reference price snapshotted at open) and feed the up/down outcome
+        to calibration, then open a fresh bet from the current cached LLM view.
+        Pure measurement — no orders, no fund movement. Recorded under the
+        ``kraken_spot`` category so it never pollutes the Polymarket ``crypto``
+        calibration that drives prediction-market sizing.
+        """
+        db = self._db()
+        if db is None or not eligible:
+            return
+        comp = self._bot._components if self._bot else {}
+        calibration = comp.get("calibration")
+        horizon = int(getattr(self._s.kraken, "directional_llm_horizon_days", 3) or 3)
+
+        # 1) Resolve bets whose horizon has elapsed.
+        try:
+            due = await db.fetchall(
+                "SELECT pair, ref_price FROM kraken_dir_signals WHERE due_at <= datetime('now')"
+            )
+        except Exception:
+            due = []
+        for row in due:
+            pair = row["pair"]
+            price = await self._safe_price(pair)
+            if price is None:
+                continue   # can't price now; retry next cycle (row stays due)
+            went_up = price > row["ref_price"]
+            if calibration is not None:
+                try:
+                    await calibration.record_resolution(f"kraken-dir:{pair}", went_up)
+                except Exception as e:
+                    log.warning("kraken.dir_signal.resolve_error", pair=pair, error=str(e))
+            await db.execute("DELETE FROM kraken_dir_signals WHERE pair = ?", (pair,))
+            await db.commit()
+            log.info("kraken.dir_signal.resolved", pair=pair,
+                     ref=round(row["ref_price"], 6), now=round(price, 6), went_up=went_up)
+
+        # 2) Open a fresh bet for any eligible pair that has a warm LLM view but
+        #    no outstanding row.
+        try:
+            open_rows = await db.fetchall("SELECT pair FROM kraken_dir_signals")
+            open_pairs = {r["pair"] for r in open_rows}
+        except Exception:
+            open_pairs = set()
+        for pair in eligible:
+            if pair in open_pairs:
+                continue
+            view = self._llm_views.get(pair)
+            if view is None:
+                continue   # no warm view yet — nothing to track
+            prob = view[1]
+            price = await self._safe_price(pair)
+            if price is None:
+                continue
+            await db.execute(
+                "INSERT OR REPLACE INTO kraken_dir_signals "
+                "(pair, prob, ref_price, opened_at, due_at) "
+                "VALUES (?, ?, ?, datetime('now'), datetime('now', ?))",
+                (pair, prob, price, f"+{horizon} days"),
+            )
+            if calibration is not None:
+                try:
+                    await calibration.record_prediction(f"kraken-dir:{pair}", prob, "kraken_spot")
+                except Exception:
+                    pass
+            await db.commit()
+            log.info("kraken.dir_signal.opened", pair=pair, prob=round(prob, 3),
+                     ref=round(price, 6), horizon_days=horizon)
+
+    async def _safe_price(self, pair: str) -> float | None:
+        try:
+            price = await self._k.get_price(pair)
+        except Exception:
+            return None
+        return price if price and price > 0 else None
+
+    def _conviction_mult(self, eligible: list[str]) -> float:
+        """Aggregate-conviction multiplier in [min_mult, 1.0] for the crypto budget.
+
+        Reads only CACHED LLM views (no extra LLM cost). Each eligible pair
+        contributes clamp((P(up) - 0.5) / 0.5, 0, 1) when its confidence clears
+        the floor, else 0; pairs with no warm view count as 0. The mean over all
+        eligible pairs maps onto [min_mult, 1.0]. <=1.0 by construction, so it
+        can only shrink the budget (hold more USDC), never grow it.
+        """
+        kcfg = self._s.kraken
+        if not getattr(kcfg, "directional_conviction_budget_enabled", False):
+            return 1.0
+        min_mult = max(0.0, min(1.0, float(getattr(kcfg, "directional_conviction_min_mult", 0.34) or 0.34)))
+        if not eligible:
+            return min_mult
+        total = 0.0
+        for pair in eligible:
+            view = self._llm_views.get(pair)
+            if view is None:
+                continue
+            _, prob, conf = view
+            if not self._conf_ok(conf):
+                continue
+            total += max(0.0, min(1.0, (prob - 0.5) / 0.5))
+        conviction = total / len(eligible)
+        return min_mult + (1.0 - min_mult) * conviction

@@ -208,6 +208,13 @@ kraken:
   directional_llm_min_confidence: "MEDIUM"
   directional_llm_horizon_days: 3
   directional_llm_refresh_hours: 8.0
+  # Conviction-weighted crypto budget (Tier 1, opt-in). Scales directional_budget_usd
+  # by an aggregate-conviction factor in [min_mult, 1.0] from the cached LLM P(up)
+  # views. <=1.0 by construction → can only hold MORE USDC, never raise crypto risk.
+  # OFF by default: turn on once the calibration loop (kraken_dir_signals) has a
+  # track record you trust. Inspect inputs with `auramaur kraken signal`.
+  directional_conviction_budget_enabled: false
+  directional_conviction_min_mult: 0.34
 
 transfers:
   # Cross-venue fund movement (Kraken -> Polymarket, Polygon USDC only).

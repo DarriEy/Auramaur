@@ -56,7 +56,11 @@ def test_llm_exit_reason():
     asyncio.run(run())
 
 
-def test_llm_view_records_and_throttles():
+def test_llm_view_returns_and_throttles():
+    """_llm_view returns (prob, conf) and serves cached reads within the refresh
+    window. Calibration recording is NOT done here — it is owned by
+    _track_dir_signals (see test_kraken_dir_signals.py) so the feedback loop
+    records exactly one horizon-resolved bet per pair."""
     agg = MagicMock()
     agg.gather = AsyncMock(return_value=[])
     analysis = SimpleNamespace(probability=0.71, confidence="HIGH", skipped_reason=None)
@@ -72,8 +76,8 @@ def test_llm_view_records_and_throttles():
     async def run():
         v = await p._llm_view("SOLUSDC")
         assert v == (0.71, "HIGH")
-        calib.record_prediction.assert_awaited_once()
-        assert calib.record_prediction.await_args.args[0] == "kraken-dir:SOLUSDC"
+        # _llm_view itself no longer records to calibration.
+        calib.record_prediction.assert_not_awaited()
         assert analyzer.analyze.await_count == 1
         # Second call within refresh window → served from cache, no new LLM call.
         v2 = await p._llm_view("SOLUSDC")

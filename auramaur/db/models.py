@@ -124,6 +124,19 @@ CREATE TABLE IF NOT EXISTS calibration (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- One outstanding directional "bet" per Kraken pair, used to close the
+-- calibration feedback loop: snapshot the LLM P(up) + a reference price at
+-- open, then at horizon (due_at) compare spot vs ref_price to resolve the
+-- prediction (record_resolution). At most one unresolved row per pair so the
+-- "most-recent-unresolved" resolution semantics stay correct.
+CREATE TABLE IF NOT EXISTS kraken_dir_signals (
+    pair TEXT PRIMARY KEY,
+    prob REAL NOT NULL,
+    ref_price REAL NOT NULL,
+    opened_at TEXT NOT NULL DEFAULT (datetime('now')),
+    due_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS calibration_params (
     category TEXT PRIMARY KEY,
     a REAL NOT NULL,
