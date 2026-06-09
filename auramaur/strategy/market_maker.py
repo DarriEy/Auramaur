@@ -92,6 +92,7 @@ class MarketMaker:
         # MM configuration from settings
         mm_cfg = settings.market_maker
         self._min_spread_bps: int = mm_cfg.min_spread_bps
+        self._max_spread_bps: int = mm_cfg.max_spread_bps
         self._quote_size: float = mm_cfg.quote_size
         self._max_inventory: float = mm_cfg.max_inventory
         self._max_markets: int = mm_cfg.max_markets
@@ -203,9 +204,16 @@ class MarketMaker:
                 if hours_remaining < 48:
                     continue
 
-            # Spread must be wide enough to profit
+            # Spread must be wide enough to profit...
             spread_bps = int(market.spread * 10000) if market.spread else 0
             if spread_bps < self._min_spread_bps:
+                continue
+
+            # ...but not SO wide that it's a dead/empty book. A near-100% nominal
+            # spread (e.g. bid 0.02 / ask 0.98 = 9600 bps) is not an opportunity —
+            # it's a market with no real two-sided liquidity, where neither leg
+            # ever fills and we churn cancel/replace every cycle. Reject it.
+            if spread_bps > self._max_spread_bps:
                 continue
 
             # Don't exceed max inventory on this market
@@ -215,7 +223,9 @@ class MarketMaker:
 
             suitable.append(market)
 
-        # Sort by spread (widest first = most profitable)
+        # Sort by spread, widest first — but now bounded above by max_spread_bps,
+        # so dead books no longer dominate the top of the list. Among legitimate
+        # spreads, wider = more profit per round-trip.
         suitable.sort(key=lambda m: m.spread or 0, reverse=True)
 
         return suitable
@@ -260,6 +270,22 @@ class MarketMaker:
 
         if best_bid is None or best_ask is None:
             return None, "no_bbo"
+
+        # Dead-book guard on the LIVE book (selection used market.spread, a summary
+        # field that can be stale or differ from the CLOB BBO). If the actual best
+        # bid/ask are this far apart, there's no genuine two-sided market — quoting
+        # into it just churns and risks one-sided fills at an extreme price.
+        book_spread_bps = int((best_ask - best_bid) * 10000)
+        if book_spread_bps > self._max_spread_bps:
+            log.debug(
+                "market_maker.dead_book",
+                market_id=market.id,
+                best_bid=best_bid,
+                best_ask=best_ask,
+                book_spread_bps=book_spread_bps,
+                max_spread_bps=self._max_spread_bps,
+            )
+            return None, "dead_book"
 
         # Polymarket has 1-cent ticks. Try to price-improve by one tick on each
         # side; if the underlying spread is too tight for that (which is the
