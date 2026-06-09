@@ -26,6 +26,20 @@ class IBKRDirectionalPillar:
         cfg = self._s.ibkr
         if not cfg.directional_equity_enabled:
             return
+        # Auto FX top-up: keep settled USD buying power for the USD-priced book by
+        # converting idle base-currency cash (CAD->USD). Gated by auto_fx_enabled;
+        # the conversion itself dry-runs unless the live gates are open. T+1 on a
+        # cash account, so it funds a buffer for future cycles, not this one.
+        if cfg.auto_fx_enabled:
+            try:
+                await self._eq.ensure_usd_float(
+                    target_usd=cfg.fx_target_usd,
+                    max_convert_usd=cfg.fx_max_convert_usd,
+                    min_convert_usd=cfg.fx_min_convert_usd,
+                    source_ccy=cfg.fx_source_currency,
+                )
+            except Exception as e:  # noqa: BLE001 — never kill the loop on FX
+                log.error("ibkr_equity.fx_convert.pillar_error", error=str(e)[:120])
         # Reconcile open positions from the IBKR account so a restart doesn't lose
         # track (re-buy / miss exits). Empty when disconnected — safe.
         try:
@@ -66,8 +80,12 @@ class IBKRDirectionalPillar:
                      status=res.status, err=res.error_message[:80])
 
         elif holding and mom <= -cfg.directional_equity_momentum_pct:
-            res = await self._eq.place_order(sym, OrderSide.SELL, cfg.equity_max_order_usd)
-            if res.order_id not in ("ERROR", "BLOCKED"):
+            # Close the whole position (cashQty-valued sell). res is None when
+            # nothing is actually held — drop it from the book either way unless
+            # the close errored/was blocked.
+            res = await self._eq.close_position(sym)
+            if res is None or res.order_id not in ("ERROR", "BLOCKED"):
                 self._long.pop(sym, None)
             log.info("ibkr_equity.directional.exit", symbol=sym, momentum=round(mom, 2),
-                     status=res.status, err=res.error_message[:80])
+                     status=(res.status if res else "noop"),
+                     err=(res.error_message[:80] if res else ""))

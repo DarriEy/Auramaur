@@ -235,6 +235,11 @@ class KalshiConfig(BaseModel):
 
 class IBKRConfig(BaseModel):
     enabled: bool = False
+    # `enabled` is the master switch (connect to IBKR at all). The two books
+    # beneath it are gated independently: options_enabled (the option-chain
+    # scanner) and directional_equity_enabled (the stocks book). Keep options
+    # off to run equities without the OPRA-less scanner spamming Error 200/10091.
+    options_enabled: bool = False
     host: str = "127.0.0.1"
     paper_port: int = 7497
     live_port: int = 7496
@@ -268,6 +273,20 @@ class IBKRConfig(BaseModel):
     directional_equity_momentum_pct: float = 2.0
     directional_equity_lookback: int = 12          # bars of recent history
     equity_client_id: int = 2                      # distinct from client_id
+
+    # --- Auto FX top-up (CAD->USD funding for the USD-priced stock book) ---
+    # Mirrors the Kraken fiat->USDC treasury convert: keep enough *settled* USD
+    # buying power for the equity book by converting idle base-currency cash.
+    # Off by default. A real conversion still needs the three live gates;
+    # otherwise it dry-runs (logs the intended convert). On a cash account
+    # converted funds settle T+1, so this maintains a buffer AHEAD of trading
+    # rather than funding a same-cycle order. Small orders auto-route as odd
+    # lots, so the per-convert cap can sit well under the IDEALPRO 25k minimum.
+    auto_fx_enabled: bool = False
+    fx_source_currency: str = "CAD"                 # idle cash to draw down
+    fx_target_usd: float = 120.0                    # keep >= this much settled USD
+    fx_max_convert_usd: float = 150.0              # hard per-conversion ceiling
+    fx_min_convert_usd: float = 20.0              # skip dust conversions
 
 
 class CryptoComConfig(BaseModel):
