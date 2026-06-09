@@ -199,6 +199,11 @@ class CalibrationConfig(BaseModel):
 class MarketMakerConfig(BaseModel):
     enabled: bool = True
     min_spread_bps: int = 40  # minimum spread in bps; below the 1-tick improvement, join BBO
+    # Upper spread bound. A nominal spread this wide is not a fat opportunity —
+    # it's a dead/empty book (e.g. bid 0.02 / ask 0.98 = 9600 bps), where neither
+    # leg ever fills and we churn cancel/replace forever. Real MM edge lives in
+    # the ~100-1000 bps range; reject anything wider at both selection and quote time.
+    max_spread_bps: int = 1500
     quote_size: float = 10.0  # tokens per side
     max_inventory: float = 50.0  # max directional exposure per market
     max_markets: int = 5  # max simultaneous MM markets

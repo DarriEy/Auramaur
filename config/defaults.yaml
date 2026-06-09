@@ -266,6 +266,7 @@ gemini:
 market_maker:
   enabled: true
   min_spread_bps: 40        # minimum 0.4% spread (BBO-join kicks in when 1-tick improvement would go below this)
+  max_spread_bps: 1500      # max 15% spread — wider = dead/empty book (bid 0.02/ask 0.98), never fills; reject it
   quote_size: 10.0          # tokens per side
   max_inventory: 50.0       # max directional exposure per market
   max_markets: 5            # max simultaneous MM markets
