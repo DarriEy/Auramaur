@@ -51,7 +51,7 @@ def show_analyzing(question: str, market_id: str) -> None:
 
 def show_evidence(count: int, sources: dict[str, int]) -> None:
     if count == 0:
-        console.print(f"         [yellow]No evidence found[/]")
+        console.print("         [yellow]No evidence found[/]")
     else:
         parts = [f"{s}:{n}" for s, n in sources.items() if n > 0]
         console.print(f"         [dim]Evidence:[/] [green]{count}[/] items ({', '.join(parts)})")
@@ -86,19 +86,34 @@ def show_analysis(claude_prob: float, market_prob: float, edge: float,
     _cycle_stats["signals"] = _cycle_stats.get("signals", 0) + 1
 
 
-def show_risk_decision(approved: bool, reason: str, passed: int, failed: int, size: float = 0) -> None:
+def show_risk_decision(approved: bool, reason: str, passed: int, failed: int,
+                       size: float = 0, market_id: str = "", strategy: str = "",
+                       graduation: str = "", mispricing: str = "") -> None:
     total = passed + failed
+    # Context tags: which book, which market, what the ladder and the
+    # name-the-gap audit said — the WHY behind every decision line.
+    tags = []
+    if strategy:
+        tags.append(f"[magenta]{strategy}[/]")
+    if market_id:
+        tags.append(f"[dim]{market_id[:16]}[/]")
+    if graduation and graduation not in ("live", "exempt"):
+        tags.append(f"[yellow]grad:{graduation}[/]")
+    if mispricing and mispricing != "none":
+        tags.append(f"[cyan]gap:{mispricing.split(':')[0]}[/]")
+    ctx = (" " + " ".join(tags)) if tags else ""
     if approved:
         if size <= 0:
             return
         console.print(
             f"         [bold green]APPROVED[/] ({passed}/{total}) "
-            f"Size: [bold]${size:.2f}[/]"
+            f"[bold]${size:.2f}[/]{ctx}"
         )
     else:
         # Show concise rejection reason
         short_reason = reason.split(";")[0].strip() if ";" in reason else reason
-        console.print(f"         [red]REJECTED[/] ({passed}/{total}) [dim]{short_reason}[/]")
+        console.print(
+            f"         [red]REJECTED[/] ({passed}/{total}){ctx} [dim]{short_reason}[/]")
 
 
 def show_order(status: str, order_id: str, side: str, size: float, price: float, is_paper: bool, exchange: str = "", error_message: str = "", market_id: str = "") -> None:
@@ -138,6 +153,11 @@ def show_order_dropped(market_id: str, reason: str) -> None:
 
 
 def show_cycle_summary(signals: int, trades: int, elapsed: float, exchange: str = "") -> None:
+    # Empty cycles are the steady state — the periodic status line is the
+    # heartbeat. Only narrate cycles that actually did something.
+    if signals == 0 and trades == 0:
+        _cycle_stats.update({"signals": 0, "trades": 0, "analyzed": 0})
+        return
     trade_color = "green" if trades > 0 else "dim"
     ex = f"[magenta]{exchange}[/] " if exchange else ""
     console.print(
@@ -153,12 +173,13 @@ def show_cycle_summary(signals: int, trades: int, elapsed: float, exchange: str 
 def show_portfolio(balance: float, pnl: float, positions: int, drawdown: float, schedule_mode: str = "") -> None:
     pnl_color = "green" if pnl >= 0 else "red"
 
-    # Build a compact but informative status line
+    # Build a compact but informative status line — label what the numbers
+    # ARE ("cash"/"uPnL"), not bare figures the operator has to decode.
     parts = [
         f"[dim]{_ts()}[/]",
-        f"[bold]${balance:,.2f}[/]",
-        f"PnL:[{pnl_color}]{pnl:+,.2f}[/]",
-        f"Pos:{positions}",
+        f"cash [bold]${balance:,.2f}[/]",
+        f"P&L [{pnl_color}]{pnl:+,.2f}[/]",
+        f"{positions} pos",
     ]
     if drawdown > 0:
         dd_color = "yellow" if drawdown < 10 else "red"
@@ -182,7 +203,7 @@ def show_claude_thinking(market_id: str, stage: str = "primary") -> None:
 
 
 def show_cache_hit() -> None:
-    console.print(f"         [dim]Cache hit[/]")
+    console.print("         [dim]Cache hit[/]")
 
 
 def show_source_error(source: str, error: str) -> None:

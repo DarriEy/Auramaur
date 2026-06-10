@@ -592,7 +592,12 @@ class TradingEngine:
         decision = await self.risk_manager.evaluate(signal, market, price_history=price_history, available_cash=cash)
         checks_passed = sum(1 for c in decision.checks if c.passed)
         checks_failed = sum(1 for c in decision.checks if not c.passed)
-        show_risk_decision(decision.approved, decision.reason, checks_passed, checks_failed, decision.position_size)
+        show_risk_decision(
+            decision.approved, decision.reason, checks_passed,
+            checks_failed, decision.position_size, market_id=signal.market_id,
+            strategy=signal.strategy_source,
+            graduation=getattr(decision, "graduation_status", ""),
+            mispricing=getattr(signal, "mispricing_reason", ""))
 
         if not decision.approved or decision.position_size <= 0:
             return {"market": market, "signal": signal, "decision": decision, "order": None}
@@ -1113,6 +1118,9 @@ class TradingEngine:
             show_risk_decision(
                 decision.approved, decision.reason,
                 checks_passed, checks_failed, decision.position_size,
+                market_id=tc.signal.market_id, strategy=tc.signal.strategy_source,
+                graduation=getattr(decision, "graduation_status", ""),
+                mispricing=getattr(tc.signal, "mispricing_reason", ""),
             )
 
             result = {"market": tc.market, "signal": tc.signal, "decision": decision, "order": None}
@@ -1361,7 +1369,12 @@ class TradingEngine:
             from auramaur.monitoring.display import show_risk_decision
             checks_passed = sum(1 for c in decision.checks if c.passed)
             checks_failed = sum(1 for c in decision.checks if not c.passed)
-            show_risk_decision(decision.approved, decision.reason, checks_passed, checks_failed, decision.position_size)
+            show_risk_decision(
+            decision.approved, decision.reason, checks_passed,
+            checks_failed, decision.position_size, market_id=signal.market_id,
+            strategy=signal.strategy_source,
+            graduation=getattr(decision, "graduation_status", ""),
+            mispricing=getattr(signal, "mispricing_reason", ""))
 
             result = {"market": market, "signal": signal, "decision": decision, "order": None}
             results.append(result)
