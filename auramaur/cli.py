@@ -697,6 +697,54 @@ def entailment():
     asyncio.run(_run())
 
 
+@main.command("repair-categories")
+@click.option("--write", is_flag=True,
+              help="Persist classified categories (default is a dry-run).")
+def repair_categories(write: bool):
+    """Classify markets stored with an empty/NULL category.
+
+    Empty categories bypass blocked_categories (the check is `category in
+    blocked`) and pollute graduation cells as '(none)'. Insert sites now
+    classify on write; this backfills history (markets + portfolio rows).
+    """
+
+    async def _run():
+        from collections import Counter
+
+        from auramaur.strategy.classifier import classify_market
+
+        db = Database()
+        await db.connect()
+        try:
+            rows = await db.fetchall(
+                "SELECT id, question, description FROM markets "
+                "WHERE category = '' OR category IS NULL")
+            counts: Counter = Counter()
+            for r in rows or []:
+                cat = classify_market(r["question"] or "", r["description"] or "")
+                counts[cat] += 1
+                if write:
+                    await db.execute(
+                        "UPDATE markets SET category = ? WHERE id = ?",
+                        (cat, r["id"]))
+                    await db.execute(
+                        "UPDATE portfolio SET category = ? WHERE market_id = ? "
+                        "AND (category = '' OR category IS NULL)",
+                        (cat, r["id"]))
+            if write:
+                await db.commit()
+            mode = "WRITE" if write else "DRY RUN"
+            console.print(f"[bold]{mode}[/] {len(rows or [])} uncategorized markets")
+            for cat, n in counts.most_common():
+                console.print(f"  {cat:16} {n}")
+            if not write and rows:
+                console.print("\n[dim]Re-run with [cyan]--write[/] to persist.[/]")
+        finally:
+            await db.close()
+
+    asyncio.run(_run())
+
+
 @main.command("repair-pnl")
 @click.option("--write", is_flag=True,
               help="Persist resolution_pnl rows and rebuild category_stats dollar fields.")

@@ -38,6 +38,7 @@ from datetime import datetime, timezone
 
 import structlog
 
+from auramaur.strategy.classifier import ensure_category
 from auramaur.exchange.models import (
     Confidence,
     Fill,
@@ -385,7 +386,8 @@ class EntailmentArbPillar:
                active, outcome_yes_price, outcome_no_price, volume, liquidity,
                last_updated)
                VALUES (?, 'polymarket', ?, ?, 1, ?, ?, ?, ?, datetime('now'))""",
-            (market.id, market.question, market.category or "",
+            (market.id, market.question,
+             ensure_category(market.question, market.description, market.category),
              market.outcome_yes_price, market.outcome_no_price,
              market.volume, market.liquidity),
         )

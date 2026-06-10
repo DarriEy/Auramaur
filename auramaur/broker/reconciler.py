@@ -14,7 +14,7 @@ This module:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import structlog
 
@@ -233,13 +233,15 @@ class PositionReconciler:
         # No match — insert a stub so exits and risk checks can find it
         if question and condition_id:
             from datetime import datetime, timezone
+
+            from auramaur.strategy.classifier import ensure_category
             stub_id = condition_id[:16]
             try:
                 await self._db.execute(
                     """INSERT OR IGNORE INTO markets
-                       (id, condition_id, question, last_updated)
-                       VALUES (?, ?, ?, ?)""",
-                    (stub_id, condition_id, question,
+                       (id, condition_id, question, category, last_updated)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (stub_id, condition_id, question, ensure_category(question),
                      datetime.now(timezone.utc).isoformat()),
                 )
                 await self._db.commit()
