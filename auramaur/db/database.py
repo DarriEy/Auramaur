@@ -72,6 +72,8 @@ class Database:
             await self._migrate_v12_to_v13()
         if from_version < 14:
             await self._migrate_v13_to_v14()
+        if from_version < 15:
+            await self._migrate_v14_to_v15()
 
     async def _migrate_v1_to_v2(self) -> None:
         """Add category to calibration, add new tables."""
@@ -388,6 +390,14 @@ class Database:
         await self._db.execute("UPDATE schema_version SET version = 14")
         await self._db.commit()
         log.info("database.migrated", from_version=13, to_version=14)
+
+    async def _migrate_v14_to_v15(self) -> None:
+        """Add the pnl_ledger table (created by TABLES executescript; this just
+        stamps the version so the backfill CLI can tell a fresh ledger from a
+        pre-ledger database)."""
+        await self._db.execute("UPDATE schema_version SET version = 15")
+        await self._db.commit()
+        log.info("database.migrated", from_version=14, to_version=15)
 
     async def _migrate_v11_to_v12(self) -> None:
         """Add strategy_source column to signals and trades for hybrid mode attribution."""

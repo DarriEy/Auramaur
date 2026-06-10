@@ -232,17 +232,34 @@ class ResolutionTracker:
             log.debug("resolution.daily_stats_error", error=str(e))
 
         # Update cost_basis realized PnL — scoped to the same paper/live mode
-        # as the portfolio row so a paper resolution can't zero a live row's
-        # cost basis (and vice versa).
+        # AND token as the settled position, so a paper resolution can't zero a
+        # live row's cost basis and settling one side can't zero the other
+        # (YES+NO can coexist since the #78 PKs).
         try:
             await self._db.execute(
                 """UPDATE cost_basis
                    SET realized_pnl = realized_pnl + ?, size = 0, updated_at = datetime('now')
-                   WHERE market_id = ? AND is_paper = ?""",
-                (pnl, market_id, is_paper_flag),
+                   WHERE market_id = ? AND is_paper = ? AND token = ?""",
+                (pnl, market_id, is_paper_flag, token),
             )
         except Exception as e:
             log.debug("resolution.cost_basis_error", error=str(e))
+
+        # Unified realized-P&L ledger: settlement of the residual position.
+        # Same source_ref scheme as the backfill, so re-running either is a
+        # no-op rather than a double-count.
+        from auramaur.broker.ledger import record_ledger_event
+        await record_ledger_event(
+            self._db,
+            market_id=market_id,
+            kind="settlement",
+            token=token,
+            qty=size,
+            pnl=pnl,
+            fees=0.0,
+            is_paper=bool(is_paper_flag),
+            source_ref=f"settle:{market_id}:{token}:{is_paper_flag}",
+        )
 
         # Remove from portfolio — scoped by is_paper so a paper resolution
         # doesn't delete a live position for the same market (and vice versa).

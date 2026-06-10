@@ -550,6 +550,44 @@ def redeem_check():
     asyncio.run(_check())
 
 
+@main.command("pnl")
+@click.option("--paper", "paper", is_flag=True, default=False,
+              help="Show the paper book instead of live.")
+@click.option("--backfill", is_flag=True, default=False,
+              help="Reconstruct ledger rows from fills + resolved outcomes first "
+                   "(idempotent — re-running cannot double-count).")
+def pnl(paper: bool, backfill: bool):
+    """Unified realized-P&L scorecard (the pnl_ledger source of truth).
+
+    One row per realization event (sell or settlement), with venue, entry
+    strategy and category on every row — by venue / strategy / category /
+    month, plus reconciliation against the legacy accountings.
+    """
+
+    async def _run():
+        from auramaur.broker.ledger import backfill_ledger
+        from auramaur.monitoring.ledger_report import (
+            gather_ledger_report, render_ledger_report,
+        )
+
+        db = Database()
+        await db.connect()
+        try:
+            if backfill:
+                written = await backfill_ledger(db)
+                console.print(
+                    f"[dim]backfill: {written['sell']} sell + "
+                    f"{written['settlement']} settlement rows visited "
+                    f"(existing refs skipped)[/]"
+                )
+            state = await gather_ledger_report(db, is_paper=paper)
+            console.print(render_ledger_report(state))
+        finally:
+            await db.close()
+
+    asyncio.run(_run())
+
+
 @main.command("repair-pnl")
 @click.option("--write", is_flag=True,
               help="Persist resolution_pnl rows and rebuild category_stats dollar fields.")
