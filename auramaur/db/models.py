@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS markets (
     outcome_no_price REAL,
     volume REAL DEFAULT 0,
     liquidity REAL DEFAULT 0,
+    clob_token_yes TEXT DEFAULT '',
+    clob_token_no TEXT DEFAULT '',
     last_updated TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

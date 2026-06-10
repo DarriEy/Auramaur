@@ -104,7 +104,8 @@ class PositionSyncer:
             # Filter is_paper=0 so paper fills don't leak into live sync.
             rows = await self._db.fetchall(
                 """SELECT cb.market_id, cb.token, cb.token_id, cb.size, cb.avg_cost,
-                          m.outcome_yes_price, m.outcome_no_price, m.category
+                          m.outcome_yes_price, m.outcome_no_price, m.category,
+                          m.clob_token_yes, m.clob_token_no
                    FROM cost_basis cb
                    LEFT JOIN markets m ON cb.market_id = m.id
                    WHERE cb.size > 0 AND cb.is_paper = 0"""
@@ -113,12 +114,41 @@ class PositionSyncer:
             for row in rows:
                 market_id = row["market_id"]
                 raw_token = (row["token"] or "YES").upper()
-                token = TokenType(raw_token) if raw_token in ("YES", "NO") else TokenType.YES
-
-                # Use the correct price for the token we hold
+                token_id = row["token_id"] or ""
                 yes_price = float(row["outcome_yes_price"] or 0)
                 no_price = float(row["outcome_no_price"] or 0)
-                if token == TokenType.NO:
+
+                # Resolve which SIDE the held token is. Matching token_id
+                # against the market's CLOB token ids is authoritative; the
+                # outcome label only works when it literally is YES/NO. For
+                # anything else ("Something"/"Nothing", "Up"/"Down", team
+                # names) the old YES-default marked the position at the wrong
+                # outcome's price — the Obama "Something" held at ~$0.105 was
+                # marked at "Nothing"'s $0.885, a phantom +$77 whose exit the
+                # bot chased for two days.
+                direct_price: float | None = None
+                if token_id and token_id == (row["clob_token_no"] or ""):
+                    token = TokenType.NO
+                elif token_id and token_id == (row["clob_token_yes"] or ""):
+                    token = TokenType.YES
+                elif raw_token in ("YES", "NO"):
+                    token = TokenType(raw_token)
+                else:
+                    # Side unknown — price the token we actually hold straight
+                    # off its own book instead of guessing an outcome.
+                    token = TokenType.YES
+                    direct_price = await self._price_held_token(token_id)
+                    if direct_price is None:
+                        log.warning(
+                            "sync.unresolved_token_side",
+                            market_id=market_id,
+                            token_label=raw_token,
+                        )
+
+                # Use the correct price for the token we hold
+                if direct_price is not None:
+                    current_price = direct_price
+                elif token == TokenType.NO:
                     current_price = no_price if no_price > 0.01 else (1.0 - yes_price) if yes_price > 0 else 0.0
                 else:
                     current_price = yes_price
@@ -143,6 +173,26 @@ class PositionSyncer:
             log.error("sync.live.error", error=str(e))
 
         return positions
+
+    async def _price_held_token(self, token_id: str) -> float | None:
+        """Mark an outcome token directly off its own CLOB book.
+
+        Used when neither the token-id match nor the YES/NO label can tell
+        which side we hold. The book midpoint is what the token is actually
+        worth right now; on a one-sided book fall back to the bid — the
+        price an exit could realize. Returns None when there is no book.
+        """
+        if not token_id:
+            return None
+        try:
+            book = await self._exchange.get_order_book(token_id)
+        except Exception as e:
+            log.debug("sync.token_book_error", token_id=token_id[:20], error=str(e))
+            return None
+        mid = book.midpoint
+        if mid is not None:
+            return mid
+        return book.best_bid
 
     async def _get_live_balance(self) -> float:
         """Return *spendable* pUSD: gross collateral minus collateral already
