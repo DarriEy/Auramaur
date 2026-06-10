@@ -553,11 +553,25 @@ class KrakenPillar:
                            updated_at = excluded.updated_at""",
                     (pair, qty, entry, current, (current - entry) * qty, pair, is_paper),
                 )
-            for pair in closed:
+            # Reconcile the mirror against WALLET truth, not in-memory state:
+            # `closed` only sees pairs tracked by THIS process, so positions
+            # closed in a previous session (manual flatten, prior bot run, the
+            # 2026-06-10 duplicate-process incident) left immortal rows — 12
+            # phantom positions / ~$280 of fake exposure. Any kraken row whose
+            # pair isn't currently held gets deleted.
+            rows = await db.fetchall(
+                "SELECT market_id FROM portfolio WHERE exchange = 'kraken' AND is_paper = ?",
+                (is_paper,),
+            )
+            stale = [r["market_id"] for r in (rows or [])
+                     if r["market_id"] not in held_prices]
+            for pair in stale:
                 await db.execute(
                     "DELETE FROM portfolio WHERE market_id = ? AND exchange = 'kraken' AND is_paper = ?",
                     (pair, is_paper),
                 )
+                if pair not in closed:
+                    log.info("kraken.portfolio_mirror.stale_removed", pair=pair)
             await db.commit()
         except Exception as e:  # noqa: BLE001 — visibility only; never break the pillar
             log.debug("kraken.portfolio_mirror_error", error=str(e)[:100])

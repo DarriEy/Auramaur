@@ -150,10 +150,15 @@ async def test_holds_through_moderate_drop():
 @pytest.mark.asyncio
 async def test_mirror_to_portfolio_upserts_held_and_deletes_closed():
     """The spec book is reflected into the portfolio table for dashboard
-    visibility: held pairs upsert with unrealized P&L, closed pairs are deleted."""
+    visibility: held pairs upsert with unrealized P&L; rows for pairs no
+    longer held (wallet truth, not in-memory `closed`) are deleted."""
     s = MagicMock()
     s.is_live = True
     db = AsyncMock()
+    # The wallet-truth reconcile reads existing kraken rows: ETHUSDC is
+    # mirrored from a prior cycle but no longer held -> must be deleted.
+    db.fetchall = AsyncMock(return_value=[{"market_id": "ETHUSDC"},
+                                          {"market_id": "XBTUSDC"}])
     bot = MagicMock()
     bot._components = {"db": db}
     p = KrakenPillar(settings=s, kraken_client=MagicMock(), bot=bot)
@@ -188,3 +193,38 @@ async def test_exits_on_large_drop():
     client.place_spot_order.assert_awaited_once()
     assert client.place_spot_order.await_args.args[1] == OrderSide.SELL
     assert "XBTUSDC" not in p._dir_long
+
+
+@pytest.mark.asyncio
+async def test_mirror_removes_stale_rows_from_prior_sessions():
+    """Regression (2026-06-10): `closed` only sees pairs tracked by THIS
+    process, so positions closed in a previous session left immortal
+    portfolio rows — 12 phantom positions / ~$280 of fake exposure. The
+    mirror now reconciles against wallet truth: any kraken row whose pair
+    isn't currently held is deleted, even with empty in-memory state."""
+    from auramaur.db.database import Database
+
+    s = MagicMock()
+    s.is_live = True
+    db = Database(":memory:")
+    await db.connect()
+    # Stale row from a "previous session" (pair no longer held).
+    await db.execute(
+        "INSERT INTO portfolio (market_id, exchange, side, size, avg_price, "
+        "current_price, is_paper) VALUES ('ADAUSDC', 'kraken', 'BUY', 182, 0.16, 0.16, 0)")
+    # A non-kraken row that must survive.
+    await db.execute(
+        "INSERT INTO portfolio (market_id, exchange, side, size, avg_price, "
+        "current_price, is_paper) VALUES ('poly-1', 'polymarket', 'BUY', 10, 0.5, 0.5, 0)")
+    await db.commit()
+
+    bot = MagicMock()
+    bot._components = {"db": db}
+    p = KrakenPillar(settings=s, kraken_client=MagicMock(), bot=bot)
+    # Fresh process: _dir_long empty, closed empty — only XBT actually held.
+    await p._mirror_to_portfolio({"XBTUSDC": (90.0, 100.0, 0.5)}, [])
+
+    rows = {r["market_id"] for r in await db.fetchall(
+        "SELECT market_id FROM portfolio")}
+    assert rows == {"XBTUSDC", "poly-1"}  # ADAUSDC gone, polymarket untouched
+    await db.close()
