@@ -335,6 +335,28 @@ technical:
   mean_rev_threshold: 0.10
   min_history_points: 5
 
+entailment_arb:
+  # Entailment arbitrage: if A=>B at resolution level, P(A) <= P(B) must
+  # hold; violations are model-free profit (buy NO-A + YES-B, both-or-
+  # nothing legs). Ladder pairs (threshold/Top-N families) are detected
+  # deterministically; fuzzy 'conditional' pairs are LLM-verified
+  # ADVERSARIALLY (default verdict: none) and cached in entailment_verdicts.
+  # Dead-book guard rejects placeholder mids (the #80 lesson) before any
+  # price is believed. PAPER-FORCED until the paper ledger proves it —
+  # the real unknowns are fine-print entailment failures and leg risk.
+  enabled: true
+  paper: true
+  min_gap: 0.04          # violation must exceed this after both legs
+  stake_usd: 10.0        # per leg, also capped by risk sizing
+  max_pairs_per_cycle: 3
+  scan_limit: 300
+  min_liquidity: 1000.0
+  max_spread_pct: 5.0
+  min_hours_to_resolution: 2.0
+  llm_enabled: true
+  llm_min_confidence: 0.9
+  interval_seconds: 900
+
 bias_harvest:
   # Favorite-longshot bias harvest — forecast-free base-load strategy.
   # Backtest (scripts/research/favorite_longshot_backtest.py, 414 resolved

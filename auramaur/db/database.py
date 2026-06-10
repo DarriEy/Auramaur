@@ -74,6 +74,8 @@ class Database:
             await self._migrate_v13_to_v14()
         if from_version < 15:
             await self._migrate_v14_to_v15()
+        if from_version < 16:
+            await self._migrate_v15_to_v16()
 
     async def _migrate_v1_to_v2(self) -> None:
         """Add category to calibration, add new tables."""
@@ -398,6 +400,12 @@ class Database:
         await self._db.execute("UPDATE schema_version SET version = 15")
         await self._db.commit()
         log.info("database.migrated", from_version=14, to_version=15)
+
+    async def _migrate_v15_to_v16(self) -> None:
+        """Add the entailment_verdicts table (created by TABLES executescript)."""
+        await self._db.execute("UPDATE schema_version SET version = 16")
+        await self._db.commit()
+        log.info("database.migrated", from_version=15, to_version=16)
 
     async def _migrate_v11_to_v12(self) -> None:
         """Add strategy_source column to signals and trades for hybrid mode attribution."""

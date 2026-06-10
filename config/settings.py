@@ -243,6 +243,29 @@ class BiasHarvestConfig(BaseModel):
     interval_seconds: int = 600
 
 
+class EntailmentArbConfig(BaseModel):
+    """Entailment arbitrage (strategy/entailment_arb.py).
+
+    Trades P(implier) > P(implied) violations between logically linked
+    markets. Ladder pairs (numeric threshold / Top-N families) are
+    deterministic; fuzzy 'conditional' pairs are LLM-verified
+    adversarially and cached. PAPER-FORCED by default.
+    """
+
+    enabled: bool = False
+    paper: bool = True
+    min_gap: float = 0.04
+    stake_usd: float = 10.0
+    max_pairs_per_cycle: int = 3
+    scan_limit: int = 300
+    min_liquidity: float = 1000.0
+    max_spread_pct: float = 5.0
+    min_hours_to_resolution: float = 2.0
+    llm_enabled: bool = True
+    llm_min_confidence: float = 0.9
+    interval_seconds: int = 900
+
+
 class GraduationConfig(BaseModel):
     """Graduation ladder (risk/graduation.py) — capital earned per
     (strategy × category) cell from the pnl_ledger record.
@@ -615,6 +638,7 @@ class Settings(BaseSettings):
     technical: TechnicalConfig = Field(default_factory=lambda: TechnicalConfig(**_DEFAULTS.get("technical", {})))
     bias_harvest: BiasHarvestConfig = Field(default_factory=lambda: BiasHarvestConfig(**_DEFAULTS.get("bias_harvest", {})))
     graduation: GraduationConfig = Field(default_factory=lambda: GraduationConfig(**_DEFAULTS.get("graduation", {})))
+    entailment_arb: EntailmentArbConfig = Field(default_factory=lambda: EntailmentArbConfig(**_DEFAULTS.get("entailment_arb", {})))
     arbitrage: ArbitrageConfig = Field(default_factory=lambda: ArbitrageConfig(**_DEFAULTS.get("arbitrage", {})))
     analysis: AnalysisConfig = Field(default_factory=lambda: AnalysisConfig(**_DEFAULTS.get("analysis", {})))
     hybrid: HybridConfig = Field(default_factory=lambda: HybridConfig(**_DEFAULTS.get("hybrid", {})))

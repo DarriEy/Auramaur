@@ -643,6 +643,60 @@ def graduation():
     asyncio.run(_run())
 
 
+@main.command("entailment")
+def entailment():
+    """Entailment-arb status: cached LLM verdicts + ladder families visible
+    in the markets table (detection view; the live scan runs in the bot)."""
+
+    async def _run():
+        from auramaur.exchange.models import Market
+        from auramaur.strategy.entailment_arb import ladder_pairs
+
+        db = Database()
+        await db.connect()
+        try:
+            rows = await db.fetchall(
+                "SELECT * FROM entailment_verdicts ORDER BY checked_at DESC LIMIT 25")
+            if rows:
+                t = Table(title="LLM entailment verdicts (cached)")
+                t.add_column("pair")
+                t.add_column("direction")
+                t.add_column("conf", justify="right")
+                t.add_column("traded")
+                for r in rows:
+                    t.add_row(f"{r['market_id_a'][:18]} / {r['market_id_b'][:18]}",
+                              r["direction"], f"{r['confidence']:.2f}",
+                              "yes" if r["traded_at"] else "")
+                console.print(t)
+            else:
+                console.print("[dim]No LLM verdicts cached yet.[/]")
+
+            mrows = await db.fetchall(
+                """SELECT id, question, outcome_yes_price, liquidity
+                   FROM markets WHERE active = 1 AND question IS NOT NULL""")
+            markets = [Market(id=r["id"], exchange="polymarket",
+                              question=r["question"] or "",
+                              outcome_yes_price=r["outcome_yes_price"] or 0.5,
+                              liquidity=r["liquidity"] or 0.0)
+                       for r in (mrows or [])]
+            pairs = ladder_pairs(markets)
+            viol = [(im, ip, why, im.outcome_yes_price - ip.outcome_yes_price)
+                    for im, ip, why in pairs
+                    if im.outcome_yes_price - ip.outcome_yes_price >= 0.04]
+            console.print(f"\nladder families: [cyan]{len(pairs)}[/] pairs from "
+                          f"{len(markets)} active markets; "
+                          f"[cyan]{len(viol)}[/] showing >=4c violations "
+                          "(before dead-book/liquidity guards)")
+            for im, ip, why, gap in sorted(viol, key=lambda v: -v[3])[:10]:
+                console.print(f"  [red]{gap:+.2f}[/] {why}")
+                console.print(f"        implier: {im.question[:64]} @ {im.outcome_yes_price:.2f}")
+                console.print(f"        implied: {ip.question[:64]} @ {ip.outcome_yes_price:.2f}")
+        finally:
+            await db.close()
+
+    asyncio.run(_run())
+
+
 @main.command("repair-pnl")
 @click.option("--write", is_flag=True,
               help="Persist resolution_pnl rows and rebuild category_stats dollar fields.")

@@ -2548,6 +2548,29 @@ class AuramaurBot:
                 log.error("bias_harvest.cycle_error", error=str(e))
             await asyncio.sleep(interval)
 
+    async def _task_entailment_arb(self) -> None:
+        """Periodic entailment-arbitrage scan (paper-forced by config)."""
+        from auramaur.strategy.entailment_arb import EntailmentArbPillar
+
+        pillar = EntailmentArbPillar(
+            db=self._components["db"],
+            settings=self.settings,
+            discovery=self._components["discovery"],
+            exchange=self._components["exchange"],
+            risk_manager=self._components["risk_manager"],
+            pnl_tracker=self._components["pnl_tracker"],
+            analyzer=self._components.get("analyzer"),
+        )
+        interval = max(60, self.settings.entailment_arb.interval_seconds)
+        while self._running:
+            if await self._check_kill_switch():
+                return
+            try:
+                await pillar.run_once()
+            except Exception as e:
+                log.error("entailment.cycle_error", error=str(e))
+            await asyncio.sleep(interval)
+
     async def _task_order_monitor(self) -> None:
         """Monitor pending limit orders for fills and expiry."""
         from datetime import datetime, timezone
@@ -2894,6 +2917,10 @@ class AuramaurBot:
         # Favorite-longshot bias harvest (paper-forced until proven)
         if self.settings.bias_harvest.enabled:
             tasks.append(asyncio.create_task(self._task_bias_harvest(), name="bias_harvest"))
+
+        # Entailment arbitrage (paper-forced until proven)
+        if self.settings.entailment_arb.enabled:
+            tasks.append(asyncio.create_task(self._task_entailment_arb(), name="entailment_arb"))
 
         # Kraken treasury/capital pillar (+ gated directional spot)
         if self.settings.kraken.enabled:
