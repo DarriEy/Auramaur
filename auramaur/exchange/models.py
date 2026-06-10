@@ -127,13 +127,19 @@ class OrderBook(BaseModel):
     bids: list[OrderBookLevel] = Field(default_factory=list)
     asks: list[OrderBookLevel] = Field(default_factory=list)
 
+    # Compute, never index: the Polymarket CLOB /book endpoint returns levels
+    # WORST-first (bids ascending, asks descending), so bids[0]/asks[0] were
+    # the $0.01 stub bid and the $0.99 stub ask. Every consumer (router
+    # crossing, exit pricing, market maker quoting) was reading a fictional
+    # 98-cent-wide book. max/min is ordering-agnostic, so any venue's book
+    # ordering is safe.
     @property
     def best_bid(self) -> float | None:
-        return self.bids[0].price if self.bids else None
+        return max(level.price for level in self.bids) if self.bids else None
 
     @property
     def best_ask(self) -> float | None:
-        return self.asks[0].price if self.asks else None
+        return min(level.price for level in self.asks) if self.asks else None
 
     @property
     def midpoint(self) -> float | None:
