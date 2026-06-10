@@ -821,6 +821,33 @@ class AuramaurBot:
             return False
 
         sell_price = max(0.01, min(0.99, round(pos.current_price, 2)))
+        # Marketable exit: a SELL at the snapshot price sits at/above the ask,
+        # rests until the TTL reaper cancels it, and the cleared exit
+        # suppression re-posts it next pass — the Obama winner looped like
+        # that for 2 days (35 cancelled SELLs, no fill). Take the real bid
+        # when it's within the cross-down budget; otherwise post at the
+        # budget floor, which still sits inside the spread instead of on top
+        # of the ask. Best-effort: no book, no change.
+        try:
+            max_cross = float(self.settings.execution.exit_max_cross_cents) / 100.0
+        except Exception:
+            max_cross = 0.03
+        try:
+            book = await exchange.get_order_book(token_id)
+            best_bid = book.best_bid
+            if best_bid is not None and best_bid > 0:
+                marketable = max(best_bid, sell_price - max_cross)
+                if marketable < sell_price:
+                    log.info(
+                        "exit.priced_to_bid",
+                        market_id=pos.market_id,
+                        snapshot=sell_price,
+                        bid=best_bid,
+                        price=round(marketable, 2),
+                    )
+                sell_price = max(0.01, min(0.99, round(marketable, 2)))
+        except Exception as e:
+            log.debug("exit.book_unavailable", market_id=pos.market_id, error=str(e))
         sell_order = Order(
             market_id=pos.market_id,
             token_id=token_id,
@@ -2797,11 +2824,25 @@ class AuramaurBot:
                                                 order_id=order_id,
                                                 error=str(e),
                                             )
+                                    # Reconciled orphans carry the CLOB condition
+                                    # hash as market_id — resolve it to the real
+                                    # market id so the terminal line is readable.
+                                    display_market = order.market_id
+                                    if display_market.startswith("0x") and db is not None:
+                                        try:
+                                            row = await db.fetchone(
+                                                "SELECT id FROM markets WHERE condition_id = ?",
+                                                (display_market,),
+                                            )
+                                            if row:
+                                                display_market = str(row["id"])
+                                        except Exception:
+                                            pass
                                     from auramaur.monitoring.display import show_order_unfilled
                                     show_order_unfilled(
                                         order.side.value, order.size, order.price,
                                         age, exchange=exchange_name,
-                                        market_id=order.market_id,
+                                        market_id=display_market,
                                     )
                                     log.info(
                                         "order_monitor.live_ttl_cancel",

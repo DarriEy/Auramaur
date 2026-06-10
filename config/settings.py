@@ -31,6 +31,11 @@ class ExecutionConfig(BaseModel):
     # that the TTL reaper usually kills unfilled. The cross also has to leave
     # net edge above risk.min_edge_pct, so this cap only binds on wide edges.
     entry_max_cross_cents: int = 4
+    # Exit twin of entry_max_cross_cents: max cents below the position's
+    # snapshot price a SELL may cross down to hit the real bid. Without it
+    # exits posted at the snapshot price sit at/above the ask and TTL-cancel
+    # forever (the 2-day Obama-winner loop).
+    exit_max_cross_cents: int = 3
     spread_capture_min_bps: int = 50
     stop_loss_pct: float = 30.0
     profit_target_pct: float = 50.0
