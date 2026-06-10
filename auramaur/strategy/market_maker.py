@@ -244,6 +244,15 @@ class MarketMaker:
         if quote is None:
             return None, skip_reason
 
+        # Cancel the previous quote BEFORE posting its replacement. The
+        # overwrite below used to drop the old legs' order ids on the floor,
+        # leaking a resting GTC pair onto the book every refresh cycle —
+        # _cancel_stale_quotes never saw them again, only the silent TTL
+        # reaper (and, after a freeze, nobody) cleaned them up.
+        prior = self._active_quotes.pop(market.id, None)
+        if prior is not None:
+            await self._cancel_quote(prior)
+
         # Place the two-sided quote
         is_live = self._settings.is_live
         result = await self._place_two_sided(quote, is_live)
@@ -500,28 +509,30 @@ class MarketMaker:
 
         for market_id in stale_market_ids:
             quote = self._active_quotes.pop(market_id)
-
-            # Cancel bid leg
-            if quote.bid_order_id and not quote.bid_order_id.startswith("PAPER"):
-                try:
-                    await self._exchange.cancel_order(quote.bid_order_id)
-                except Exception as e:
-                    log.debug("market_maker.cancel_bid_error", order_id=quote.bid_order_id, error=str(e))
-
-            # Cancel ask leg
-            if quote.ask_order_id and not quote.ask_order_id.startswith("PAPER"):
-                try:
-                    await self._exchange.cancel_order(quote.ask_order_id)
-                except Exception as e:
-                    log.debug("market_maker.cancel_ask_error", order_id=quote.ask_order_id, error=str(e))
-
-            # Clean up pending order tracking
-            self._pending_orders.pop(quote.bid_order_id, None)
-            self._pending_orders.pop(quote.ask_order_id, None)
-
+            await self._cancel_quote(quote)
             cancelled += 1
 
         return cancelled
+
+    async def _cancel_quote(self, quote) -> None:
+        """Cancel both legs of a quote and drop its pending-order tracking."""
+        # Cancel bid leg
+        if quote.bid_order_id and not quote.bid_order_id.startswith("PAPER"):
+            try:
+                await self._exchange.cancel_order(quote.bid_order_id)
+            except Exception as e:
+                log.debug("market_maker.cancel_bid_error", order_id=quote.bid_order_id, error=str(e))
+
+        # Cancel ask leg
+        if quote.ask_order_id and not quote.ask_order_id.startswith("PAPER"):
+            try:
+                await self._exchange.cancel_order(quote.ask_order_id)
+            except Exception as e:
+                log.debug("market_maker.cancel_ask_error", order_id=quote.ask_order_id, error=str(e))
+
+        # Clean up pending order tracking
+        self._pending_orders.pop(quote.bid_order_id, None)
+        self._pending_orders.pop(quote.ask_order_id, None)
 
     def _update_inventory(self, market_id: str, side: str, size: float) -> None:
         """Track net inventory position.
