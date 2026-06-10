@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 from pathlib import Path
 
@@ -51,6 +52,29 @@ class PolymarketClient:
         # get_sellable_token_id() can read it safely even before any market
         # tokens have been registered.
         self._market_token_map: dict[str, set[str]] = {}
+        # Serializes py_clob_client calls (the SDK is not thread-safe).
+        self._clob_lock = asyncio.Lock()
+        # Deadline for any single CLOB HTTP call; instance attr so tests can
+        # shrink it.
+        self._call_timeout = 20.0
+
+    async def clob_call(self, fn, *args, timeout: float | None = None, **kwargs):
+        """Run a blocking py_clob_client call off the event loop, with a deadline.
+
+        The SDK is synchronous HTTP with no default timeout. Called directly
+        from async code, one stalled socket freezes the entire event loop —
+        no exits, no risk checks, no kill-switch polling (2026-06-10: a
+        stalled get_market call froze the live bot for 84 minutes until ^C).
+        Worker thread + wait_for means a stall costs one abandoned thread and
+        a TimeoutError instead. The SDK is not thread-safe, so calls
+        serialize behind one lock; a timed-out call releases the lock and
+        abandons its thread.
+        """
+        async with self._clob_lock:
+            return await asyncio.wait_for(
+                asyncio.to_thread(fn, *args, **kwargs),
+                timeout if timeout is not None else self._call_timeout,
+            )
 
     def _load_real_positions(self) -> None:
         """Load actual on-chain positions from CLOB trade history."""
@@ -317,7 +341,7 @@ class PolymarketClient:
             price=order.price,
         )
 
-        self._init_clob_client()
+        await self.clob_call(self._init_clob_client)
 
         # Pre-submit collateral guard for BUYs. An unfilled limit order locks its
         # notional as collateral; once prior resting orders consume the balance,
@@ -353,12 +377,13 @@ class PolymarketClient:
             # For SELL orders: approve the specific conditional token if not yet approved
             if order.side == OrderSide.SELL and order.token_id not in self._approved_tokens:
                 try:
-                    self._clob_client.update_balance_allowance(
+                    await self.clob_call(
+                        self._clob_client.update_balance_allowance,
                         BalanceAllowanceParams(
                             asset_type=AssetType.CONDITIONAL,
                             token_id=order.token_id,
                             signature_type=2,
-                        )
+                        ),
                     )
                     self._approved_tokens.add(order.token_id)
                     log.info("clob_client.token_approved", token_id=order.token_id[:20])
@@ -374,8 +399,13 @@ class PolymarketClient:
                 side=clob_side,
             )
 
-            signed_order = self._submit_clob_order(
+            # Longer deadline for the actual submit: a timeout here is
+            # ambiguous (the order may have landed) — the startup
+            # reconciler picks up any such stray on the next session.
+            signed_order = await self.clob_call(
+                self._submit_clob_order,
                 ord_args, want_post_only, ClobOrderType, order,
+                timeout=30.0,
             )
 
             order_id = str(signed_order.get("orderID", signed_order.get("id", "unknown")))
@@ -440,8 +470,9 @@ class PolymarketClient:
         """
         try:
             from py_clob_client_v2 import AssetType, BalanceAllowanceParams
-            resp = self._clob_client.get_balance_allowance(
-                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=2)
+            resp = await self.clob_call(
+                self._clob_client.get_balance_allowance,
+                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=2),
             )
             # A non-dict / balance-less response means "unknown" — fail open rather
             # than treat it as zero collateral (which would block every BUY).
@@ -452,7 +483,10 @@ class PolymarketClient:
             log.debug("order.balance_probe_failed", error=str(e))
             return None
 
-        reserved = self._reserved_buy_collateral_from_open_orders()
+        try:
+            reserved = await self.clob_call(self._reserved_buy_collateral_from_open_orders)
+        except Exception:
+            reserved = None
         if reserved is None:
             # Authoritative view unavailable — fall back to orders we placed this
             # session. Less complete (misses orphans) but better than no guard.
@@ -507,8 +541,8 @@ class PolymarketClient:
         if not self._is_live_enabled():
             return 0
         try:
-            self._init_clob_client()
-            orders = self._clob_client.get_open_orders()
+            await self.clob_call(self._init_clob_client)
+            orders = await self.clob_call(self._clob_client.get_open_orders)
         except Exception as e:
             log.warning("order.reconcile_failed", error=str(e))
             return 0
@@ -567,9 +601,9 @@ class PolymarketClient:
         or cancelled. We return a terminal "cancelled" result so callers can
         drop it from their pending-order tracking instead of re-polling forever.
         """
-        self._init_clob_client()
+        await self.clob_call(self._init_clob_client)
         try:
-            raw = self._clob_client.get_order(order_id)
+            raw = await self.clob_call(self._clob_client.get_order, order_id)
         except Exception as e:
             log.error("order_status.error", order_id=order_id, error=str(e))
             raise
@@ -612,9 +646,9 @@ class PolymarketClient:
         ``self._clob_client.cancel(order_id)`` raised AttributeError on every
         call, so live cancels silently never happened.)
         """
-        self._init_clob_client()
+        await self.clob_call(self._init_clob_client)
         try:
-            resp = self._clob_client.cancel_orders([order_id])
+            resp = await self.clob_call(self._clob_client.cancel_orders, [order_id])
             not_canceled = resp.get("not_canceled", {}) if isinstance(resp, dict) else {}
             if order_id in not_canceled:
                 log.warning("order_cancel.rejected", order_id=order_id,
@@ -639,11 +673,12 @@ class PolymarketClient:
         """
         if not token_id:
             return 0
-        self._init_clob_client()
+        await self.clob_call(self._init_clob_client)
         try:
             from py_clob_client_v2 import OrderMarketCancelParams
-            resp = self._clob_client.cancel_market_orders(
-                OrderMarketCancelParams(asset_id=token_id)
+            resp = await self.clob_call(
+                self._clob_client.cancel_market_orders,
+                OrderMarketCancelParams(asset_id=token_id),
             )
             cancelled = resp.get("canceled", []) if isinstance(resp, dict) else []
             count = len(cancelled) if isinstance(cancelled, list) else 0
@@ -698,9 +733,9 @@ class PolymarketClient:
     async def get_order_book(self, token_id: str) -> OrderBook:
         """Get order book for a token (public, no auth needed)."""
         from auramaur.exchange.models import OrderBook, OrderBookLevel
-        self._init_clob_client()
         try:
-            raw = self._clob_client.get_order_book(token_id)
+            await self.clob_call(self._init_clob_client)
+            raw = await self.clob_call(self._clob_client.get_order_book, token_id)
             # py_clob_client_v2 returns a plain dict ({"bids": [...], "asks": [...]}),
             # not a dataclass — read by key, falling back to attribute access for
             # any client version that returns an OrderBookSummary object.

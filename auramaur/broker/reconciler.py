@@ -54,13 +54,13 @@ class PositionReconciler:
         3. Look up market info for each position
         4. Match to our DB market IDs
         """
-        self._exchange._init_clob_client()
+        await self._exchange.clob_call(self._exchange._init_clob_client)
         client = self._exchange._clob_client
         proxy = self._exchange._settings.polymarket_proxy_address.lower()
 
         # Step 1: Get all trades
         try:
-            trades = client.get_trades()
+            trades = await self._exchange.clob_call(client.get_trades)
         except Exception as e:
             log.error("reconciler.trades_error", error=str(e))
             return []
@@ -191,7 +191,12 @@ class PositionReconciler:
             return self._market_cache[condition_id]
 
         try:
-            info = self._exchange._clob_client.get_market(condition_id)
+            # Via clob_call, not directly: this exact call, run bare on the
+            # event loop, stalled on a dead socket on 2026-06-10 and froze
+            # the whole live bot for 84 minutes.
+            info = await self._exchange.clob_call(
+                self._exchange._clob_client.get_market, condition_id,
+            )
             if info:
                 self._market_cache[condition_id] = info
                 return info
