@@ -13,11 +13,27 @@ to the next one and logs which backend actually ran.
 
 from __future__ import annotations
 
+import logging
 import math
+import os
 import re
+import warnings
 from functools import lru_cache
 
 import structlog
+
+# Quiet HF Hub chatter at import — it was spamming the trading terminal with
+# "unauthenticated requests" warnings + weight-loading progress bars from the
+# evidence-relevance embedder. Set BEFORE any huggingface_hub import so the
+# env vars take, and belt-and-suspenders the warning via both logging and the
+# warnings filter (the advisory is emitted via warnings.warn, not logging, so
+# the lazy logger-level tweak inside _get_embedder never caught it). Loading
+# still works without a token; this is purely cosmetic.
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+warnings.filterwarnings("ignore", message=r".*unauthenticated requests.*")
+warnings.filterwarnings("ignore", message=r".*HF_TOKEN.*")
 
 log = structlog.get_logger()
 
@@ -107,14 +123,6 @@ def _tfidf_scores(query: str, texts: list[str]) -> list[float] | None:
 @lru_cache(maxsize=2)
 def _get_embedder(model_name: str):
     """Lazily load and cache a SentenceTransformer; return None if unavailable."""
-    # Quiet the HF Hub chatter that was spamming the trading terminal
-    # ("unauthenticated requests" warnings + "Loading weights" progress
-    # bars). Loading still works without a token; these are cosmetic.
-    import logging as _logging
-    import os as _os
-    _os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-    _os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
-    _logging.getLogger("huggingface_hub").setLevel(_logging.ERROR)
     try:
         from sentence_transformers import SentenceTransformer
     except Exception:

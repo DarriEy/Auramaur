@@ -162,16 +162,19 @@ class RiskManager:
         # Blocked categories at the single gateway: the engine-level filter
         # only covers run_cycle's candidate selection — news_speed (via
         # analyze_market) and other entry paths sailed past it (caught live
-        # 2026-06-10 buying politics_us). Classify on the spot when the
-        # discovery object carries no category; structural two-sided
-        # strategies (graduation's exempt list) stay free to quote/arb.
-        from auramaur.strategy.classifier import ensure_category
-        market_category = market.category or ensure_category(
-            market.question, market.description)
+        # 2026-06-10 buying politics_us). Block on the stored category OR a
+        # fresh classification: 247 active sports markets carried stale
+        # 'other' labels that dodged the block, so trusting the stored label
+        # alone was the residual leak. Structural two-sided strategies
+        # (graduation's exempt list) stay free to quote/arb.
+        from auramaur.strategy.classifier import classify_market
+        fresh_category = classify_market(
+            market.question or "", market.description or "")
         pre_checks.append(await check_blocked_category(
-            market_category, rc.blocked_categories,
+            market.category or "", rc.blocked_categories,
             applies=signal.strategy_source not in set(
                 self.settings.graduation.exempt_strategies),
+            fallback_category=fresh_category,
         ))
 
         # ----------------------------------------------------------------

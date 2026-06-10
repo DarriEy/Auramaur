@@ -309,3 +309,30 @@ async def test_blocked_category_classifies_uncategorized_markets(mock_kill):
     blocked = next(c for c in d.checks if c.name == "blocked_category")
     assert blocked.passed is False
     assert blocked.value == "politics_us"  # classified on the spot
+
+
+@pytest.mark.asyncio
+@patch("auramaur.risk.manager.check_kill_switch")
+async def test_blocked_category_catches_stale_stored_label(mock_kill):
+    """Regression (2026-06-10): 247 active sports markets were stored as
+    'other'/'politics_intl' (stale labels), dodging the block because the
+    gateway trusted the stored category. The gate now blocks on a FRESH
+    classification too — a sports matchup stored as 'other' is blocked."""
+    from auramaur.risk.checks import CheckResult
+    mock_kill.return_value = CheckResult(name="kill_switch", passed=True, reason="", value=False)
+
+    settings = _make_settings(blocked_categories=["sports", "politics_us"])
+    db = MagicMock()
+    db.fetchone = AsyncMock(return_value=None)
+    manager = RiskManager(settings, db)
+    manager.portfolio = _mock_portfolio()
+
+    market = _make_market(category="other")  # stale stored label
+    market.question = "Warriors vs. Celtics"  # the real stored-as-other pattern
+    market.description = ""
+    sig = _make_signal(edge=10.0, claude_prob=0.60, market_prob=0.50)
+    d = await manager.evaluate(sig, market, available_cash=500.0)
+    assert d.approved is False
+    blocked = next(c for c in d.checks if c.name == "blocked_category")
+    assert blocked.passed is False
+    assert blocked.value == "sports"  # the fresh classification, not 'other'
