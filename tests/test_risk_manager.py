@@ -55,6 +55,8 @@ def _make_settings(
     )
     s.risk = rc
     s.risk_tolerance = 50.0  # neutral -> scaling is a no-op in tests
+    from config.settings import GraduationConfig
+    s.graduation = GraduationConfig(mode="off")  # ladder exercised in test_graduation.py
     s.kelly = MagicMock()
     s.kelly.fraction = kelly_fraction
     s.execution = MagicMock()

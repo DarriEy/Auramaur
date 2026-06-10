@@ -601,7 +601,9 @@ class TradingEngine:
             return {"market": market, "signal": signal, "decision": decision, "order": None}
 
         # 6. Build and place order — use smart router if available
-        order = await self._build_and_place_order(signal, market, decision.position_size)
+        order = await self._build_and_place_order(
+            signal, market, decision.position_size,
+            force_paper=decision.force_paper)
         if order is None:
             return {"market": market, "signal": signal, "decision": decision, "order": None}
 
@@ -609,12 +611,18 @@ class TradingEngine:
 
     async def _build_and_place_order(
         self, signal: Signal, market: Market, size_dollars: float,
+        force_paper: bool = False,
     ) -> OrderResult | None:
-        """Build an order (via router or direct) and place it."""
+        """Build an order (via router or direct) and place it.
+
+        ``force_paper`` (graduation ladder) downgrades this ENTRY to dry-run
+        regardless of global live mode — it can only restrict, never arm.
+        """
+        is_live = self.settings.is_live and not force_paper
         if self.router:
-            order = await self.router.route(signal, market, size_dollars, self.settings.is_live)
+            order = await self.router.route(signal, market, size_dollars, is_live)
         else:
-            order = self.exchange.prepare_order(signal, market, size_dollars, self.settings.is_live)
+            order = self.exchange.prepare_order(signal, market, size_dollars, is_live)
 
         if order is None:
             show_order_dropped(market.id, f"order build failed (${size_dollars:.2f} — could not build a valid order)")
@@ -1124,6 +1132,7 @@ class TradingEngine:
                 try:
                     order_result = await self._build_and_place_order(
                         candidate.signal, candidate.market, candidate.allocated_size,
+                        force_paper=candidate.risk_decision.force_paper,
                     )
                     if order_result:
                         for r in results:
@@ -1370,6 +1379,7 @@ class TradingEngine:
                 try:
                     order_result = await self._build_and_place_order(
                         candidate.signal, candidate.market, candidate.allocated_size,
+                        force_paper=candidate.risk_decision.force_paper,
                     )
                     if order_result:
                         for r in results:
@@ -1426,6 +1436,7 @@ class TradingEngine:
             try:
                 order_result = await self._build_and_place_order(
                     candidate.signal, candidate.market, candidate.allocated_size,
+                    force_paper=candidate.risk_decision.force_paper,
                 )
                 if order_result:
                     # Update the result dict for this market

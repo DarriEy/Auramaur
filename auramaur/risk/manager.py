@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 
 import structlog
 from pydantic import BaseModel
 
 from auramaur.db.database import Database
-from auramaur.exchange.models import Confidence, Market, Signal
+from auramaur.exchange.models import Market, Signal
 from auramaur.risk.checks import (
     CheckResult,
     check_category_exposure,
@@ -41,6 +40,11 @@ class RiskDecision(BaseModel):
     checks: list[CheckResult]
     position_size: float
     reason: str
+    # Graduation ladder (Phase 3): entries from unproven/demoted
+    # (strategy × category) cells run dry-run regardless of global live
+    # mode. Restriction-only — exits never pass through evaluate().
+    force_paper: bool = False
+    graduation_status: str = ""
 
 
 class RiskManager:
@@ -51,6 +55,8 @@ class RiskManager:
         self.db = db
         self.portfolio = PortfolioTracker(db, settings=settings)
         self.kelly = KellySizer(fraction=settings.kelly.fraction)
+        from auramaur.risk.graduation import GraduationLadder
+        self.graduation = GraduationLadder(db, settings)
 
     async def evaluate(
         self,
@@ -211,11 +217,21 @@ class RiskManager:
             else "; ".join(c.reason for c in failed)
         )
 
+        # Graduation ladder: the cell's measured record decides whether this
+        # ENTRY trades live, on probation size, or paper-forced. Applied after
+        # all checks so it can only restrict an already-approved trade.
+        cell = await self.graduation.decide(
+            signal.strategy_source, market.category or "")
+        if all_passed and cell.size_multiplier != 1.0:
+            position_size = position_size * cell.size_multiplier
+
         decision = RiskDecision(
             approved=all_passed,
             checks=checks,
             position_size=position_size,
             reason=reason,
+            force_paper=cell.force_paper,
+            graduation_status=cell.status,
         )
 
         # ----------------------------------------------------------------

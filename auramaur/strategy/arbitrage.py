@@ -98,6 +98,7 @@ class ArbitrageExecutor:
             edge=edge_pct / 2,  # Split edge across both legs
             evidence_summary=f"Arbitrage: {opp.get('type', 'unknown')}",
             recommended_side=OrderSide.BUY,
+            strategy_source="arbitrage",
         )
 
         sell_signal = Signal(
@@ -109,6 +110,7 @@ class ArbitrageExecutor:
             edge=edge_pct / 2,
             evidence_summary=f"Arbitrage: {opp.get('type', 'unknown')}",
             recommended_side=OrderSide.SELL,
+            strategy_source="arbitrage",
         )
 
         return (buy_signal, sell_signal, opp)
