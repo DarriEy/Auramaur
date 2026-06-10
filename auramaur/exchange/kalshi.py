@@ -640,9 +640,11 @@ class KalshiClient:
                     market = None
                     current_price = avg_price
 
-                category = market.category if market else ""
+                from auramaur.strategy.classifier import ensure_category
                 question = market.question if market else ticker
                 description = market.description if market else ""
+                category = ensure_category(
+                    question, description, market.category if market else "")
                 yes_price = market.outcome_yes_price if market else 0.0
                 no_price = market.outcome_no_price if market else 0.0
                 volume = market.volume if market else 0.0

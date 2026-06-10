@@ -30,7 +30,7 @@ from auramaur.nlp.calibration import CalibrationTracker
 from auramaur.broker.allocator import CandidateTrade, CapitalAllocator
 from auramaur.broker.router import SmartOrderRouter
 from auramaur.risk.manager import RiskManager
-from auramaur.strategy.classifier import classify_market
+from auramaur.strategy.classifier import classify_market, ensure_category
 from auramaur.strategy.order_flow import OrderFlowTracker
 from auramaur.strategy.protocols import MarketAnalyzer, TradeCandidate
 from auramaur.strategy.signals import detect_edge
@@ -567,7 +567,8 @@ class TradingEngine:
                VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))""",
             (market.id, market.exchange or self.exchange_name or "polymarket",
              market.condition_id, market.question,
-             market.description[:500], market.category,
+             market.description[:500],
+             ensure_category(market.question, market.description, market.category),
              market.outcome_yes_price, market.outcome_no_price,
              market.volume, market.liquidity),
         )
@@ -1086,7 +1087,8 @@ class TradingEngine:
                    VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))""",
                 (m.id, m.exchange or self.exchange_name or "polymarket",
                  m.condition_id, m.question, m.description[:500],
-                 m.category, m.outcome_yes_price, m.outcome_no_price,
+                 ensure_category(m.question, m.description, m.category),
+                 m.outcome_yes_price, m.outcome_no_price,
                  m.volume, m.liquidity),
             )
             # Store signal
@@ -1336,7 +1338,8 @@ class TradingEngine:
                    volume, liquidity, last_updated)
                    VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))""",
                 (market.id, market.condition_id, market.question,
-                 market.description[:500], market.category,
+                 market.description[:500],
+             ensure_category(market.question, market.description, market.category),
                  market.outcome_yes_price, market.outcome_no_price,
                  market.volume, market.liquidity),
             )

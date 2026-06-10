@@ -178,3 +178,15 @@ def classify_market(question: str, description: str = "") -> str:
         return "other"
 
     return max(scores, key=scores.get)
+
+
+def ensure_category(question: str, description: str = "",
+                    category: str | None = "") -> str:
+    """Return *category*, classifying when missing.
+
+    Markets must never be stored category-less: empty categories bypass
+    ``blocked_categories`` (the check is ``category in blocked``) and
+    pollute graduation cells as '(none)'. Every INSERT-into-markets site
+    routes through this instead of writing ``market.category`` raw.
+    """
+    return category or classify_market(question or "", description or "")
