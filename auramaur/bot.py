@@ -1165,28 +1165,6 @@ class AuramaurBot:
         finally:
             await client.close()
 
-    async def _task_ibkr_directional(self) -> None:
-        """IBKR directional equity speculation (gated; no validated edge).
-
-        Own socket (equity_client_id) so it coexists with the options client.
-        Momentum per symbol -> capped/budgeted long entry/exit.
-        """
-        from auramaur.exchange.ibkr_equity import IBKREquityClient
-        from auramaur.treasury.ibkr_pillar import IBKRDirectionalPillar
-        from auramaur.monitoring.display import console
-
-        client = IBKREquityClient(self.settings)
-        pillar = IBKRDirectionalPillar(self.settings, client, console=console)
-        interval = self.settings.intervals.market_scan_seconds
-        try:
-            while self._running:
-                if await self._check_kill_switch():
-                    return
-                await pillar.run_once()
-                await asyncio.sleep(interval)
-        finally:
-            await client.close()
-
     async def _task_momentum_coupling(self) -> None:
         """Fast path: spot->prediction momentum-coupling pillar (gated, detect-only).
 
@@ -2610,6 +2588,40 @@ class AuramaurBot:
                 log.error("lens.cycle_error", error=str(e))
             await asyncio.sleep(interval)
 
+    async def _task_oddlot_tender(self) -> None:
+        """EDGAR odd-lot tender scan (detection always; entries paper-forced)."""
+        from auramaur.data_sources.edgar import EdgarClient
+        from auramaur.strategy.oddlot_tender import OddLotTenderPillar
+
+        edgar = EdgarClient()
+        equity = None
+        if self.settings.ibkr.enabled:
+            from auramaur.exchange.ibkr_equity import IBKREquityClient
+            equity = IBKREquityClient(self.settings)
+        pillar = OddLotTenderPillar(
+            db=self._components["db"],
+            settings=self.settings,
+            edgar=edgar,
+            analyzer=self._components.get("analyzer"),
+            alerts=self._components.get("alerts"),
+            equity_client=equity,
+            pnl_tracker=self._components["pnl_tracker"],
+        )
+        interval = max(600, self.settings.oddlot_tender.interval_seconds)
+        try:
+            while self._running:
+                if await self._check_kill_switch():
+                    return
+                try:
+                    await pillar.run_once()
+                except Exception as e:
+                    log.error("oddlot.cycle_error", error=str(e))
+                await asyncio.sleep(interval)
+        finally:
+            await edgar.close()
+            if equity is not None:
+                await equity.close()
+
     async def _task_order_monitor(self) -> None:
         """Monitor pending limit orders for fills and expiry."""
         from datetime import datetime, timezone
@@ -2893,9 +2905,7 @@ class AuramaurBot:
         if self.settings.ibkr.enabled and self._exchange_filter in (None, "ibkr"):
             opt = ("[red]options ON[/]" if self.settings.ibkr.options_enabled
                    else "options off")
-            eq = ("[red]equity SPEC ON[/]" if self.settings.ibkr.directional_equity_enabled
-                  else "equity spec off")
-            console.print(f"  IBKR: enabled ({self.settings.ibkr.environment}) | {opt} | {eq}")
+            console.print(f"  IBKR: enabled ({self.settings.ibkr.environment}) | {opt}")
 
         show_startup(
             self._components["source_names"],
@@ -2980,13 +2990,13 @@ class AuramaurBot:
         if self.settings.resolution_lens.enabled:
             tasks.append(asyncio.create_task(self._task_resolution_lens(), name="resolution_lens"))
 
+        # Odd-lot tender harvester (detection always; entries paper-forced)
+        if self.settings.oddlot_tender.enabled:
+            tasks.append(asyncio.create_task(self._task_oddlot_tender(), name="oddlot_tender"))
+
         # Kraken treasury/capital pillar (+ gated directional spot)
         if self.settings.kraken.enabled:
             tasks.append(asyncio.create_task(self._task_kraken_pillar(), name="kraken_treasury"))
-
-        # IBKR directional equity speculation (gated by directional_equity_enabled)
-        if self.settings.ibkr.enabled and self.settings.ibkr.directional_equity_enabled:
-            tasks.append(asyncio.create_task(self._task_ibkr_directional(), name="ibkr_directional"))
 
         # Fast path: momentum-coupling pillar (gated by momentum_coupling.enabled)
         if self.settings.momentum_coupling.enabled:

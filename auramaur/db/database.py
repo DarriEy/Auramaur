@@ -78,6 +78,8 @@ class Database:
             await self._migrate_v15_to_v16()
         if from_version < 17:
             await self._migrate_v16_to_v17()
+        if from_version < 18:
+            await self._migrate_v17_to_v18()
 
     async def _migrate_v1_to_v2(self) -> None:
         """Add category to calibration, add new tables."""
@@ -414,6 +416,12 @@ class Database:
         await self._db.execute("UPDATE schema_version SET version = 17")
         await self._db.commit()
         log.info("database.migrated", from_version=16, to_version=17)
+
+    async def _migrate_v17_to_v18(self) -> None:
+        """Add the oddlot_filings table (created by TABLES executescript)."""
+        await self._db.execute("UPDATE schema_version SET version = 18")
+        await self._db.commit()
+        log.info("database.migrated", from_version=17, to_version=18)
 
     async def _migrate_v11_to_v12(self) -> None:
         """Add strategy_source column to signals and trades for hybrid mode attribution."""

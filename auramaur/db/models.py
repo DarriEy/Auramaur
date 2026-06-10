@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -238,6 +238,23 @@ CREATE TABLE IF NOT EXISTS pnl_ledger (
 
 CREATE INDEX IF NOT EXISTS idx_pnl_ledger_market ON pnl_ledger(market_id, is_paper);
 CREATE INDEX IF NOT EXISTS idx_pnl_ledger_realized ON pnl_ledger(realized_at);
+
+CREATE TABLE IF NOT EXISTS oddlot_filings (
+    accession TEXT PRIMARY KEY,
+    cik TEXT NOT NULL DEFAULT '',
+    ticker TEXT NOT NULL DEFAULT '',
+    company TEXT NOT NULL DEFAULT '',
+    form TEXT NOT NULL DEFAULT '',
+    filed_at TEXT NOT NULL DEFAULT '',
+    odd_lot_priority INTEGER NOT NULL DEFAULT 0,
+    tender_price REAL NOT NULL DEFAULT 0,
+    tender_price_high REAL NOT NULL DEFAULT 0,
+    expiration TEXT NOT NULL DEFAULT '',
+    conditions TEXT NOT NULL DEFAULT '',
+    confidence REAL NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'detected',
+    checked_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 
 CREATE TABLE IF NOT EXISTS gap_audits (
     market_id TEXT PRIMARY KEY,

@@ -1,10 +1,13 @@
-"""IBKR equity trading client — directional stocks/ETFs (gated speculation).
+"""IBKR equity trading client.
 
 Separate from the options client (ibkr.py): connects on its own clientId so the
 two can coexist, and uses a non-read-only connection so it can place orders.
 Same three-gate live model + kill switch + a hard per-order USD cap.
 
-No validated edge — this is opt-in speculation, bounded by config.
+Serves the equity pillars (currently the odd-lot tender harvester). The
+directional momentum book that originally owned this client was REMOVED
+2026-06-09: the identical strategy shape went 0W/20L on Kraken and
+backtested net-negative in every variant — pre-failed, never activated.
 """
 
 from __future__ import annotations
@@ -188,26 +191,66 @@ class IBKREquityClient:
             return OrderResult(order_id="ERROR", market_id=symbol, status="rejected",
                                is_paper=False, error_message=str(e)[:200])
 
-    async def momentum(self, symbol: str) -> float | None:
-        """Percent change over the lookback using historical daily bars."""
+    async def place_share_order(
+        self, symbol: str, side: OrderSide | str, qty: int, limit_price: float,
+        dry_run: bool | None = None,
+    ) -> OrderResult:
+        """Place a WHOLE-share limit order for an exact quantity.
+
+        The odd-lot tender trade needs an exact sub-100 share count (odd-lot
+        priority applies to holders of FEWER than 100 shares — a cashQty
+        order could fill to 100+ and forfeit the priority). Whole-share
+        quantities are accepted over the API; only fractional quantities are
+        rejected (Error 10243). Gated + capped like every order.
+        """
+        side_str = (side.value if isinstance(side, OrderSide) else str(side)).upper()
+        qty = int(qty)
+        if qty <= 0:
+            return OrderResult(order_id="ERROR", market_id=symbol, status="rejected",
+                               is_paper=True, error_message="qty must be positive")
+
+        if Path("KILL_SWITCH").exists():
+            log.critical("kill_switch.active", action="ibkr_equity_order_blocked")
+            return OrderResult(order_id="BLOCKED", market_id=symbol, status="rejected",
+                               is_paper=True, error_message="kill switch")
+
+        notional = qty * limit_price
+        cap = self._settings.ibkr.equity_max_order_usd
+        if notional > cap:
+            return OrderResult(order_id="BLOCKED", market_id=symbol, status="rejected",
+                               is_paper=True,
+                               error_message=f"${notional:.2f} exceeds cap ${cap:.2f}")
+
+        if dry_run is None:
+            dry_run = not self._settings.is_live
+        if dry_run:
+            log.info("ibkr_equity.share_order.paper", symbol=symbol, side=side_str,
+                     qty=qty, limit=limit_price)
+            return OrderResult(order_id="PAPER", market_id=symbol, status="paper",
+                               filled_size=float(qty), filled_price=limit_price,
+                               is_paper=True)
+
+        if self._settings.ibkr.readonly:
+            return OrderResult(order_id="BLOCKED", market_id=symbol, status="rejected",
+                               is_paper=False,
+                               error_message="ibkr.readonly=true — cannot place orders")
         await self._ensure_connected()
-        from ib_async import Stock
-        cfg = self._settings.ibkr
         try:
+            from ib_async import LimitOrder, Stock
             stock = Stock(symbol, "SMART", "USD")
             await self._ib.qualifyContractsAsync(stock)
-            bars = await self._ib.reqHistoricalDataAsync(
-                stock, endDateTime="", durationStr=f"{cfg.directional_equity_lookback + 2} D",
-                barSizeSetting="1 day", whatToShow="TRADES", useRTH=True,
-            )
-            if not bars or len(bars) < cfg.directional_equity_lookback + 1:
-                return None
-            old = bars[-1 - cfg.directional_equity_lookback].close
-            cur = bars[-1].close
-            return None if old <= 0 else (cur - old) / old * 100.0
+            order = LimitOrder(side_str, qty, round(limit_price, 2))
+            trade = self._ib.placeOrder(stock, order)
+            log.warning("ibkr_equity.share_order.live", symbol=symbol,
+                        side=side_str, qty=qty, limit=limit_price)
+            return OrderResult(order_id=str(trade.order.orderId), market_id=symbol,
+                               status="pending", filled_price=limit_price,
+                               is_paper=False)
         except Exception as e:  # noqa: BLE001
-            log.warning("ibkr_equity.momentum_error", symbol=symbol, error=str(e)[:100])
-            return None
+            log.error("ibkr_equity.share_order.error", symbol=symbol,
+                      error=str(e)[:150])
+            return OrderResult(order_id="ERROR", market_id=symbol, status="rejected",
+                               is_paper=False, error_message=str(e)[:200])
 
     async def get_positions(self) -> dict[str, float]:
         """Held equity positions {symbol: qty} from the account (for reconcile)."""
