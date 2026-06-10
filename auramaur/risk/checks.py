@@ -357,3 +357,37 @@ async def check_second_opinion_divergence(
         ),
         value=divergence,
     )
+
+
+# ---------------------------------------------------------------------------
+# 16. Name-the-gap (mispricing must be explained)
+# ---------------------------------------------------------------------------
+
+async def check_mispricing_named(
+    mispricing_reason: str,
+    divergence_abs: float,
+    enabled: bool = False,
+    min_divergence: float = 0.05,
+    applies: bool = True,
+) -> CheckResult:
+    """Fail when a significant LLM divergence has no nameable mechanism.
+
+    The 10-20% divergence bucket realized -$5.90/market at 22% win — when
+    the model can't say WHY the market is wrong, the market is usually
+    right. ``mispricing_reason`` is "<mechanism>: <reason>" from the gap
+    audit (or pre-named by the originating strategy); "none"/empty blocks.
+    """
+    if not enabled or not applies or divergence_abs < min_divergence:
+        return CheckResult(name="mispricing_named", passed=True, reason="",
+                           value=mispricing_reason or "")
+    named = bool(mispricing_reason) and mispricing_reason.strip().lower() != "none"
+    return CheckResult(
+        name="mispricing_named",
+        passed=named,
+        reason=(
+            f"divergence {divergence_abs:.2f} has no nameable mispricing "
+            "mechanism — unexplained disagreement defers to the market"
+            if not named else ""
+        ),
+        value=mispricing_reason or "none",
+    )

@@ -75,6 +75,15 @@ class RiskConfig(BaseModel):
     divergence_adverse_low: float = 0.05
     divergence_adverse_high: float = 0.20
     divergence_require_confidence: str = "HIGH"
+    # Name-the-gap gate: an LLM signal whose probability diverges from the
+    # market by >= min_divergence must carry a NAMED mispricing mechanism
+    # (structural/behavioral/informational) from the post-hoc gap audit, or
+    # it does not trade. "none"/unauditable blocks. The estimation pipeline
+    # stays price-blind; the audit is a separate lazy LLM call made only for
+    # otherwise-approved trades.
+    mispricing_gate_enabled: bool = False
+    mispricing_min_divergence: float = 0.05
+    mispricing_audit_ttl_hours: float = 12.0
     # sports: the LLM has no structural edge on game outcomes / spreads / O-U
     # (driven by live injury & lineup info we don't ingest), and resolved-market
     # performance bears that out. Blocked outright rather than left to the
@@ -264,6 +273,32 @@ class EntailmentArbConfig(BaseModel):
     llm_enabled: bool = True
     llm_min_confidence: float = 0.9
     interval_seconds: int = 900
+
+
+class ResolutionLensConfig(BaseModel):
+    """Resolution-language lens (strategy/resolution_lens.py).
+
+    Trades headline-vs-fine-print gaps found by an adversarial criteria
+    read. Lexical triggers + real-book guards select candidates; the LLM
+    lens is the precision stage (verdicts cached forever — criteria are
+    static). PAPER-FORCED by default.
+    """
+
+    enabled: bool = False
+    paper: bool = True
+    min_gap_score: float = 0.4
+    high_conf_gap_score: float = 0.7
+    min_edge: float = 0.08
+    stake_usd: float = 10.0
+    max_entries_per_cycle: int = 3
+    max_llm_calls_per_cycle: int = 5
+    scan_limit: int = 300
+    min_liquidity: float = 1000.0
+    max_spread_pct: float = 5.0
+    min_description_chars: int = 80
+    min_hours_to_resolution: float = 12.0
+    max_days_to_resolution: float = 90.0
+    interval_seconds: int = 1800
 
 
 class GraduationConfig(BaseModel):
@@ -639,6 +674,7 @@ class Settings(BaseSettings):
     bias_harvest: BiasHarvestConfig = Field(default_factory=lambda: BiasHarvestConfig(**_DEFAULTS.get("bias_harvest", {})))
     graduation: GraduationConfig = Field(default_factory=lambda: GraduationConfig(**_DEFAULTS.get("graduation", {})))
     entailment_arb: EntailmentArbConfig = Field(default_factory=lambda: EntailmentArbConfig(**_DEFAULTS.get("entailment_arb", {})))
+    resolution_lens: ResolutionLensConfig = Field(default_factory=lambda: ResolutionLensConfig(**_DEFAULTS.get("resolution_lens", {})))
     arbitrage: ArbitrageConfig = Field(default_factory=lambda: ArbitrageConfig(**_DEFAULTS.get("arbitrage", {})))
     analysis: AnalysisConfig = Field(default_factory=lambda: AnalysisConfig(**_DEFAULTS.get("analysis", {})))
     hybrid: HybridConfig = Field(default_factory=lambda: HybridConfig(**_DEFAULTS.get("hybrid", {})))

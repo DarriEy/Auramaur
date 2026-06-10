@@ -138,7 +138,7 @@ async def test_evaluate_passing_case(mock_kill):
 
     assert decision.approved is True
     assert decision.position_size > 0
-    assert len(decision.checks) == 16
+    assert len(decision.checks) == 17  # 15 pre + mispricing_named + max_stake
     assert all(c.passed for c in decision.checks)
 
 

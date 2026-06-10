@@ -460,6 +460,13 @@ class AuramaurBot:
             "exchange_filter": self._exchange_filter,
         }
 
+        # Name-the-gap gate: wire the post-hoc mispricing auditor into the
+        # risk manager now that db + analyzer exist. Without this, the gate
+        # (if enabled) blocks unexplained divergences without an LLM call.
+        if risk_manager is not None and analyzer is not None:
+            from auramaur.nlp.gap_audit import GapAuditor
+            risk_manager.gap_auditor = GapAuditor(db, analyzer, self.settings)
+
     def _get_schedule_mode(self) -> str:
         """Return current adaptive schedule mode."""
         from datetime import datetime, timezone
@@ -2571,6 +2578,30 @@ class AuramaurBot:
                 log.error("entailment.cycle_error", error=str(e))
             await asyncio.sleep(interval)
 
+    async def _task_resolution_lens(self) -> None:
+        """Periodic resolution-language lens scan (paper-forced by config)."""
+        from auramaur.strategy.resolution_lens import ResolutionLensPillar
+
+        pillar = ResolutionLensPillar(
+            db=self._components["db"],
+            settings=self.settings,
+            discovery=self._components["discovery"],
+            exchange=self._components["exchange"],
+            risk_manager=self._components["risk_manager"],
+            pnl_tracker=self._components["pnl_tracker"],
+            calibration=self._components["calibration"],
+            analyzer=self._components.get("analyzer"),
+        )
+        interval = max(60, self.settings.resolution_lens.interval_seconds)
+        while self._running:
+            if await self._check_kill_switch():
+                return
+            try:
+                await pillar.run_once()
+            except Exception as e:
+                log.error("lens.cycle_error", error=str(e))
+            await asyncio.sleep(interval)
+
     async def _task_order_monitor(self) -> None:
         """Monitor pending limit orders for fills and expiry."""
         from datetime import datetime, timezone
@@ -2921,6 +2952,10 @@ class AuramaurBot:
         # Entailment arbitrage (paper-forced until proven)
         if self.settings.entailment_arb.enabled:
             tasks.append(asyncio.create_task(self._task_entailment_arb(), name="entailment_arb"))
+
+        # Resolution-language lens (paper-forced until proven)
+        if self.settings.resolution_lens.enabled:
+            tasks.append(asyncio.create_task(self._task_resolution_lens(), name="resolution_lens"))
 
         # Kraken treasury/capital pillar (+ gated directional spot)
         if self.settings.kraken.enabled:
