@@ -214,4 +214,8 @@ class Signal(BaseModel):
     # build a proper SELL order instead of opening a new opposing position.
     exit_token: TokenType | None = None
     strategy_source: str = "llm"
+    # Name-the-gap gate: WHY the market is mispriced (structural / behavioral /
+    # informational mechanism). Empty = not yet audited; "none" = the model
+    # could not name a mechanism (blocked when the gate is enabled).
+    mispricing_reason: str = ""
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

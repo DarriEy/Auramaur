@@ -25,6 +25,7 @@ from auramaur.risk.checks import (
     check_max_stake,
     check_min_edge,
     check_min_liquidity,
+    check_mispricing_named,
     check_second_opinion_divergence,
     check_time_to_resolution,
 )
@@ -57,6 +58,10 @@ class RiskManager:
         self.kelly = KellySizer(fraction=settings.kelly.fraction)
         from auramaur.risk.graduation import GraduationLadder
         self.graduation = GraduationLadder(db, settings)
+        # Optional post-hoc mispricing auditor (nlp/gap_audit.GapAuditor),
+        # wired by the bot after the analyzer exists. None -> the gate
+        # blocks unexplained divergences without spending an LLM call.
+        self.gap_auditor = None
 
     async def evaluate(
         self,
@@ -152,6 +157,34 @@ class RiskManager:
             await check_time_to_resolution(hours_remaining, rc.time_to_resolution_min_hours, rc.time_to_resolution_max_days * 24.0),
             await check_second_opinion_divergence(divergence, rc.second_opinion_divergence_max),
         ]
+
+        # ----------------------------------------------------------------
+        # Name-the-gap gate: a significant LLM divergence must name the
+        # mechanism why the market is wrong, or it doesn't trade. The
+        # estimation pipeline is price-blind (anti-anchoring), so the audit
+        # is a separate post-hoc LLM call — made lazily, only for signals
+        # that already pass everything else (no spend on doomed trades).
+        # Strategies that pre-name their mechanism (resolution_lens,
+        # bias_harvest's measured bias, entailment bounds) skip the call.
+        # ----------------------------------------------------------------
+        gap_div = abs(signal.claude_prob - signal.market_prob)
+        gate_applies = (rc.mispricing_gate_enabled
+                        and signal.strategy_source in ("llm",)
+                        and gap_div >= rc.mispricing_min_divergence)
+        if (gate_applies and not signal.mispricing_reason
+                and self.gap_auditor is not None
+                and all(c.passed for c in pre_checks)):
+            try:
+                signal.mispricing_reason = await self.gap_auditor.audit(signal, market)
+            except Exception as e:
+                log.warning("risk.gap_audit_failed", market_id=signal.market_id,
+                            error=str(e))
+        pre_checks.append(await check_mispricing_named(
+            signal.mispricing_reason, gap_div,
+            enabled=rc.mispricing_gate_enabled,
+            min_divergence=rc.mispricing_min_divergence,
+            applies=signal.strategy_source in ("llm",),
+        ))
 
         pre_passed = all(c.passed for c in pre_checks)
 

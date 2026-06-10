@@ -58,6 +58,16 @@ risk:
   divergence_adverse_low: 0.05
   divergence_adverse_high: 0.20
   divergence_require_confidence: "HIGH"
+  # Name-the-gap gate (2026-06-09): an llm-source trade with >=5pt divergence
+  # from the market must NAME the mechanism why the market is wrong
+  # (structural / behavioral / informational, via a cached post-hoc gap-audit
+  # call), else it defers to the market. This is the direct fix for the
+  # measured adverse selection: model Brier 0.191 loses to the price's 0.119
+  # head-to-head; unexplained disagreement = the market knows something.
+  # Costs ~1 LLM call per otherwise-approved divergent trade (cached 12h).
+  mispricing_gate_enabled: true
+  mispricing_min_divergence: 0.05
+  mispricing_audit_ttl_hours: 12.0
 
 kelly:
   fraction: 0.30
@@ -356,6 +366,31 @@ entailment_arb:
   llm_enabled: true
   llm_min_confidence: 0.9
   interval_seconds: 900
+
+resolution_lens:
+  # Resolution-language lens: the crowd prices the HEADLINE, the criteria
+  # resolve the FINE PRINT (announce-by, permanence bars, literal counting,
+  # compound conditions) — the bot's best documented wins all had this shape.
+  # Lexical triggers + real-book guards pick candidates; an adversarial LLM
+  # read ("how does YES resolve without the headline event, and vice versa")
+  # prices the strict criteria; verdicts cache forever. Lens signals are
+  # born with mispricing_reason named, so the name-the-gap gate passes
+  # without a second audit call. PAPER-FORCED until the ledger proves it.
+  enabled: true
+  paper: true
+  min_gap_score: 0.4       # lens-judged headline/criteria divergence floor
+  high_conf_gap_score: 0.7 # >= this -> HIGH confidence (clears divergence filter)
+  min_edge: 0.08           # |strict fair - market| floor
+  stake_usd: 10.0
+  max_entries_per_cycle: 3
+  max_llm_calls_per_cycle: 5
+  scan_limit: 300
+  min_liquidity: 1000.0
+  max_spread_pct: 5.0
+  min_description_chars: 80
+  min_hours_to_resolution: 12.0
+  max_days_to_resolution: 90.0
+  interval_seconds: 1800
 
 bias_harvest:
   # Favorite-longshot bias harvest — forecast-free base-load strategy.
