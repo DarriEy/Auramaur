@@ -213,8 +213,11 @@ def show_portfolio(balance: float, pnl: float, positions: int, drawdown: float, 
 
 
 def show_claude_thinking(market_id: str, stage: str = "primary") -> None:
+    # Concurrent evidence passes interleave these lines, so an untagged
+    # "Asking Claude..." is unattributable — show which market each belongs to.
     label = "Asking Claude" if stage == "primary" else "Second opinion"
-    console.print(f"         [dim]{label}...[/]")
+    tag = f" {market_id[:16]}" if market_id else ""
+    console.print(f"         [dim]{label}...{tag}[/]")
 
 
 def show_cache_hit() -> None:
