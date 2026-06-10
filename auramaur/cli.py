@@ -62,8 +62,11 @@ def run(agent: bool, hybrid: bool, exchange: str | None):
             settings.market_maker.enabled = True
         mode = "[bold red]LIVE TRADING[/]" if settings.is_live else "paper trading"
         console.print(f"[bold cyan]HYBRID MODE[/] — {mode}")
+        # The full per-book picture (modes, gates, graduation, ledger) is the
+        # "strategy books" panel printed at bot startup.
         console.print(
-            "[dim]  Pillars: arb (60s) + news speed (30s) + domain LLM + market making[/]"
+            "[dim]  Pillars: arb + news speed + LLM + market making"
+            " + bias_harvest + entailment_arb + resolution_lens[/]"
         )
     if exchange:
         console.print(f"[bold blue]Starting Auramaur bot (exchange: {exchange})...[/]")

@@ -655,6 +655,14 @@ class AuramaurBot:
                         )
                         if cat_stats:
                             show_category_performance(cat_stats)
+                        # Strategy-books view: per-book open exposure +
+                        # realized (live & paper) from the pnl_ledger.
+                        from auramaur.monitoring.books import (
+                            gather_books, render_books_table,
+                        )
+                        books = await gather_books(self._components["db"])
+                        if books:
+                            console.print(render_books_table(books))
                     except Exception as e:
                         log.debug("attribution.initial_error", error=str(e))
 
@@ -2866,9 +2874,13 @@ class AuramaurBot:
                 cadpx = await kclient.get_price("USDCCAD") or 1.38
                 cad_usd = cad / cadpx if cadpx else 0.0
                 crypto = [a for a, v in kb.items() if v > 0 and a not in ("USDC", "ZCAD")]
-                spec = (f"[red]SPEC ON[/] ({len(self.settings.kraken.directional_pairs)} pairs, "
-                        f"${self.settings.kraken.directional_budget_usd:.0f} budget)"
-                        if self.settings.kraken.directional_enabled else "spec off")
+                if not self.settings.kraken.directional_enabled:
+                    spec = "spec off"
+                elif self.settings.kraken.directional_budget_usd <= 0:
+                    spec = "[yellow]spec WIND-DOWN[/] (exits only)"
+                else:
+                    spec = (f"[red]SPEC ON[/] ({len(self.settings.kraken.directional_pairs)} pairs, "
+                            f"${self.settings.kraken.directional_budget_usd:.0f} budget)")
                 console.print(
                     f"  Kraken: [green]${usdc:.2f}[/] USDC + [green]${cad_usd:.0f}[/] CAD"
                     f"{' + ' + ','.join(crypto) if crypto else ''} | {spec}"
@@ -2889,6 +2901,17 @@ class AuramaurBot:
             self._components["source_names"],
             startup_balance,
         )
+
+        # Strategy-books panel: every book with its TRUE mode, the gates,
+        # graduation mode, and the ledger lifetime number.
+        try:
+            from auramaur.monitoring.books import render_books_panel
+            row = await self._components["db"].fetchone(
+                "SELECT COALESCE(SUM(pnl), 0) AS v FROM pnl_ledger WHERE is_paper = 0")
+            console.print(render_books_panel(
+                self.settings, float(row["v"]) if row else None))
+        except Exception as e:
+            log.debug("startup.books_panel_error", error=str(e))
 
         exchange_filter = self._components.get("exchange_filter")
         if exchange_filter:
