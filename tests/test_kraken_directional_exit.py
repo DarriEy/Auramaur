@@ -462,3 +462,75 @@ if __name__ == "__main__":
     test_paper_mode_records_nothing()
     test_entry_basis_recovered_from_cost_basis_on_restart()
     print("ok")
+
+
+# ---------------------------------------------------------------------------
+# LLM-mode exits — gain-based exits apply regardless of signal source
+# (regression 2026-06-10: the LLM pivot dropped TP/trailing, so a +40%
+# winner could never bank and a missing LLM view froze exits entirely)
+# ---------------------------------------------------------------------------
+
+def _llm_pillar(view):
+    from unittest.mock import MagicMock
+    p = KrakenPillar(settings=MagicMock(), kraken_client=MagicMock())
+    p._llm_view = AsyncMock(return_value=view)
+    return p
+
+
+def _llm_kcfg(**over):
+    base = dict(
+        directional_stop_loss_pct=12.0,
+        directional_take_profit_pct=4.0,
+        directional_trailing_stop_pct=8.0,
+        directional_fee_pct=0.26,
+        directional_llm_exit_prob=0.45,
+    )
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def test_llm_exit_takes_profit_even_when_view_is_missing():
+    """The TON case: +40% over basis, LLM view unavailable. Take-profit must
+    fire WITHOUT consulting the LLM — gain exits protect the position."""
+    async def run():
+        p = _llm_pillar(view=None)
+        reason = await p._llm_exit_reason("TONUSDC", gain_pct=40.0,
+                                          kcfg=_llm_kcfg(), peak_pct=40.0)
+        assert reason == "take_profit"
+        p._llm_view.assert_not_awaited()  # banked before any LLM call
+    asyncio.run(run())
+
+
+def test_llm_exit_trailing_protects_peak():
+    async def run():
+        p = _llm_pillar(view=(0.70, "HIGH"))  # LLM still bullish — irrelevant
+        reason = await p._llm_exit_reason(
+            "XBTUSDC", gain_pct=11.0,
+            kcfg=_llm_kcfg(directional_take_profit_pct=0.0), peak_pct=20.0)
+        assert reason == "trailing_stop"
+    asyncio.run(run())
+
+
+def test_llm_exit_stop_loss_first():
+    async def run():
+        p = _llm_pillar(view=(0.90, "HIGH"))
+        assert await p._llm_exit_reason("X", gain_pct=-15.0, kcfg=_llm_kcfg(),
+                                        peak_pct=0.0) == "stop_loss"
+    asyncio.run(run())
+
+
+def test_llm_exit_bearish_view_still_exits_flat_position():
+    async def run():
+        p = _llm_pillar(view=(0.30, "MEDIUM"))
+        assert await p._llm_exit_reason("X", gain_pct=0.5, kcfg=_llm_kcfg(),
+                                        peak_pct=0.5) == "llm_bearish"
+    asyncio.run(run())
+
+
+def test_llm_exit_holds_when_flat_and_view_missing():
+    """No gain trigger + no view -> hold (don't churn on a transient gap)."""
+    async def run():
+        p = _llm_pillar(view=None)
+        assert await p._llm_exit_reason("X", gain_pct=1.0, kcfg=_llm_kcfg(),
+                                        peak_pct=1.0) is None
+    asyncio.run(run())

@@ -156,12 +156,32 @@ class KrakenPillar:
             return "momentum"
         return None
 
-    async def _llm_exit_reason(self, pair: str, gain_pct: float, kcfg) -> str | None:
-        """Exit a held LLM-driven long: hard stop floor, else exit when the LLM
-        view turns bearish. A missing view holds (don't churn on a transient gap)."""
+    async def _llm_exit_reason(self, pair: str, gain_pct: float, kcfg,
+                               peak_pct: float | None = None) -> str | None:
+        """Exit a held LLM-driven long.
+
+        The GAIN-based exits (stop-loss, fee-netted take-profit, trailing
+        stop) apply regardless of signal source — they protect the position,
+        not the thesis. BUG fixED 2026-06-10: the LLM pivot (#76) routed
+        exits here WITHOUT them, so a winner could never bank a target (TON
+        sat at +40% over basis with no exit able to fire — the same failure
+        mode #68 fixed once before on the momentum path) and a missing LLM
+        view froze exits entirely. Priority matches _exit_reason: cut losers
+        -> bank the target -> protect the peak -> then ask the LLM.
+        A missing view still holds (don't churn on a transient gap) — but
+        only after the gain-based exits had their chance.
+        """
         stop_pct = getattr(kcfg, "directional_stop_loss_pct", 0.0) or 0.0
+        tp_pct = getattr(kcfg, "directional_take_profit_pct", 0.0) or 0.0
+        trail_pct = getattr(kcfg, "directional_trailing_stop_pct", 0.0) or 0.0
+        rt_fee = 2.0 * (getattr(kcfg, "directional_fee_pct", 0.0) or 0.0)
         if stop_pct > 0 and gain_pct <= -stop_pct:
             return "stop_loss"
+        if tp_pct > 0 and (gain_pct - rt_fee) >= tp_pct:
+            return "take_profit"
+        if (trail_pct > 0 and peak_pct is not None and peak_pct > rt_fee
+                and (peak_pct - gain_pct) >= trail_pct):
+            return "trailing_stop"
         view = await self._llm_view(pair)
         if view is None:
             return None
@@ -643,7 +663,7 @@ class KrakenPillar:
                 else:
                     peak_pct = await self._update_and_get_peak(pair, gain_pct)
                     if llm_on:
-                        reason = await self._llm_exit_reason(pair, gain_pct, kcfg)
+                        reason = await self._llm_exit_reason(pair, gain_pct, kcfg, peak_pct=peak_pct)
                     else:
                         mom = await self._momentum(pair)
                         if mom is None:
