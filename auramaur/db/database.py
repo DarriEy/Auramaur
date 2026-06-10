@@ -84,6 +84,8 @@ class Database:
             await self._migrate_v16_to_v17()
         if from_version < 18:
             await self._migrate_v17_to_v18()
+        if from_version < 19:
+            await self._migrate_v18_to_v19()
 
     async def _migrate_v1_to_v2(self) -> None:
         """Add category to calibration, add new tables."""
@@ -426,6 +428,22 @@ class Database:
         await self._db.execute("UPDATE schema_version SET version = 18")
         await self._db.commit()
         log.info("database.migrated", from_version=17, to_version=18)
+
+    async def _migrate_v18_to_v19(self) -> None:
+        """Add CLOB outcome-token columns to markets.
+
+        Needed to resolve which SIDE a held token is: outcome labels like
+        "Something"/"Nothing" aren't YES/NO, and the position syncer's
+        YES-default marked such holdings at the wrong outcome's price.
+        """
+        for column_def in ("clob_token_yes TEXT DEFAULT ''", "clob_token_no TEXT DEFAULT ''"):
+            try:
+                await self._db.execute(f"ALTER TABLE markets ADD COLUMN {column_def}")
+            except Exception:
+                pass  # Column already exists
+        await self._db.execute("UPDATE schema_version SET version = 19")
+        await self._db.commit()
+        log.info("database.migrated", from_version=18, to_version=19)
 
     async def _migrate_v11_to_v12(self) -> None:
         """Add strategy_source column to signals and trades for hybrid mode attribution."""

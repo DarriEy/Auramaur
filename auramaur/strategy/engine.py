@@ -348,15 +348,18 @@ class TradingEngine:
             await self.db.execute(
                 """INSERT OR REPLACE INTO markets
                    (id, exchange, condition_id, question, description, category, end_date, active,
-                    outcome_yes_price, outcome_no_price, volume, liquidity, last_updated)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    outcome_yes_price, outcome_no_price, volume, liquidity,
+                    clob_token_yes, clob_token_no, last_updated)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     market.id, market.exchange or self.exchange_name or "polymarket",
                     market.condition_id, market.question,
                     market.description, category,
                     market.end_date.isoformat() if market.end_date else None,
                     int(market.active), market.outcome_yes_price, market.outcome_no_price,
-                    market.volume, market.liquidity, datetime.now(timezone.utc).isoformat(),
+                    market.volume, market.liquidity,
+                    market.clob_token_yes, market.clob_token_no,
+                    datetime.now(timezone.utc).isoformat(),
                 ),
             )
 
