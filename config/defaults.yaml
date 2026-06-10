@@ -41,14 +41,20 @@ risk:
   implied_prob_min: 0.05
   implied_prob_max: 0.95
   category_exposure_cap_pct: 60.0
-  blocked_categories: ["sports"]
+  # politics_us added 2026-06-09: 243 resolved calibration points say ~no edge
+  # (Brier 0.238) and it's the worst realized-$ category (-$17 to -$29 lifetime)
+  # — yet it was the 2nd-largest live category by June notional. Sports is
+  # anti-edge (Brier 0.521).
+  blocked_categories: ["sports", "politics_us"]
   time_to_resolution_min_hours: 4
   time_to_resolution_max_days: 0   # 0 = no ceiling; set to 90 to reject 3+ month markets
   max_correlated_positions: 10
   second_opinion_divergence_max: 0.25
-  # Divergence-aware filter (LLM signal). OFF — A/B once resolution_pnl confirms
-  # the mid-divergence adverse-selection pattern at scale.
-  divergence_filter_enabled: false
+  # Divergence-aware filter (LLM signal). ON as of 2026-06-09: resolution_pnl
+  # confirmed the adverse-selection pattern — 10-20% divergence bucket realized
+  # -$53.11 over 9 markets (-$5.90/mkt, 22% win) vs +$6.00 for 20%+. Mid-band
+  # signals now require HIGH confidence to trade.
+  divergence_filter_enabled: true
   divergence_adverse_low: 0.05
   divergence_adverse_high: 0.20
   divergence_require_confidence: "HIGH"
@@ -207,11 +213,14 @@ kraken:
   # 0W/7L: every position decayed back into a momentum/stop loss. This re-enables
   # profit-taking so the book can actually close trades green.
   directional_take_profit_pct: 4.0
-  # Max total open speculative exposure. De-risked $600 -> $150 (~5 concurrent
-  # $30 positions). The current open book (~$362) already exceeds this, so NO new
-  # entries fire until it bleeds down — i.e. entries are effectively paused while
-  # the existing positions wind down through the now-working take-profit/stops.
-  directional_budget_usd: 150.0
+  # Max total open speculative exposure. WIND-DOWN as of 2026-06-09: the live
+  # book went 0W/20L on round trips with fees ($14.70) exceeding gross edge.
+  # Budget 0 blocks ALL new entries (entries are budget-gated) while exits
+  # (take-profit/stop/momentum) stay LIVE, so the ~$480 of open positions close
+  # gracefully. Do NOT use directional_llm_paper for wind-down — the paper flag
+  # forces EXITS into validate-only too, which would strand the held coins while
+  # the tracker simulates closes. Re-fund only behind a redesigned, validated edge.
+  directional_budget_usd: 0.0
   # LLM/news-driven directional signal. Price-only momentum backtested net-negative
   # in every variant; this gates entries on the bot's proven news->LLM crypto read
   # (P(up) over a multi-day horizon) instead. OFF by default; PAPER-forced when on
