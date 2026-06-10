@@ -143,3 +143,27 @@ def test_yaml_defaults_safe():
     assert raw["kelly"]["fraction"] <= 0.50, (
         "defaults.yaml kelly fraction must be <= 50%"
     )
+
+
+def test_hf_token_exported_to_environ(monkeypatch):
+    """hf_token from .env/constructor must reach os.environ — huggingface_hub
+    reads HF_TOKEN from the environment, not from Settings."""
+    import os
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    Settings(hf_token="hf_test123")
+    assert os.environ.get("HF_TOKEN") == "hf_test123"
+
+
+def test_hf_token_does_not_override_shell_env(monkeypatch):
+    """A token already exported in the shell wins over the .env value."""
+    import os
+    monkeypatch.setenv("HF_TOKEN", "hf_from_shell")
+    Settings(hf_token="hf_from_dotenv")
+    assert os.environ.get("HF_TOKEN") == "hf_from_shell"
+
+
+def test_hf_token_empty_leaves_environ_untouched(monkeypatch):
+    import os
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    Settings(hf_token="")
+    assert "HF_TOKEN" not in os.environ

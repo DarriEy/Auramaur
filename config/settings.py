@@ -662,6 +662,14 @@ class Settings(BaseSettings):
     # Google Gemini — LLM fallback for off-hours / when Claude budget is low.
     gemini_api_key: str = ""
 
+    # Hugging Face Hub token — used by the sentence-transformers evidence
+    # embedder (nlp/relevance.py). Anonymous downloads work but are
+    # rate-limited and warn; a free read token lifts both. huggingface_hub
+    # reads HF_TOKEN from the process environment, not from our Settings, so
+    # model_post_init exports it (pydantic-settings parses .env into fields
+    # without touching os.environ).
+    hf_token: str = ""
+
     # Global risk-tolerance lever: 0=most conservative, 50=neutral, 100=YOLO.
     # Scales the whole prob/stat/risk surface at the RiskManager gateway.
     # From defaults.yaml (risk_tolerance:) and overridable via env RISK_TOLERANCE.
@@ -727,6 +735,17 @@ class Settings(BaseSettings):
         # unrelated stray var shouldn't crash Settings on startup.
         "extra": "ignore",
     }
+
+    def model_post_init(self, __context) -> None:
+        """Export pass-through tokens to the process environment.
+
+        huggingface_hub (via sentence-transformers) reads HF_TOKEN from
+        os.environ — pydantic-settings parses .env into fields without
+        touching the environment, so a token set only in .env would never
+        reach it. setdefault: a token already exported in the shell wins.
+        """
+        if self.hf_token and not os.environ.get("HF_TOKEN"):
+            os.environ["HF_TOKEN"] = self.hf_token
 
     @property
     def kill_switch_active(self) -> bool:
