@@ -330,6 +330,15 @@ CREATE TABLE IF NOT EXISTS order_build_drops (
     reason TEXT DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS signal_rejections (
+    market_id TEXT PRIMARY KEY,
+    exchange TEXT DEFAULT '',
+    rejected_at TEXT NOT NULL DEFAULT (datetime('now')),
+    yes_price REAL NOT NULL DEFAULT 0,
+    reason TEXT DEFAULT '',
+    streak INTEGER NOT NULL DEFAULT 1
+);
+
 CREATE TABLE IF NOT EXISTS slippage_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     market_id TEXT NOT NULL,

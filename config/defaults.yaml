@@ -111,6 +111,11 @@ intervals:
 nlp:
   cache_ttl_breaking_seconds: 900
   cache_ttl_slow_seconds: 7200
+  # Rejection cooldown: bench risk-rejected markets instead of re-burning an
+  # evidence pass + LLM call on them every cycle. A reprice >= the threshold
+  # or a news flag lifts the bench immediately.
+  rejection_cooldown_minutes: 240
+  rejection_reprice_threshold: 0.03
   model: "opus"
   max_tokens: 4096
   # API intensity: "low", "medium", or "full_blast"

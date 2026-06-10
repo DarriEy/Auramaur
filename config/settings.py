@@ -179,6 +179,16 @@ class NLPConfig(BaseModel):
     # fresh, price-stable cached result are reused and excluded from the batch.
     strategic_cache_enabled: bool = True
 
+    # Lever 6: rejection cooldown. A risk-rejected market re-entered the
+    # candidate pool as soon as the 15-minute recently-analyzed window lapsed,
+    # so the same dud markets burned a fresh evidence pass + LLM call every
+    # ~20 minutes all day (on Kalshi this was the entire signal stream). The
+    # verdict can't flip until something moves, so bench the market until the
+    # cooldown expires, it reprices by the escape threshold, or a news flag
+    # promotes it — the cooldown must never blind the bot to new information.
+    rejection_cooldown_minutes: int = 240
+    rejection_reprice_threshold: float = 0.03  # abs yes-price move that lifts the bench early
+
     # Info-content tuning — maximize signal per token sent to the LLM.
     # Evidence is globally re-ranked (recency x authority x relevance) before
     # truncation, so the model sees the best N items, not the first N.
