@@ -25,6 +25,7 @@ from auramaur.risk.checks import (
     check_max_stake,
     check_min_edge,
     check_min_liquidity,
+    check_blocked_category,
     check_mispricing_named,
     check_second_opinion_divergence,
     check_time_to_resolution,
@@ -157,6 +158,21 @@ class RiskManager:
             await check_time_to_resolution(hours_remaining, rc.time_to_resolution_min_hours, rc.time_to_resolution_max_days * 24.0),
             await check_second_opinion_divergence(divergence, rc.second_opinion_divergence_max),
         ]
+
+        # Blocked categories at the single gateway: the engine-level filter
+        # only covers run_cycle's candidate selection — news_speed (via
+        # analyze_market) and other entry paths sailed past it (caught live
+        # 2026-06-10 buying politics_us). Classify on the spot when the
+        # discovery object carries no category; structural two-sided
+        # strategies (graduation's exempt list) stay free to quote/arb.
+        from auramaur.strategy.classifier import ensure_category
+        market_category = market.category or ensure_category(
+            market.question, market.description)
+        pre_checks.append(await check_blocked_category(
+            market_category, rc.blocked_categories,
+            applies=signal.strategy_source not in set(
+                self.settings.graduation.exempt_strategies),
+        ))
 
         # ----------------------------------------------------------------
         # Name-the-gap gate: a significant LLM divergence must name the

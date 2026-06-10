@@ -138,7 +138,8 @@ async def test_evaluate_passing_case(mock_kill):
 
     assert decision.approved is True
     assert decision.position_size > 0
-    assert len(decision.checks) == 17  # 15 pre + mispricing_named + max_stake
+    # 15 pre + mispricing_named + blocked_category + max_stake
+    assert len(decision.checks) == 18
     assert all(c.passed for c in decision.checks)
 
 
@@ -245,3 +246,66 @@ async def test_max_stake_check_runs_after_sizing(mock_kill):
     assert stake_check.passed is True
     # The stake check's value should be the actual position_size, not 0 or the signal's recommended_size
     assert stake_check.value == decision.position_size
+
+
+@pytest.mark.asyncio
+@patch("auramaur.risk.manager.check_kill_switch")
+async def test_blocked_category_enforced_at_gateway_for_all_entry_paths(mock_kill):
+    """Regression (2026-06-10): news_speed bought $42 of politics_us live —
+    blocked_categories was only an engine-level SELECTION filter that
+    analyze_market paths never traverse. It is now risk check #17 at the
+    single gateway: directional strategies blocked everywhere, structural
+    two-sided strategies (graduation's exempt list) still free."""
+    from auramaur.risk.checks import CheckResult
+    mock_kill.return_value = CheckResult(name="kill_switch", passed=True, reason="", value=False)
+
+    settings = _make_settings(blocked_categories=["politics_us", "sports"])
+    db = MagicMock()
+    db.fetchone = AsyncMock(return_value=None)
+    manager = RiskManager(settings, db)
+    manager.portfolio = _mock_portfolio()
+    market = _make_market(category="politics_us")
+
+    # news_speed (the live offender): blocked.
+    sig = _make_signal(edge=10.0, claude_prob=0.60, market_prob=0.50)
+    sig.strategy_source = "news_speed"
+    d = await manager.evaluate(sig, market, available_cash=500.0)
+    assert d.approved is False
+    assert any(c.name == "blocked_category" and not c.passed for c in d.checks)
+
+    # llm: blocked too.
+    sig2 = _make_signal(edge=10.0, claude_prob=0.60, market_prob=0.50)
+    d2 = await manager.evaluate(sig2, market, available_cash=500.0)
+    assert any(c.name == "blocked_category" and not c.passed for c in d2.checks)
+
+    # arbitrage (structural, exempt): passes the category check.
+    sig3 = _make_signal(edge=10.0, claude_prob=0.60, market_prob=0.50)
+    sig3.strategy_source = "arbitrage"
+    d3 = await manager.evaluate(sig3, market, available_cash=500.0)
+    assert not any(c.name == "blocked_category" and not c.passed for c in d3.checks)
+
+
+@pytest.mark.asyncio
+@patch("auramaur.risk.manager.check_kill_switch")
+async def test_blocked_category_classifies_uncategorized_markets(mock_kill):
+    """A discovery object with category='' is classified on the spot — empty
+    categories were the original gate leak (156 politics_us markets hid as
+    blank strings)."""
+    from auramaur.risk.checks import CheckResult
+    mock_kill.return_value = CheckResult(name="kill_switch", passed=True, reason="", value=False)
+
+    settings = _make_settings(blocked_categories=["politics_us"])
+    db = MagicMock()
+    db.fetchone = AsyncMock(return_value=None)
+    manager = RiskManager(settings, db)
+    manager.portfolio = _mock_portfolio()
+
+    market = _make_market(category="politics_us")
+    market.category = ""
+    market.question = "Will the Republican Party control the Senate after the 2026 election?"
+    sig = _make_signal(edge=10.0, claude_prob=0.60, market_prob=0.50)
+    sig.strategy_source = "news_speed"
+    d = await manager.evaluate(sig, market, available_cash=500.0)
+    blocked = next(c for c in d.checks if c.name == "blocked_category")
+    assert blocked.passed is False
+    assert blocked.value == "politics_us"  # classified on the spot

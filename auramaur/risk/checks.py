@@ -391,3 +391,30 @@ async def check_mispricing_named(
         ),
         value=mispricing_reason or "none",
     )
+
+
+# ---------------------------------------------------------------------------
+# 17. Blocked category (at the single gateway — no entry path bypasses it)
+# ---------------------------------------------------------------------------
+
+async def check_blocked_category(
+    category: str, blocked: list[str], applies: bool = True,
+) -> CheckResult:
+    """Fail when the market's category is blocked.
+
+    Originally enforced only as a market-SELECTION filter in the engine's
+    run_cycle, which news_speed (via analyze_market) and other entry paths
+    never pass through — caught live 2026-06-10 buying $42 of politics_us
+    Senate control. Entries only by construction (exits never reach
+    evaluate); structural two-sided strategies pass ``applies=False``.
+    """
+    if not applies:
+        return CheckResult(name="blocked_category", passed=True, reason="",
+                           value=category)
+    hit = bool(category) and category in set(blocked or [])
+    return CheckResult(
+        name="blocked_category",
+        passed=not hit,
+        reason=f"category '{category}' is blocked" if hit else "",
+        value=category,
+    )
