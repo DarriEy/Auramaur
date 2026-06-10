@@ -107,6 +107,14 @@ def _tfidf_scores(query: str, texts: list[str]) -> list[float] | None:
 @lru_cache(maxsize=2)
 def _get_embedder(model_name: str):
     """Lazily load and cache a SentenceTransformer; return None if unavailable."""
+    # Quiet the HF Hub chatter that was spamming the trading terminal
+    # ("unauthenticated requests" warnings + "Loading weights" progress
+    # bars). Loading still works without a token; these are cosmetic.
+    import logging as _logging
+    import os as _os
+    _os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    _os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+    _logging.getLogger("huggingface_hub").setLevel(_logging.ERROR)
     try:
         from sentence_transformers import SentenceTransformer
     except Exception:

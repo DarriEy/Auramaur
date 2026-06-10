@@ -20,6 +20,10 @@ class Database:
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA foreign_keys=OFF")
+        # CLI commands share the file with the running bot; without a busy
+        # timeout a writer collision fails instantly ("database is locked" —
+        # bit the ledger backfill 2026-06-10). 5s covers any sane write txn.
+        await self._db.execute("PRAGMA busy_timeout=5000")
         await self._init_schema()
         log.info("database.connected", path=self.db_path)
 
