@@ -26,6 +26,11 @@ class ExecutionConfig(BaseModel):
     live: bool = False
     paper_initial_balance: float = 1000.0
     limit_order_ttl_seconds: int = 120
+    # Max cents the router may pay above the signal's reference price to lift
+    # the ask (marketable entry) instead of resting a maker quote at bid+1
+    # that the TTL reaper usually kills unfilled. The cross also has to leave
+    # net edge above risk.min_edge_pct, so this cap only binds on wide edges.
+    entry_max_cross_cents: int = 4
     spread_capture_min_bps: int = 50
     stop_loss_pct: float = 30.0
     profit_target_pct: float = 50.0

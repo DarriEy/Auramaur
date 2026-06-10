@@ -152,6 +152,21 @@ def show_order_dropped(market_id: str, reason: str) -> None:
     )
 
 
+def show_order_unfilled(side: str, size: float, price: float, age_seconds: float,
+                        exchange: str = "", market_id: str = "") -> None:
+    """A live order TTL-expired without filling — the entry the strategy
+    reported as ORDER LIVE never became a position. Without this line the
+    cancel is invisible: cash quietly snaps back and the terminal says
+    nothing."""
+    side_color = "green" if side == "BUY" else "red"
+    ex = f"[magenta]{exchange}[/] " if exchange else ""
+    console.print(
+        f"         [yellow]ORDER UNFILLED[/] [bold red]LIVE[/] {ex}[{side_color}]{side}[/] "
+        f"${size * price:.2f} ({size:.1f} tokens @ ${price:.3f}) "
+        f"cancelled after {age_seconds:.0f}s [dim]{market_id[:16]}[/]"
+    )
+
+
 def show_cycle_summary(signals: int, trades: int, elapsed: float, exchange: str = "") -> None:
     # Empty cycles are the steady state — the periodic status line is the
     # heartbeat. Only narrate cycles that actually did something.
