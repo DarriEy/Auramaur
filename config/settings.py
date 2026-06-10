@@ -217,6 +217,32 @@ class TechnicalConfig(BaseModel):
     min_history_points: int = 5
 
 
+class BiasHarvestConfig(BaseModel):
+    """Favorite-longshot bias harvest (see strategy/bias_harvest.py).
+
+    PAPER-FORCED by default: flip ``paper`` to false only after the paper
+    ledger (``auramaur pnl --paper``) proves the edge live-shaped. The
+    backtested edge dies above ~2c slippage, so entries are passive limits
+    at the observed price; ``edge_uplift`` must stay below the divergence
+    filter's adverse-band floor (0.05) or entries get blocked at MEDIUM
+    confidence — by design.
+    """
+
+    enabled: bool = False
+    paper: bool = True
+    band_lo: float = 0.80
+    band_hi: float = 0.97
+    edge_uplift: float = 0.04
+    stake_usd: float = 10.0
+    max_open: int = 40
+    max_entries_per_cycle: int = 5
+    scan_limit: int = 300
+    min_liquidity: float = 1000.0
+    min_hours_to_resolution: float = 6.0
+    max_days_to_resolution: float = 45.0
+    interval_seconds: int = 600
+
+
 class BrokerConfig(BaseModel):
     sync_interval_seconds: int = 60
     use_limit_orders: bool = True
@@ -569,6 +595,7 @@ class Settings(BaseSettings):
     momentum_coupling: MomentumCouplingConfig = Field(default_factory=lambda: MomentumCouplingConfig(**_DEFAULTS.get("momentum_coupling", {})))
     market_maker: MarketMakerConfig = Field(default_factory=lambda: MarketMakerConfig(**_DEFAULTS.get("market_maker", {})))
     technical: TechnicalConfig = Field(default_factory=lambda: TechnicalConfig(**_DEFAULTS.get("technical", {})))
+    bias_harvest: BiasHarvestConfig = Field(default_factory=lambda: BiasHarvestConfig(**_DEFAULTS.get("bias_harvest", {})))
     arbitrage: ArbitrageConfig = Field(default_factory=lambda: ArbitrageConfig(**_DEFAULTS.get("arbitrage", {})))
     analysis: AnalysisConfig = Field(default_factory=lambda: AnalysisConfig(**_DEFAULTS.get("analysis", {})))
     hybrid: HybridConfig = Field(default_factory=lambda: HybridConfig(**_DEFAULTS.get("hybrid", {})))

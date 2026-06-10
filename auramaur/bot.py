@@ -2525,6 +2525,29 @@ class AuramaurBot:
             interval = self.settings.hybrid.news_cycle_seconds if self._hybrid else 60
             await asyncio.sleep(interval)
 
+    async def _task_bias_harvest(self) -> None:
+        """Periodic favorite-longshot bias harvest scan (paper-forced by config)."""
+        from auramaur.strategy.bias_harvest import BiasHarvestPillar
+
+        pillar = BiasHarvestPillar(
+            db=self._components["db"],
+            settings=self.settings,
+            discovery=self._components["discovery"],
+            exchange=self._components["exchange"],
+            risk_manager=self._components["risk_manager"],
+            pnl_tracker=self._components["pnl_tracker"],
+            calibration=self._components["calibration"],
+        )
+        interval = max(60, self.settings.bias_harvest.interval_seconds)
+        while self._running:
+            if await self._check_kill_switch():
+                return
+            try:
+                await pillar.run_once()
+            except Exception as e:
+                log.error("bias_harvest.cycle_error", error=str(e))
+            await asyncio.sleep(interval)
+
     async def _task_order_monitor(self) -> None:
         """Monitor pending limit orders for fills and expiry."""
         from datetime import datetime, timezone
@@ -2867,6 +2890,10 @@ class AuramaurBot:
         # Arb scanner always runs (handles single-exchange gracefully)
         tasks.append(asyncio.create_task(self._task_arb_scanner(), name="arb_scanner"))
         tasks.append(asyncio.create_task(self._task_depth_research(), name="depth_research"))
+
+        # Favorite-longshot bias harvest (paper-forced until proven)
+        if self.settings.bias_harvest.enabled:
+            tasks.append(asyncio.create_task(self._task_bias_harvest(), name="bias_harvest"))
 
         # Kraken treasury/capital pillar (+ gated directional spot)
         if self.settings.kraken.enabled:
