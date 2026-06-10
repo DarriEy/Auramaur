@@ -188,6 +188,76 @@ class TradingEngine:
             return market_id.rsplit("-", 1)[0]
         return market_id
 
+    async def _apply_rejection_cooldown(self, candidates: list) -> tuple[list, int]:
+        """Drop candidates with a fresh risk rejection. Returns (kept, benched).
+
+        Three things lift the bench, all of them "new information" signals:
+        the cooldown expiring, the yes-price moving by at least the reprice
+        threshold since the rejection, or an active news flag on the market.
+        """
+        try:
+            cooldown_min = int(self.settings.nlp.rejection_cooldown_minutes)
+            reprice = float(self.settings.nlp.rejection_reprice_threshold)
+        except Exception:
+            return candidates, 0
+        if cooldown_min <= 0 or not candidates:
+            return candidates, 0
+        try:
+            rows = await self.db.fetchall(
+                """SELECT market_id, yes_price FROM signal_rejections
+                   WHERE rejected_at > datetime('now', ?)""",
+                (f"-{cooldown_min} minutes",),
+            )
+        except Exception:
+            return candidates, 0  # Table may not exist yet
+        benched = {r["market_id"]: r["yes_price"] for r in rows}
+        if not benched:
+            return candidates, 0
+        flagged = set(self._news_flagged.keys())
+        kept = [
+            m for m in candidates
+            if m.id not in benched
+            or m.id in flagged
+            or abs(m.outcome_yes_price - benched[m.id]) >= reprice
+        ]
+        benched_count = len(candidates) - len(kept)
+        if benched_count > 0:
+            log.info("engine.rejection_benched", count=benched_count, exchange=self.exchange_name)
+        return kept, benched_count
+
+    async def _record_rejection_state(self, market, approved: bool, reason: str) -> None:
+        """Track the risk verdict for the rejection cooldown.
+
+        A rejection benches the market (upsert refreshes the clock and bumps
+        the streak); an approval clears it — the market earned its way back.
+        """
+        try:
+            if approved:
+                await self.db.execute(
+                    "DELETE FROM signal_rejections WHERE market_id = ?",
+                    (market.id,),
+                )
+            else:
+                await self.db.execute(
+                    """INSERT INTO signal_rejections
+                       (market_id, exchange, rejected_at, yes_price, reason, streak)
+                       VALUES (?, ?, datetime('now'), ?, ?, 1)
+                       ON CONFLICT(market_id) DO UPDATE SET
+                           rejected_at = excluded.rejected_at,
+                           yes_price = excluded.yes_price,
+                           reason = excluded.reason,
+                           streak = streak + 1""",
+                    (
+                        market.id,
+                        market.exchange or self.exchange_name or "",
+                        market.outcome_yes_price,
+                        (reason or "")[:200],
+                    ),
+                )
+            await self.db.commit()
+        except Exception as e:
+            log.debug("engine.rejection_record_error", market_id=market.id, error=str(e))
+
     async def _get_available_cash(self) -> float:
         """Get available cash from syncer, exchange, or paper balance."""
         syncer = getattr(self, '_components_syncer', None)
@@ -598,6 +668,7 @@ class TradingEngine:
             strategy=signal.strategy_source,
             graduation=getattr(decision, "graduation_status", ""),
             mispricing=getattr(signal, "mispricing_reason", ""))
+        await self._record_rejection_state(market, decision.approved, decision.reason)
 
         if not decision.approved or decision.position_size <= 0:
             return {"market": market, "signal": signal, "decision": decision, "order": None}
@@ -949,6 +1020,15 @@ class TradingEngine:
                 log.info("engine.held_filtered", count=held_filtered)
                 filtered_count += held_filtered
 
+        # Bench markets the risk gateway recently rejected — their verdict
+        # can't flip until something moves, so re-analyzing them every cycle
+        # (the recently-analyzed fallback above resurrects them once the
+        # 15-minute window lapses) is pure evidence+LLM burn. Applied after
+        # that fallback so a fully-benched venue stays quiet rather than
+        # re-running its dud markets.
+        fresh_candidates, benched_count = await self._apply_rejection_cooldown(fresh_candidates)
+        filtered_count += benched_count
+
         show_scan_results(len(markets), len(fresh_candidates), filtered_count, exchange=self.exchange_name)
 
         # Smart ranking — prioritize markets most likely to be mispriced
@@ -1122,6 +1202,7 @@ class TradingEngine:
                 graduation=getattr(decision, "graduation_status", ""),
                 mispricing=getattr(tc.signal, "mispricing_reason", ""),
             )
+            await self._record_rejection_state(tc.market, decision.approved, decision.reason)
 
             result = {"market": tc.market, "signal": tc.signal, "decision": decision, "order": None}
             results.append(result)
@@ -1375,6 +1456,7 @@ class TradingEngine:
             strategy=signal.strategy_source,
             graduation=getattr(decision, "graduation_status", ""),
             mispricing=getattr(signal, "mispricing_reason", ""))
+            await self._record_rejection_state(market, decision.approved, decision.reason)
 
             result = {"market": market, "signal": signal, "decision": decision, "order": None}
             results.append(result)
