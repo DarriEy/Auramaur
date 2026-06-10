@@ -47,6 +47,9 @@ def _book_modes(settings) -> list[tuple[str, str, str]]:
                  "LIVE" if settings.market_maker.enabled and settings.is_live
                  else ("paper" if settings.market_maker.enabled else "off"),
                  "graduation-exempt"))
+    ol = settings.oddlot_tender
+    rows.append(("oddlot_tender", *paper_mode(
+        ol, "EDGAR scan, 99-sh entries, manual tender")))
     rows.append(("arbitrage",
                  "LIVE" if settings.arbitrage.enabled and settings.is_live
                  else ("paper" if settings.arbitrage.enabled else "off"),

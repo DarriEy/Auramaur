@@ -62,6 +62,12 @@ def _looks_like_kraken_pair(market_id: str) -> bool:
     )
 
 
+def _looks_like_us_ticker(market_id: str) -> bool:
+    """Bare 1-5 letter uppercase symbol (checked AFTER the kraken-pair test,
+    so 6+ char pairs like XBTUSDC never reach this)."""
+    return market_id.isupper() and market_id.isalpha() and 1 <= len(market_id) <= 5
+
+
 async def _market_context(db: Database, market_id: str) -> tuple[str, str, str]:
     """Resolve ``(venue, category, strategy_source)`` for a realization."""
     row = await db.fetchone(
@@ -74,6 +80,11 @@ async def _market_context(db: Database, market_id: str) -> tuple[str, str, str]:
         # Kraken directional book: market_id is the spot pair, no markets row.
         # 'kraken_spot' matches the calibration category used for its signals.
         return "kraken", "kraken_spot", "kraken_directional"
+    elif _looks_like_us_ticker(market_id):
+        # IBKR equity fill without a markets row (the pillars insert one, so
+        # this is a safety net for direct/manual fills). Strategy still
+        # resolves via the entry-strategy SQL below.
+        venue, category = "ibkr", "ibkr_equity"
     else:
         venue, category = "", ""
 

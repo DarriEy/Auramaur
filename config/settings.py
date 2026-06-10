@@ -275,6 +275,25 @@ class EntailmentArbConfig(BaseModel):
     interval_seconds: int = 900
 
 
+class OddLotTenderConfig(BaseModel):
+    """Odd-lot tender harvester (strategy/oddlot_tender.py).
+
+    Scans EDGAR for issuer tender offers with odd-lot priority; LLM reads
+    the fine print adversarially; alerts the operator and (when IBKR is
+    enabled) buys 99 shares PAPER-FORCED. Tendering itself is manual.
+    Detection runs even with ibkr.enabled=false.
+    """
+
+    enabled: bool = False
+    paper: bool = True
+    lookback_days: int = 7
+    max_filings_per_cycle: int = 5
+    llm_min_confidence: float = 0.8
+    min_premium_pct: float = 2.0
+    max_position_usd: float = 2500.0
+    interval_seconds: int = 21600  # 6h — filings are daily-cadence events
+
+
 class ResolutionLensConfig(BaseModel):
     """Resolution-language lens (strategy/resolution_lens.py).
 
@@ -339,7 +358,7 @@ class IBKRConfig(BaseModel):
     enabled: bool = False
     # `enabled` is the master switch (connect to IBKR at all). The two books
     # beneath it are gated independently: options_enabled (the option-chain
-    # scanner) and directional_equity_enabled (the stocks book). Keep options
+    # scanner) and the odd-lot tender pillar (the stocks book). Keep options
     # off to run equities without the OPRA-less scanner spamming Error 200/10091.
     options_enabled: bool = False
     host: str = "127.0.0.1"
@@ -368,12 +387,11 @@ class IBKRConfig(BaseModel):
     # --- Directional equity speculation (gated; no validated edge) ---
     # Mirrors the Kraken directional pillar. Uses its OWN socket connection
     # (equity_client_id) so it doesn't clash with the options client.
-    directional_equity_enabled: bool = False
-    directional_equity_symbols: list[str] = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA"]
-    directional_equity_budget_usd: float = 100.0   # total open speculative exposure
-    equity_max_order_usd: float = 50.0             # hard per-order ceiling
-    directional_equity_momentum_pct: float = 2.0
-    directional_equity_lookback: int = 12          # bars of recent history
+    # Directional equity momentum book REMOVED 2026-06-09 (pre-failed: same
+    # strategy shape went 0W/20L on Kraken, backtested negative in every
+    # variant). The equity client + per-order cap remain for the odd-lot
+    # tender pillar.
+    equity_max_order_usd: float = 2500.0           # hard per-order ceiling (99 sh x ~$25)
     equity_client_id: int = 2                      # distinct from client_id
 
     # --- Auto FX top-up (CAD->USD funding for the USD-priced stock book) ---
@@ -675,6 +693,7 @@ class Settings(BaseSettings):
     graduation: GraduationConfig = Field(default_factory=lambda: GraduationConfig(**_DEFAULTS.get("graduation", {})))
     entailment_arb: EntailmentArbConfig = Field(default_factory=lambda: EntailmentArbConfig(**_DEFAULTS.get("entailment_arb", {})))
     resolution_lens: ResolutionLensConfig = Field(default_factory=lambda: ResolutionLensConfig(**_DEFAULTS.get("resolution_lens", {})))
+    oddlot_tender: OddLotTenderConfig = Field(default_factory=lambda: OddLotTenderConfig(**_DEFAULTS.get("oddlot_tender", {})))
     arbitrage: ArbitrageConfig = Field(default_factory=lambda: ArbitrageConfig(**_DEFAULTS.get("arbitrage", {})))
     analysis: AnalysisConfig = Field(default_factory=lambda: AnalysisConfig(**_DEFAULTS.get("analysis", {})))
     hybrid: HybridConfig = Field(default_factory=lambda: HybridConfig(**_DEFAULTS.get("hybrid", {})))

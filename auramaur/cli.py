@@ -700,6 +700,45 @@ def entailment():
     asyncio.run(_run())
 
 
+@main.command("oddlot")
+def oddlot():
+    """Odd-lot tender opportunities detected from EDGAR (the equity pillar)."""
+
+    async def _run():
+        db = Database()
+        await db.connect()
+        try:
+            rows = await db.fetchall(
+                "SELECT * FROM oddlot_filings ORDER BY filed_at DESC LIMIT 30")
+            if not rows:
+                console.print("[dim]No filings audited yet — the scanner runs "
+                              "every 6h inside the bot.[/]")
+                return
+            t = Table(title="Odd-lot tender filings (EDGAR)")
+            t.add_column("filed")
+            t.add_column("ticker", style="cyan")
+            t.add_column("company")
+            t.add_column("priority")
+            t.add_column("price", justify="right")
+            t.add_column("expires")
+            t.add_column("status")
+            for r in rows:
+                pr = "[green]YES[/]" if r["odd_lot_priority"] else "[dim]no[/]"
+                price = (f"${r['tender_price']:.2f}"
+                         + (f"-{r['tender_price_high']:.2f}"
+                            if r["tender_price_high"] > r["tender_price"] else ""))
+                t.add_row(r["filed_at"], r["ticker"] or "?",
+                          (r["company"] or "")[:36], pr, price,
+                          r["expiration"] or "—", r["status"])
+            console.print(t)
+            console.print("[dim]Tendering is MANUAL — submit in TWS before "
+                          "expiration. Entries are paper-forced.[/]")
+        finally:
+            await db.close()
+
+    asyncio.run(_run())
+
+
 @main.command("repair-categories")
 @click.option("--write", is_flag=True,
               help="Persist classified categories (default is a dry-run).")

@@ -74,10 +74,10 @@ def gather(settings, db_path: str = "auramaur.db") -> list[dict]:
         },
         {
             "feature": "IBKR equity directional",
-            "flag": f"ibkr.directional_equity_enabled={settings.ibkr.directional_equity_enabled}",
+            "flag": "REMOVED 2026-06-09",
             "criterion": "validated edge + funded account + market data",
-            "status": "no edge + account unfunded/options pending",
-            "verdict": "NO-GO",
+            "status": "pre-failed (0W/20L on Kraken, backtests negative) — deleted",
+            "verdict": "REMOVED",
         },
         {
             "feature": "Cross-venue transfers (armed)",
