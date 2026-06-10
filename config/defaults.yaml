@@ -13,6 +13,9 @@ execution:
   live: false
   paper_initial_balance: 111.0
   limit_order_ttl_seconds: 120
+  # Max cents above the reference price the router may pay to lift the ask;
+  # crossing additionally requires post-cross edge >= risk.min_edge_pct.
+  entry_max_cross_cents: 4
   spread_capture_min_bps: 50
   stop_loss_pct: 30.0
   profit_target_pct: 50.0

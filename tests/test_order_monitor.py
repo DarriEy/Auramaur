@@ -262,3 +262,160 @@ async def test_order_monitor_polls_all_live_exchanges():
     assert kalshi._live_pending == {}
     poly.get_order_status.assert_awaited_once_with("poly-1")
     kalshi.get_order_status.assert_awaited_once_with("kalshi-1")
+
+
+@pytest.mark.asyncio
+async def test_ttl_cancel_writes_cancelled_status_to_db():
+    """A TTL-cancelled live order must not leave its trades row 'pending'.
+
+    The on-chain cancel releases the collateral, so without the status write
+    the DB claims an open order that no longer exists (#94: 26 orphaned rows,
+    $194 of phantom pending buys).
+    """
+    settings = MagicMock()
+    settings.execution.limit_order_ttl_seconds = 60
+
+    bot = AuramaurBot(settings=settings)
+    bot._running = True
+
+    stale_order = Order(
+        market_id="m1",
+        exchange="polymarket",
+        token_id="tok_yes",
+        token=TokenType.YES,
+        side=OrderSide.BUY,
+        size=10,
+        price=0.50,
+        dry_run=False,
+    )
+    stale_order.created_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+
+    exchange = SimpleNamespace(
+        _live_pending={"live-1": stale_order},
+        get_order_status=AsyncMock(return_value=OrderResult(
+            order_id="live-1", market_id="m1", status="pending",
+            filled_size=0, filled_price=0.50, is_paper=False,
+        )),
+        cancel_order=AsyncMock(return_value=True),
+    )
+    paper = SimpleNamespace(
+        pending_orders=[],
+        check_fills=AsyncMock(return_value=[]),
+        cancel_expired=AsyncMock(return_value=0),
+    )
+    db = AsyncMock()
+    bot._components = {
+        "paper": paper,
+        "exchange": exchange,
+        "discovery": AsyncMock(),
+        "pnl_tracker": AsyncMock(),
+        "db": db,
+    }
+
+    async def stop_after_loop(_seconds):
+        bot._running = False
+
+    with patch("asyncio.sleep", new=AsyncMock(side_effect=stop_after_loop)):
+        await bot._task_order_monitor()
+
+    assert "live-1" not in exchange._live_pending
+    update_calls = [
+        c for c in db.execute.await_args_list
+        if "UPDATE trades SET status = 'cancelled'" in c.args[0]
+    ]
+    assert len(update_calls) == 1
+    assert update_calls[0].args[1] == ("live-1",)
+    db.commit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ttl_cancel_failure_keeps_order_tracked():
+    """A failed cancel (e.g. racing a fill) keeps the order in _live_pending
+    so the next status poll resolves it, instead of dropping it untracked."""
+    settings = MagicMock()
+    settings.execution.limit_order_ttl_seconds = 60
+
+    bot = AuramaurBot(settings=settings)
+    bot._running = True
+
+    stale_order = Order(
+        market_id="m1",
+        exchange="polymarket",
+        token_id="tok_yes",
+        token=TokenType.YES,
+        side=OrderSide.BUY,
+        size=10,
+        price=0.50,
+        dry_run=False,
+    )
+    stale_order.created_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+
+    exchange = SimpleNamespace(
+        _live_pending={"live-1": stale_order},
+        get_order_status=AsyncMock(return_value=OrderResult(
+            order_id="live-1", market_id="m1", status="pending",
+            filled_size=0, filled_price=0.50, is_paper=False,
+        )),
+        cancel_order=AsyncMock(return_value=False),
+    )
+    paper = SimpleNamespace(
+        pending_orders=[],
+        check_fills=AsyncMock(return_value=[]),
+        cancel_expired=AsyncMock(return_value=0),
+    )
+    db = AsyncMock()
+    bot._components = {
+        "paper": paper,
+        "exchange": exchange,
+        "discovery": AsyncMock(),
+        "pnl_tracker": AsyncMock(),
+        "db": db,
+    }
+
+    async def stop_after_loop(_seconds):
+        bot._running = False
+
+    with patch("asyncio.sleep", new=AsyncMock(side_effect=stop_after_loop)):
+        await bot._task_order_monitor()
+
+    assert "live-1" in exchange._live_pending
+    cancelled_writes = [
+        c for c in db.execute.await_args_list
+        if "UPDATE trades SET status = 'cancelled'" in str(c.args[0])
+    ]
+    assert cancelled_writes == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_orphaned_pending_trades():
+    """DB rows stuck 'pending' with no in-memory tracking get resolved via the
+    exchange's authoritative order status."""
+    settings = MagicMock()
+    bot = AuramaurBot(settings=settings)
+
+    exchange = SimpleNamespace(
+        _live_pending={"still-tracked": object()},
+        get_order_status=AsyncMock(return_value=OrderResult(
+            order_id="orphan-1", market_id="m1", status="cancelled",
+            filled_size=0, filled_price=0, is_paper=False,
+        )),
+    )
+    db = AsyncMock()
+    db.fetchall = AsyncMock(return_value=[
+        {"order_id": "still-tracked", "exchange": "polymarket"},
+        {"order_id": "PAPER-abc123", "exchange": "polymarket"},
+        {"order_id": "orphan-1", "exchange": "polymarket"},
+    ])
+    bot._components = {"db": db}
+
+    await bot._reconcile_orphaned_pending_trades([("polymarket", exchange)])
+
+    # Only the genuine orphan is queried and rewritten
+    exchange.get_order_status.assert_awaited_once_with("orphan-1")
+    update_calls = [
+        c for c in db.execute.await_args_list
+        if c.args[0].startswith("UPDATE trades SET status = ?")
+    ]
+    assert len(update_calls) == 1
+    assert update_calls[0].args[1] == ("cancelled", "orphan-1")
+    db.commit.assert_awaited_once()

@@ -2767,8 +2767,42 @@ class AuramaurBot:
                                 age = (datetime.now(timezone.utc) - ts).total_seconds()
                                 if age > ttl:
                                     cancelled = await live_exchange.cancel_order(order_id)
+                                    if not cancelled:
+                                        # Cancel can race a fill — keep the order
+                                        # tracked so the next status poll resolves
+                                        # it instead of dropping it on the floor.
+                                        log.warning(
+                                            "order_monitor.ttl_cancel_failed",
+                                            exchange=exchange_name,
+                                            order_id=order_id,
+                                            age_seconds=round(age),
+                                        )
+                                        continue
                                     pending.pop(order_id, None)
                                     self._clear_exit_suppression(exchange_name, order, "ttl_cancelled")
+                                    # Without this status write the trades row
+                                    # stays 'pending' forever even though the
+                                    # collateral was released (#94).
+                                    db = self._components.get("db")
+                                    if db is not None:
+                                        try:
+                                            await db.execute(
+                                                "UPDATE trades SET status = 'cancelled' WHERE order_id = ?",
+                                                (order_id,),
+                                            )
+                                            await db.commit()
+                                        except Exception as e:
+                                            log.debug(
+                                                "order_monitor.ttl_db_error",
+                                                order_id=order_id,
+                                                error=str(e),
+                                            )
+                                    from auramaur.monitoring.display import show_order_unfilled
+                                    show_order_unfilled(
+                                        order.side.value, order.size, order.price,
+                                        age, exchange=exchange_name,
+                                        market_id=order.market_id,
+                                    )
                                     log.info(
                                         "order_monitor.live_ttl_cancel",
                                         exchange=exchange_name,
@@ -2785,7 +2819,68 @@ class AuramaurBot:
                             )
             except Exception as e:
                 log.debug("order_monitor.error", error=str(e))
+
+            try:
+                await self._reconcile_orphaned_pending_trades(live_clients)
+            except Exception as e:
+                log.debug("order_monitor.orphan_sweep_error", error=str(e))
+
             await asyncio.sleep(30)
+
+    async def _reconcile_orphaned_pending_trades(self, live_clients) -> None:
+        """Resolve live trades rows stuck in status='pending'.
+
+        A row goes orphaned when its order left ``_live_pending`` without a
+        terminal DB write — a TTL cancel before that path wrote status back
+        (#94), or a restart that dropped the in-memory tracking. The order is
+        long gone on-chain (collateral released) but the DB still says
+        pending, which poisons anything that reads order history. Ask the
+        exchange for the true terminal status and write it back, a few rows
+        per pass to keep API load flat.
+
+        ``get_order_status`` maps unknown/aged-out orders to 'cancelled', so
+        rows whose orders the CLOB no longer indexes resolve too.
+        """
+        db = self._components.get("db")
+        if db is None or not live_clients:
+            return
+
+        tracked: set[str] = set()
+        clients_by_name: dict[str, object] = {}
+        for name, client in live_clients:
+            tracked.update(getattr(client, "_live_pending", {}).keys())
+            clients_by_name[name] = client
+
+        rows = await db.fetchall(
+            """SELECT order_id, exchange FROM trades
+               WHERE is_paper = 0 AND status = 'pending'
+                 AND order_id IS NOT NULL AND order_id != ''
+                 AND timestamp < datetime('now', '-10 minutes')
+               ORDER BY timestamp ASC LIMIT 25"""
+        )
+        fixed = 0
+        for row in rows:
+            order_id = row["order_id"]
+            if order_id in tracked or order_id.startswith("PAPER"):
+                continue
+            client = clients_by_name.get(row["exchange"] or "polymarket")
+            if client is None or not hasattr(client, "get_order_status"):
+                continue
+            try:
+                result = await client.get_order_status(order_id)
+            except Exception:
+                continue
+            if result.status in ("filled", "cancelled", "expired", "rejected"):
+                await db.execute(
+                    "UPDATE trades SET status = ? WHERE order_id = ?",
+                    (result.status, order_id),
+                )
+                fixed += 1
+            if fixed >= 5:
+                break
+        if fixed:
+            await db.commit()
+            log.info("order_monitor.orphans_reconciled", count=fixed)
 
     async def _task_resolution_checker(self) -> None:
         """Poll for resolved markets and record calibration outcomes.

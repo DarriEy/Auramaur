@@ -72,13 +72,31 @@ class SmartOrderRouter:
         edge_pct = abs(signal.edge)
         spread = book.spread
 
+        # Crossing budget: how far above the signal's reference price a BUY may
+        # lift the ask and still clear the minimum-edge floor. The CLOB has no
+        # true market orders — every order is a GTC limit — so a "market" order
+        # priced at the (stale) reference price just rests until the TTL
+        # reaper kills it. Marketable means priced at the actual best ask.
+        try:
+            min_edge_pct = float(self._settings.risk.min_edge_pct)
+        except Exception:
+            min_edge_pct = 2.5
+        try:
+            max_cross = float(self._settings.execution.entry_max_cross_cents) / 100.0
+        except Exception:
+            max_cross = 0.04
+
         # Determine order type via decision matrix
         # On 0% fee exchanges (Polymarket reward tier), limit orders are almost
         # always better — you get price improvement for free.
         #   - spread < $0.01: limit order (tight market, capture the spread)
         #   - edge > 40%:     market order (urgency overrides price)
-        #   - otherwise:      limit order with price improvement (+1 tick)
+        #   - otherwise:      limit order with price improvement (+1 tick),
+        #                     lifting the ask instead when it costs less than
+        #                     entry_max_cross_cents and the post-cross edge
+        #                     still clears the minimum-edge floor
         has_book = spread is not None and (book.best_bid is not None or book.best_ask is not None)
+        crossed_to_ask = False
 
         if not has_book:
             # No book data — fall back to market order
@@ -91,13 +109,18 @@ class SmartOrderRouter:
                 reason="no_book",
             )
         elif edge_pct > 40.0:
-            # Very high urgency — cross immediately
+            # Very high urgency — cross immediately. Price at the real ask
+            # (capped by the edge budget) so the order is actually marketable.
             order_type = OrderType.MARKET
             limit_price = base_order.price
+            if base_order.side == OrderSide.BUY and book.best_ask is not None:
+                budget_price = base_order.price + max(0.0, edge_pct - min_edge_pct) / 100.0
+                limit_price = max(0.01, min(0.99, round(min(book.best_ask, budget_price), 2)))
             log.info(
                 "router.market_order",
                 market_id=market.id,
                 edge_pct=round(edge_pct, 2),
+                limit_price=limit_price,
                 reason="high_urgency",
             )
         else:
@@ -106,9 +129,34 @@ class SmartOrderRouter:
                 book, base_order.side, base_order.token
             )
 
+            # Lift the ask when it's cheap enough: a maker quote at bid+1 tick
+            # only fills if flow comes to us within the order TTL, which on
+            # quiet books makes the fill a coin flip. Paying ≤max_cross more
+            # for certainty is the better trade whenever the remaining edge
+            # still clears the floor.
+            if base_order.side == OrderSide.BUY and book.best_ask is not None:
+                cross_cost_pts = (book.best_ask - base_order.price) * 100.0
+                if (
+                    book.best_ask - candidate_price <= max_cross + 1e-9
+                    and cross_cost_pts <= edge_pct - min_edge_pct
+                ):
+                    crossed_to_ask = True
+                    order_type = OrderType.LIMIT
+                    limit_price = max(0.01, min(0.99, round(book.best_ask, 2)))
+                    log.info(
+                        "router.crossed_to_ask",
+                        market_id=market.id,
+                        edge_pct=round(edge_pct, 2),
+                        candidate=candidate_price,
+                        ask=book.best_ask,
+                        cross_cost_pts=round(cross_cost_pts, 2),
+                    )
+
             # Sanity check: limit price shouldn't deviate >30% from fair price
             fair_price = base_order.price
-            if fair_price > 0 and abs(candidate_price - fair_price) / fair_price > 0.30:
+            if crossed_to_ask:
+                pass
+            elif fair_price > 0 and abs(candidate_price - fair_price) / fair_price > 0.30:
                 # Book too thin — use market order at fair price
                 order_type = OrderType.MARKET
                 limit_price = fair_price
@@ -139,7 +187,9 @@ class SmartOrderRouter:
         # accidentally take, which keeps us on the maker-reward side of the
         # fee schedule and flushes out any router/pricing mistakes loudly
         # (rejection) instead of quietly (taker fill at a worse price).
-        want_post_only = order_type == OrderType.LIMIT
+        # A deliberate cross-to-ask is the opposite intent: it must be allowed
+        # to take, so it never sets post_only.
+        want_post_only = order_type == OrderType.LIMIT and not crossed_to_ask
 
         # Build the final order with refined price / type
         routed_order = base_order.model_copy(
