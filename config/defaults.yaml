@@ -62,6 +62,24 @@ risk:
 kelly:
   fraction: 0.30
 
+graduation:
+  # Graduation ladder: every (strategy x category) cell EARNS live capital
+  # from its measured pnl_ledger record (>= min_events in window_days, P&L
+  # positive), and is demoted back to paper on decay. Entries only — exits
+  # never pass through the risk manager, so demotion can't strand positions.
+  # ROLLOUT: "observe" logs what enforce would do without changing behavior.
+  # Read `auramaur graduation`, then flip to "enforce" deliberately. NOTE:
+  # on current data enforce would paper-force most of the llm book (cells
+  # are unproven at n<20 or negative) — that is the redesign's intent, but
+  # flip it consciously.
+  mode: "observe"
+  min_events: 20
+  window_days: 90
+  probation_multiplier: 0.5
+  cache_seconds: 300
+  # Structural/two-sided strategies bypass the ladder.
+  exempt_strategies: ["arbitrage", "market_maker", "order_monitor"]
+
 intervals:
   market_scan_seconds: 300
   news_poll_seconds: 120

@@ -91,12 +91,13 @@ def _exchange(filled=True):
     return ex
 
 
-def _risk(approved=True, size=8.0):
+def _risk(approved=True, size=8.0, force_paper=False):
     rm = MagicMock()
     decision = MagicMock()
     decision.approved = approved
     decision.position_size = size if approved else 0.0
     decision.reason = "" if approved else "blocked"
+    decision.force_paper = force_paper
     rm.evaluate = AsyncMock(return_value=decision)
     return rm
 

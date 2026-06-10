@@ -197,8 +197,10 @@ class BiasHarvestPillar:
         # Passive limit at the observed price (prepare_order uses the seen
         # token price, tick-rounded — no improvement, no crossing). Paper-
         # forced entries pass is_live=False so the order carries dry_run=True
-        # regardless of the global live gates.
-        is_live_order = self._settings.is_live and not cfg.paper
+        # regardless of the global live gates. The graduation ladder
+        # (decision.force_paper) can also paper-force, never un-paper.
+        is_live_order = (self._settings.is_live and not cfg.paper
+                         and not getattr(decision, "force_paper", False))
         order = self._exchange.prepare_order(signal, market, size, is_live_order)
         if order is None:
             log.warning("bias_harvest.order_build_failed", market_id=market.id)

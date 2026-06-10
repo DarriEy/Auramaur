@@ -243,6 +243,24 @@ class BiasHarvestConfig(BaseModel):
     interval_seconds: int = 600
 
 
+class GraduationConfig(BaseModel):
+    """Graduation ladder (risk/graduation.py) — capital earned per
+    (strategy × category) cell from the pnl_ledger record.
+
+    mode: "observe" logs what enforce WOULD do (rollout default);
+    "enforce" paper-forces unproven/demoted cells and applies the
+    probation multiplier; "off" disables. Entries only — exits never
+    pass through the risk manager.
+    """
+
+    mode: str = "observe"
+    min_events: int = 20
+    window_days: int = 90
+    probation_multiplier: float = 0.5
+    cache_seconds: int = 300
+    exempt_strategies: list[str] = ["arbitrage", "market_maker", "order_monitor"]
+
+
 class BrokerConfig(BaseModel):
     sync_interval_seconds: int = 60
     use_limit_orders: bool = True
@@ -596,6 +614,7 @@ class Settings(BaseSettings):
     market_maker: MarketMakerConfig = Field(default_factory=lambda: MarketMakerConfig(**_DEFAULTS.get("market_maker", {})))
     technical: TechnicalConfig = Field(default_factory=lambda: TechnicalConfig(**_DEFAULTS.get("technical", {})))
     bias_harvest: BiasHarvestConfig = Field(default_factory=lambda: BiasHarvestConfig(**_DEFAULTS.get("bias_harvest", {})))
+    graduation: GraduationConfig = Field(default_factory=lambda: GraduationConfig(**_DEFAULTS.get("graduation", {})))
     arbitrage: ArbitrageConfig = Field(default_factory=lambda: ArbitrageConfig(**_DEFAULTS.get("arbitrage", {})))
     analysis: AnalysisConfig = Field(default_factory=lambda: AnalysisConfig(**_DEFAULTS.get("analysis", {})))
     hybrid: HybridConfig = Field(default_factory=lambda: HybridConfig(**_DEFAULTS.get("hybrid", {})))

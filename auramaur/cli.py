@@ -588,6 +588,61 @@ def pnl(paper: bool, backfill: bool):
     asyncio.run(_run())
 
 
+@main.command("graduation")
+def graduation():
+    """Graduation ladder — which (strategy x category) cells have earned live
+    capital, per the pnl_ledger record. In observe mode this shows what
+    enforce WOULD do."""
+
+    async def _run():
+        from auramaur.risk.graduation import GraduationLadder
+
+        settings = Settings()
+        db = Database()
+        await db.connect()
+        try:
+            ladder = GraduationLadder(db, settings)
+            cells = await ladder.report()
+            cfg = settings.graduation
+            console.print(
+                f"[bold]Graduation ladder[/] — mode [cyan]{cfg.mode}[/], "
+                f"min {cfg.min_events} events / {cfg.window_days}d window, "
+                f"probation x{cfg.probation_multiplier}"
+            )
+            if not cells:
+                console.print("[dim]No ledger history in the window — run "
+                              "`auramaur pnl --backfill` first.[/]")
+                return
+            table = Table()
+            table.add_column("strategy", style="cyan")
+            table.add_column("category")
+            table.add_column("live n/$", justify="right")
+            table.add_column("paper n/$", justify="right")
+            table.add_column("status")
+            table.add_column("would trade as")
+            for c in cells:
+                status_style = {
+                    "live": "green", "probation": "yellow", "exempt": "blue",
+                }.get(c["status"], "red")
+                mode_str = ("LIVE" if not c["force_paper"] else "paper") + (
+                    f" x{c['multiplier']}" if c["multiplier"] != 1.0 else "")
+                table.add_row(
+                    c["strategy"], c["category"],
+                    f"{c['live_n']} / ${c['live_pnl']:+.2f}",
+                    f"{c['paper_n']} / ${c['paper_pnl']:+.2f}",
+                    f"[{status_style}]{c['status']}[/]",
+                    mode_str,
+                )
+            console.print(table)
+            if cfg.mode == "observe":
+                console.print("[dim]observe mode: nothing is enforced yet — flip "
+                              "graduation.mode to \"enforce\" to act on this.[/]")
+        finally:
+            await db.close()
+
+    asyncio.run(_run())
+
+
 @main.command("repair-pnl")
 @click.option("--write", is_flag=True,
               help="Persist resolution_pnl rows and rebuild category_stats dollar fields.")
