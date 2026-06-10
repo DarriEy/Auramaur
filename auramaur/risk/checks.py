@@ -399,6 +399,7 @@ async def check_mispricing_named(
 
 async def check_blocked_category(
     category: str, blocked: list[str], applies: bool = True,
+    fallback_category: str = "",
 ) -> CheckResult:
     """Fail when the market's category is blocked.
 
@@ -407,14 +408,25 @@ async def check_blocked_category(
     never pass through — caught live 2026-06-10 buying $42 of politics_us
     Senate control. Entries only by construction (exits never reach
     evaluate); structural two-sided strategies pass ``applies=False``.
+
+    Blocks if EITHER the stored ``category`` OR a freshly-classified
+    ``fallback_category`` is blocked: 247 active sports markets were stored
+    as 'other'/'politics_intl' (stale/wrong stored labels), dodging the
+    block while the classifier knew better. Trusting the stored label alone
+    was the residual leak.
     """
     if not applies:
         return CheckResult(name="blocked_category", passed=True, reason="",
                            value=category)
-    hit = bool(category) and category in set(blocked or [])
+    blocked_set = set(blocked or [])
+    offending = ""
+    if category and category in blocked_set:
+        offending = category
+    elif fallback_category and fallback_category in blocked_set:
+        offending = fallback_category
     return CheckResult(
         name="blocked_category",
-        passed=not hit,
-        reason=f"category '{category}' is blocked" if hit else "",
-        value=category,
+        passed=not offending,
+        reason=f"category '{offending}' is blocked" if offending else "",
+        value=offending or category,
     )
