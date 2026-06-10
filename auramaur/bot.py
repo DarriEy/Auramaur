@@ -836,6 +836,20 @@ class AuramaurBot:
         try:
             book = await exchange.get_order_book(token_id)
             best_bid = book.best_bid
+            best_ask = book.best_ask
+            # Mark-vs-book sanity: when even the budget floor sits far above
+            # the best ask, the snapshot is not what this token's book will
+            # pay (mislabeled side, stale mark) — the order can only rest
+            # until the TTL reaper kills it. Skip instead of looping.
+            if best_ask is not None and (sell_price - max_cross) > best_ask + 0.10:
+                log.warning(
+                    "exit.mark_book_divergence",
+                    market_id=pos.market_id,
+                    snapshot=sell_price,
+                    best_ask=best_ask,
+                    best_bid=best_bid,
+                )
+                return False
             if best_bid is not None and best_bid > 0:
                 marketable = max(best_bid, sell_price - max_cross)
                 if marketable < sell_price:

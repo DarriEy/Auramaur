@@ -236,6 +236,44 @@ class PortfolioTracker:
     # Exit checks
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _resolve_mark_price(pos: Position, market) -> float | None:
+        """Price of the token the position actually holds, or None to keep
+        the stored mark.
+
+        The held token id is authoritative. The YES/NO label defaults to YES
+        for markets whose outcomes aren't literally Yes/No ("Nothing"/
+        "Something", team names), so marking off the label prices those
+        positions at the wrong outcome — the Obama "Something" held at
+        ~$0.105 was marked at "Nothing"'s $0.895, and the phantom +$77
+        PROFIT_TARGET exit looped unfilled for days. When the market's
+        tokens are known but ours matches neither, return None: the live
+        syncer marks unresolved tokens off their own order book, and
+        re-marking from the label here would clobber that with the wrong
+        outcome's price every cycle.
+        """
+        clob_yes = market.clob_token_yes or ""
+        clob_no = market.clob_token_no or ""
+        token = pos.token
+        if pos.token_id and pos.token_id == clob_yes:
+            token = TokenType.YES
+        elif pos.token_id and pos.token_id == clob_no:
+            token = TokenType.NO
+        elif pos.token_id and (clob_yes or clob_no):
+            log.warning(
+                "check_exits.unresolved_token_side",
+                market_id=pos.market_id,
+                token_label=pos.token.value,
+            )
+            return None
+        if token == TokenType.NO:
+            return (
+                market.outcome_no_price
+                if market.outcome_no_price > 0.01
+                else 1.0 - market.outcome_yes_price
+            )
+        return market.outcome_yes_price
+
     async def check_exits(
         self,
         settings,
@@ -281,31 +319,29 @@ class PortfolioTracker:
                 # leave it untouched for that venue (we still need `market` below
                 # for end_date / profit-target logic).
                 if exchange != "ibkr":
-                    # Use the correct price for the token we actually hold
-                    if pos.token == TokenType.NO:
-                        pos.current_price = (
-                            market.outcome_no_price
-                            if market.outcome_no_price > 0.01
-                            else 1.0 - market.outcome_yes_price
-                        )
+                    new_mark = self._resolve_mark_price(pos, market)
+                    if new_mark is None:
+                        # Side unresolved — keep the stored mark (the live
+                        # syncer prices such tokens off their own book).
+                        pass
                     else:
-                        pos.current_price = market.outcome_yes_price
-                    update_sql = (
-                        """UPDATE portfolio
-                           SET current_price = ?,
-                               unrealized_pnl = (? - avg_price) * size,
-                               updated_at = datetime('now')
-                           WHERE market_id = ?"""
-                    )
-                    update_params: list[object] = [pos.current_price, pos.current_price, pos.market_id]
-                    if exchange:
-                        update_sql += " AND exchange = ?"
-                        update_params.append(exchange)
-                    if mode_flag is not None:
-                        update_sql += " AND is_paper = ?"
-                        update_params.append(mode_flag)
-                    await self.db.execute(update_sql, tuple(update_params))
-                    prices_updated = True
+                        pos.current_price = new_mark
+                        update_sql = (
+                            """UPDATE portfolio
+                               SET current_price = ?,
+                                   unrealized_pnl = (? - avg_price) * size,
+                                   updated_at = datetime('now')
+                               WHERE market_id = ?"""
+                        )
+                        update_params: list[object] = [pos.current_price, pos.current_price, pos.market_id]
+                        if exchange:
+                            update_sql += " AND exchange = ?"
+                            update_params.append(exchange)
+                        if mode_flag is not None:
+                            update_sql += " AND is_paper = ?"
+                            update_params.append(mode_flag)
+                        await self.db.execute(update_sql, tuple(update_params))
+                        prices_updated = True
             except Exception as e:
                 log.debug("check_exits.price_error", market_id=pos.market_id, error=str(e))
                 continue

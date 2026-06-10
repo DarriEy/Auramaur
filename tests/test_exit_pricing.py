@@ -89,3 +89,29 @@ async def test_exit_keeps_snapshot_price_without_book():
     assert ok is True
     order = exchange.place_order.await_args.args[0]
     assert order.price == 0.90
+
+
+@pytest.mark.asyncio
+async def test_exit_skips_when_mark_contradicts_book():
+    """Snapshot $0.90 but the token's book asks $0.13: the mark is fiction
+    (wrong-side label, stale price). Posting at the budget floor ($0.87) can
+    only rest and TTL out — skip the order entirely."""
+    bot, pos, reason, exchange, alerts = _setup(_book(0.07, 0.13), current_price=0.90)
+
+    ok = await bot._execute_poly_exit(pos, reason, AsyncMock(), exchange, alerts)
+
+    assert ok is False
+    exchange.place_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_exit_posts_on_wide_but_plausible_spread():
+    """A wide spread whose ask is near the snapshot is legitimate — the
+    divergence gate must not block it (floor 0.87 < ask 0.95 + 0.10)."""
+    bot, pos, reason, exchange, alerts = _setup(_book(0.80, 0.95), current_price=0.90)
+
+    ok = await bot._execute_poly_exit(pos, reason, AsyncMock(), exchange, alerts)
+
+    assert ok is True
+    order = exchange.place_order.await_args.args[0]
+    assert order.price == 0.87  # budget floor, inside the spread
