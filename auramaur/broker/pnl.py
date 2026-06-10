@@ -44,7 +44,7 @@ class PnLTracker:
               ``(sell_price - avg_cost) * size``.
         """
         # 1. Persist the fill
-        await self._db.execute(
+        cursor = await self._db.execute(
             """INSERT INTO fills
                (order_id, market_id, token_id, side, token, size, price, fee, is_paper, timestamp)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -61,15 +61,18 @@ class PnLTracker:
                 fill.timestamp.isoformat(),
             ),
         )
+        fill_rowid = cursor.lastrowid
 
-        # 2. Fetch current cost basis for the same paper/live mode (if any).
-        # cost_basis is keyed by (market_id, is_paper); reading without the
-        # is_paper filter would let paper fills consume a live row's basis
-        # and vice versa.
+        # 2. Fetch current cost basis for the same paper/live mode AND token.
+        # cost_basis is keyed by (market_id, is_paper, token); reading without
+        # the is_paper filter would let paper fills consume a live row's basis,
+        # and reading without the token filter would let a NO sell realize
+        # against the YES side's basis when both coexist (post-#78 PKs).
         is_paper_flag = 1 if fill.is_paper else 0
         row = await self._db.fetchone(
-            "SELECT size, avg_cost, total_cost, realized_pnl FROM cost_basis WHERE market_id = ? AND is_paper = ?",
-            (fill.market_id, is_paper_flag),
+            "SELECT size, avg_cost, total_cost, realized_pnl FROM cost_basis"
+            " WHERE market_id = ? AND is_paper = ? AND token = ?",
+            (fill.market_id, is_paper_flag, fill.token.value),
         )
 
         old_size: float = float(row["size"]) if row else 0.0
@@ -129,6 +132,22 @@ class PnLTracker:
                 )
             except Exception as e:
                 log.debug("pnl.daily_stats_error", error=str(e))
+
+            # Unified realized-P&L ledger: one row per realization event,
+            # idempotent on fill rowid (the backfill uses the same ref).
+            from auramaur.broker.ledger import record_ledger_event
+            await record_ledger_event(
+                self._db,
+                market_id=fill.market_id,
+                kind="sell",
+                token=fill.token.value,
+                qty=sell_size,
+                pnl=pnl,
+                fees=fill.fee,
+                is_paper=fill.is_paper,
+                source_ref=f"fill:{fill_rowid}",
+                realized_at=fill.timestamp.isoformat(),
+            )
 
         # Clamp negative sizes to zero (shouldn't happen, but be safe)
         if new_size < 0:

@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -219,6 +219,25 @@ CREATE TABLE IF NOT EXISTS resolution_pnl (
     pnl REAL NOT NULL,
     resolved_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS pnl_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id TEXT NOT NULL,
+    venue TEXT NOT NULL DEFAULT '',
+    category TEXT NOT NULL DEFAULT '',
+    strategy_source TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL,
+    token TEXT NOT NULL DEFAULT 'YES',
+    qty REAL NOT NULL DEFAULT 0,
+    pnl REAL NOT NULL,
+    fees REAL NOT NULL DEFAULT 0,
+    is_paper INTEGER NOT NULL DEFAULT 1,
+    source_ref TEXT NOT NULL UNIQUE,
+    realized_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_pnl_ledger_market ON pnl_ledger(market_id, is_paper);
+CREATE INDEX IF NOT EXISTS idx_pnl_ledger_realized ON pnl_ledger(realized_at);
 
 CREATE INDEX IF NOT EXISTS idx_price_history_market ON price_history(market_id);
 CREATE INDEX IF NOT EXISTS idx_price_history_time ON price_history(recorded_at);
