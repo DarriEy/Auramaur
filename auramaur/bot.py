@@ -3162,6 +3162,11 @@ class AuramaurBot:
         self._running = False
         console.print("\n[dim]Shutting down...[/]")
 
+        try:
+            await self._cancel_resting_live_orders()
+        except Exception as e:
+            log.debug("shutdown.cancel_sweep_error", error=str(e))
+
         for name, comp in self._components.items():
             if hasattr(comp, "close"):
                 try:
@@ -3180,3 +3185,56 @@ class AuramaurBot:
             self._lock_file = None
 
         console.print("[dim]Stopped.[/]")
+
+    async def _cancel_resting_live_orders(self) -> None:
+        """Cancel live orders still resting on the book before exit.
+
+        GTC orders outlive the process, so every restart used to inherit the
+        prior session's market-maker quotes and in-flight entries — collateral
+        stayed locked until the startup reconciler and the TTL reaper mopped
+        them up minutes into the next session. Cancel on the way out instead,
+        and write the trades rows terminal so shutdown doesn't mint new
+        orphaned 'pending' rows. Best-effort: a failed cancel is the next
+        session's reconciler problem, exactly as before.
+        """
+        clients: dict[int, tuple[str, object]] = {}
+        primary = self._components.get("exchange")
+        if primary is not None and hasattr(primary, "_live_pending"):
+            clients[id(primary)] = ("polymarket", primary)
+        for name, client in (self._components.get("exchanges") or {}).items():
+            if client is not None and hasattr(client, "_live_pending"):
+                clients.setdefault(id(client), (name, client))
+
+        db = self._components.get("db")
+        cancelled = 0
+        for exchange_name, client in clients.values():
+            for order_id in list(getattr(client, "_live_pending", {}).keys()):
+                try:
+                    ok = await client.cancel_order(order_id)
+                except Exception as e:
+                    log.debug(
+                        "shutdown.cancel_error",
+                        exchange=exchange_name,
+                        order_id=order_id,
+                        error=str(e),
+                    )
+                    continue
+                if not ok:
+                    continue
+                cancelled += 1
+                if db is not None:
+                    try:
+                        await db.execute(
+                            "UPDATE trades SET status = 'cancelled' WHERE order_id = ?",
+                            (order_id,),
+                        )
+                    except Exception:
+                        pass
+        if cancelled and db is not None:
+            try:
+                await db.commit()
+            except Exception:
+                pass
+        if cancelled:
+            console.print(f"[dim]Cancelled {cancelled} resting live orders[/]")
+            log.info("shutdown.orders_cancelled", count=cancelled)
