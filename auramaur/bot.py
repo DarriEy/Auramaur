@@ -794,13 +794,14 @@ class AuramaurBot:
         sell_size = pos.size
         try:
             from py_clob_client_v2 import BalanceAllowanceParams, AssetType
-            exchange._init_clob_client()
-            bal = exchange._clob_client.get_balance_allowance(
+            await exchange.clob_call(exchange._init_clob_client)
+            bal = await exchange.clob_call(
+                exchange._clob_client.get_balance_allowance,
                 BalanceAllowanceParams(
                     asset_type=AssetType.CONDITIONAL,
                     token_id=token_id,
                     signature_type=2,
-                )
+                ),
             )
             onchain = int(bal.get("balance", 0)) / 1e6
             if onchain < sell_size:
@@ -2899,10 +2900,22 @@ class AuramaurBot:
                  AND timestamp < datetime('now', '-10 minutes')
                ORDER BY timestamp ASC LIMIT 25"""
         )
+        # Placeholder ids from failed/odd submissions — not real orders. Asking
+        # the exchange about them 400s on every pass forever (the 'unknown'
+        # kalshi row did exactly that); mark them terminal instead.
+        sentinel_ids = {"unknown", "ERROR", "BLOCKED", "INSUFFICIENT_BALANCE",
+                        "SKIP_DUP", "POST_ONLY_REJECTED"}
         fixed = 0
         for row in rows:
             order_id = row["order_id"]
             if order_id in tracked or order_id.startswith("PAPER"):
+                continue
+            if order_id in sentinel_ids:
+                await db.execute(
+                    "UPDATE trades SET status = 'error' WHERE order_id = ? AND status = 'pending'",
+                    (order_id,),
+                )
+                fixed += 1
                 continue
             client = clients_by_name.get(row["exchange"] or "polymarket")
             if client is None or not hasattr(client, "get_order_status"):
