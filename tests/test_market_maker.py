@@ -131,3 +131,58 @@ def test_select_skips_dead_book_but_keeps_real_spread():
     ids = [m.id for m in suitable]
     assert "dead" not in ids
     assert ids == ["real"]
+
+
+@pytest.mark.asyncio
+async def test_requote_cancels_previous_legs_before_replacing():
+    """Re-quoting a market must cancel the prior quote's legs first.
+
+    The overwrite of _active_quotes used to orphan the old legs' order ids —
+    a resting GTC pair leaked onto the book every refresh cycle (observed
+    live 2026-06-10: three stacked identical quote pairs ~36s apart)."""
+    from unittest.mock import AsyncMock
+
+    mm = _maker()
+    mm._settings = SimpleNamespace(is_live=True, market_maker=mm._settings.market_maker)
+
+    placed: list[str] = []
+    counter = {"n": 0}
+
+    async def place_order(order):
+        counter["n"] += 1
+        oid = f"live-{counter['n']}"
+        placed.append(oid)
+        return SimpleNamespace(order_id=oid, status="pending", is_paper=False)
+
+    cancelled: list[str] = []
+
+    async def cancel_order(order_id):
+        cancelled.append(order_id)
+        return True
+
+    book = OrderBook(
+        bids=[OrderBookLevel(price=0.40, size=100)],
+        asks=[OrderBookLevel(price=0.46, size=100)],
+    )
+    mm._exchange = SimpleNamespace(
+        place_order=place_order,
+        cancel_order=cancel_order,
+        get_order_book=AsyncMock(return_value=book),
+    )
+    market = Market(
+        id="m1",
+        question="Will this happen?",
+        clob_token_yes="yes",
+        clob_token_no="no",
+    )
+
+    result1, _ = await mm._quote_market(market)
+    assert result1 and result1.get("success")
+    first_legs = placed[:2]
+    assert cancelled == []  # nothing to replace yet
+
+    result2, _ = await mm._quote_market(market)
+    assert result2 and result2.get("success")
+    # The first quote's two legs were cancelled before the new pair posted.
+    assert cancelled == first_legs
+    assert len(placed) == 4
