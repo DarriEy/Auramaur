@@ -49,12 +49,16 @@ def _make_position(market_id: str, avg_price: float, size: float = 10.0,
 
 
 def _make_market(market_id: str, yes_price: float, end_date: datetime | None = None,
-                 active: bool = True):
+                 active: bool = True, no_price: float | None = None,
+                 clob_yes: str = "", clob_no: str = ""):
     m = MagicMock()
     m.id = market_id
     m.outcome_yes_price = yes_price
+    m.outcome_no_price = no_price if no_price is not None else round(1.0 - yes_price, 4)
     m.end_date = end_date
     m.active = active
+    m.clob_token_yes = clob_yes
+    m.clob_token_no = clob_no
     return m
 
 
@@ -259,6 +263,106 @@ async def test_binary_exits_skipped_for_ibkr_options(settings):
         tracker = PortfolioTracker(db=db, settings=settings)
         exits = await tracker.check_exits(settings, gamma, exchange="ibkr")
         assert exits == []  # no edge-erosion / time-decay for options
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_token_id_overrides_yes_label(settings):
+    """A position whose outcome label defaulted to YES but whose held token id
+    is the market's NO-slot token must be marked at the NO price. The Obama
+    "Something" held at $0.105 was marked at "Nothing"'s $0.895 — a phantom
+    +$77 that fired PROFIT_TARGET every cycle."""
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        settings.is_live = True
+        await db.execute(
+            """INSERT INTO portfolio
+               (market_id, exchange, side, size, avg_price, current_price,
+                category, token, token_id, is_paper)
+               VALUES ('obama', 'polymarket', 'BUY', 100, 0.126, 0.895,
+                       'politics_us', 'YES', 'tok_something', 0)"""
+        )
+        await db.commit()
+
+        gamma = AsyncMock()
+        gamma.get_market = AsyncMock(return_value=_make_market(
+            "obama", 0.895, no_price=0.105,
+            clob_yes="tok_nothing", clob_no="tok_something",
+        ))
+
+        tracker = PortfolioTracker(db=db, settings=settings)
+        exits = await tracker.check_exits(settings, gamma, exchange="polymarket")
+
+        # Real P&L is (0.105-0.126)*100 = -$2.10 (-17%): no exit fires.
+        assert exits == []
+        row = await db.fetchone("SELECT current_price FROM portfolio WHERE market_id='obama'")
+        assert row["current_price"] == pytest.approx(0.105)
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_unresolved_token_keeps_stored_mark(settings):
+    """When the market's CLOB tokens are known but the held token matches
+    neither, the stored mark (set by the syncer off the token's own book)
+    must not be clobbered with the label outcome's price."""
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        settings.is_live = True
+        await db.execute(
+            """INSERT INTO portfolio
+               (market_id, exchange, side, size, avg_price, current_price,
+                category, token, token_id, is_paper)
+               VALUES ('m1', 'polymarket', 'BUY', 100, 0.126, 0.10,
+                       'test', 'YES', 'tok_unknown', 0)"""
+        )
+        await db.commit()
+
+        gamma = AsyncMock()
+        gamma.get_market = AsyncMock(return_value=_make_market(
+            "m1", 0.895, no_price=0.105,
+            clob_yes="tok_a", clob_no="tok_b",
+        ))
+
+        tracker = PortfolioTracker(db=db, settings=settings)
+        exits = await tracker.check_exits(settings, gamma, exchange="polymarket")
+
+        assert exits == []
+        row = await db.fetchone("SELECT current_price FROM portfolio WHERE market_id='m1'")
+        assert row["current_price"] == pytest.approx(0.10)  # untouched
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_label_used_when_market_tokens_unknown(settings):
+    """No CLOB token ids on the market (e.g. Kalshi) — the YES/NO label keeps
+    driving the mark, as before."""
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        settings.is_live = True
+        await db.execute(
+            """INSERT INTO portfolio
+               (market_id, exchange, side, size, avg_price, current_price,
+                category, token, token_id, is_paper)
+               VALUES ('m1', 'polymarket', 'BUY', 10, 0.50, 0.50,
+                       'test', 'NO', 'tok_x', 0)"""
+        )
+        await db.commit()
+
+        gamma = AsyncMock()
+        gamma.get_market = AsyncMock(return_value=_make_market("m1", 0.45, no_price=0.55))
+
+        tracker = PortfolioTracker(db=db, settings=settings)
+        exits = await tracker.check_exits(settings, gamma, exchange="polymarket")
+
+        assert exits == []
+        row = await db.fetchone("SELECT current_price FROM portfolio WHERE market_id='m1'")
+        assert row["current_price"] == pytest.approx(0.55)  # NO-side price
     finally:
         await db.close()
 
