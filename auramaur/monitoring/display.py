@@ -1,7 +1,16 @@
-"""Rich console display for bot events."""
+"""Rich console display for bot events.
+
+Quiet-feed contract: the scrolling output prints what the operator must
+see (trades, decisions with reasons, errors, health) and aggregates
+routine churn (MM quotes, Claude calls, cache hits, scans) into periodic
+one-line summaries via :mod:`auramaur.monitoring.feed`. An expired MM
+quote is the maker book's normal idle state — it must not render like a
+failed entry.
+"""
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 
 from rich.console import Console
@@ -9,10 +18,16 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from auramaur.monitoring.feed import NoiseAggregator
+
 console = Console()
 
 # Track activity for status line
 _cycle_stats: dict = {"signals": 0, "trades": 0, "filtered": 0, "analyzed": 0, "errors": 0}
+
+# Routine-event counters, flushed as one summary line per interval (the
+# flush rides on the ticker cadence in show_portfolio).
+noise = NoiseAggregator(interval_seconds=3600.0)
 
 
 def show_banner(mode: str, version: str) -> None:
@@ -35,12 +50,17 @@ def show_startup(sources: list[str], balance: float) -> None:
 
 
 def show_scan_results(total: int, candidates: int, filtered: int = 0, exchange: str = "") -> None:
+    # Zero-candidate scans are the steady state — aggregate them; only a
+    # scan that produced work is worth a line of its own.
+    noise.bump("scan")
+    _cycle_stats["filtered"] = filtered
+    if candidates == 0:
+        return
     ex = f"[magenta]{exchange}[/] " if exchange else ""
     msg = f"[dim]{_ts()}[/] {ex}Scanned [bold]{total}[/] markets, [cyan]{candidates}[/] candidates"
     if filtered > 0:
         msg += f", [yellow]{filtered}[/] filtered"
     console.print(msg)
-    _cycle_stats["filtered"] = filtered
 
 
 def show_analyzing(question: str, market_id: str) -> None:
@@ -50,11 +70,12 @@ def show_analyzing(question: str, market_id: str) -> None:
 
 
 def show_evidence(count: int, sources: dict[str, int]) -> None:
+    # The empty case is a signal-quality warning and stays visible; a
+    # normal evidence pull is routine and aggregates.
     if count == 0:
         console.print("         [yellow]No evidence found[/]")
     else:
-        parts = [f"{s}:{n}" for s, n in sources.items() if n > 0]
-        console.print(f"         [dim]Evidence:[/] [green]{count}[/] items ({', '.join(parts)})")
+        noise.bump("evidence")
 
 
 def show_analysis(claude_prob: float, market_prob: float, edge: float,
@@ -153,15 +174,24 @@ def show_order_dropped(market_id: str, reason: str) -> None:
 
 
 def show_order_unfilled(side: str, size: float, price: float, age_seconds: float,
-                        exchange: str = "", market_id: str = "") -> None:
-    """A live order TTL-expired without filling — the entry the strategy
-    reported as ORDER LIVE never became a position. Without this line the
-    cancel is invisible: cash quietly snaps back and the terminal says
-    nothing."""
+                        exchange: str = "", market_id: str = "",
+                        source: str = "") -> None:
+    """A live order TTL-expired without filling.
+
+    For strategy entries and exits this is a must-see line — the order the
+    bot reported as ORDER LIVE never became a position. For market-maker
+    quotes it is the maker book's normal idle state and rendering it like a
+    failure was the single biggest source of operator false alarms, so MM
+    expiries aggregate into the periodic noise summary instead.
+    """
+    if source == "market_maker":
+        noise.bump("mm_expired")
+        return
     side_color = "green" if side == "BUY" else "red"
     ex = f"[magenta]{exchange}[/] " if exchange else ""
+    src = f"[magenta]{source}[/] " if source else ""
     console.print(
-        f"         [yellow]ORDER UNFILLED[/] [bold red]LIVE[/] {ex}[{side_color}]{side}[/] "
+        f"         [yellow]ORDER UNFILLED[/] [bold red]LIVE[/] {ex}{src}[{side_color}]{side}[/] "
         f"${size * price:.2f} ({size:.1f} tokens @ ${price:.3f}) "
         f"cancelled after {age_seconds:.0f}s [dim]{market_id[:16]}[/]"
     )
@@ -185,14 +215,48 @@ def show_cycle_summary(signals: int, trades: int, elapsed: float, exchange: str 
     _cycle_stats.update({"signals": 0, "trades": 0, "analyzed": 0})
 
 
-def show_portfolio(balance: float, pnl: float, positions: int, drawdown: float, schedule_mode: str = "") -> None:
+# Ticker throttle state: last printed values + timestamp. The monitor loop
+# calls show_portfolio every ~90s; printing each tick taught the operator to
+# ignore the line. Print on material change or every 15 minutes, whichever
+# comes first.
+_ticker_state: dict = {"last_print": 0.0, "pnl": None, "positions": None, "mode": None}
+_TICKER_MIN_INTERVAL = 900.0  # seconds
+_TICKER_PNL_DELTA = 2.0  # dollars
+
+
+def show_portfolio(balance: float, pnl: float, positions: int, drawdown: float,
+                   schedule_mode: str = "", reserved: float | None = None) -> None:
+    # Flush the routine-event summary on the ticker cadence regardless of
+    # whether the ticker line itself prints.
+    if noise.due():
+        summary = noise.flush()
+        if summary:
+            console.print(f"[dim]{_ts()} ─ last hour: {summary}[/]")
+
+    now = time.monotonic()
+    changed = (
+        _ticker_state["pnl"] is None
+        or _ticker_state["positions"] != positions
+        or _ticker_state["mode"] != schedule_mode
+        or abs(pnl - (_ticker_state["pnl"] or 0.0)) >= _TICKER_PNL_DELTA
+    )
+    if not changed and (now - _ticker_state["last_print"]) < _TICKER_MIN_INTERVAL:
+        return
+    _ticker_state.update(
+        {"last_print": now, "pnl": pnl, "positions": positions, "mode": schedule_mode}
+    )
+
     pnl_color = "green" if pnl >= 0 else "red"
 
-    # Build a compact but informative status line — label what the numbers
-    # ARE ("cash"/"uPnL"), not bare figures the operator has to decode.
+    # Label what the numbers ARE — and split free vs reserved cash so
+    # collateral locked by resting orders stops reading as vanished money.
+    if reserved is not None and reserved > 0.005:
+        cash_str = f"cash [bold]${balance:,.2f}[/] free [dim](+${reserved:,.2f} in orders)[/]"
+    else:
+        cash_str = f"cash [bold]${balance:,.2f}[/]"
     parts = [
         f"[dim]{_ts()}[/]",
-        f"cash [bold]${balance:,.2f}[/]",
+        cash_str,
         f"P&L [{pnl_color}]{pnl:+,.2f}[/]",
         f"{positions} pos",
     ]
@@ -213,15 +277,13 @@ def show_portfolio(balance: float, pnl: float, positions: int, drawdown: float, 
 
 
 def show_claude_thinking(market_id: str, stage: str = "primary") -> None:
-    # Concurrent evidence passes interleave these lines, so an untagged
-    # "Asking Claude..." is unattributable — show which market each belongs to.
-    label = "Asking Claude" if stage == "primary" else "Second opinion"
-    tag = f" {market_id[:16]}" if market_id else ""
-    console.print(f"         [dim]{label}...{tag}[/]")
+    # Routine — a dozen of these per cycle (kraken tickers alone) buried
+    # the lines that mattered. Counted, summarized hourly.
+    noise.bump("claude_call")
 
 
 def show_cache_hit() -> None:
-    console.print("         [dim]Cache hit[/]")
+    noise.bump("cache_hit")
 
 
 def show_source_error(source: str, error: str) -> None:
@@ -262,11 +324,8 @@ def show_arb_opportunity(exchange_a: str, exchange_b: str, question: str, spread
 
 
 def show_mm_quote(market_id: str, bid: float, ask: float, spread_bps: int) -> None:
-    """Show market making quote placed."""
-    console.print(
-        f"[dim]{_ts()}[/] [blue]MM[/] {market_id[:12]} "
-        f"bid:${bid:.3f} ask:${ask:.3f} spread:{spread_bps}bps"
-    )
+    """Market-maker quote placed — routine; counted, summarized hourly."""
+    noise.bump("mm_quote")
 
 
 _BAR_CHARS = " ▏▎▍▌▋▊▉█"

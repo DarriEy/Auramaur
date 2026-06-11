@@ -79,6 +79,11 @@ class Order(BaseModel):
     # when the book moves between order formation and submission, and keeps
     # us eligible for Polymarket's maker-reward tier.
     post_only: bool = False
+    # Who placed this order ("market_maker", a strategy book like "llm" /
+    # "news_speed", or "exit"). The order monitor uses it to render TTL
+    # cancels honestly: an expired MM quote is routine churn, an expired
+    # strategy entry is a must-see failure.
+    source: str = ""
     # Stamped at construction (≈ submission time). The order monitor uses this
     # to TTL-cancel live limit orders that are still resting, since live GTC
     # orders never auto-expire on-chain and would otherwise lock collateral.

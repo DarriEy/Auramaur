@@ -752,6 +752,8 @@ class TradingEngine:
                 pass  # Table may not exist yet
             return None
 
+        if not order.source:
+            order.source = signal.strategy_source or "llm"
         result = await self.exchange.place_order(order)
         show_order(result.status, result.order_id, order.side.value, order.size, order.price, result.is_paper, exchange=self.exchange_name, error_message=result.error_message, market_id=order.market_id)
 

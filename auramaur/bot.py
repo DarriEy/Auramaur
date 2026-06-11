@@ -77,6 +77,7 @@ class AuramaurBot:
         # Track attempted cross-exchange arbs so the scanner doesn't re-execute
         # the same opportunity every 5-minute cycle. Maps arb-key -> expiry ts.
         self._arb_attempts: dict[str, float] = {}
+        self._watchdog = None  # LoopWatchdog thread, started with the task set
 
     def _acquire_db_path(self) -> str:
         """Find an available database slot using file locks.
@@ -666,7 +667,21 @@ class AuramaurBot:
                     except Exception as e:
                         log.debug("attribution.initial_error", error=str(e))
 
-                show_portfolio(poly_cash, total_pnl, len(all_positions), 0.0, schedule_mode=self._get_schedule_mode())
+                # Collateral reserved by resting BUY orders — shown alongside
+                # free cash so it stops reading as money randomly vanishing
+                # between ticks.
+                reserved = 0.0
+                for client in exchanges.values():
+                    pending = getattr(client, "_live_pending", None)
+                    if pending:
+                        reserved += sum(
+                            o.notional for o in pending.values()
+                            if getattr(o, "side", None) == OrderSide.BUY
+                        )
+                show_portfolio(
+                    poly_cash, total_pnl, len(all_positions), 0.0,
+                    schedule_mode=self._get_schedule_mode(), reserved=reserved,
+                )
 
                 # Per-exchange exit checks + execution
                 for name, discovery in discoveries.items():
@@ -871,6 +886,7 @@ class AuramaurBot:
             price=sell_price,
             order_type=OrderType.LIMIT,
             dry_run=not self.settings.is_live,
+            source="exit",
         )
         result = await exchange.place_order(sell_order)
         if result.status == "rejected":
@@ -954,6 +970,7 @@ class AuramaurBot:
         if order.size < 1:
             return False
 
+        order.source = "exit"
         result = await exchange.place_order(order)
         from auramaur.monitoring.display import show_order
         show_order(
@@ -998,6 +1015,7 @@ class AuramaurBot:
             price=max(pos.current_price or 0.0, 0.01),
             order_type=OrderType.LIMIT,
             dry_run=not self.settings.is_live,
+            source="exit",
         )
         result = await exchange.place_order(order)
         from auramaur.monitoring.display import show_order
@@ -2858,6 +2876,7 @@ class AuramaurBot:
                                         order.side.value, order.size, order.price,
                                         age, exchange=exchange_name,
                                         market_id=display_market,
+                                        source=getattr(order, "source", ""),
                                     )
                                     log.info(
                                         "order_monitor.live_ttl_cancel",
@@ -2880,6 +2899,13 @@ class AuramaurBot:
                 await self._reconcile_orphaned_pending_trades(live_clients)
             except Exception as e:
                 log.debug("order_monitor.orphan_sweep_error", error=str(e))
+
+            # Heartbeat for the loop watchdog: this coroutine ticking proves
+            # the event loop is alive. A blocking sync call anywhere in the
+            # loop silences this beat, and the watchdog THREAD raises the
+            # alarm (the 2026-06-10 freeze ran 84 minutes with zero output).
+            if self._watchdog is not None:
+                self._watchdog.beat()
 
             await asyncio.sleep(30)
 
@@ -3108,6 +3134,16 @@ class AuramaurBot:
         tasks.append(asyncio.create_task(self._task_resolution_checker(), name="resolution_checker"))
         tasks.append(asyncio.create_task(self._task_order_monitor(), name="order_monitor"))
 
+        # Loop watchdog: a daemon thread that screams when the asyncio loop
+        # stops beating (blocking sync call). Runs outside the loop so it can
+        # still speak during a freeze.
+        from auramaur.monitoring.feed import LoopWatchdog
+        self._watchdog = LoopWatchdog(
+            alert=lambda msg: console.print(f"[bold red]⚠ WATCHDOG: {msg}[/]")
+        )
+        self._watchdog.beat()
+        self._watchdog.start()
+
         # Redemption check — only meaningful with a Polymarket proxy wallet
         if self.settings.polymarket_proxy_address:
             tasks.append(asyncio.create_task(self._task_redemption_check(), name="redemption_check"))
@@ -3187,6 +3223,8 @@ class AuramaurBot:
     async def shutdown(self) -> None:
         """Gracefully shut down all components."""
         self._running = False
+        if self._watchdog is not None:
+            self._watchdog.stop()
         console.print("\n[dim]Shutting down...[/]")
 
         try:
