@@ -416,6 +416,7 @@ class MarketMaker:
             order_type=OrderType.LIMIT,
             dry_run=not is_live,
             post_only=True,
+            source="market_maker",
         )
 
         # Build ask leg (BUY NO = effectively selling YES)
@@ -430,6 +431,7 @@ class MarketMaker:
             order_type=OrderType.LIMIT,
             dry_run=not is_live,
             post_only=True,
+            source="market_maker",
         )
 
         # Place both legs
