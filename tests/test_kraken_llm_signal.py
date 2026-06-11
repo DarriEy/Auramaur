@@ -98,9 +98,11 @@ def test_llm_view_unknown_pair_returns_none():
 
 
 def test_llm_view_skipped_analysis_returns_none():
-    agg = MagicMock(); agg.gather = AsyncMock(return_value=[])
+    agg = MagicMock()
+    agg.gather = AsyncMock(return_value=[])
     analysis = SimpleNamespace(probability=0.5, confidence="LOW", skipped_reason="thin evidence")
-    analyzer = MagicMock(); analyzer.analyze = AsyncMock(return_value=analysis)
+    analyzer = MagicMock()
+    analyzer.analyze = AsyncMock(return_value=analysis)
     bot = SimpleNamespace(_components={
         "aggregator": agg, "analyzer": analyzer, "cache": None, "calibration": None,
     })
@@ -115,7 +117,7 @@ def test_llm_view_skipped_analysis_returns_none():
 if __name__ == "__main__":
     test_conf_floor()
     test_llm_exit_reason()
-    test_llm_view_records_and_throttles()
+    test_llm_view_returns_and_throttles()
     test_llm_view_unknown_pair_returns_none()
     test_llm_view_skipped_analysis_returns_none()
     print("ok")
