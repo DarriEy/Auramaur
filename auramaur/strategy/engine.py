@@ -28,7 +28,7 @@ from auramaur.nlp.analyzer import ClaudeAnalyzer
 from auramaur.nlp.cache import NLPCache
 from auramaur.nlp.calibration import CalibrationTracker
 from auramaur.broker.allocator import CandidateTrade, CapitalAllocator
-from auramaur.broker.router import SmartOrderRouter
+from auramaur.broker.router import SmartOrderRouter, UnmarketableSignal
 from auramaur.risk.manager import RiskManager
 from auramaur.strategy.classifier import classify_market, ensure_category
 from auramaur.strategy.order_flow import OrderFlowTracker
@@ -699,10 +699,35 @@ class TradingEngine:
         regardless of global live mode — it can only restrict, never arm.
         """
         is_live = self.settings.is_live and not force_paper
-        if self.router:
-            order = await self.router.route(signal, market, size_dollars, is_live)
-        else:
-            order = self.exchange.prepare_order(signal, market, size_dollars, is_live)
+        try:
+            if self.router:
+                order = await self.router.route(signal, market, size_dollars, is_live)
+            else:
+                order = self.exchange.prepare_order(signal, market, size_dollars, is_live)
+        except UnmarketableSignal as skip:
+            # No realizable edge at the book. This gate runs before the
+            # paper/live split on purpose: paper fills simulate at the
+            # reference price, so letting paper books keep these trades
+            # would graduate strategies on fills live could never get.
+            show_order_dropped(market.id, f"unmarketable: {skip}")
+            log.info(
+                "engine.entry_unmarketable",
+                market_id=market.id,
+                strategy=signal.strategy_source,
+                reason=str(skip),
+            )
+            try:
+                # Shorter block than build failures: the book can move.
+                await self.db.execute(
+                    """INSERT OR REPLACE INTO order_build_drops
+                       (market_id, blocked_until, reason)
+                       VALUES (?, datetime('now', '+30 minutes'), ?)""",
+                    (market.id, f"unmarketable: {skip}"),
+                )
+                await self.db.commit()
+            except Exception:
+                pass
+            return None
 
         if order is None:
             show_order_dropped(market.id, f"order build failed (${size_dollars:.2f} — could not build a valid order)")

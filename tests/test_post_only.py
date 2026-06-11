@@ -57,8 +57,10 @@ def test_limit_price_joins_bbo_on_one_cent_spread_sell():
 
 
 @pytest.mark.asyncio
-async def test_router_sets_post_only_on_limit_orders():
-    """Router should set post_only=True on any LIMIT order it emits."""
+async def test_router_sets_post_only_on_passive_sell_limits():
+    """SELLs keep the passive path; the router must set post_only=True on
+    the maker limit it emits (BUY entries are taker-or-skip and never post
+    passively anymore)."""
     settings = MagicMock()
     exchange = MagicMock()
     exchange.prepare_order = MagicMock(
@@ -66,7 +68,7 @@ async def test_router_sets_post_only_on_limit_orders():
             market_id="m1",
             exchange="polymarket",
             token_id="tok",
-            side=OrderSide.BUY,
+            side=OrderSide.SELL,
             token=TokenType.YES,
             size=10.0,
             price=0.45,
@@ -89,12 +91,14 @@ async def test_router_sets_post_only_on_limit_orders():
     order = await router.route(signal, market, size_dollars=10.0, is_live=False)
     assert order is not None
     assert order.order_type == OrderType.LIMIT
+    assert order.price == 0.49  # best_ask - 1 tick, maker side
     assert order.post_only is True
 
 
 @pytest.mark.asyncio
-async def test_router_does_not_set_post_only_on_market_orders():
-    """High-urgency edge -> MARKET, which should not carry post_only."""
+async def test_router_does_not_set_post_only_on_crossed_entries():
+    """A BUY entry crosses to the ask — it must be allowed to take, so it
+    never carries post_only."""
     settings = MagicMock()
     exchange = MagicMock()
     exchange.prepare_order = MagicMock(
@@ -119,10 +123,11 @@ async def test_router_does_not_set_post_only_on_market_orders():
         claude_prob=0.9,
         claude_confidence="HIGH",
         market_prob=0.50,
-        edge=50.0,  # > 40 triggers MARKET
+        edge=50.0,
     )
 
     order = await router.route(signal, market, size_dollars=10.0, is_live=False)
     assert order is not None
-    assert order.order_type == OrderType.MARKET
+    assert order.order_type == OrderType.LIMIT
+    assert order.price == 0.51  # at the ask
     assert order.post_only is False
