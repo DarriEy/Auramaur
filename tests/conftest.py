@@ -24,7 +24,7 @@ def pytest_sessionfinish(session, exitstatus):
     except ImportError:  # pragma: no cover
         return
     for obj in gc.get_objects():
-        if isinstance(obj, aiosqlite.Connection):
+        if type(obj) is aiosqlite.Connection:
             try:
                 obj._running = False
             except Exception:  # pragma: no cover

@@ -26,38 +26,32 @@ def analyzer(settings):
 @pytest.mark.asyncio
 async def test_retry_on_timeout(analyzer):
     """Subprocess times out twice, then succeeds on third attempt."""
-    call_count = 0
-
-    async def mock_communicate():
-        nonlocal call_count
-        call_count += 1
-        if call_count <= 2:
-            raise asyncio.TimeoutError("timed out")
-        return (b'{"probability": 0.7, "confidence": "HIGH", "reasoning": "ok"}', b"")
-
     mock_proc = AsyncMock()
-    mock_proc.communicate = mock_communicate
+    mock_proc.communicate = AsyncMock(side_effect=[
+        asyncio.TimeoutError("timed out"),
+        asyncio.TimeoutError("timed out"),
+        (b'{"probability": 0.7, "confidence": "HIGH", "reasoning": "ok"}', b""),
+    ])
     mock_proc.returncode = 0
 
     with patch("asyncio.create_subprocess_exec", return_value=mock_proc), \
-         patch("asyncio.wait_for", side_effect=[
-             asyncio.TimeoutError("timed out"),
-             asyncio.TimeoutError("timed out"),
-             (b'{"probability": 0.7, "confidence": "HIGH", "reasoning": "ok"}', b""),
-         ]), \
          patch("asyncio.sleep", new_callable=AsyncMock):
         result = await analyzer._call_claude_cli("test prompt")
         assert "probability" in result
+        assert mock_proc.communicate.await_count == 3
 
 
 @pytest.mark.asyncio
 async def test_retry_exhausted_raises(analyzer):
     """All 3 attempts fail — should raise."""
-    with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec, \
-         patch("asyncio.wait_for", side_effect=asyncio.TimeoutError("timed out")), \
+    mock_proc = AsyncMock()
+    mock_proc.communicate = AsyncMock(side_effect=asyncio.TimeoutError("timed out"))
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc), \
          patch("asyncio.sleep", new_callable=AsyncMock):
         with pytest.raises((asyncio.TimeoutError, TimeoutError)):
             await analyzer._call_claude_cli("test prompt")
+        assert mock_proc.communicate.await_count == 3
 
 
 @pytest.mark.asyncio
