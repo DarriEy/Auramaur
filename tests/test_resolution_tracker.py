@@ -276,3 +276,127 @@ class TestSettlePosition:
             if "DELETE FROM portfolio" in str(c)
         ]
         assert len(delete_calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# Venue-truth sweep (Polymarket data-api) — settles positions the Gamma loop
+# can't see (archived markets / stale active flags / phantom $0 marks)
+# ---------------------------------------------------------------------------
+
+def _make_venue_position(asset_id: str, *, is_winner: bool, title="Old match",
+                         outcome="Yes", status="redeemable"):
+    vp = MagicMock()
+    vp.asset_id = asset_id
+    vp.is_winner = is_winner
+    vp.title = title
+    vp.outcome = outcome
+    vp.status = status
+    return vp
+
+
+def _make_sweep_db(portfolio_rows: list[dict]):
+    db = AsyncMock()
+
+    async def _fetchall(sql, params=None):
+        if "FROM portfolio" in sql and "token_id" in sql:
+            return portfolio_rows
+        return []
+
+    async def _fetchone(sql, params=None):
+        # _settle_position re-fetches the scoped row
+        if "FROM portfolio" in sql and portfolio_rows:
+            tok = params[1] if params and len(params) > 1 else None
+            for r in portfolio_rows:
+                if tok is None or r.get("token") == tok:
+                    return r
+        return None
+
+    db.fetchall = AsyncMock(side_effect=_fetchall)
+    db.fetchone = AsyncMock(side_effect=_fetchone)
+    db.execute = AsyncMock()
+    db.commit = AsyncMock()
+    return db
+
+
+@pytest.mark.asyncio
+async def test_venue_sweep_settles_matched_token(monkeypatch):
+    """A live NO position whose token the venue reports as the winner
+    settles as outcome NO (outcome_yes=False) with payout $1/share."""
+    row = {"market_id": "m1", "token": "NO", "token_id": "tok-no-1",
+           "size": 20.0, "avg_price": 0.62, "side": "BUY", "is_paper": 0}
+    db = _make_sweep_db([row])
+    tracker = ResolutionTracker(db=db, calibration=None, discoveries={},
+                                proxy_address="0xproxy")
+    vps = [_make_venue_position("tok-no-1", is_winner=True, outcome="No")]
+
+    async def _fake_fetch(proxy, **kw):
+        return vps
+    monkeypatch.setattr("auramaur.broker.redeemer.fetch_redeemable_positions",
+                        _fake_fetch)
+
+    settlements = await tracker.settle_via_venue("0xproxy")
+    assert len(settlements) == 1
+    s = settlements[0]
+    assert s["outcome_yes"] is False  # we hold NO and NO won
+    assert s["pnl"] == pytest.approx((1.0 - 0.62) * 20.0)
+    # The portfolio row was deleted token-scoped and the market deactivated.
+    executed_sql = " ".join(str(c.args[0]) for c in db.execute.call_args_list)
+    assert "DELETE FROM portfolio" in executed_sql
+    assert "AND token = ?" in executed_sql
+    assert "UPDATE markets SET active = 0" in executed_sql
+
+
+@pytest.mark.asyncio
+async def test_venue_sweep_losing_yes_leg(monkeypatch):
+    """A YES leg the venue says lost settles at $0 — realized loss equals
+    cost, replacing the phantom -100% unrealized mark."""
+    row = {"market_id": "m2", "token": "YES", "token_id": "tok-yes-2",
+           "size": 10.0, "avg_price": 0.40, "side": "BUY", "is_paper": 0}
+    db = _make_sweep_db([row])
+    tracker = ResolutionTracker(db=db, calibration=None, discoveries={},
+                                proxy_address="0xproxy")
+
+    async def _fake_fetch(proxy, **kw):
+        return [_make_venue_position("tok-yes-2", is_winner=False,
+                                     status="pending_oracle")]
+    monkeypatch.setattr("auramaur.broker.redeemer.fetch_redeemable_positions",
+                        _fake_fetch)
+
+    settlements = await tracker.settle_via_venue("0xproxy")
+    assert len(settlements) == 1
+    assert settlements[0]["outcome_yes"] is False
+    assert settlements[0]["pnl"] == pytest.approx(-4.0)
+
+
+@pytest.mark.asyncio
+async def test_venue_sweep_dry_run_writes_nothing(monkeypatch):
+    row = {"market_id": "m1", "token": "NO", "token_id": "tok-no-1",
+           "size": 20.0, "avg_price": 0.62, "side": "BUY", "is_paper": 0}
+    db = _make_sweep_db([row])
+    tracker = ResolutionTracker(db=db, calibration=None, discoveries={},
+                                proxy_address="0xproxy")
+
+    async def _fake_fetch(proxy, **kw):
+        return [_make_venue_position("tok-no-1", is_winner=True)]
+    monkeypatch.setattr("auramaur.broker.redeemer.fetch_redeemable_positions",
+                        _fake_fetch)
+
+    settlements = await tracker.settle_via_venue("0xproxy", dry_run=True)
+    assert len(settlements) == 1
+    db.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_venue_sweep_ignores_unmatched_and_no_proxy(monkeypatch):
+    db = _make_sweep_db([{"market_id": "m1", "token": "YES",
+                          "token_id": "tok-other", "size": 5.0,
+                          "avg_price": 0.5, "side": "BUY", "is_paper": 0}])
+    tracker = ResolutionTracker(db=db, calibration=None, discoveries={})
+
+    async def _fake_fetch(proxy, **kw):
+        return [_make_venue_position("tok-unknown", is_winner=True)]
+    monkeypatch.setattr("auramaur.broker.redeemer.fetch_redeemable_positions",
+                        _fake_fetch)
+
+    assert await tracker.settle_via_venue("0xproxy") == []
+    assert await tracker.settle_via_venue("") == []

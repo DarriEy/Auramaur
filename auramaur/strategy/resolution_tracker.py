@@ -26,12 +26,14 @@ class ResolutionTracker:
     def __init__(
         self,
         db: Database,
-        calibration: CalibrationTracker,
+        calibration: CalibrationTracker | None,
         discoveries: dict[str, MarketDiscovery],
+        proxy_address: str = "",
     ) -> None:
         self._db = db
         self._calibration = calibration
         self._discoveries = discoveries
+        self._proxy_address = proxy_address
 
     async def check_resolutions(self) -> int:
         """Check all pending predictions for resolutions.
@@ -126,10 +128,95 @@ class ResolutionTracker:
                     error=str(e),
                 )
 
+        # Venue-truth sweep: the loop above can't settle markets the Gamma
+        # API no longer returns (archived) or whose active flag is stale —
+        # those positions sat at phantom marks forever (March sports legs
+        # were marked $0 on BOTH sides, -100% "unrealized" on each). The
+        # data-api per-token resolution state is authoritative and covers
+        # exactly the rows the loop skipped.
+        if self._proxy_address:
+            try:
+                settled = await self.settle_via_venue(self._proxy_address)
+                resolved_count += len(settled)
+            except Exception as e:
+                log.debug("resolution.venue_sweep_error", error=str(e))
+
         if resolved_count > 0:
             log.info("resolution.cycle_complete", newly_resolved=resolved_count)
 
         return resolved_count
+
+    # ------------------------------------------------------------------
+    # Venue-truth settlement (Polymarket data-api)
+    # ------------------------------------------------------------------
+
+    async def settle_via_venue(
+        self, proxy_address: str, *, dry_run: bool = False,
+    ) -> list[dict]:
+        """Settle live Polymarket positions the venue itself says resolved.
+
+        Polymarket's data-api reports per held token whether the position is
+        redeemable (oracle-confirmed) or effectively resolved (curPrice
+        pinned to 0/1, pending oracle), keyed by asset id == our
+        portfolio.token_id. Settlement goes through the standard idempotent
+        path (ledger source_ref dedupes), scoped to the exact token row so
+        YES+NO pairs settle leg by leg.
+
+        Returns the settlements performed (or planned, when ``dry_run``).
+        """
+        from auramaur.broker.redeemer import fetch_redeemable_positions
+
+        if not proxy_address:
+            return []
+        venue_positions = await fetch_redeemable_positions(proxy_address)
+        if not venue_positions:
+            return []
+
+        rows = await self._db.fetchall(
+            """SELECT p.market_id, p.token, p.token_id, p.size, p.avg_price
+               FROM portfolio p WHERE p.is_paper = 0 AND p.size > 0""")
+        by_token_id = {r["token_id"]: dict(r) for r in (rows or [])
+                       if r["token_id"]}
+
+        settlements: list[dict] = []
+        for vp in venue_positions:
+            row = by_token_id.get(vp.asset_id)
+            if row is None:
+                continue
+            # cur_price/is_winner are relative to OUR held side; map back to
+            # the market-level YES outcome the settlement path expects.
+            held_yes = (row["token"] or "YES") == "YES"
+            outcome_yes = vp.is_winner if held_yes else (not vp.is_winner)
+            exit_price = 1.0 if vp.is_winner else 0.0
+            settlements.append({
+                "market_id": row["market_id"],
+                "title": vp.title,
+                "token": row["token"] or "YES",
+                "size": row["size"],
+                "avg_price": row["avg_price"],
+                "pnl": (exit_price - row["avg_price"]) * row["size"],
+                "status": vp.status,
+                "outcome_yes": outcome_yes,
+            })
+            if dry_run:
+                continue
+            await self._settle_position(
+                row["market_id"], outcome_yes,
+                token_scope=row["token"] or "YES", is_paper_scope=0,
+            )
+            await self._db.execute(
+                "UPDATE markets SET active = 0 WHERE id = ?",
+                (row["market_id"],),
+            )
+            await self._db.commit()
+            log.info(
+                "resolution.venue_settled",
+                market_id=row["market_id"],
+                token=row["token"],
+                status=vp.status,
+                title=vp.title[:60],
+            )
+        return settlements
 
     # ------------------------------------------------------------------
     # Resolution detection
@@ -178,15 +265,28 @@ class ResolutionTracker:
     # Position settlement
     # ------------------------------------------------------------------
 
-    async def _settle_position(self, market_id: str, outcome: bool) -> None:
+    async def _settle_position(self, market_id: str, outcome: bool,
+                               token_scope: str | None = None,
+                               is_paper_scope: int | None = None) -> None:
         """Clean up the portfolio entry and log realized PnL for a resolved market.
 
         Computes the realized profit/loss from the position, records it in
-        the daily_stats table, and removes the portfolio row.
+        the daily_stats table, and removes the portfolio row. When
+        ``token_scope`` / ``is_paper_scope`` are given the settlement is
+        scoped to that exact row (the venue sweep settles per held token);
+        without them the legacy market-wide behavior is preserved.
         """
+        where = "market_id = ?"
+        params: list = [market_id]
+        if token_scope is not None:
+            where += " AND token = ?"
+            params.append(token_scope)
+        if is_paper_scope is not None:
+            where += " AND is_paper = ?"
+            params.append(is_paper_scope)
         pos_row = await self._db.fetchone(
-            "SELECT * FROM portfolio WHERE market_id = ?",
-            (market_id,),
+            f"SELECT * FROM portfolio WHERE {where}",
+            tuple(params),
         )
         if pos_row is None:
             # No position — we only had a calibration prediction, not a trade.
@@ -263,10 +363,19 @@ class ResolutionTracker:
 
         # Remove from portfolio — scoped by is_paper so a paper resolution
         # doesn't delete a live position for the same market (and vice versa).
-        await self._db.execute(
-            "DELETE FROM portfolio WHERE market_id = ? AND is_paper = ?",
-            (market_id, is_paper_flag),
-        )
+        # When the caller settled a specific token, only that row goes: a
+        # YES+NO pair (mergeable) settles leg by leg.
+        if token_scope is not None:
+            await self._db.execute(
+                "DELETE FROM portfolio WHERE market_id = ? AND is_paper = ? "
+                "AND token = ?",
+                (market_id, is_paper_flag, token_scope),
+            )
+        else:
+            await self._db.execute(
+                "DELETE FROM portfolio WHERE market_id = ? AND is_paper = ?",
+                (market_id, is_paper_flag),
+            )
 
         # Remove peak tracking
         await self._db.execute(
