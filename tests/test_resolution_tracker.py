@@ -400,3 +400,32 @@ async def test_venue_sweep_ignores_unmatched_and_no_proxy(monkeypatch):
 
     assert await tracker.settle_via_venue("0xproxy") == []
     assert await tracker.settle_via_venue("") == []
+
+
+@pytest.mark.asyncio
+async def test_venue_sweep_skips_already_settled_token(monkeypatch):
+    """A settled-but-unredeemed leg resurrected by the syncer must NOT
+    settle twice — only the ledger insert is idempotent; daily_stats and
+    cost_basis would double-count."""
+    row = {"market_id": "m1", "token": "NO", "token_id": "tok-no-1",
+           "size": 20.0, "avg_price": 0.62, "side": "BUY", "is_paper": 0}
+    db = _make_sweep_db([row])
+
+    async def _fetchone(sql, params=None):
+        if "pnl_ledger" in sql:
+            assert params == ("settle:m1:NO:0",)
+            return {"1": 1}  # settlement already recorded
+        return row
+    db.fetchone = AsyncMock(side_effect=_fetchone)
+
+    tracker = ResolutionTracker(db=db, calibration=None, discoveries={},
+                                proxy_address="0xproxy")
+
+    async def _fake_fetch(proxy, **kw):
+        return [_make_venue_position("tok-no-1", is_winner=True)]
+    monkeypatch.setattr("auramaur.broker.redeemer.fetch_redeemable_positions",
+                        _fake_fetch)
+
+    assert await tracker.settle_via_venue("0xproxy") == []
+    executed_sql = " ".join(str(c.args[0]) for c in db.execute.call_args_list)
+    assert "DELETE FROM portfolio" not in executed_sql

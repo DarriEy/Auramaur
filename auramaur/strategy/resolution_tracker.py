@@ -139,7 +139,9 @@ class ResolutionTracker:
                 settled = await self.settle_via_venue(self._proxy_address)
                 resolved_count += len(settled)
             except Exception as e:
-                log.debug("resolution.venue_sweep_error", error=str(e))
+                # Warning, not debug: a silently-failing sweep looks identical
+                # to "nothing to settle" and the stuck positions never clear.
+                log.warning("resolution.venue_sweep_error", error=str(e))
 
         if resolved_count > 0:
             log.info("resolution.cycle_complete", newly_resolved=resolved_count)
@@ -182,6 +184,15 @@ class ResolutionTracker:
         for vp in venue_positions:
             row = by_token_id.get(vp.asset_id)
             if row is None:
+                continue
+            # Already settled in a prior pass (the wallet still holds the
+            # tokens until redemption, so the syncer can resurrect the row).
+            # Only the ledger insert is idempotent — re-running settlement
+            # would re-add the P&L to daily_stats and cost_basis.
+            held_token = row["token"] or "YES"
+            ref = f"settle:{row['market_id']}:{held_token}:0"
+            if await self._db.fetchone(
+                    "SELECT 1 FROM pnl_ledger WHERE source_ref = ?", (ref,)):
                 continue
             # cur_price/is_winner are relative to OUR held side; map back to
             # the market-level YES outcome the settlement path expects.
