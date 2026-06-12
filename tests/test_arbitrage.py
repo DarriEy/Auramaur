@@ -116,3 +116,34 @@ class TestArbitrageExecutor:
 
         pairs = run(executor.generate_arb_signals(), event_loop)
         assert len(pairs) == 0
+
+
+# --- Category gate (2026-06-12): exempt books still respect category bans ---
+
+def test_arb_category_gate_filters_blocked_and_non_allowlisted():
+    """The arb scanner was caught quoting KBO baseball live — an arb is
+    hedged only when both legs fill; a single-leg fill is directional sports
+    inventory. Blocked categories are never scanned; with the live allowlist
+    set, unknown/'other' markets are skipped too."""
+    from auramaur.exchange.models import Market
+    from auramaur.strategy.arbitrage_scanner import ArbitrageScanner
+
+    def _mkt(mid, question, category=""):
+        return Market(id=mid, question=question, category=category)
+
+    kbo = _mkt("kbo", "KBO: SSG Landers vs. Samsung Lions")
+    labeled = _mkt("lab", "Will this happen?", category="sports")
+    unknown = _mkt("unk", "Will the gadget ship this quarter?")
+    crypto = _mkt("cry", "Will Bitcoin reach $200k?", category="crypto")
+
+    live = ArbitrageScanner(
+        discoveries={}, blocked_categories=["sports", "politics_us"],
+        allowed_categories_live=["crypto", "tech", "politics_intl"])
+    assert [m.id for m in [kbo, labeled, unknown, crypto]
+            if live._category_ok(m)] == ["cry"]
+
+    paper = ArbitrageScanner(
+        discoveries={}, blocked_categories=["sports", "politics_us"],
+        allowed_categories_live=None)
+    assert [m.id for m in [kbo, labeled, unknown, crypto]
+            if paper._category_ok(m)] == ["unk", "cry"]

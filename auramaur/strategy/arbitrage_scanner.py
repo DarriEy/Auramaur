@@ -137,6 +137,8 @@ class ArbitrageScanner:
         analyzer: Any = None,
         exchange_fees: dict[str, float] | None = None,
         min_profit_after_fees_pct: float = 1.5,
+        blocked_categories: list[str] | None = None,
+        allowed_categories_live: list[str] | None = None,
     ) -> None:
         """Initialize with the discoveries dict from bot components.
 
@@ -148,11 +150,34 @@ class ArbitrageScanner:
                           e.g. {"polymarket": 0.0, "kalshi": 0.07}
             min_profit_after_fees_pct: Minimum profit % after fees to flag
                                        as an opportunity.
+            blocked_categories: categories never scanned (an arb is hedged
+                only when BOTH legs fill — a single-leg fill is directional
+                inventory in a banned market; observed live 2026-06-12
+                quoting KBO baseball).
+            allowed_categories_live: when set (live mode), only these
+                categories are scanned — same fail-closed policy as the
+                directional books. None disables the allowlist (paper).
         """
         self._discoveries = discoveries
         self._analyzer = analyzer
         self._exchange_fees = exchange_fees or {}
         self._min_profit_after_fees_pct = min_profit_after_fees_pct
+        self._blocked_categories = set(blocked_categories or [])
+        self._allowed_categories_live = (
+            set(allowed_categories_live) if allowed_categories_live is not None
+            else None)
+
+    def _category_ok(self, market: Market) -> bool:
+        """Category gate for scan candidates (stored label or fresh classify)."""
+        from auramaur.strategy.classifier import ensure_category
+        category = ensure_category(
+            market.question, market.description, market.category)
+        if category in self._blocked_categories:
+            return False
+        if (self._allowed_categories_live is not None
+                and category not in self._allowed_categories_live):
+            return False
+        return True
 
     async def scan(self) -> list[ArbOpportunity]:
         """Scan all exchanges for price mismatches on equivalent markets.
@@ -408,6 +433,7 @@ class ArbitrageScanner:
         if markets is None:
             try:
                 markets = await discovery.get_markets(active=True, limit=100)
+                markets = [m for m in markets if self._category_ok(m)]
             except Exception as e:
                 log.error("arb_scanner.internal_fetch_error", error=str(e))
                 return []
@@ -543,6 +569,7 @@ class ArbitrageScanner:
         async def _fetch_one(name: str, discovery: MarketDiscovery) -> tuple[str, list[Market]]:
             try:
                 markets = await discovery.get_markets(active=True, limit=100)
+                markets = [m for m in markets if self._category_ok(m)]
                 log.debug("arb_scanner.fetched", exchange=name, count=len(markets))
                 return (name, markets)
             except Exception as e:
