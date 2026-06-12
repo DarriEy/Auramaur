@@ -811,6 +811,64 @@ def repair_categories(write: bool, reclassify_all: bool):
     asyncio.run(_run())
 
 
+@main.command("settle-stale")
+@click.option("--write", is_flag=True,
+              help="Perform the settlements (default is a dry-run).")
+def settle_stale(write: bool):
+    """Settle live positions the venue says resolved but the tracker missed.
+
+    The resolution tracker can't settle markets the Gamma API no longer
+    returns (archived) or whose active flag is stale — those positions sit
+    at phantom marks (-100% on BOTH sides of the same market). This sweeps
+    them against Polymarket's data-api per-token resolution state, through
+    the same idempotent settlement path the tracker uses.
+    """
+
+    async def _run():
+        from auramaur.strategy.resolution_tracker import ResolutionTracker
+
+        settings = Settings()
+        proxy = settings.polymarket_proxy_address
+        if not proxy:
+            console.print("[red]POLYMARKET_PROXY_ADDRESS not set.[/]")
+            return
+
+        db = Database()
+        await db.connect()
+        try:
+            tracker = ResolutionTracker(db=db, calibration=None,
+                                        discoveries={}, proxy_address=proxy)
+            settlements = await tracker.settle_via_venue(
+                proxy, dry_run=not write)
+            if not settlements:
+                console.print("[green]No venue-resolved positions to settle.[/]")
+                return
+            t = Table(title=f"{'Settled' if write else 'Would settle (dry run)'} "
+                            f"{len(settlements)} positions")
+            t.add_column("Market", max_width=50)
+            t.add_column("Token", width=5)
+            t.add_column("Size", justify="right")
+            t.add_column("Avg", justify="right")
+            t.add_column("P&L", justify="right")
+            t.add_column("Status")
+            total = 0.0
+            for s in settlements:
+                total += s["pnl"]
+                color = "green" if s["pnl"] >= 0 else "red"
+                t.add_row(s["title"][:50], s["token"], f"{s['size']:.1f}",
+                          f"{s['avg_price']:.2f}",
+                          f"[{color}]{s['pnl']:+.2f}[/]", s["status"])
+            console.print(t)
+            color = "green" if total >= 0 else "red"
+            console.print(f"[bold]Net realized: [{color}]${total:+.2f}[/][/]")
+            if not write:
+                console.print("\n[dim]Re-run with [cyan]--write[/] to settle.[/]")
+        finally:
+            await db.close()
+
+    asyncio.run(_run())
+
+
 @main.command("repair-pnl")
 @click.option("--write", is_flag=True,
               help="Persist resolution_pnl rows and rebuild category_stats dollar fields.")

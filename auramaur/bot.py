@@ -350,6 +350,9 @@ class AuramaurBot:
             db=db,
             calibration=calibration,
             discoveries=discoveries,
+            # Enables the venue-truth sweep: settles positions whose markets
+            # vanished from the Gamma API (the -100% phantom-mark legs).
+            proxy_address=s.polymarket_proxy_address or "",
         )
 
         # Cross-platform arbitrage scanner (fee-aware)
