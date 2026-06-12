@@ -181,7 +181,29 @@ class MarketMaker:
         suitable: list[Market] = []
         now = datetime.now(timezone.utc)
 
+        risk = self._settings.risk
+        blocked = set(risk.blocked_categories)
+        allowed_live = (set(risk.allowed_categories_live)
+                        if self._settings.is_live else None)
+
         for market in markets:
+            # Category gate. The MM is graduation-exempt and places orders
+            # outside the risk gateway, so until 2026-06-12 it was the last
+            # path with NO category policy at all — it filled $6.30 of a
+            # tennis match live (Stuttgart Open) hours after the allowlist
+            # shipped. "Structural two-sided" only holds while quotes stay
+            # flat; a one-sided fill IS directional inventory, so the MM
+            # respects the same blocklist (always) and live allowlist as
+            # every directional book. Classify on the spot when the
+            # discovery payload carries no category.
+            from auramaur.strategy.classifier import ensure_category
+            category = ensure_category(
+                market.question, market.description, market.category)
+            if category in blocked:
+                continue
+            if allowed_live is not None and category not in allowed_live:
+                continue
+
             # Must have both token IDs for two-sided quoting
             if not market.clob_token_yes or not market.clob_token_no:
                 continue

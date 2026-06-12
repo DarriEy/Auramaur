@@ -361,6 +361,12 @@ class AuramaurBot:
             analyzer=analyzer,
             exchange_fees=s.arbitrage.exchange_fees,
             min_profit_after_fees_pct=s.arbitrage.min_profit_after_fees_pct,
+            # An arb is hedged only when BOTH legs fill — a single-leg fill
+            # is directional inventory in a banned market (caught quoting
+            # KBO baseball live 2026-06-12). Same gates as the MM.
+            blocked_categories=s.risk.blocked_categories,
+            allowed_categories_live=(s.risk.allowed_categories_live
+                                     if s.is_live else None),
         )
 
         # News reactor — monitors RSS for breaking news, triggers fast analysis
