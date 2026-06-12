@@ -59,13 +59,11 @@ async def test_no_retry_on_budget(settings):
     """Budget exhausted raises immediately, no retries."""
     settings.nlp.daily_claude_call_budget = 1
     a = ClaudeAnalyzer(settings=settings)
-    # Simulate one call already made today
-    from datetime import date
-    a._daily_calls = 1
-    a._daily_calls_date = date.today().isoformat()
-
-    with pytest.raises(RuntimeError, match="budget"):
-        await a._call_claude_cli("test prompt")
+    # Simulate one call already made today (persistent counter)
+    from unittest.mock import patch
+    with patch("auramaur.nlp.call_budget.calls_today", return_value=1):
+        with pytest.raises(RuntimeError, match="budget"):
+            await a._call_claude_cli("test prompt")
 
 
 @pytest.mark.asyncio

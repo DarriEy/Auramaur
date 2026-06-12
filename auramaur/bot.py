@@ -3120,6 +3120,11 @@ class AuramaurBot:
         db_path = self._components["db"].db_path
         if db_path != "auramaur.db":
             console.print(f"  [yellow]Instance: {db_path}[/]")
+        # Persistent Claude-budget counter lives in the same sqlite file —
+        # point it at this instance's path (multi-instance runs use
+        # auramaur_N.db and must not share a budget row file-side).
+        from auramaur.nlp import call_budget
+        call_budget.set_db_path(db_path)
 
         # Show real balance — use reconciler for live, paper for paper mode.
         # In live mode we never fall back to paper.balance — that would show
