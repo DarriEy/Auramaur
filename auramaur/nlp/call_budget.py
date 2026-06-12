@@ -41,7 +41,11 @@ def set_db_path(path: str) -> None:
 
 
 def _conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(_db_path, timeout=2)
+    # 15s busy-timeout: the bot's scan/settlement cycles hold the write lock
+    # for multi-second stretches and 2s lost the race twice within 90s of
+    # deploy. Callers sit inside multi-second LLM calls, so waiting is free;
+    # losing the write silently undercounts the budget instead.
+    conn = sqlite3.connect(_db_path, timeout=15)
     conn.execute(
         """CREATE TABLE IF NOT EXISTS llm_call_counter (
                day TEXT PRIMARY KEY,
