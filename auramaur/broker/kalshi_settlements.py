@@ -114,9 +114,20 @@ async def sweep_kalshi_settlements(
 
 async def _fetch_all_settlements(kalshi_client, max_pages: int) -> list:
     """Walk the paginated settlements feed via the client's SDK."""
+    # The SDK client is lazily constructed; outside the bot's order paths
+    # nothing has triggered it yet (the first CLI dry-run returned a silent
+    # empty list this way — silence must not look like "nothing to settle").
+    init = getattr(kalshi_client, "_init_api", None)
+    if callable(init):
+        try:
+            init()
+        except Exception as e:
+            log.warning("kalshi_settlements.init_error", error=str(e))
+            return []
     api = getattr(kalshi_client, "_portfolio_api", None)
     call = getattr(kalshi_client, "_call", None)
     if api is None or call is None:
+        log.warning("kalshi_settlements.client_unavailable")
         return []
     out: list = []
     cursor = None
