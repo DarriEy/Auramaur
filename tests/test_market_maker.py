@@ -8,9 +8,11 @@ from auramaur.exchange.models import Market, OrderBook, OrderBookLevel
 from auramaur.strategy.market_maker import MarketMaker
 
 
-def _maker(*, quote_size=10.0, max_inventory=50.0) -> MarketMaker:
+def _maker(*, quote_size=10.0, max_inventory=50.0, is_live=False,
+           blocked_categories=("sports", "politics_us"),
+           allowed_categories_live=("crypto", "tech", "politics_intl")) -> MarketMaker:
     settings = SimpleNamespace(
-        is_live=False,
+        is_live=is_live,
         market_maker=SimpleNamespace(
             min_spread_bps=40,
             max_spread_bps=1500,
@@ -18,6 +20,10 @@ def _maker(*, quote_size=10.0, max_inventory=50.0) -> MarketMaker:
             max_inventory=max_inventory,
             max_markets=5,
             refresh_seconds=30,
+        ),
+        risk=SimpleNamespace(
+            blocked_categories=list(blocked_categories),
+            allowed_categories_live=list(allowed_categories_live),
         ),
     )
     return MarketMaker(settings=settings, exchange=SimpleNamespace(), db=SimpleNamespace())
@@ -186,3 +192,50 @@ async def test_requote_cancels_previous_legs_before_replacing():
     # The first quote's two legs were cancelled before the new pair posted.
     assert cancelled == first_legs
     assert len(placed) == 4
+
+
+def test_select_rejects_blocked_category_markets():
+    """Regression (2026-06-12): the MM filled $6.30 of a tennis match live
+    ('Stuttgart Open: X vs Y') — it was the last order path with no category
+    policy. Blocked categories must never be quoted, whether the label is
+    stored or only derivable by classification."""
+    mm = _maker()
+
+    def _mkt(mid, question, category=""):
+        return Market(
+            id=mid, question=question, category=category,
+            clob_token_yes="yes", clob_token_no="no",
+            liquidity=10000, spread=0.05,
+        )
+
+    tennis = _mkt("tennis",
+                  "Stuttgart Open: Giovanni Mpetshi Perricard vs Alexander Bublik")
+    labeled = _mkt("labeled", "Will this happen?", category="sports")
+    fine = _mkt("fine", "Will Bitcoin reach $200k?", category="crypto")
+
+    ids = [m.id for m in mm._select_mm_markets([tennis, labeled, fine])]
+    assert ids == ["fine"]
+
+
+def test_select_live_mode_requires_allowlist():
+    """In live mode the MM only quotes allowlisted categories — unknown/
+    'other' markets are paper-only, same policy as the directional books."""
+    mm = _maker(is_live=True)
+
+    def _mkt(mid, question, category=""):
+        return Market(
+            id=mid, question=question, category=category,
+            clob_token_yes="yes", clob_token_no="no",
+            liquidity=10000, spread=0.05,
+        )
+
+    unknown = _mkt("unknown", "Will the gadget ship this quarter?")
+    allowed = _mkt("allowed", "Will Ethereum flip Bitcoin?", category="crypto")
+
+    ids = [m.id for m in mm._select_mm_markets([unknown, allowed])]
+    assert ids == ["allowed"]
+
+    # Paper mode keeps exploring unknown categories.
+    mm_paper = _maker(is_live=False)
+    ids_paper = [m.id for m in mm_paper._select_mm_markets([unknown, allowed])]
+    assert set(ids_paper) == {"unknown", "allowed"}
