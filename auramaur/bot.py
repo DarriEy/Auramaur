@@ -2682,6 +2682,25 @@ class AuramaurBot:
             if equity is not None:
                 await equity.close()
 
+    async def _task_build_guard(self) -> None:
+        """Warn when the on-disk checkout moves past the running process.
+
+        The 2026-06 category leak traded for a day on pre-fix code because
+        the merged fix sat on disk while the long-lived process kept running
+        the old build. Checks every 5 minutes; the guard rate-limits its own
+        alerts (hourly per the quiet-feed rules).
+        """
+        from auramaur.monitoring.build_info import BuildStalenessGuard
+        guard = BuildStalenessGuard(
+            alert=lambda msg: console.print(f"[bold red]⚠ STALE BUILD: {msg}[/]")
+        )
+        while self._running:
+            try:
+                guard.check()
+            except Exception as e:
+                log.debug("build_guard.error", error=str(e))
+            await asyncio.sleep(300)
+
     async def _task_order_monitor(self) -> None:
         """Monitor pending limit orders for fills and expiry."""
         from datetime import datetime, timezone
@@ -3018,6 +3037,14 @@ class AuramaurBot:
         mode = "LIVE" if self.settings.is_live else "PAPER"
         show_banner(mode, "0.1.0")
 
+        # Announce which build this process runs. The 2026-06 category leak
+        # traded for a day on pre-fix code because nothing said the running
+        # process was older than the checkout.
+        from auramaur.monitoring.build_info import STARTUP_SHA
+        if STARTUP_SHA:
+            console.print(f"  [dim]Build: {STARTUP_SHA}[/]")
+            log.info("bot.build", sha=STARTUP_SHA, mode=mode)
+
         await self._init_components()
         self._running = True
 
@@ -3143,6 +3170,11 @@ class AuramaurBot:
         )
         self._watchdog.beat()
         self._watchdog.start()
+
+        # Build-staleness guard: warns when the checkout on disk moves past
+        # the running process (merged fix, no restart — the 2026-06 leak).
+        tasks.append(asyncio.create_task(
+            self._task_build_guard(), name="build_guard"))
 
         # Redemption check — only meaningful with a Polymarket proxy wallet
         if self.settings.polymarket_proxy_address:
