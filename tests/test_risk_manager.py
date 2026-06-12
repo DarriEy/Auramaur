@@ -32,6 +32,8 @@ def _make_settings(
     kelly_fraction=0.40,
     paper_initial_balance=500.0,
     blocked_categories=None,
+    allowed_categories_live=None,
+    is_live=False,
 ):
     from config.settings import RiskConfig
     s = MagicMock()
@@ -52,8 +54,13 @@ def _make_settings(
         second_opinion_divergence_max=second_opinion_divergence_max,
         max_stake_per_market=max_stake_per_market,
         blocked_categories=blocked_categories or [],
+        **({"allowed_categories_live": allowed_categories_live}
+           if allowed_categories_live is not None else {}),
     )
     s.risk = rc
+    # MagicMock attributes are truthy — pin the live flag so the allowlist
+    # check only arms when a test asks for it.
+    s.is_live = is_live
     s.risk_tolerance = 50.0  # neutral -> scaling is a no-op in tests
     from config.settings import GraduationConfig
     s.graduation = GraduationConfig(mode="off")  # ladder exercised in test_graduation.py
@@ -336,3 +343,89 @@ async def test_blocked_category_catches_stale_stored_label(mock_kill):
     blocked = next(c for c in d.checks if c.name == "blocked_category")
     assert blocked.passed is False
     assert blocked.value == "sports"  # the fresh classification, not 'other'
+
+
+@pytest.mark.asyncio
+@patch("auramaur.risk.manager.check_kill_switch")
+async def test_live_allowlist_fails_closed_on_other_and_unknown(mock_kill):
+    """2026-06-12 inversion: a blocklist fails OPEN on every classification
+    gap (the mislabel leak bought tennis stored as politics_us live). In
+    live mode the stored category must be ON the allowlist — 'other',
+    unknown, and unlisted categories stay paper-only."""
+    from auramaur.risk.checks import CheckResult
+    mock_kill.return_value = CheckResult(name="kill_switch", passed=True, reason="", value=False)
+
+    settings = _make_settings(is_live=True,
+                              allowed_categories_live=["tech", "crypto"])
+    db = MagicMock()
+    db.fetchone = AsyncMock(return_value=None)
+    manager = RiskManager(settings, db)
+    manager.portfolio = _mock_portfolio()
+
+    for cat in ("other", "politics_us", "sports", "never-seen-venue-label"):
+        market = _make_market(category=cat)
+        sig = _make_signal(edge=10.0, claude_prob=0.60, market_prob=0.50)
+        sig.strategy_source = "news_speed"
+        d = await manager.evaluate(sig, market, available_cash=500.0)
+        gate = next(c for c in d.checks if c.name == "category_allowlist")
+        assert gate.passed is False, cat
+        assert d.approved is False, cat
+
+
+@pytest.mark.asyncio
+@patch("auramaur.risk.manager.check_kill_switch")
+async def test_live_allowlist_passes_allowed_category(mock_kill):
+    """An allowlisted stored label trades live even when the fresh keyword
+    classification is inconclusive ('other') — eligibility hangs on the
+    authoritative stored label, not keyword recognition; #17 stays the
+    tripwire for confidently-BAD fresh labels."""
+    from auramaur.risk.checks import CheckResult
+    mock_kill.return_value = CheckResult(name="kill_switch", passed=True, reason="", value=False)
+
+    settings = _make_settings(is_live=True,
+                              allowed_categories_live=["tech", "crypto"])
+    db = MagicMock()
+    db.fetchone = AsyncMock(return_value=None)
+    manager = RiskManager(settings, db)
+    manager.portfolio = _mock_portfolio()
+
+    market = _make_market(category="tech")
+    market.question = "Will the gadget ship this quarter?"  # classifies 'other'
+    sig = _make_signal(edge=10.0, claude_prob=0.60, market_prob=0.50)
+    sig.strategy_source = "news_speed"
+    d = await manager.evaluate(sig, market, available_cash=500.0)
+    gate = next(c for c in d.checks if c.name == "category_allowlist")
+    assert gate.passed is True
+
+
+@pytest.mark.asyncio
+@patch("auramaur.risk.manager.check_kill_switch")
+async def test_live_allowlist_skipped_in_paper_and_for_exempt(mock_kill):
+    """Paper mode keeps blocklist-gated exploration (no allowlist check at
+    all); structural two-sided strategies stay exempt in live mode."""
+    from auramaur.risk.checks import CheckResult
+    mock_kill.return_value = CheckResult(name="kill_switch", passed=True, reason="", value=False)
+
+    db = MagicMock()
+    db.fetchone = AsyncMock(return_value=None)
+
+    # Paper: no category_allowlist check appended.
+    settings = _make_settings(is_live=False,
+                              allowed_categories_live=["tech"])
+    manager = RiskManager(settings, db)
+    manager.portfolio = _mock_portfolio()
+    market = _make_market(category="other")
+    sig = _make_signal(edge=10.0, claude_prob=0.60, market_prob=0.50)
+    d = await manager.evaluate(sig, market, available_cash=500.0)
+    assert not any(c.name == "category_allowlist" for c in d.checks)
+
+    # Live + exempt strategy: check passes without judging the category.
+    settings2 = _make_settings(is_live=True,
+                               allowed_categories_live=["tech"])
+    manager2 = RiskManager(settings2, db)
+    manager2.portfolio = _mock_portfolio()
+    sig2 = _make_signal(edge=10.0, claude_prob=0.60, market_prob=0.50)
+    sig2.strategy_source = "arbitrage"
+    d2 = await manager2.evaluate(sig2, market, available_cash=500.0)
+    gate = next(c for c in d2.checks if c.name == "category_allowlist")
+    assert gate.passed is True

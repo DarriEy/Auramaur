@@ -26,6 +26,7 @@ from auramaur.risk.checks import (
     check_min_edge,
     check_min_liquidity,
     check_blocked_category,
+    check_category_allowlist,
     check_mispricing_named,
     check_second_opinion_divergence,
     check_time_to_resolution,
@@ -170,12 +171,24 @@ class RiskManager:
         from auramaur.strategy.classifier import classify_market
         fresh_category = classify_market(
             market.question or "", market.description or "")
+        category_applies = signal.strategy_source not in set(
+            self.settings.graduation.exempt_strategies)
         pre_checks.append(await check_blocked_category(
             market.category or "", rc.blocked_categories,
-            applies=signal.strategy_source not in set(
-                self.settings.graduation.exempt_strategies),
+            applies=category_applies,
             fallback_category=fresh_category,
         ))
+        # Live entries additionally require the allowlist (fail-safe): the
+        # stored (venue-tag-derived) label must name a category we have
+        # demonstrated edge in; unknown/'other' markets stay paper-only, so
+        # a classifier gap costs opportunity, not money. The fresh keyword
+        # classification stays the #17 tripwire for confidently-bad labels.
+        if self.settings.is_live:
+            pre_checks.append(await check_category_allowlist(
+                market.category or "", rc.allowed_categories_live,
+                applies=category_applies,
+                fallback_category=fresh_category,
+            ))
 
         # ----------------------------------------------------------------
         # Name-the-gap gate: a significant LLM divergence must name the

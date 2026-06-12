@@ -742,12 +742,22 @@ def oddlot():
 @main.command("repair-categories")
 @click.option("--write", is_flag=True,
               help="Persist classified categories (default is a dry-run).")
-def repair_categories(write: bool):
+@click.option("--all", "reclassify_all", is_flag=True,
+              help="Re-classify EVERY market and overwrite stored labels "
+                   "that differ (default: only empty/NULL labels).")
+def repair_categories(write: bool, reclassify_all: bool):
     """Classify markets stored with an empty/NULL category.
 
     Empty categories bypass blocked_categories (the check is `category in
     blocked`) and pollute graduation cells as '(none)'. Insert sites now
     classify on write; this backfills history (markets + portfolio rows).
+
+    With --all, every stored label is re-derived from the current classifier
+    and overwritten when it differs. This is the recovery path for the
+    2026-06 keyword mislabels (tennis matches stored as politics_us via
+    "primary" in resolution boilerplate, "American League" hitting the old
+    US-politics "american" marker, governor primaries stored as sports via
+    the long-removed "winner" marker).
     """
 
     async def _run():
@@ -758,28 +768,42 @@ def repair_categories(write: bool):
         db = Database()
         await db.connect()
         try:
+            scope_sql = ("" if reclassify_all
+                         else " WHERE category = '' OR category IS NULL")
             rows = await db.fetchall(
-                "SELECT id, question, description FROM markets "
-                "WHERE category = '' OR category IS NULL")
+                "SELECT id, question, description, category FROM markets"
+                + scope_sql)
             counts: Counter = Counter()
+            transitions: Counter = Counter()
+            changed = 0
             for r in rows or []:
                 cat = classify_market(r["question"] or "", r["description"] or "")
                 counts[cat] += 1
+                old = r["category"] or ""
+                if cat == old:
+                    continue
+                changed += 1
+                transitions[f"{old or '(none)'} -> {cat}"] += 1
                 if write:
                     await db.execute(
                         "UPDATE markets SET category = ? WHERE id = ?",
                         (cat, r["id"]))
                     await db.execute(
-                        "UPDATE portfolio SET category = ? WHERE market_id = ? "
-                        "AND (category = '' OR category IS NULL)",
+                        "UPDATE portfolio SET category = ? WHERE market_id = ?",
                         (cat, r["id"]))
             if write:
                 await db.commit()
             mode = "WRITE" if write else "DRY RUN"
-            console.print(f"[bold]{mode}[/] {len(rows or [])} uncategorized markets")
+            scope = "all" if reclassify_all else "uncategorized"
+            console.print(f"[bold]{mode}[/] {len(rows or [])} {scope} markets, "
+                          f"{changed} relabeled")
             for cat, n in counts.most_common():
                 console.print(f"  {cat:16} {n}")
-            if not write and rows:
+            if transitions:
+                console.print("\n[bold]Transitions[/] (old -> new):")
+                for tr, n in transitions.most_common(25):
+                    console.print(f"  {tr:42} {n}")
+            if not write and changed:
                 console.print("\n[dim]Re-run with [cyan]--write[/] to persist.[/]")
         finally:
             await db.close()

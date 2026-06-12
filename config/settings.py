@@ -99,6 +99,17 @@ class RiskConfig(BaseModel):
     # performance bears that out. Blocked outright rather than left to the
     # feedback loop, which needs a sample sports keeps losing money to build.
     blocked_categories: list[str] = ["sports"]
+    # LIVE entries are allowlist-gated (fail-safe): a category must be ON this
+    # list to trade real money; unknown/''/'other'/mislabeled categories can
+    # paper-trade but never go live. The blocklist above still governs paper
+    # (exploration) and the engine's candidate filter. Rationale: a blocklist
+    # fails OPEN on every classification gap — the 2026-06 mislabel leak
+    # bought tennis and Senate-control markets live. An allowlist makes
+    # classifier bugs cost opportunity instead of money.
+    allowed_categories_live: list[str] = [
+        "crypto", "tech", "politics_intl", "economics", "science", "legal",
+        "entertainment", "weather", "esports",
+    ]
 
 
 class KellyConfig(BaseModel):
