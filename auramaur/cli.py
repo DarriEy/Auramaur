@@ -58,8 +58,11 @@ def run(agent: bool, hybrid: bool, exchange: str | None):
         else:
             console.print("[bold yellow]AGENT MODE[/] — paper trading")
     if hybrid:
-        if settings.hybrid.market_maker_auto_enable:
-            settings.market_maker.enabled = True
+        # NOTE: --hybrid used to force market_maker.enabled = True here
+        # (hybrid.market_maker_auto_enable), silently reverting an explicit
+        # config disable on every restart — it cost three blind restarts
+        # during the 2026-06-12 incident before anyone found it. Book
+        # enablement now lives in exactly one place: market_maker.enabled.
         mode = "[bold red]LIVE TRADING[/]" if settings.is_live else "paper trading"
         console.print(f"[bold cyan]HYBRID MODE[/] — {mode}")
         # The full per-book picture (modes, gates, graduation, ledger) is the

@@ -479,7 +479,6 @@ hybrid:
   llm_domain_filter: true
   llm_whitelist_min_accuracy: 0.50
   llm_whitelist_min_trades: 5
-  market_maker_auto_enable: true
 
 logging:
   level: "INFO"
