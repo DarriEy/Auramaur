@@ -633,7 +633,6 @@ class HybridConfig(BaseModel):
     llm_domain_filter: bool = True
     llm_whitelist_min_accuracy: float = 0.50
     llm_whitelist_min_trades: int = 5
-    market_maker_auto_enable: bool = True
 
 
 class LoggingConfig(BaseModel):

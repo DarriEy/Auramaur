@@ -1376,6 +1376,26 @@ class AuramaurBot:
                         sell_market = await arb_executor._load_market(sell_signal.market_id)
                         if not buy_market or not sell_market:
                             continue
+                        # Same category policy as every other book: this
+                        # path executes through the exempt 'arbitrage'
+                        # strategy_source, so the gateway's category checks
+                        # never see it (it quoted KBO baseball live
+                        # 2026-06-12). Both legs must clear the gates.
+                        from auramaur.strategy.classifier import ensure_category
+                        risk_cfg = self.settings.risk
+                        blocked = set(risk_cfg.blocked_categories)
+                        allowed = (set(risk_cfg.allowed_categories_live)
+                                   if self.settings.is_live else None)
+                        leg_cats = [
+                            ensure_category(m.question, m.description, m.category)
+                            for m in (buy_market, sell_market)
+                        ]
+                        if any(c in blocked for c in leg_cats) or (
+                                allowed is not None
+                                and any(c not in allowed for c in leg_cats)):
+                            log.debug("arbitrage.category_gated",
+                                      categories=leg_cats)
+                            continue
                         await self._execute_conditional_arb(
                             buy_signal, sell_signal, buy_market, sell_market,
                             opp, risk_manager, engines,
@@ -1861,6 +1881,23 @@ class AuramaurBot:
         engine = engines.get(exchange_name)
         if engine is None:
             log.debug("arb_scanner.no_engine", exchange=exchange_name)
+            return
+
+        # Cross-attempt pairing guard (2026-06-12): re-quoting a market whose
+        # previous attempt PARTIALLY filled completes the pair at the new
+        # cycle's worse prices — observed live locking 0.82 + 0.21 = $1.03
+        # against a $1.00 payout. If we already hold either token of this
+        # market, skip: the one-sided leg is the exit machinery's problem,
+        # not a fresh "arb".
+        db: Database = self._components["db"]
+        is_paper_flag = 0 if self.settings.is_live else 1
+        held = await db.fetchone(
+            "SELECT 1 FROM portfolio WHERE market_id = ? AND is_paper = ? "
+            "AND size > 0",
+            (market.id, is_paper_flag),
+        )
+        if held is not None:
+            log.info("arb_scanner.skip_partial_inventory", market_id=market.id)
             return
 
         alerts: AlertManager = self._components["alerts"]
@@ -3228,7 +3265,9 @@ class AuramaurBot:
 
         if self._components.get("attributor"):
             tasks.append(asyncio.create_task(self._task_attribution_update(), name="attribution"))
-        if self._components.get("correlator"):
+        # Correlation-arb executes through the exempt 'arbitrage' source and
+        # had no off switch at all; it shares the arbitrage book's flag.
+        if self._components.get("correlator") and self.settings.arbitrage.enabled:
             tasks.append(asyncio.create_task(self._task_correlation_scan(), name="correlation"))
         if self._components.get("websocket"):
             tasks.append(asyncio.create_task(self._task_price_monitor(), name="price_monitor"))
@@ -3237,8 +3276,11 @@ class AuramaurBot:
         if self._components.get("feedback"):
             tasks.append(asyncio.create_task(self._task_performance_feedback(), name="performance_feedback"))
 
-        # Arb scanner always runs (handles single-exchange gracefully)
-        tasks.append(asyncio.create_task(self._task_arb_scanner(), name="arb_scanner"))
+        # Arb scanner — arbitrage.enabled was a dead flag (the task ran
+        # unconditionally), discovered 2026-06-12 when disabling it via
+        # config did nothing while the book locked a -3% cross-attempt pair.
+        if self.settings.arbitrage.enabled:
+            tasks.append(asyncio.create_task(self._task_arb_scanner(), name="arb_scanner"))
         tasks.append(asyncio.create_task(self._task_depth_research(), name="depth_research"))
 
         # Favorite-longshot bias harvest (paper-forced until proven)
