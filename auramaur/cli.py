@@ -869,6 +869,68 @@ def settle_stale(write: bool):
     asyncio.run(_run())
 
 
+@main.command("kalshi-settlements")
+@click.option("--write", is_flag=True,
+              help="Book the settlements into the ledger (default dry-run).")
+def kalshi_settlements(write: bool):
+    """Backfill/book Kalshi settlements from the venue's settlement feed.
+
+    Kalshi realized P&L was never recorded (the tracker keyed off a Market
+    field that didn't exist, and the syncer dropped settled positions before
+    booking). This walks GET /portfolio/settlements and books every
+    settlement missing from pnl_ledger, idempotently (source_ref dedupes).
+    Settlements whose cost basis we never recorded are listed but skipped.
+    The bot also runs this sweep automatically every resolution cycle.
+    """
+
+    async def _run():
+        from auramaur.broker.kalshi_settlements import sweep_kalshi_settlements
+        from auramaur.exchange.kalshi import KalshiClient
+        from auramaur.exchange.paper import PaperTrader
+
+        settings = Settings()
+        db = Database()
+        await db.connect()
+        try:
+            paper = PaperTrader(db=db)
+            client = KalshiClient(settings=settings, paper_trader=paper)
+            rows = await sweep_kalshi_settlements(db, client, dry_run=not write)
+            if not rows:
+                console.print("[green]No unbooked Kalshi settlements found.[/]")
+                return
+            t = Table(title=f"{'Booked' if write else 'Would book (dry run)'} "
+                            f"Kalshi settlements")
+            t.add_column("Settled", width=10)
+            t.add_column("Ticker", max_width=30)
+            t.add_column("Result", width=6)
+            t.add_column("Qty", justify="right")
+            t.add_column("Revenue", justify="right")
+            t.add_column("P&L", justify="right")
+            total, skipped = 0.0, 0
+            for r in sorted(rows, key=lambda x: x["settled"]):
+                if r["pnl"] is None:
+                    skipped += 1
+                    t.add_row(r["settled"][:10], r["ticker"][:30], r["result"],
+                              f"{r['qty']:.0f}", f"${r['revenue']:.2f}",
+                              "[yellow]skip: no cost[/]")
+                    continue
+                total += r["pnl"]
+                color = "green" if r["pnl"] >= 0 else "red"
+                t.add_row(r["settled"][:10], r["ticker"][:30], r["result"],
+                          f"{r['qty']:.0f}", f"${r['revenue']:.2f}",
+                          f"[{color}]{r['pnl']:+.2f}[/]")
+            console.print(t)
+            color = "green" if total >= 0 else "red"
+            console.print(f"[bold]Net realized: [{color}]${total:+.2f}[/][/]"
+                          + (f"  ({skipped} skipped, no cost basis)" if skipped else ""))
+            if not write:
+                console.print("\n[dim]Re-run with [cyan]--write[/] to book.[/]")
+        finally:
+            await db.close()
+
+    asyncio.run(_run())
+
+
 @main.command("repair-pnl")
 @click.option("--write", is_flag=True,
               help="Persist resolution_pnl rows and rebuild category_stats dollar fields.")

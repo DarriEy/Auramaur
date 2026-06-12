@@ -3017,6 +3017,29 @@ class AuramaurBot:
                 return
             try:
                 resolved = await tracker.check_resolutions()
+
+                # Kalshi settlements sweep: the venue's settlements feed is
+                # the only reliable booking source there — the syncer drops
+                # settled positions from `portfolio` before the Gamma-style
+                # detection path can see them, which is how Kalshi realized
+                # P&L went entirely unrecorded until 2026-06-12.
+                kalshi = (self._components.get("exchanges") or {}).get("kalshi")
+                if kalshi is not None:
+                    try:
+                        from auramaur.broker.kalshi_settlements import (
+                            sweep_kalshi_settlements,
+                        )
+                        booked = await sweep_kalshi_settlements(
+                            self._components["db"], kalshi)
+                        booked_ok = [b for b in booked if b.get("booked")]
+                        if booked_ok:
+                            resolved += len(booked_ok)
+                            log.info("kalshi_settlements.swept",
+                                     booked=len(booked_ok))
+                    except Exception as e:
+                        log.warning("kalshi_settlements.sweep_error",
+                                    error=str(e))
+
                 if resolved > 0:
                     from datetime import datetime, timezone
                     now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")

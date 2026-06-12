@@ -865,6 +865,13 @@ class KalshiClient:
                 volume=volume,
                 liquidity=liquidity,
                 spread=spread,
+                # Settlement signals for the resolution tracker: it keys off
+                # market.status ("settled"/"finalized") and prefers the
+                # venue's explicit result side over price inference. These
+                # were never populated, so no Kalshi position ever settled
+                # into the ledger.
+                status=status,
+                result=str(_get("result", "") or "").lower(),
             )
         except Exception as e:
             log.warning("kalshi.parse_error", error=str(e))

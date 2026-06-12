@@ -46,6 +46,13 @@ class Market(BaseModel):
     # guaranteed-profit arb. neg_risk_market_id is the grouping key.
     neg_risk: bool = False
     neg_risk_market_id: str = ""
+    # Venue-reported lifecycle. Kalshi exposes an explicit settlement status
+    # ("settled"/"finalized") and a result side ("yes"/"no") — the resolution
+    # tracker keyed off `market.status` while no Market ever carried the
+    # field (getattr defaulted to None), so no Kalshi position was ever
+    # settled into the ledger. Empty for venues that don't report these.
+    status: str = ""
+    result: str = ""
     last_updated: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
