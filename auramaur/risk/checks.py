@@ -430,3 +430,42 @@ async def check_blocked_category(
         reason=f"category '{offending}' is blocked" if offending else "",
         value=offending or category,
     )
+
+
+# ---------------------------------------------------------------------------
+# 18. Category allowlist (LIVE entries only — fail-safe inversion of #17)
+# ---------------------------------------------------------------------------
+
+async def check_category_allowlist(
+    category: str, allowed: list[str], applies: bool = True,
+    fallback_category: str = "",
+) -> CheckResult:
+    """Fail unless the market's category is explicitly allowed for live money.
+
+    The blocklist (#17) fails OPEN: any market whose label is unknown, '',
+    'other', or simply wrong slips through and trades live — the 2026-06
+    mislabel leak bought tennis matches stored as politics_us and a $42
+    Senate-control position. This check fails CLOSED: the stored ``category``
+    (venue-tag-derived at ingestion, the authoritative label) must be ON the
+    allowlist; ``fallback_category`` substitutes only when no label is stored.
+
+    The fresh classification deliberately does NOT also have to be allowed:
+    the keyword classifier returns 'other' for plenty of legitimately-labeled
+    markets, and requiring both would make live eligibility depend on keyword
+    recognition again. Mislabel defense-in-depth stays with #17, which trips
+    when the fresh classification names a BLOCKED category. Paper mode never
+    calls this — exploration stays blocklist-gated. Structural two-sided
+    strategies pass ``applies=False``, same as #17.
+    """
+    if not applies:
+        return CheckResult(name="category_allowlist", passed=True, reason="",
+                           value=category)
+    label = category or fallback_category or "(none)"
+    passed = label in set(allowed or [])
+    return CheckResult(
+        name="category_allowlist",
+        passed=passed,
+        reason=("" if passed
+                else f"category '{label}' is not allowed for live entries"),
+        value=label,
+    )

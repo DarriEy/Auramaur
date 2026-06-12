@@ -1,6 +1,6 @@
 """Tests for market category classification."""
 
-from auramaur.strategy.classifier import classify_market
+from auramaur.strategy.classifier import classify_market, classify_tags
 
 
 def test_politics_us():
@@ -129,3 +129,89 @@ def test_individual_sports_stay_blocked():
         "Will the winner of the 2026 Tour de France be from Slovenia?",
     ]:
         assert classify_market(q) == "sports", q
+
+
+# --- 2026-06 production mislabels: description boilerplate poisoning ---
+# These exact markets were stored as politics_us and traded live (or false-
+# blocked) because keyword scoring ran on resolution boilerplate.
+
+def test_tennis_marker_in_description_is_sports():
+    """Tennis matchup with no marker in the question — the description names
+    the sport. Stored as politics_us in production via 'primary' boilerplate;
+    bought live 2026-06-11 ($4.30)."""
+    assert classify_market(
+        "Libema Open: Magda Linette vs Mia Pohankova",
+        description="This market refers to the tennis match between Magda "
+                    "Linette and Mia Pohankova in the Libema Open.",
+    ) == "sports"
+
+
+def test_vs_without_period_is_sports():
+    assert classify_market("Libema Open: Magda Linette vs Mia Pohankova") == "sports"
+
+
+def test_american_league_is_not_politics_us():
+    """'American League' must not hit a US-politics marker."""
+    assert classify_market(
+        "Will Seattle Mariners win the 2026 AL West title?",
+        description="This market will resolve according to the team that "
+                    "wins the 2026 MLB American League West division.",
+    ) == "sports"
+
+
+def test_primary_listing_boilerplate_not_politics():
+    """'primary listing' in IPO boilerplate must not classify as politics_us."""
+    assert classify_market(
+        "SpaceX IPO closing market cap above $1.8T?",
+        description="This market will resolve to Yes if the official closing "
+                    "price for SpaceX's market capitalization on its first day "
+                    "of primary listing exceeds the threshold.",
+    ) not in ("politics_us", "politics_intl")
+
+
+def test_transcription_boilerplate_not_tech():
+    """'AI transcription' resolution boilerplate must not out-vote a political
+    question — question hits count double."""
+    assert classify_market(
+        'Will JD Vance say "Crazy" during Michigan visit?',
+        description="Resolution will be according to AI transcription services "
+                    "of the full remarks.",
+    ) == "politics_us"
+
+
+def test_esports_not_stolen_by_sports_markers():
+    """CS/Dota matchups read like sports ('X vs Y') but must stay esports —
+    sports is blocked, esports is not."""
+    assert classify_market(
+        "Counter-Strike: CYBERSHOKE Esports vs Eternal Fire (BO1)") == "esports"
+    assert classify_market("Counter-Strike: FURIA vs TYLOO - Map 2 Winner") == "esports"
+    assert classify_market(
+        "Game 2: Both Teams Beat Roshan?",
+        description="This market refers to Game 2 of the Dota 2 series.",
+    ) == "esports"
+
+
+def test_dutch_parliament_not_politics_us():
+    """'Dutch House of Representatives' must not hit the US 'house' marker."""
+    assert classify_market(
+        "Dutch House of Representatives dissolved in 2026?") == "politics_intl"
+
+
+# --- Venue tag mapping (authoritative layer above keyword scoring) ---
+
+def test_classify_tags_maps_known_labels():
+    assert classify_tags(["Tennis", "2026 Predictions"]) == "sports"
+    assert classify_tags(["exchange", "Tech", "Crypto"]) == "crypto"
+    assert classify_tags(["France", "Politics", "Macron"]) == "politics_intl"
+    assert classify_tags(["US Politics", "Featured"]) == "politics_us"
+
+
+def test_classify_tags_inconclusive():
+    """Bare 'Politics' is ambiguous (US? intl?) — fall through to keywords."""
+    assert classify_tags(["Politics", "Featured"]) == ""
+    assert classify_tags([]) == ""
+    assert classify_tags(None) == ""
+
+
+def test_classify_tags_esports_beats_sports():
+    assert classify_tags(["Sports", "Esports", "CS2"]) == "esports"

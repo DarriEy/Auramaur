@@ -10,6 +10,7 @@ import aiohttp
 import structlog
 
 from auramaur.exchange.models import Market
+from auramaur.strategy.classifier import classify_tags
 
 log = structlog.get_logger()
 
@@ -233,12 +234,28 @@ class GammaClient:
             neg_risk_market_id = str(
                 data.get("negRiskMarketID") or data.get("negRiskMarketId") or ""
             )
+            events = data.get("events") or []
+            if not isinstance(events, list):
+                events = []
             if not neg_risk_market_id:
-                events = data.get("events") or []
-                if isinstance(events, list) and events and isinstance(events[0], dict):
+                if events and isinstance(events[0], dict):
                     neg_risk_market_id = str(events[0].get("id", ""))
                     if not neg_risk and events[0].get("negRisk"):
                         neg_risk = True
+
+            # Category: the market object itself carries no taxonomy, but its
+            # parent events carry curated tags ("Tennis", "Crypto", "France").
+            # Those are authoritative when they map; the keyword classifier in
+            # ensure_category()/classify_market() is only the fallback. Keyword
+            # scoring on description boilerplate is what mislabeled tennis and
+            # SpaceX-IPO markets as politics_us (traded live 2026-06-09..11).
+            tag_labels = [
+                t.get("label", "")
+                for e in events if isinstance(e, dict)
+                for t in (e.get("tags") or []) if isinstance(t, dict)
+            ]
+            category = (classify_tags(tag_labels)
+                        or data.get("category", data.get("groupSlug", "")))
 
             return Market(
                 id=str(data.get("id", data.get("conditionId", ""))),
@@ -246,7 +263,7 @@ class GammaClient:
                 condition_id=str(data.get("conditionId", "")),
                 question=data.get("question", ""),
                 description=data.get("description", ""),
-                category=data.get("category", data.get("groupSlug", "")),
+                category=category,
                 end_date=end_date,
                 active=data.get("active", True),
                 outcome_yes_price=yes_price,

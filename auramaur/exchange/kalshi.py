@@ -641,10 +641,18 @@ class KalshiClient:
                     current_price = avg_price
 
                 from auramaur.strategy.classifier import ensure_category
+                # The ticker stands in for the question when the market lookup
+                # fails (NOT NULL column), but it must never reach the
+                # classifier — keyword-matching a ticker string produces
+                # garbage labels. Unknown stays "other" until a later sync
+                # sees the real question.
                 question = market.question if market else ticker
                 description = market.description if market else ""
-                category = ensure_category(
-                    question, description, market.category if market else "")
+                if market:
+                    category = ensure_category(
+                        market.question, description, market.category)
+                else:
+                    category = "other"
                 yes_price = market.outcome_yes_price if market else 0.0
                 no_price = market.outcome_no_price if market else 0.0
                 volume = market.volume if market else 0.0

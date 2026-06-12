@@ -52,6 +52,16 @@ risk:
   # — yet it was the 2nd-largest live category by June notional. Sports is
   # anti-edge (Brier 0.521).
   blocked_categories: ["sports", "politics_us"]
+  # LIVE entries are allowlist-gated (fail-safe, 2026-06-12): a category must
+  # be ON this list to trade real money. Unknown/''/'other'/mislabeled
+  # categories paper-trade but never go live — a blocklist fails OPEN on
+  # every classification gap (the 2026-06 mislabel leak bought tennis and
+  # Senate-control markets live); an allowlist makes classifier bugs cost
+  # opportunity instead of money. Edge map: tech/crypto/intl-politics is
+  # where calibration shows edge; sports/politics_us stay out (see above).
+  allowed_categories_live: ["crypto", "tech", "politics_intl", "economics",
+                            "science", "legal", "entertainment", "weather",
+                            "esports"]
   time_to_resolution_min_hours: 4
   time_to_resolution_max_days: 0   # 0 = no ceiling; set to 90 to reject 3+ month markets
   max_correlated_positions: 10

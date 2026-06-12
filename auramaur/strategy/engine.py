@@ -30,7 +30,7 @@ from auramaur.nlp.calibration import CalibrationTracker
 from auramaur.broker.allocator import CandidateTrade, CapitalAllocator
 from auramaur.broker.router import SmartOrderRouter, UnmarketableSignal
 from auramaur.risk.manager import RiskManager
-from auramaur.strategy.classifier import classify_market, ensure_category
+from auramaur.strategy.classifier import ensure_category
 from auramaur.strategy.order_flow import OrderFlowTracker
 from auramaur.strategy.protocols import MarketAnalyzer, TradeCandidate
 from auramaur.strategy.signals import detect_edge
@@ -342,7 +342,11 @@ class TradingEngine:
         markets = await self.discovery.get_markets(limit=limit)
 
         for market in markets:
-            category = classify_market(market.question, market.description)
+            # Venue-tag categories (set by the gamma parser from event tags)
+            # are authoritative; keyword-classify only when tags were absent
+            # or inconclusive.
+            category = ensure_category(
+                market.question, market.description, market.category)
             market.category = category
 
             await self.db.execute(
@@ -961,9 +965,19 @@ class TradingEngine:
         filtered_count = 0
 
         blocked = set(self.settings.risk.blocked_categories)
+        # Live mode: skip candidates outside the live allowlist up front —
+        # the gateway's check_category_allowlist would reject them anyway,
+        # so analyzing them only burns LLM calls. The gateway remains the
+        # enforcement point (this is a pure efficiency filter, like
+        # _held_market_ids).
+        allowed_live = (set(self.settings.risk.allowed_categories_live)
+                        if self.settings.is_live else None)
 
         for m in candidates:
             if m.category in blocked:
+                filtered_count += 1
+                continue
+            if allowed_live is not None and m.category not in allowed_live:
                 filtered_count += 1
                 continue
             # Check performance-based avoid list
