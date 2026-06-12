@@ -249,9 +249,16 @@ class ResolutionTracker:
         prematurely and fed a fake outcome into calibration.
         """
         # Kalshi exposes an explicit settlement status — trust it first.
+        # (market.status/.result only exist as of the Market-model fields
+        # added 2026-06-12; before that getattr always returned None and no
+        # Kalshi position ever settled.) Prefer the venue's explicit result
+        # side over price inference.
         if exchange == "kalshi":
             status = getattr(market, "status", None)
             if status in ("settled", "finalized"):
+                result = getattr(market, "result", "")
+                if result in ("yes", "no"):
+                    return result == "yes"
                 return market.outcome_yes_price > 0.5
 
         # For everything else, the exchange must have flagged the market
