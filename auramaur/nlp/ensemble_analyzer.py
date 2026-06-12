@@ -64,8 +64,6 @@ class EnsembleAnalyzer:
         self._db = db
         self._models = settings.llm_ensemble.models
         self._model_weights: dict[str, float] = {}
-        self._daily_calls = 0
-        self._daily_calls_date = ""
 
     # ------------------------------------------------------------------
     # Weight management
@@ -345,13 +343,10 @@ class EnsembleAnalyzer:
 
         Same as ClaudeAnalyzer._call_claude_cli but with configurable --model flag.
         """
-        today = date.today().isoformat()
-        if self._daily_calls_date != today:
-            self._daily_calls = 0
-            self._daily_calls_date = today
+        from auramaur.nlp import call_budget
 
         budget = self._settings.nlp.daily_claude_call_budget
-        if budget > 0 and self._daily_calls >= budget:
+        if budget > 0 and call_budget.calls_today() >= budget:
             raise RuntimeError(f"Daily Claude call budget ({budget}) exhausted")
 
         max_attempts = 3
@@ -378,11 +373,10 @@ class EnsembleAnalyzer:
                     err_msg = stderr.decode().strip()
                     raise RuntimeError(f"Claude CLI ({model}) failed (rc={proc.returncode}): {err_msg}")
 
-                self._daily_calls += 1
                 log.info(
                     "ensemble.model_call",
                     model=model,
-                    daily_calls=self._daily_calls,
+                    daily_calls=call_budget.record_call(),
                 )
 
                 raw_text = stdout.decode().strip()

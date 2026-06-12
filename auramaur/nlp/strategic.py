@@ -273,8 +273,6 @@ class StrategicAnalyzer:
         self._db = db
         self._cache = NLPCache(db)
         self._world_model = self._load_world_model()
-        self._daily_calls = 0
-        self._daily_calls_date = ""
 
         # Initialize LLM ensemble if enabled
         self._ensemble = None
@@ -949,12 +947,6 @@ class StrategicAnalyzer:
                 ``nlp.effort_primary``.
         """
         import asyncio
-        from datetime import date
-
-        today = date.today().isoformat()
-        if self._daily_calls_date != today:
-            self._daily_calls = 0
-            self._daily_calls_date = today
 
         use_model = model or self._model
         use_effort = effort or self._settings.nlp.effort_primary
@@ -992,13 +984,13 @@ class StrategicAnalyzer:
                     err = stderr.decode().strip()
                     raise RuntimeError(f"Claude CLI ({use_model}) failed (rc={proc.returncode}): {err}")
 
-                self._daily_calls += 1
+                from auramaur.nlp import call_budget
                 log.info(
                     "strategic.claude_call",
                     model=use_model,
                     effort=use_effort,
                     cached_prefix=bool(system_prompt),
-                    daily_calls=self._daily_calls,
+                    daily_calls=call_budget.record_call(),
                 )
                 return stdout.decode().strip()
 
@@ -1019,7 +1011,8 @@ class StrategicAnalyzer:
 
         # route() calls the fn with just the prompt; bind the extra CLI options.
         claude_fn = partial(self._call_claude_cli, system_prompt=system_prompt, effort=effort)
-        return await route(self._settings, self._daily_calls, prompt, claude_fn)
+        from auramaur.nlp import call_budget
+        return await route(self._settings, call_budget.calls_today(), prompt, claude_fn)
 
     async def _call_ensemble_extra(
         self, prompt: str, extra_models: list[str], *, system_prompt: str | None = None,

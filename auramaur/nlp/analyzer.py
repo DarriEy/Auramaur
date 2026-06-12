@@ -83,8 +83,6 @@ class ClaudeAnalyzer:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._model = settings.nlp.model
-        self._daily_calls = 0
-        self._daily_calls_date = ""
 
     async def _call_claude_cli(self, prompt: str, *, effort: str | None = None) -> str:
         """Call Claude via the CLI using the Max+ subscription.
@@ -97,16 +95,12 @@ class ClaudeAnalyzer:
 
         Retries up to 3 times on transient failures (timeout, non-zero exit).
         """
-        from datetime import date
+        from auramaur.nlp import call_budget
 
         use_effort = effort or self._settings.nlp.effort_primary
 
-        today = date.today().isoformat()
-        if self._daily_calls_date != today:
-            self._daily_calls = 0
-            self._daily_calls_date = today
         budget = self._settings.nlp.daily_claude_call_budget
-        if budget > 0 and self._daily_calls >= budget:
+        if budget > 0 and call_budget.calls_today() >= budget:
             raise RuntimeError(
                 f"Daily Claude call budget ({budget}) exhausted"
             )
@@ -132,10 +126,9 @@ class ClaudeAnalyzer:
                     log.error("claude_cli.error", returncode=proc.returncode, stderr=err_msg, attempt=attempt)
                     raise RuntimeError(f"Claude CLI failed (rc={proc.returncode}): {err_msg}")
 
-                self._daily_calls += 1
                 log.info(
                     "claude_cli.call",
-                    daily_calls=self._daily_calls,
+                    daily_calls=call_budget.record_call(),
                     budget=budget,
                 )
                 return stdout.decode().strip()
@@ -160,8 +153,9 @@ class ClaudeAnalyzer:
         from functools import partial
 
         from auramaur.nlp.llm_router import route
+        from auramaur.nlp import call_budget
         claude_fn = partial(self._call_claude_cli, effort=effort)
-        return await route(self._settings, self._daily_calls, prompt, claude_fn)
+        return await route(self._settings, call_budget.calls_today(), prompt, claude_fn)
 
     # ------------------------------------------------------------------
     # Core estimation methods

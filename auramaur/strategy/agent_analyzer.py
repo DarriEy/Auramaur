@@ -235,18 +235,12 @@ class AgentAnalyzer:
         self._model = settings.nlp.model
         self._max_turns: int = 15  # Enough room for deep research
         self._timeout_seconds: int = 600  # 10 minutes for thorough analysis
-        # Daily budget tracking (resets each calendar day)
-        self._daily_calls: int = 0
-        self._daily_calls_date: str = ""
 
     def _check_budget(self) -> None:
         """Enforce daily Claude call budget.  Raises RuntimeError if exhausted."""
-        today = date.today().isoformat()
-        if self._daily_calls_date != today:
-            self._daily_calls = 0
-            self._daily_calls_date = today
+        from auramaur.nlp import call_budget
         budget = self.settings.nlp.daily_claude_call_budget
-        if budget > 0 and self._daily_calls >= budget:
+        if budget > 0 and call_budget.calls_today() >= budget:
             raise RuntimeError(
                 f"Daily agent call budget ({budget}) exhausted"
             )
@@ -266,7 +260,8 @@ class AgentAnalyzer:
             batch = markets[i:i + _MAX_MARKETS_PER_CALL]
             try:
                 candidates, entity_map = await self._run_agent(batch)
-                self._daily_calls += 1
+                from auramaur.nlp import call_budget
+                call_budget.record_call()
                 all_candidates.extend(candidates)
                 self._update_world_model_from_entities(entity_map)
             except RuntimeError:
@@ -578,7 +573,8 @@ Respond with JSON:
 
             self._max_turns = old_turns
             self._timeout_seconds = old_timeout
-            self._daily_calls += 1
+            from auramaur.nlp import call_budget
+            call_budget.record_call()
 
             # Parse single-market response
             fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw)
