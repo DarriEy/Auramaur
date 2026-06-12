@@ -261,6 +261,44 @@ class PositionSyncer:
     # Reconciliation
     # ------------------------------------------------------------------
 
+    async def _settled_keys(self, is_paper_flag: int) -> set[tuple[str, str]]:
+        """(market_id, token) pairs whose settlement is already in the ledger.
+
+        A settled-but-unredeemed position still sits in the wallet, so every
+        sync resurrected it into portfolio at a $0 mark — a phantom -100%
+        "unrealized" loss on a leg whose P&L is already realized (and, once
+        the venue sweep re-settled the zombie, daily_stats/cost_basis would
+        double-count). Settled keys stay out of portfolio; redeem-check
+        tracks the wallet side until on-chain redemption empties it.
+        """
+        try:
+            rows = await self._db.fetchall(
+                "SELECT source_ref FROM pnl_ledger WHERE kind = 'settlement'")
+        except Exception:
+            return set()
+        keys: set[tuple[str, str]] = set()
+        suffix = f":{is_paper_flag}"
+        for r in rows or []:
+            ref = r["source_ref"] or ""
+            # source_ref format: settle:{market_id}:{token}:{is_paper}
+            if ref.startswith("settle:") and ref.endswith(suffix):
+                parts = ref.split(":")
+                if len(parts) == 4:
+                    keys.add((parts[1], parts[2]))
+        return keys
+
+    def _drop_settled(self, positions: list[LivePosition],
+                      settled: set[tuple[str, str]]) -> list[LivePosition]:
+        kept = []
+        for pos in positions:
+            token = pos.token.value if pos.token else "YES"
+            if (pos.market_id, token) in settled:
+                log.debug("sync.skip_settled", market_id=pos.market_id,
+                          token=token)
+                continue
+            kept.append(pos)
+        return kept
+
     async def _merge_new_positions(self, positions: list[LivePosition]) -> None:
         """Add newly discovered positions to the portfolio table.
 
@@ -270,6 +308,8 @@ class PositionSyncer:
         """
         now = datetime.now(timezone.utc).isoformat()
         is_paper_flag = 0 if self._settings.is_live else 1
+        positions = self._drop_settled(
+            positions, await self._settled_keys(is_paper_flag))
         for pos in positions:
             side = OrderSide.BUY.value
             token = pos.token.value if pos.token else "YES"
@@ -317,6 +357,15 @@ class PositionSyncer:
 
         now = datetime.now(timezone.utc).isoformat()
         is_paper_flag = 0 if self._settings.is_live else 1
+
+        # Settled-but-unredeemed legs must not resurrect: dropping them from
+        # the incoming list ALSO routes their existing portfolio rows into
+        # the stale-delete below, so zombies get purged on the next sync.
+        positions = self._drop_settled(
+            positions, await self._settled_keys(is_paper_flag))
+        if not positions:
+            log.debug("sync.reconcile.skip_all_settled")
+            return
 
         # Scope reconciliation to Polymarket rows in the CURRENT mode only.
         # Mixing modes would let a live sync (which returns empty when the
