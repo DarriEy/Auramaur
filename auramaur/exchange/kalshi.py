@@ -431,26 +431,35 @@ class KalshiClient:
             # API returns orderbook_fp (dollar strings) or orderbook (cents)
             book = data.get("orderbook_fp", data.get("orderbook", {}))
 
-            bids = []
-            for level in (book.get("yes_dollars") or book.get("yes") or book.get("var_true") or []):
+            def _level_price(level) -> tuple[float, float]:
+                """Return (price_in_dollars, size) for a raw book level."""
                 if isinstance(level, list):
                     # [price_str, size_str] in dollars
-                    bids.append(OrderBookLevel(price=float(level[0]), size=float(level[1])))
-                elif isinstance(level, dict):
-                    price = float(level.get("price", 0))
-                    if price > 1:
-                        price = price / 100
-                    bids.append(OrderBookLevel(price=price, size=float(level.get("count", 0))))
+                    return float(level[0]), float(level[1])
+                price = float(level.get("price", 0))
+                if price > 1:  # cents API
+                    price = price / 100
+                return price, float(level.get("count", 0))
+
+            # Kalshi only publishes RESTING BIDS on each side: `yes` = bids to
+            # buy YES, `no` = bids to buy NO. There is no explicit ask array.
+            #   - YES bids map directly to our book bids.
+            #   - A NO bid at price p is an offer to SELL YES at (1 - p), so it
+            #     becomes a YES ask at (1 - p). Without this conversion, asks
+            #     held the raw NO-bid prices, and best_ask = min(asks) collapsed
+            #     to the cheapest longshot NO bid (~$0.01). The router then
+            #     crossed every BUY entry to that phantom 1c ask, the order
+            #     rested forever, TTL-cancelled, and re-approved next cycle —
+            #     an unfillable churn loop on illiquid tail bins.
+            bids = []
+            for level in (book.get("yes_dollars") or book.get("yes") or book.get("var_true") or []):
+                price, size = _level_price(level)
+                bids.append(OrderBookLevel(price=price, size=size))
 
             asks = []
             for level in (book.get("no_dollars") or book.get("no") or book.get("var_false") or []):
-                if isinstance(level, list):
-                    asks.append(OrderBookLevel(price=float(level[0]), size=float(level[1])))
-                elif isinstance(level, dict):
-                    price = float(level.get("price", 0))
-                    if price > 1:
-                        price = price / 100
-                    asks.append(OrderBookLevel(price=price, size=float(level.get("count", 0))))
+                no_price, size = _level_price(level)
+                asks.append(OrderBookLevel(price=round(1.0 - no_price, 4), size=size))
 
             return OrderBook(bids=bids, asks=asks)
         except Exception as e:
