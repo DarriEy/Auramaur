@@ -159,6 +159,23 @@ class PositionReconciler:
                 # Fall back to current price — treats the dust as flat P&L.
                 avg_cost = current_price if current_price > 0 else 0.5
 
+            # The CLOB get_market `price` field comes back 0/missing for
+            # thinly-traded tokens, but these positions are ACTIVE and held.
+            # Marking them at $0 understates the portfolio and fabricates a
+            # -100% unrealized loss — and portfolio value feeds the risk gates
+            # (drawdown / daily-loss) and Kelly sizing. Fall back to avg_cost
+            # (the real fill price) so the mark is flat P&L, not a phantom total
+            # loss. Matched positions still get a live book price from
+            # _sync_live; this floor only catches the reconciler-only positions
+            # (no market row) that never reach it.
+            if current_price <= 0:
+                log.info(
+                    "reconciler.zero_price_fallback",
+                    market_id=market_id or condition_id[:16],
+                    avg_cost=round(avg_cost, 4),
+                )
+                current_price = avg_cost
+
             positions.append(ReconciledPosition(
                 market_id=market_id or condition_id[:16],
                 condition_id=condition_id,
