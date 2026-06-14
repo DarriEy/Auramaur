@@ -153,6 +153,15 @@ class PositionSyncer:
                 else:
                     current_price = yes_price
 
+                # No usable market price — a stale or never-scanned market row
+                # carries 0 for both sides. Fall back to avg_cost so an ACTIVE
+                # held position isn't marked $0: a phantom -100% loss that
+                # distorts portfolio value, the risk gates, and Kelly. Mirrors
+                # the reconciler floor; real book/market marks still win when
+                # present (this only fires when current_price resolved to 0).
+                if current_price <= 0:
+                    current_price = float(row["avg_cost"] or 0)
+
                 category = row["category"] or ""
 
                 positions.append(
