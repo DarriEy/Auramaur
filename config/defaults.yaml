@@ -51,7 +51,11 @@ risk:
   # (Brier 0.238) and it's the worst realized-$ category (-$17 to -$29 lifetime)
   # — yet it was the 2nd-largest live category by June notional. Sports is
   # anti-edge (Brier 0.521).
-  blocked_categories: ["sports", "politics_us"]
+  # entertainment added 2026-06-14: pnl_ledger shows -$17.21 realized live,
+  # 0 wins / 5 settlements — a no-edge speculation bucket. The counterfactual
+  # (excluding politics_us/sports/entertainment) lifts lifetime live realized
+  # from -$126 to -$44, so these three carry ~$82 of the loss.
+  blocked_categories: ["sports", "politics_us", "entertainment"]
   # LIVE entries are allowlist-gated (fail-safe, 2026-06-12): a category must
   # be ON this list to trade real money. Unknown/''/'other'/mislabeled
   # categories paper-trade but never go live — a blocklist fails OPEN on
@@ -60,7 +64,7 @@ risk:
   # opportunity instead of money. Edge map: tech/crypto/intl-politics is
   # where calibration shows edge; sports/politics_us stay out (see above).
   allowed_categories_live: ["crypto", "tech", "politics_intl", "economics",
-                            "science", "legal", "entertainment", "weather",
+                            "science", "legal", "weather",
                             "esports"]
   time_to_resolution_min_hours: 4
   time_to_resolution_max_days: 0   # 0 = no ceiling; set to 90 to reject 3+ month markets
