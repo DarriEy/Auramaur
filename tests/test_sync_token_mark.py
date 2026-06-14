@@ -137,6 +137,34 @@ def test_unknown_label_empty_book_falls_back_to_yes_price():
     asyncio.run(run())
 
 
+def test_no_price_data_market_falls_back_to_avg_cost():
+    """A stale/never-scanned market row carries 0 for both prices. An ACTIVE
+    held position must NOT be marked $0 (a phantom -100% loss) — fall back to
+    avg_cost."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            # Market row with NO usable price data on either side.
+            await db.execute(
+                """INSERT INTO markets (id, question, outcome_yes_price,
+                                        outcome_no_price, clob_token_yes,
+                                        clob_token_no, last_updated)
+                   VALUES ('m1', 'Q?', 0, 0, '', '', datetime('now'))""",
+            )
+            await _seed_holding(db, "m1", "YES", "tok-1", size=40.0, avg_cost=0.58)
+            await db.commit()
+
+            positions = await _syncer(db, OrderBook())._sync_live()
+            assert len(positions) == 1
+            # Marked at avg_cost (0.58), not $0.
+            assert abs(positions[0].current_price - 0.58) < 1e-9
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_markets_table_has_clob_token_columns():
     async def run():
         db = Database(":memory:")
