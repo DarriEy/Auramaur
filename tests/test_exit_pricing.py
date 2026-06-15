@@ -1,10 +1,13 @@
-"""Marketable exit pricing: SELLs cross down to the real bid within budget.
+"""Marketable exit pricing: SELLs cross down to the real bid, or skip.
 
-A SELL posted at the position's snapshot price sits at/above the ask, rests
-until the TTL reaper cancels it, and the cleared exit suppression re-posts
-it next pass — the Obama winner looped like that for 2 days (35 cancelled
-SELLs, no fill). Exits must take the bid when it's within the cross-down
-budget, or at worst post at the budget floor inside the spread.
+A SELL only fills by crossing down to the real bid. Posted at the snapshot
+price — or anywhere inside the spread — it sits above the bid, rests until the
+TTL reaper cancels it, and the cleared exit suppression re-posts it next pass:
+the Obama winner looped that way for 2 days (35 cancelled SELLs, no fill), and
+market 1287614 the same (bid 0.27 vs a 0.48 mark). So exits take the bid when
+it's within the slippage band and above the junk floor; otherwise they skip,
+and returning False leaves the monitor's suppression set so the retry backs
+off instead of looping.
 """
 
 from __future__ import annotations
@@ -30,10 +33,11 @@ def _book(best_bid: float | None, best_ask: float | None) -> OrderBook:
     )
 
 
-def _setup(book: OrderBook, current_price: float = 0.90):
+def _setup(book: OrderBook, current_price: float = 0.90, max_slip_cents: int = 10):
     settings = MagicMock()
     settings.is_live = False
-    settings.execution.exit_max_cross_cents = 3
+    settings.execution.exit_max_cross_cents = max_slip_cents
+    settings.execution.exit_min_bid_price = 0.05
 
     bot = AuramaurBot(settings=settings)
     db = AsyncMock()
@@ -59,30 +63,72 @@ def _setup(book: OrderBook, current_price: float = 0.90):
 
 
 @pytest.mark.asyncio
-async def test_exit_takes_bid_within_budget():
+async def test_exit_takes_bid_within_band():
+    """Bid 2c below the snapshot, well within the band — cross to the bid."""
     bot, pos, reason, exchange, alerts = _setup(_book(0.88, 0.91), current_price=0.90)
 
     ok = await bot._execute_poly_exit(pos, reason, AsyncMock(), exchange, alerts)
 
     assert ok is True
     order = exchange.place_order.await_args.args[0]
-    assert order.price == 0.88  # bid is 2 cents below snapshot, within the 3-cent budget
+    assert order.price == 0.88  # the real bid, marketable
 
 
 @pytest.mark.asyncio
-async def test_exit_caps_cross_at_budget_floor():
-    bot, pos, reason, exchange, alerts = _setup(_book(0.80, 0.91), current_price=0.90)
+async def test_exit_crosses_to_bid_not_a_resting_floor():
+    """A bid 5c under the snapshot, inside a 10c band, fills at the bid (0.85)
+    — never at a 'budget floor' (0.87) that would only rest above the bid."""
+    bot, pos, reason, exchange, alerts = _setup(_book(0.85, 0.95), current_price=0.90)
 
     ok = await bot._execute_poly_exit(pos, reason, AsyncMock(), exchange, alerts)
 
     assert ok is True
     order = exchange.place_order.await_args.args[0]
-    assert order.price == 0.87  # bid too deep — post at snapshot minus 3-cent budget
+    assert order.price == 0.85  # crosses to the bid, not 0.87
 
 
 @pytest.mark.asyncio
-async def test_exit_keeps_snapshot_price_without_book():
+async def test_exit_skips_when_bid_below_band():
+    """Bid 0.70 is 20c under the 0.90 mark — beyond the 10c band. Selling here
+    would dump well under the mark, so skip and back off (the 1287614 case)."""
+    bot, pos, reason, exchange, alerts = _setup(_book(0.70, 0.95), current_price=0.90)
+
+    ok = await bot._execute_poly_exit(pos, reason, AsyncMock(), exchange, alerts)
+
+    assert ok is False
+    exchange.place_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_exit_skips_junk_bid_below_floor():
+    """A near-zero bid within the band is still junk: redeem at resolution
+    rather than dump into a 2c buyer."""
+    bot, pos, reason, exchange, alerts = _setup(_book(0.02, 0.20), current_price=0.12)
+
+    ok = await bot._execute_poly_exit(pos, reason, AsyncMock(), exchange, alerts)
+
+    assert ok is False
+    exchange.place_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_exit_skips_when_book_has_no_bid():
+    """An empty bid side has nothing to cross into — skip, don't rest a SELL
+    at the snapshot that can only TTL-cancel."""
     bot, pos, reason, exchange, alerts = _setup(_book(None, None), current_price=0.90)
+
+    ok = await bot._execute_poly_exit(pos, reason, AsyncMock(), exchange, alerts)
+
+    assert ok is False
+    exchange.place_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_exit_best_effort_when_book_fetch_errors():
+    """A genuine book fetch error (network/API) is the transient path, not the
+    wide-spread loop — fall back to posting at the snapshot price."""
+    bot, pos, reason, exchange, alerts = _setup(_book(0.88, 0.91), current_price=0.90)
+    exchange.get_order_book = AsyncMock(side_effect=RuntimeError("clob timeout"))
 
     ok = await bot._execute_poly_exit(pos, reason, AsyncMock(), exchange, alerts)
 
@@ -94,24 +140,10 @@ async def test_exit_keeps_snapshot_price_without_book():
 @pytest.mark.asyncio
 async def test_exit_skips_when_mark_contradicts_book():
     """Snapshot $0.90 but the token's book asks $0.13: the mark is fiction
-    (wrong-side label, stale price). Posting at the budget floor ($0.87) can
-    only rest and TTL out — skip the order entirely."""
+    (wrong-side label, stale price). Skip the order entirely."""
     bot, pos, reason, exchange, alerts = _setup(_book(0.07, 0.13), current_price=0.90)
 
     ok = await bot._execute_poly_exit(pos, reason, AsyncMock(), exchange, alerts)
 
     assert ok is False
     exchange.place_order.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_exit_posts_on_wide_but_plausible_spread():
-    """A wide spread whose ask is near the snapshot is legitimate — the
-    divergence gate must not block it (floor 0.87 < ask 0.95 + 0.10)."""
-    bot, pos, reason, exchange, alerts = _setup(_book(0.80, 0.95), current_price=0.90)
-
-    ok = await bot._execute_poly_exit(pos, reason, AsyncMock(), exchange, alerts)
-
-    assert ok is True
-    order = exchange.place_order.await_args.args[0]
-    assert order.price == 0.87  # budget floor, inside the spread

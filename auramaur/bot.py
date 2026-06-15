@@ -846,26 +846,37 @@ class AuramaurBot:
             return False
 
         sell_price = max(0.01, min(0.99, round(pos.current_price, 2)))
-        # Marketable exit: a SELL at the snapshot price sits at/above the ask,
-        # rests until the TTL reaper cancels it, and the cleared exit
-        # suppression re-posts it next pass — the Obama winner looped like
-        # that for 2 days (35 cancelled SELLs, no fill). Take the real bid
-        # when it's within the cross-down budget; otherwise post at the
-        # budget floor, which still sits inside the spread instead of on top
-        # of the ask. Best-effort: no book, no change.
+        # Marketable exit: a SELL only fills by crossing down to the real bid.
+        # Pricing at the snapshot — or anywhere inside the spread — rests above
+        # the bid, TTL-cancels, and the cleared exit suppression re-posts it
+        # next pass: the Obama winner looped that way for 2 days, and market
+        # 1287614 the same (bid 0.27 vs a 0.48 mark, order resting at 0.45).
+        # So take the bid outright when it's within the slippage band and above
+        # the junk floor; otherwise skip. Returning False (no order placed)
+        # leaves the portfolio monitor's exit-failure suppression set, which
+        # backs the retry off until restart or resolution instead of looping.
         try:
-            max_cross = float(self.settings.execution.exit_max_cross_cents) / 100.0
+            max_slip = float(self.settings.execution.exit_max_cross_cents) / 100.0
         except Exception:
-            max_cross = 0.03
+            max_slip = 0.10
+        try:
+            min_bid = float(self.settings.execution.exit_min_bid_price)
+        except Exception:
+            min_bid = 0.05
         try:
             book = await exchange.get_order_book(token_id)
+        except Exception as e:
+            # Genuine fetch error (network/API) — best-effort: post at the
+            # snapshot. This is the transient path, not the wide-spread loop.
+            log.debug("exit.book_unavailable", market_id=pos.market_id, error=str(e))
+            book = None
+        if book is not None:
             best_bid = book.best_bid
             best_ask = book.best_ask
-            # Mark-vs-book sanity: when even the budget floor sits far above
-            # the best ask, the snapshot is not what this token's book will
-            # pay (mislabeled side, stale mark) — the order can only rest
-            # until the TTL reaper kills it. Skip instead of looping.
-            if best_ask is not None and (sell_price - max_cross) > best_ask + 0.10:
+            # Mark-vs-book sanity: when the snapshot sits far above the best
+            # ask, the mark is fiction (mislabeled side, stale price) — even
+            # the bid is meaningless. Clearer signal than bid_too_thin.
+            if best_ask is not None and (sell_price - max_slip) > best_ask + 0.10:
                 log.warning(
                     "exit.mark_book_divergence",
                     market_id=pos.market_id,
@@ -874,19 +885,42 @@ class AuramaurBot:
                     best_bid=best_bid,
                 )
                 return False
-            if best_bid is not None and best_bid > 0:
-                marketable = max(best_bid, sell_price - max_cross)
-                if marketable < sell_price:
-                    log.info(
-                        "exit.priced_to_bid",
-                        market_id=pos.market_id,
-                        snapshot=sell_price,
-                        bid=best_bid,
-                        price=round(marketable, 2),
-                    )
-                sell_price = max(0.01, min(0.99, round(marketable, 2)))
-        except Exception as e:
-            log.debug("exit.book_unavailable", market_id=pos.market_id, error=str(e))
+            # No buyers at all — nothing to cross into; redeem at resolution.
+            if best_bid is None or best_bid <= 0:
+                log.warning(
+                    "exit.no_bid", market_id=pos.market_id, snapshot=sell_price,
+                )
+                return False
+            # Junk bid below the absolute floor — redeeming beats dumping.
+            if best_bid < min_bid:
+                log.warning(
+                    "exit.bid_below_floor",
+                    market_id=pos.market_id,
+                    snapshot=sell_price,
+                    bid=best_bid,
+                    floor=min_bid,
+                )
+                return False
+            # Bid too far under the mark to accept the slippage — back off.
+            if best_bid < sell_price - max_slip:
+                log.warning(
+                    "exit.bid_too_thin",
+                    market_id=pos.market_id,
+                    snapshot=sell_price,
+                    bid=best_bid,
+                    max_slip=max_slip,
+                )
+                return False
+            # Cross to the bid: a marketable SELL that actually fills.
+            if best_bid < sell_price:
+                log.info(
+                    "exit.priced_to_bid",
+                    market_id=pos.market_id,
+                    snapshot=sell_price,
+                    bid=best_bid,
+                    price=round(best_bid, 2),
+                )
+            sell_price = max(0.01, min(0.99, round(best_bid, 2)))
         sell_order = Order(
             market_id=pos.market_id,
             token_id=token_id,
