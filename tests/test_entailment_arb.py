@@ -290,6 +290,38 @@ def test_llm_verification_gates_fuzzy_pairs():
     asyncio.run(run())
 
 
+def test_conditional_pairs_fetched_outside_scan_window():
+    """Pre-computed conditional pairs are niche/low-volume and rarely land in
+    the top-N-by-volume scan window; _conditional_pairs must fetch each leg
+    directly rather than intersect with by_id, or the strategy stays silent
+    (root cause of entailment_arb emitting zero signals)."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            a = _market("ca", "Will A happen?", 0.30)
+            b = _market("cb", "Will B happen?", 0.50)
+            await db.execute(
+                "INSERT INTO market_relationships (market_id_a, market_id_b, "
+                "relationship_type, strength) VALUES ('ca', 'cb', 'conditional', 0.9)")
+            await db.commit()
+
+            # Scan window (get_markets) returns NEITHER leg — both must be
+            # fetched directly via get_market.
+            pillar = _pillar(db, _settings(), markets=[])
+            pillar._discovery.get_market = AsyncMock(
+                side_effect=lambda mid: {"ca": a, "cb": b}.get(mid))
+
+            pairs = await pillar._conditional_pairs(by_id={})
+            assert len(pairs) == 1
+            assert {pairs[0][0].id, pairs[0][1].id} == {"ca", "cb"}
+            assert pillar._discovery.get_market.await_count == 2
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_llm_low_confidence_blocks():
     async def run():
         db = Database(":memory:")

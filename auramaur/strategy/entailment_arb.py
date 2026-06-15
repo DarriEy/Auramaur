@@ -192,11 +192,35 @@ class EntailmentArbPillar:
             "SELECT market_id_a, market_id_b FROM market_relationships "
             "WHERE relationship_type = 'conditional'",
         )
+        # Load each leg DIRECTLY rather than intersecting with the scan window.
+        # The scan is the top-N markets by VOLUME; conditional pairs are mostly
+        # niche/low-volume markets, so both legs almost never co-occur in by_id
+        # and the strategy evaluated ~none of its 50+ ready pairs. Prefer the
+        # freshly-scanned market when present, else fetch it once (cached for
+        # this cycle). Dead/illiquid legs are filtered by _real_book.
+        fetch_cache: dict[str, Market | None] = {}
+
+        async def _leg(mid: str) -> Market | None:
+            if mid in by_id:
+                return by_id[mid]
+            if mid not in fetch_cache:
+                try:
+                    fetch_cache[mid] = await self._discovery.get_market(mid)
+                except Exception as e:
+                    log.debug("entailment.leg_fetch_error", market_id=mid, error=str(e))
+                    fetch_cache[mid] = None
+            return fetch_cache[mid]
+
         out = []
         for r in rows or []:
-            a, b = by_id.get(r["market_id_a"]), by_id.get(r["market_id_b"])
-            if a is not None and b is not None:
+            a = await _leg(r["market_id_a"])
+            b = await _leg(r["market_id_b"])
+            if (a is not None and b is not None
+                    and self._real_book(a) and self._real_book(b)):
                 out.append((a, b))
+        if out:
+            log.info("entailment.conditional_pairs", evaluable=len(out),
+                     total=len(rows or []))
         return out
 
     async def _verify_llm(self, a: Market, b: Market):
