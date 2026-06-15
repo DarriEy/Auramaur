@@ -155,13 +155,73 @@ class ResolutionLensPillar:
         )
         return row is not None
 
+    # -- candidate selection ----------------------------------------------
+
+    async def _lexical_candidates(self) -> list[Market]:
+        """Select candidates by fine-print LEXICAL shape across the FULL markets
+        table, not the top-N-by-volume scan.
+
+        resolution_lens mines the long tail — niche markets with tricky
+        resolution criteria — but the per-cycle scan is the top markets by
+        VOLUME, the mainstream where fine print rarely diverges, re-scanned
+        every cycle. So it never reached its own opportunity set and emitted
+        zero signals. The markets table caches question + description (the fine
+        print) + price + liquidity + end_date for ~all markets — everything
+        ``_eligible`` and the LLM lens need — so we filter the whole universe
+        cheaply by trigger keywords here and let the precise ``has_lens_trigger``
+        regex + ``_eligible`` refine. Per-cycle LLM work stays bounded by
+        ``max_llm_calls_per_cycle``; the lens_verdicts cache advances coverage
+        across cycles.
+        """
+        rows = await self._db.fetchall(
+            """SELECT id, question, description, category, end_date,
+                      outcome_yes_price, outcome_no_price, liquidity,
+                      clob_token_yes, clob_token_no
+               FROM markets
+               WHERE active = 1 AND exchange = 'polymarket'
+                 AND (question LIKE '%announce%' OR question LIKE '%official%'
+                      OR question LIKE '%confirm%' OR question LIKE '%permanent%'
+                      OR question LIKE '%exactly%' OR question LIKE '%ceasefire%'
+                      OR question LIKE '%declare%' OR question LIKE '%ranked%'
+                      OR question LIKE '%lasting%' OR question LIKE '%between %'
+                      OR question LIKE '%state%' OR question LIKE '% #%')""",
+        )
+        out: list[Market] = []
+        for r in rows or []:
+            if not has_lens_trigger(r["question"]):
+                continue
+            end = None
+            if r["end_date"]:
+                try:
+                    end = datetime.fromisoformat(str(r["end_date"]).replace("Z", "+00:00"))
+                except (ValueError, AttributeError):
+                    pass
+            out.append(Market(
+                id=r["id"], exchange="polymarket",
+                question=r["question"] or "", description=r["description"] or "",
+                category=r["category"] or "",
+                outcome_yes_price=r["outcome_yes_price"] or 0.0,
+                outcome_no_price=r["outcome_no_price"] or 0.0,
+                liquidity=r["liquidity"] or 0.0, volume=r["liquidity"] or 0.0,
+                clob_token_yes=r["clob_token_yes"] or "",
+                clob_token_no=r["clob_token_no"] or "",
+                end_date=end, active=True,
+            ))
+        return out
+
     # -- main cycle --------------------------------------------------------
 
     async def run_once(self) -> int:
         cfg = self._settings.resolution_lens
         if not cfg.enabled:
             return 0
-        markets = await self._discovery.get_markets(limit=cfg.scan_limit)
+        # Lexical pre-filter over the whole universe; fall back to the volume
+        # scan only if the markets table is empty (cold start).
+        markets = await self._lexical_candidates()
+        if markets:
+            log.info("lens.candidates", lexical=len(markets))
+        else:
+            markets = await self._discovery.get_markets(limit=cfg.scan_limit)
         calls = 0
         entered = 0
         for m in markets:

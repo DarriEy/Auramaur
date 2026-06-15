@@ -319,3 +319,39 @@ def test_gap_audit_caching():
         await db.close()
 
     asyncio.run(run())
+
+
+def test_lexical_candidates_scan_whole_table_not_volume_top():
+    """Candidates are selected by fine-print lexical shape across the FULL
+    markets table — not the top-N-by-volume scan — so the long-tail markets
+    the lens targets are reachable (root cause of zero signals)."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            async def _ins(mid, q, exchange="polymarket", active=1, liq=5000.0):
+                await db.execute(
+                    "INSERT INTO markets (id, exchange, question, description, "
+                    "category, end_date, outcome_yes_price, outcome_no_price, "
+                    "liquidity, clob_token_yes, clob_token_no, active, last_updated) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?, datetime('now'))",
+                    (mid, exchange, q,
+                     "Long fine-print resolution criteria describing the strict "
+                     "written bar that must be met for YES to resolve.",
+                     "politics_intl",
+                     (datetime.now(timezone.utc) + timedelta(days=20)).isoformat(),
+                     0.30, 0.70, liq, "ty", "tn", active))
+            await _ins("hit", "Will Iran officially announce a permanent ceasefire?")
+            await _ins("plain", "Will Bitcoin go up tomorrow?")            # no trigger
+            await _ins("inactive", "Will X officially confirm it?", active=0)
+            await _ins("kalshi", "Will Y officially announce?", exchange="kalshi")
+            await db.commit()
+
+            pillar = _pillar(db, _settings(), markets=[])
+            cands = await pillar._lexical_candidates()
+            assert {m.id for m in cands} == {"hit"}
+            assert cands[0].description  # fine print loaded from the cache
+        finally:
+            await db.close()
+
+    asyncio.run(run())
