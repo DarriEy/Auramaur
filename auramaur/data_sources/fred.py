@@ -18,7 +18,7 @@ _DEFAULT_SERIES: dict[str, str] = {
     "UNRATE": "Unemployment Rate",
     "PAYEMS": "Total Nonfarm Payrolls",
     "ICSA": "Initial Jobless Claims",
-    "JOLTS": "Job Openings (JOLTS)",
+    "JTSJOL": "Job Openings (JOLTS)",
     # Prices
     "CPIAUCSL": "Consumer Price Index (CPI)",
     "CPILFESL": "Core CPI (ex Food & Energy)",
