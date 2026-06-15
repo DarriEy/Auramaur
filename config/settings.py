@@ -31,11 +31,18 @@ class ExecutionConfig(BaseModel):
     # that the TTL reaper usually kills unfilled. The cross also has to leave
     # net edge above risk.min_edge_pct, so this cap only binds on wide edges.
     entry_max_cross_cents: int = 4
-    # Exit twin of entry_max_cross_cents: max cents below the position's
-    # snapshot price a SELL may cross down to hit the real bid. Without it
-    # exits posted at the snapshot price sit at/above the ask and TTL-cancel
-    # forever (the 2-day Obama-winner loop).
-    exit_max_cross_cents: int = 3
+    # Exit twin of entry_max_cross_cents: the slippage band for marketable
+    # exits. A SELL only fills by crossing down to the real bid; pricing at the
+    # snapshot (or anywhere inside the spread) rests above the bid and
+    # TTL-cancels forever (the 2-day Obama-winner loop; market 1287614). So we
+    # take the bid outright when it is within this many cents of the snapshot,
+    # otherwise skip and let the portfolio monitor back off until the book
+    # tightens or the position redeems at resolution.
+    exit_max_cross_cents: int = 10
+    # Absolute floor on the bid an exit will cross into. Below this, redeeming
+    # at resolution beats dumping into a near-zero buyer (the "junk 1c bid"
+    # guard), regardless of the slippage band above.
+    exit_min_bid_price: float = 0.05
     spread_capture_min_bps: int = 50
     stop_loss_pct: float = 30.0
     profit_target_pct: float = 50.0
