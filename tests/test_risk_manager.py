@@ -152,6 +152,37 @@ async def test_evaluate_passing_case(mock_kill):
 
 @pytest.mark.asyncio
 @patch("auramaur.risk.manager.check_kill_switch")
+async def test_per_market_stake_clamped_to_absolute_ceiling(mock_kill):
+    """2%-of-equity * regime can exceed the documented cap as the book grows;
+    the absolute ceiling must bind so per-market stake never drifts past it."""
+    from auramaur.risk.checks import CheckResult
+    mock_kill.return_value = CheckResult(name="kill_switch", passed=True, reason="", value=False)
+
+    # max_stake as a FRACTION (0.50 = 50% of equity) — huge against a big
+    # bankroll. The $25 absolute ceiling must clamp it.
+    settings = _make_settings(max_stake_per_market=0.50, min_edge_pct=2.5)
+    settings.risk.max_stake_abs_ceiling = 25.0
+    db = MagicMock()
+    db.fetchone = AsyncMock(return_value=None)
+
+    manager = RiskManager(settings, db)
+    manager.portfolio = _mock_portfolio()
+
+    # Strong signal + large cash: Kelly wants far more than $25.
+    signal = _make_signal(edge=20.0, claude_prob=0.70, market_prob=0.50)
+    market = _make_market()
+
+    decision = await manager.evaluate(signal, market, available_cash=5000.0)
+
+    assert decision.approved is True
+    assert decision.position_size > 0
+    # Without the ceiling this would size to thousands (50% of $5000 equity);
+    # the clamp holds it at the documented $25.
+    assert decision.position_size <= 25.0 + 1e-9
+
+
+@pytest.mark.asyncio
+@patch("auramaur.risk.manager.check_kill_switch")
 async def test_evaluate_fails_on_low_edge(mock_kill):
     from auramaur.risk.checks import CheckResult
     mock_kill.return_value = CheckResult(name="kill_switch", passed=True, reason="", value=False)

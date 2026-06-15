@@ -110,6 +110,14 @@ class RiskManager:
         if max_stake <= 1.0:
             max_stake = equity * max_stake
 
+        # Hard absolute ceiling — binds LAST, after the equity conversion and any
+        # regime scaling. The 2%-of-equity cap grows as the book grows and the
+        # regime can scale it up, so without this the documented per-market limit
+        # silently drifts (a $40 news_speed entry at ~3.3% of equity got through
+        # on 2026-06-15). Clamping here flows into both the Kelly cap below
+        # (max_stake=min(max_stake, cash)) and the post-sizing max_stake check.
+        max_stake = min(max_stake, rc.max_stake_abs_ceiling)
+
         # Kelly sizes against the full deployable cash; max_stake is the
         # ceiling that actually binds. The previous min(cash, max_stake*3)
         # double-capped: with fraction<=0.55 and edge capped at ±20% (so
