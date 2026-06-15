@@ -405,6 +405,40 @@ async def test_live_allowlist_fails_closed_on_other_and_unknown(mock_kill):
 
 @pytest.mark.asyncio
 @patch("auramaur.risk.manager.check_kill_switch")
+async def test_paper_forced_strategy_bypasses_live_only_gates(mock_kill):
+    """A paper-forced exploration pillar (cfg.paper=True) must NOT be gated by
+    the live-only category allowlist or the divergence-adverse filter, so it can
+    build a complete paper record across all categories for the graduation
+    ladder. Genuine live entries still hit both gates (tested above)."""
+    from auramaur.risk.checks import CheckResult
+    mock_kill.return_value = CheckResult(name="kill_switch", passed=True, reason="", value=False)
+
+    settings = _make_settings(is_live=True, allowed_categories_live=["crypto"])
+    # genuine bool -> _paper_forced_strategy trips (MagicMock attrs would not)
+    settings.resolution_lens = MagicMock()
+    settings.resolution_lens.paper = True
+    settings.risk.divergence_filter_enabled = True  # would reject MEDIUM in-band
+    db = MagicMock()
+    db.fetchone = AsyncMock(return_value=None)
+    manager = RiskManager(settings, db)
+    manager.portfolio = _mock_portfolio()
+
+    market = _make_market(category="other")   # NOT on the allowlist
+    # 10% divergence, MEDIUM confidence -> the divergence filter WOULD reject a
+    # live forecast here.
+    sig = _make_signal(edge=10.0, claude_prob=0.60, market_prob=0.50,
+                       confidence=Confidence.MEDIUM)
+    sig.strategy_source = "resolution_lens"
+    d = await manager.evaluate(sig, market, available_cash=500.0)
+
+    failed = [c.name for c in d.checks if not c.passed]
+    assert "category_allowlist" not in [c.name for c in d.checks]  # gate not run
+    assert "divergence_band" not in failed                          # bypassed
+    assert d.approved is True
+
+
+@pytest.mark.asyncio
+@patch("auramaur.risk.manager.check_kill_switch")
 async def test_live_allowlist_passes_allowed_category(mock_kill):
     """An allowlisted stored label trades live even when the fresh keyword
     classification is inconclusive ('other') — eligibility hangs on the

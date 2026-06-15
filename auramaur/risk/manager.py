@@ -65,6 +65,17 @@ class RiskManager:
         # blocks unexplained divergences without spending an LLM call.
         self.gap_auditor = None
 
+    def _paper_forced_strategy(self, strategy_source: str) -> bool:
+        """True if this strategy is paper-forced by its own config flag
+        (e.g. bias_harvest/entailment_arb/resolution_lens carry ``paper: true``).
+
+        ``is True`` is deliberate: it only trips on a genuine bool, so a
+        MagicMock settings object in tests (whose attributes are truthy) does
+        NOT read as paper-forced.
+        """
+        cfg = getattr(self.settings, strategy_source or "", None)
+        return getattr(cfg, "paper", False) is True
+
     async def evaluate(
         self,
         signal: Signal,
@@ -143,6 +154,24 @@ class RiskManager:
         cat_exp = category_exposure.get(market.category, 0.0)
 
         # ----------------------------------------------------------------
+        # Will this entry be paper-traded? — global paper mode, a per-strategy
+        # paper-forced pillar (bias_harvest/entailment_arb/resolution_lens), or
+        # a graduation-demoted/unproven cell. Paper exploration must BYPASS the
+        # live-only gates (category allowlist + divergence-adverse filter) so
+        # paper-forced strategies build a complete pnl_ledger record across all
+        # categories for the graduation ladder to evaluate; genuine live entries
+        # keep every gate. The blocklist still applies to paper — decided-no-edge
+        # categories never even paper-trade. `cell` is cached, so computing it
+        # here and reusing it below is free.
+        cell = await self.graduation.decide(
+            signal.strategy_source, market.category or "")
+        is_paper_entry = (
+            not self.settings.is_live
+            or self._paper_forced_strategy(signal.strategy_source)
+            or cell.force_paper
+        )
+
+        # ----------------------------------------------------------------
         # Run pre-sizing checks (max_stake validated after sizing)
         # ----------------------------------------------------------------
         pre_checks: list[CheckResult] = [
@@ -154,7 +183,8 @@ class RiskManager:
             await check_min_edge(signal.edge, regime.min_edge_pct),
             await check_divergence_band(
                 signal.claude_prob, signal.market_prob, signal.claude_confidence,
-                rc.divergence_filter_enabled, rc.divergence_adverse_low,
+                rc.divergence_filter_enabled and not is_paper_entry,
+                rc.divergence_adverse_low,
                 rc.divergence_adverse_high, rc.divergence_require_confidence),
             await check_min_liquidity(max(market.liquidity, market.volume), rc.min_liquidity),
             await check_max_spread(market.spread, rc.max_spread_pct),
@@ -191,7 +221,7 @@ class RiskManager:
         # demonstrated edge in; unknown/'other' markets stay paper-only, so
         # a classifier gap costs opportunity, not money. The fresh keyword
         # classification stays the #17 tripwire for confidently-bad labels.
-        if self.settings.is_live:
+        if not is_paper_entry:
             pre_checks.append(await check_category_allowlist(
                 market.category or "", rc.allowed_categories_live,
                 applies=category_applies,
@@ -290,11 +320,10 @@ class RiskManager:
             else "; ".join(c.reason for c in failed)
         )
 
-        # Graduation ladder: the cell's measured record decides whether this
-        # ENTRY trades live, on probation size, or paper-forced. Applied after
-        # all checks so it can only restrict an already-approved trade.
-        cell = await self.graduation.decide(
-            signal.strategy_source, market.category or "")
+        # Graduation ladder: the cell's measured record (decided above) sets
+        # whether this ENTRY trades live, on probation size, or paper-forced.
+        # Applied after all checks so it can only restrict an already-approved
+        # trade.
         if all_passed and cell.size_multiplier != 1.0:
             position_size = position_size * cell.size_multiplier
 
