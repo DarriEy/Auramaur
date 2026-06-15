@@ -36,7 +36,12 @@ execution:
 
 risk:
   max_drawdown_pct: 15.0
-  max_stake_per_market: 0.02
+  max_stake_per_market: 0.02   # <=1.0 => fraction of equity (2%)
+  # Hard $ ceiling applied AFTER the equity conversion and regime scaling, so the
+  # per-market cap can't drift as the book grows or the regime scales up. Matches
+  # the documented $25/market limit (a $40 entry at ~3.3% equity slipped through
+  # 2026-06-15 before this clamp existed).
+  max_stake_abs_ceiling: 25.0
   daily_loss_limit: 200.0
   max_open_positions: 500
   min_edge_pct: 2.5
@@ -102,7 +107,13 @@ graduation:
   # on current data enforce would paper-force most of the llm book (cells
   # are unproven at n<20 or negative) — that is the redesign's intent, but
   # flip it consciously.
-  mode: "observe"
+  # FLIPPED to enforce 2026-06-15: the ledger showed an unproven, 0-for-15
+  # (-$3.86 live) news_speed cell sizing a $40 live entry under observe. No
+  # directional cell has a proven positive live record yet, so enforce
+  # paper-forces directional books until they earn live capital on the
+  # ledger; arbitrage/market_maker stay live (exempt). Entries only — open
+  # positions are never stranded (exits bypass the risk manager).
+  mode: "enforce"
   min_events: 20
   window_days: 90
   probation_multiplier: 0.5

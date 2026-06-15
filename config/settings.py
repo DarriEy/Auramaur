@@ -60,6 +60,12 @@ class ExecutionConfig(BaseModel):
 class RiskConfig(BaseModel):
     max_drawdown_pct: float = 15.0
     max_stake_per_market: float = 25.0
+    # Hard absolute ceiling on per-market stake, in dollars. max_stake_per_market
+    # is interpreted as a fraction of EQUITY when <= 1.0, which grows as the book
+    # grows; the regime scaler can lift it further. This is the final clamp so the
+    # documented per-market cap actually binds regardless of equity/regime
+    # (a $40 entry at ~3.3% of equity slipped through before, 2026-06-15).
+    max_stake_abs_ceiling: float = 25.0
     daily_loss_limit: float = 200.0
     max_open_positions: int = 200
     min_edge_pct: float = 5.0
