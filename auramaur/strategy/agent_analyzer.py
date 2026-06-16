@@ -237,11 +237,12 @@ class AgentAnalyzer:
         self._timeout_seconds: int = 600  # 10 minutes for thorough analysis
 
     def _check_budget(self) -> None:
-        """Enforce daily Claude call budget.  Raises RuntimeError if exhausted."""
+        """Enforce daily Claude call budget. Raises BudgetExhausted if spent."""
         from auramaur.nlp import call_budget
+        from auramaur.nlp.errors import BudgetExhausted
         budget = self.settings.nlp.daily_claude_call_budget
         if budget > 0 and call_budget.calls_today() >= budget:
-            raise RuntimeError(
+            raise BudgetExhausted(
                 f"Daily agent call budget ({budget}) exhausted"
             )
 

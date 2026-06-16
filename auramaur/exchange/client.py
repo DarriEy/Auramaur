@@ -448,7 +448,13 @@ class PolymarketClient:
                 )
                 order.dry_run = True
                 return await self._paper.execute(order)
-            log.error("order.live_error", error=err_str, market_id=order.market_id)
+            # "not enough balance / allowance" is an expected capital constraint
+            # (the live book is fully deployed), not a fault — log it at warning
+            # like paper.insufficient_balance, reserving error for real failures.
+            if "not enough balance" in err_str.lower() or "allowance" in err_str.lower():
+                log.warning("order.insufficient_balance", error=err_str, market_id=order.market_id)
+            else:
+                log.error("order.live_error", error=err_str, market_id=order.market_id)
             return OrderResult(
                 order_id="ERROR",
                 market_id=order.market_id,

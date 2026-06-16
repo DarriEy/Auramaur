@@ -62,7 +62,9 @@ class PositionReconciler:
         try:
             trades = await self._exchange.clob_call(client.get_trades)
         except Exception as e:
-            log.error("reconciler.trades_error", error=str(e))
+            # Usually a transient CLOB/network hiccup (status_code=None); the
+            # next reconcile pass recovers. Warn rather than error.
+            log.warning("reconciler.trades_error", error=str(e))
             return []
 
         if not trades:

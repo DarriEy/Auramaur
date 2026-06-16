@@ -347,7 +347,8 @@ class EnsembleAnalyzer:
 
         budget = self._settings.nlp.daily_claude_call_budget
         if budget > 0 and call_budget.calls_today() >= budget:
-            raise RuntimeError(f"Daily Claude call budget ({budget}) exhausted")
+            from auramaur.nlp.errors import BudgetExhausted
+            raise BudgetExhausted(f"Daily Claude call budget ({budget}) exhausted")
 
         max_attempts = 3
         backoff_seconds = [5, 10, 20]
