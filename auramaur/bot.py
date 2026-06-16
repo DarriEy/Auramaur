@@ -38,6 +38,7 @@ from auramaur.monitoring.logger import setup_logging
 from auramaur.nlp.analyzer import ClaudeAnalyzer
 from auramaur.nlp.cache import NLPCache
 from auramaur.nlp.calibration import CalibrationTracker
+from auramaur.nlp.errors import BudgetExhausted
 from auramaur.risk.manager import RiskManager
 from auramaur.risk.portfolio import PortfolioTracker
 from auramaur.strategy.arbitrage_scanner import (
@@ -1670,6 +1671,9 @@ class AuramaurBot:
                                 level="info",
                             )
 
+            except BudgetExhausted as e:
+                # Expected daily-budget throttle, not a failure — skip quietly.
+                log.debug("depth.budget_skipped", error=str(e))
             except Exception as e:
                 log.error("depth.error", error=str(e))
             await asyncio.sleep(1800)  # Every 30 minutes

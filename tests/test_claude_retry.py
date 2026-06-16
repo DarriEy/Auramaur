@@ -56,13 +56,22 @@ async def test_retry_exhausted_raises(analyzer):
 
 @pytest.mark.asyncio
 async def test_no_retry_on_budget(settings):
-    """Budget exhausted raises immediately, no retries."""
+    """Budget exhausted raises BudgetExhausted immediately, no retries.
+
+    BudgetExhausted subclasses RuntimeError so existing `except RuntimeError`
+    handlers keep working, while callers can catch it specifically to treat the
+    throttle as expected (logged at debug, not error)."""
+    from unittest.mock import patch
+
+    from auramaur.nlp.errors import BudgetExhausted
+
+    assert issubclass(BudgetExhausted, RuntimeError)  # backward-compat contract
+
     settings.nlp.daily_claude_call_budget = 1
     a = ClaudeAnalyzer(settings=settings)
     # Simulate one call already made today (persistent counter)
-    from unittest.mock import patch
     with patch("auramaur.nlp.call_budget.calls_today", return_value=1):
-        with pytest.raises(RuntimeError, match="budget"):
+        with pytest.raises(BudgetExhausted, match="budget"):
             await a._call_claude_cli("test prompt")
 
 

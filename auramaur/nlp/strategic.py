@@ -1065,5 +1065,8 @@ class StrategicAnalyzer:
             except (json.JSONDecodeError, Exception):
                 pass
 
-        log.error("strategic.parse_failed", text_preview=text[:300])
+        # Recoverable: caller falls back to an empty StrategicAnalysis. The LLM
+        # occasionally returns prose instead of JSON — worth visibility, not an
+        # error-level alarm.
+        log.warning("strategic.parse_failed", text_preview=text[:300])
         return StrategicAnalysis()

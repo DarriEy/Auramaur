@@ -16,6 +16,7 @@ import structlog
 
 from auramaur.exchange.models import Market
 from auramaur.exchange.protocols import MarketDiscovery
+from auramaur.nlp.errors import BudgetExhausted
 
 log = structlog.get_logger()
 
@@ -365,6 +366,10 @@ class ArbitrageScanner:
                     )
                 return results
 
+            except BudgetExhausted as e:
+                # Expected throttle, not a failure — the word-overlap fallback
+                # below still matches pairs without an LLM call.
+                log.debug("arb_scanner.llm_budget_skipped", error=str(e))
             except Exception as e:
                 log.error("arb_scanner.llm_match_failed", error=str(e))
                 # Fall through to word-overlap fallback

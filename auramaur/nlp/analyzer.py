@@ -101,7 +101,8 @@ class ClaudeAnalyzer:
 
         budget = self._settings.nlp.daily_claude_call_budget
         if budget > 0 and call_budget.calls_today() >= budget:
-            raise RuntimeError(
+            from auramaur.nlp.errors import BudgetExhausted
+            raise BudgetExhausted(
                 f"Daily Claude call budget ({budget}) exhausted"
             )
 
