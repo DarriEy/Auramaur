@@ -170,6 +170,63 @@ class TestKalshiLivePositionAccounting:
         finally:
             await db.close()
 
+    @pytest.mark.asyncio
+    async def test_sync_positions_purges_orphaned_paper_kalshi_rows(self):
+        """Legacy is_paper=1 Kalshi rows (the paper trader never writes Kalshi)
+        are orphans with frozen, side-inverted marks that leak into unfiltered
+        risk reads. A live sync must purge them from portfolio and cost_basis."""
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            # Seed a stale orphaned paper Kalshi position + cost basis.
+            await db.execute(
+                """INSERT INTO portfolio
+                   (market_id, exchange, side, size, avg_price, current_price,
+                    unrealized_pnl, category, token, token_id, is_paper, updated_at)
+                   VALUES ('KXSTALE', 'kalshi', 'BUY', 144, 0.81, 0.0965,
+                           -102.0, 'other', 'NO', 'KXSTALE', 1, '2026-06-07 15:23:46')"""
+            )
+            await db.execute(
+                """INSERT INTO markets (id, exchange, question, category, active,
+                   outcome_yes_price, outcome_no_price, last_updated)
+                   VALUES ('KXSTALE', 'kalshi', 'Stale?', 'other', 1, 0.9, 0.1, datetime('now'))"""
+            )
+            await db.execute(
+                """INSERT INTO cost_basis
+                   (market_id, token, token_id, size, avg_cost, total_cost, is_paper, updated_at)
+                   VALUES ('KXSTALE', 'NO', 'KXSTALE', 144, 0.81, 116.6, 1, '2026-06-07 15:23:46')"""
+            )
+            await db.commit()
+
+            client = KalshiClient.__new__(KalshiClient)
+            client._init_api = MagicMock()
+            client._portfolio_api = MagicMock()
+            client._portfolio_api.get_positions_without_preload_content = MagicMock()
+            # Live API returns one (different) live position.
+            client._call_raw = AsyncMock(return_value=json.dumps({
+                "market_positions": [{
+                    "ticker": "KXLIVE", "position_fp": 10,
+                    "market_exposure_dollars": 4.2,
+                }]
+            }))
+            client.get_market = AsyncMock(return_value=Market(
+                id="KXLIVE", exchange="kalshi", question="Live?",
+                category="test", outcome_yes_price=0.45, outcome_no_price=0.55,
+            ))
+
+            await client.sync_positions(db)
+
+            # Orphaned paper row purged from both tables.
+            assert await db.fetchone(
+                "SELECT 1 FROM portfolio WHERE market_id='KXSTALE' AND is_paper=1") is None
+            assert await db.fetchone(
+                "SELECT 1 FROM cost_basis WHERE market_id='KXSTALE' AND is_paper=1") is None
+            # Live position still synced.
+            assert await db.fetchone(
+                "SELECT 1 FROM portfolio WHERE market_id='KXLIVE' AND is_paper=0") is not None
+        finally:
+            await db.close()
+
 
 class TestKalshiMarketParsing:
     def _make_client(self):

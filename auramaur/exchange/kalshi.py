@@ -765,6 +765,24 @@ class KalshiClient:
                          AND market_id IN (SELECT id FROM markets WHERE exchange = 'kalshi')"""
                 )
 
+            # Purge orphaned PAPER Kalshi rows. The paper trader is
+            # exchange-agnostic and never writes Kalshi positions, so any
+            # is_paper=1 Kalshi row is a legacy orphan (a one-time 2026-06-07
+            # snapshot carrying pre-#119 inverted marks). Paper rows are never
+            # re-marked, so they linger frozen forever and leak into unfiltered
+            # risk reads (risk/portfolio.py `SELECT * FROM portfolio`), inflating
+            # category exposure / position count with fiction. This live sync is
+            # the sole authoritative Kalshi source — drop the paper book. (If
+            # paper-Kalshi trading is ever reintroduced, revisit this.)
+            await db.execute(
+                "DELETE FROM portfolio WHERE exchange = 'kalshi' AND is_paper = 1"
+            )
+            await db.execute(
+                """DELETE FROM cost_basis
+                   WHERE is_paper = 1
+                     AND market_id IN (SELECT id FROM markets WHERE exchange = 'kalshi')"""
+            )
+
             await db.commit()
             if synced > 0:
                 log.info("kalshi.positions_synced", count=synced)
