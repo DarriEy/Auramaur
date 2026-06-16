@@ -419,3 +419,46 @@ async def test_reconcile_orphaned_pending_trades():
     assert len(update_calls) == 1
     assert update_calls[0].args[1] == ("cancelled", "orphan-1")
     db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_order_monitor_reconciles_orphans_periodically():
+    """Orphaned live orders created mid-session (e.g. a lost cancel during a
+    network blip leaving a resting BUY untracked) must be re-pulled into
+    _live_pending periodically, not only at startup — otherwise their locked
+    collateral is stuck until the next restart (the $27 cash-lock incident)."""
+    settings = MagicMock()
+    settings.execution.limit_order_ttl_seconds = 60
+
+    bot = AuramaurBot(settings=settings)
+    bot._running = True
+
+    exchange = SimpleNamespace(
+        _live_pending={},
+        reconcile_open_orders=AsyncMock(return_value=0),
+        get_order_status=AsyncMock(),
+    )
+    paper = SimpleNamespace(
+        pending_orders=[],
+        check_fills=AsyncMock(return_value=[]),
+        cancel_expired=AsyncMock(return_value=0),
+    )
+    bot._components = {
+        "paper": paper,
+        "exchange": exchange,
+        "discovery": AsyncMock(),
+        "db": AsyncMock(),
+    }
+
+    calls = {"n": 0}
+
+    async def stop_after_n(_seconds):
+        calls["n"] += 1
+        if calls["n"] >= 12:  # let ~12 loop cycles run (reconcile_every=10)
+            bot._running = False
+
+    with patch("asyncio.sleep", new=AsyncMock(side_effect=stop_after_n)):
+        await bot._task_order_monitor()
+
+    # Startup pass + at least one periodic re-pull (at cycle 10) => >= 2.
+    assert exchange.reconcile_open_orders.await_count >= 2
