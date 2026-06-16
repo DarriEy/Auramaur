@@ -26,10 +26,9 @@ class ExecutionConfig(BaseModel):
     live: bool = False
     # Paper book capital. Sized for headroom, not realism: the provisional
     # paper-forced strategies must hold enough concurrent positions across
-    # (strategy x category) cells to accrue >=20 settled events each for the
-    # graduation decision. At ~$10/paper-entry, $5k is ~500 concurrent slots, so
-    # paper cash is never the binding constraint (it was: a $111 book left $1.30
-    # free and rejected ~1k entries/day). Recycles on settlement (see #132).
+    # (strategy x category) cells to accrue the graduation sample. Sized so
+    # paper cash is never the binding constraint on entries; a too-small book
+    # starves them. Recycles on settlement (see #132).
     paper_initial_balance: float = 5000.0
     limit_order_ttl_seconds: int = 120
     # Max cents the router may pay above the signal's reference price to lift
@@ -40,7 +39,7 @@ class ExecutionConfig(BaseModel):
     # Exit twin of entry_max_cross_cents: the slippage band for marketable
     # exits. A SELL only fills by crossing down to the real bid; pricing at the
     # snapshot (or anywhere inside the spread) rests above the bid and
-    # TTL-cancels forever (the 2-day Obama-winner loop; market 1287614). So we
+    # TTL-cancels forever (a held winner once looped this way for days). So we
     # take the bid outright when it is within this many cents of the snapshot,
     # otherwise skip and let the portfolio monitor back off until the book
     # tightens or the position redeems at resolution.

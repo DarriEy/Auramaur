@@ -152,7 +152,7 @@ def test_venue_summary_ignores_zero_cost_basis():
     """cost_basis.avg_cost=0 (Kraken spec book) must fall back to avg_price.
 
     Otherwise unrealized = (current - 0) * size books the whole position value
-    as a gain (the +$246-vs-actual-(-$3.85) Kraken bug).
+    as a phantom gain instead of the true small loss (the Kraken avg_cost=0 bug).
     """
     async def run():
         db = Database(":memory:")

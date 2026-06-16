@@ -2,8 +2,8 @@
 
 Measured fact (edge_vs_market.py + the divergence-bucket P&L): when the
 model disagrees with the market and cannot say WHY the market is wrong,
-the market is usually right — the 10-20% divergence bucket realized
--$5.90/market at a 22% win rate. This module makes the disagreement
+the market is usually right — the mid-divergence (10-20%) bucket realized
+a net loss at a low win rate in backtest. This module makes the disagreement
 justify itself.
 
 The estimation pipeline is deliberately PRICE-BLIND (anti-anchoring), so

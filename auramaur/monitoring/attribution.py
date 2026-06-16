@@ -265,8 +265,9 @@ class PerformanceAttributor:
                           -- NULLIF(...,0): the Kraken spec book writes cost_basis
                           -- rows with avg_cost=0, so a plain COALESCE (NULL-only)
                           -- treated cost as $0 and booked the whole position value
-                          -- as "unrealized" (+$246 vs the true -$3.85). Fall back
-                          -- to the position's own avg_price when cost basis is 0.
+                          -- as "unrealized" (a large phantom gain vs a small true
+                          -- loss). Fall back to the position's own avg_price when
+                          -- cost basis is 0.
                           (COALESCE(p.current_price, p.avg_price)
                            - COALESCE(NULLIF(cb.avg_cost, 0), p.avg_price)) * p.size
                       ) AS unrealized_pnl

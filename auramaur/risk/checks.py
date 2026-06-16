@@ -372,9 +372,9 @@ async def check_mispricing_named(
 ) -> CheckResult:
     """Fail when a significant LLM divergence has no nameable mechanism.
 
-    The 10-20% divergence bucket realized -$5.90/market at 22% win — when
-    the model can't say WHY the market is wrong, the market is usually
-    right. ``mispricing_reason`` is "<mechanism>: <reason>" from the gap
+    The mid-divergence (10-20%) bucket realized a net loss at a low win rate
+    in backtest — when the model can't say WHY the market is wrong, the market
+    is usually right. ``mispricing_reason`` is "<mechanism>: <reason>" from the gap
     audit (or pre-named by the originating strategy); "none"/empty blocks.
     """
     if not enabled or not applies or divergence_abs < min_divergence:

@@ -3,11 +3,10 @@
 A SELL only fills by crossing down to the real bid. Posted at the snapshot
 price — or anywhere inside the spread — it sits above the bid, rests until the
 TTL reaper cancels it, and the cleared exit suppression re-posts it next pass:
-the Obama winner looped that way for 2 days (35 cancelled SELLs, no fill), and
-market 1287614 the same (bid 0.27 vs a 0.48 mark). So exits take the bid when
-it's within the slippage band and above the junk floor; otherwise they skip,
-and returning False leaves the monitor's suppression set so the retry backs
-off instead of looping.
+a held winner looped that way unfilled for days against a wide-spread book. So
+exits take the bid when it's within the slippage band and above the junk floor;
+otherwise they skip, and returning False leaves the monitor's suppression set
+so the retry backs off instead of looping.
 """
 
 from __future__ import annotations
@@ -90,7 +89,7 @@ async def test_exit_crosses_to_bid_not_a_resting_floor():
 @pytest.mark.asyncio
 async def test_exit_skips_when_bid_below_band():
     """Bid 0.70 is 20c under the 0.90 mark — beyond the 10c band. Selling here
-    would dump well under the mark, so skip and back off (the 1287614 case)."""
+    would dump well under the mark, so skip and back off (the wide-spread case)."""
     bot, pos, reason, exchange, alerts = _setup(_book(0.70, 0.95), current_price=0.90)
 
     ok = await bot._execute_poly_exit(pos, reason, AsyncMock(), exchange, alerts)
