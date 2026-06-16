@@ -2791,24 +2791,39 @@ class AuramaurBot:
         discovery: MarketDiscovery = self._components["discovery"]
         ttl = self.settings.execution.limit_order_ttl_seconds
 
-        # One-time startup reconcile: pull orphaned live orders left resting by a
-        # prior session into _live_pending so the TTL-cancel below can reap them
-        # and release their locked collateral.
-        reconciled_ids: set[int] = set()
-        for client in [primary_exchange, *exchanges.values()]:
-            if (
-                client is not None
-                and hasattr(client, "reconcile_open_orders")
-                and id(client) not in reconciled_ids
-            ):
-                reconciled_ids.add(id(client))
-                try:
-                    await client.reconcile_open_orders()
-                except Exception as e:
-                    log.debug("order_monitor.reconcile_error", error=str(e))
+        # Reconcile orphaned live orders into _live_pending so the TTL-cancel
+        # below can reap them and release their locked collateral. Runs at
+        # startup AND periodically: a one-time startup pass only recovers orphans
+        # from a *prior* session, but orders are also orphaned mid-session — a
+        # lost cancel during a network blip leaves a resting CLOB order untracked
+        # (e.g. cancel-replace whose cancel never lands stacks duplicate BUYs),
+        # which then locks collateral until the next restart. A periodic re-pull
+        # self-heals those within one interval; reconcile skips already-tracked
+        # ids, so it only captures genuine orphans.
+        async def _reconcile_orphans() -> None:
+            seen: set[int] = set()
+            for client in [primary_exchange, *exchanges.values()]:
+                if (
+                    client is not None
+                    and hasattr(client, "reconcile_open_orders")
+                    and id(client) not in seen
+                ):
+                    seen.add(id(client))
+                    try:
+                        await client.reconcile_open_orders()
+                    except Exception as e:
+                        log.debug("order_monitor.reconcile_error", error=str(e))
+
+        await _reconcile_orphans()
+        reconcile_every = 10  # cycles; loop sleeps 30s => re-pull orphans ~5 min
+        cycle = 0
 
         while self._running:
             try:
+                # Periodic orphan re-pull (see _reconcile_orphans above).
+                if cycle and cycle % reconcile_every == 0:
+                    await _reconcile_orphans()
+                cycle += 1
                 # Paper order monitoring
                 if paper.pending_orders:
                     prices: dict[str, float] = {}
