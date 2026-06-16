@@ -261,22 +261,33 @@ class ResolutionTracker:
                     return result == "yes"
                 return market.outcome_yes_price > 0.5
 
-        # For everything else, the exchange must have flagged the market
-        # inactive (closed/resolved on Polymarket's side).  A still-active
-        # market is by definition not resolved, regardless of price.
-        if market.active:
+        # The exchange's active flag is the primary resolution signal, but on
+        # Polymarket it lags the actual outcome: a market stays active=True for
+        # a while after resolving, price pinned to 0/1. A market is therefore
+        # eligible for the price check when it is inactive OR already past its
+        # end_date. A still-trading market — active AND before its end_date — is
+        # never resolved regardless of price; that guard is what stops an early
+        # 95/5 market from being settled prematurely and feeding a fake outcome
+        # into calibration. (Paper positions settle ONLY through this path, so
+        # the stale active flag was stranding them indefinitely.)
+        end = getattr(market, "end_date", None)
+        if end is not None and end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        past_end_date = end is not None and datetime.now(timezone.utc) > end
+        if market.active and not past_end_date:
             return None
 
-        # Inactive + tightly converged price → resolution.  The threshold
-        # is intentionally tight (0.99/0.01) to avoid declaring a winner
-        # on markets that closed early or paused with non-trivial spread.
+        # Eligible (inactive, or past end_date) + tightly converged price →
+        # resolution.  The threshold is intentionally tight (0.99/0.01) so a
+        # market that merely closed/paused with a non-trivial spread isn't
+        # declared a winner.
         yes_price = market.outcome_yes_price
         if yes_price >= 0.99:
             return True
         if yes_price <= 0.01:
             return False
 
-        # Inactive but price ambiguous — wait for clearer signal.
+        # Eligible but price ambiguous (e.g. closed awaiting oracle) — wait.
         return None
 
     # ------------------------------------------------------------------
