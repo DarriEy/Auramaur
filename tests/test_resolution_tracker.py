@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -20,6 +21,7 @@ def _make_market(
     active: bool = False,
     yes_price: float = 1.0,
     exchange: str = "polymarket",
+    end_date=None,
 ) -> Market:
     return Market(
         id=market_id,
@@ -28,6 +30,7 @@ def _make_market(
         active=active,
         outcome_yes_price=yes_price,
         outcome_no_price=1.0 - yes_price,
+        end_date=end_date,
     )
 
 
@@ -65,6 +68,29 @@ def _make_discovery(market: Market | None):
 class TestDetectResolution:
     def test_active_market_returns_none(self):
         market = _make_market(active=True, yes_price=0.65)
+        assert ResolutionTracker._detect_resolution(market, "polymarket") is None
+
+    def test_active_past_end_date_pinned_resolves(self):
+        """Polymarket's active flag lags resolution: a market past its end_date
+        with a pinned price IS resolved even though active=True. (Paper
+        positions settle only through this path — the stale flag stranded them.)"""
+        past = datetime.now(timezone.utc) - timedelta(days=2)
+        market = _make_market(active=True, yes_price=0.0, end_date=past)
+        assert ResolutionTracker._detect_resolution(market, "polymarket") is False
+        market_yes = _make_market(active=True, yes_price=1.0, end_date=past)
+        assert ResolutionTracker._detect_resolution(market_yes, "polymarket") is True
+
+    def test_active_pre_end_date_pinned_stays_none(self):
+        """The premature-settlement guard: a still-trading market (active and
+        BEFORE end_date) is never resolved, even at an extreme price."""
+        future = datetime.now(timezone.utc) + timedelta(days=10)
+        market = _make_market(active=True, yes_price=0.99, end_date=future)
+        assert ResolutionTracker._detect_resolution(market, "polymarket") is None
+
+    def test_active_past_end_date_ambiguous_stays_none(self):
+        """Past end_date but price mid (closed awaiting oracle) — still wait."""
+        past = datetime.now(timezone.utc) - timedelta(days=1)
+        market = _make_market(active=True, yes_price=0.55, end_date=past)
         assert ResolutionTracker._detect_resolution(market, "polymarket") is None
 
     def test_resolved_yes(self):
