@@ -239,3 +239,53 @@ def test_select_live_mode_requires_allowlist():
     mm_paper = _maker(is_live=False)
     ids_paper = [m.id for m in mm_paper._select_mm_markets([unknown, allowed])]
     assert set(ids_paper) == {"unknown", "allowed"}
+
+
+@pytest.mark.asyncio
+async def test_partial_quote_cancels_surviving_leg():
+    """If one leg is rejected (e.g. a post-only leg that would cross a moved
+    book), the surviving leg must be cancelled. Otherwise it rests untracked —
+    success is False so _active_quotes never records it — and the next refresh
+    stacks a fresh pair on top, the orphaned-BUY cash-lock root cause."""
+    from unittest.mock import AsyncMock
+
+    mm = _maker()
+    mm._settings = SimpleNamespace(is_live=True, market_maker=mm._settings.market_maker)
+
+    placed: list[str] = []
+    counter = {"n": 0}
+
+    async def place_order(order):
+        counter["n"] += 1
+        oid = f"live-{counter['n']}"
+        placed.append(oid)
+        # Bid (1st) rests; ask (2nd) rejected by post-only crossing the book.
+        status = "pending" if counter["n"] % 2 == 1 else "rejected"
+        return SimpleNamespace(order_id=oid, status=status, filled_size=0, is_paper=False)
+
+    cancelled: list[str] = []
+
+    async def cancel_order(order_id):
+        cancelled.append(order_id)
+        return True
+
+    book = OrderBook(
+        bids=[OrderBookLevel(price=0.40, size=100)],
+        asks=[OrderBookLevel(price=0.46, size=100)],
+    )
+    mm._exchange = SimpleNamespace(
+        place_order=place_order,
+        cancel_order=cancel_order,
+        get_order_book=AsyncMock(return_value=book),
+    )
+    market = Market(
+        id="m1",
+        question="Will this happen?",
+        clob_token_yes="yes",
+        clob_token_no="no",
+    )
+
+    result, _ = await mm._quote_market(market)
+    assert result and not result.get("success")   # partial => not a live quote
+    assert cancelled == ["live-1"]                 # surviving bid leg cancelled
+    assert "m1" not in mm._active_quotes           # nothing orphaned/tracked

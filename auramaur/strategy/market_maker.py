@@ -484,7 +484,43 @@ class MarketMaker:
         if ask_result.status in ("paper", "filled"):
             self._update_inventory(quote.market_id, "ask", ask_result.filled_size)
 
-        success = bid_result.status not in ("rejected",) and ask_result.status not in ("rejected",)
+        bid_live = bid_result.status not in ("rejected",)
+        ask_live = ask_result.status not in ("rejected",)
+
+        # Partial placement: one leg rested, the other was rejected — usually a
+        # post-only leg that would cross a moved book. A one-legged quote is
+        # naked directional exposure the MM never wants, and leaving it here is
+        # how duplicates stack: success would be False below, so _quote_market
+        # never records the quote in _active_quotes, so the resting leg is never
+        # cancelled on refresh and a fresh pair stacks on top every cycle (the
+        # orphaned-BUY cash-lock). Cancel the survivor now for a clean slate and
+        # retry next cycle. The periodic order-monitor reconcile backstops a
+        # cancel that itself fails.
+        if bid_live != ask_live:
+            survivor_id = bid_result.order_id if bid_live else ask_result.order_id
+            survivor_status = bid_result.status if bid_live else ask_result.status
+            if (
+                survivor_status not in ("paper", "filled")
+                and survivor_id
+                and not str(survivor_id).startswith("PAPER")
+            ):
+                try:
+                    await self._exchange.cancel_order(survivor_id)
+                except Exception as e:
+                    log.debug(
+                        "market_maker.partial_leg_cancel_error",
+                        order_id=survivor_id, error=str(e),
+                    )
+            self._pending_orders.pop(bid_result.order_id, None)
+            self._pending_orders.pop(ask_result.order_id, None)
+            log.warning(
+                "market_maker.partial_quote_cancelled",
+                market_id=quote.market_id,
+                bid_status=bid_result.status,
+                ask_status=ask_result.status,
+            )
+
+        success = bid_live and ask_live
 
         log.info(
             "market_maker.quote_placed",
