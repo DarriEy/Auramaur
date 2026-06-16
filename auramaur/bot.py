@@ -850,8 +850,8 @@ class AuramaurBot:
         # Marketable exit: a SELL only fills by crossing down to the real bid.
         # Pricing at the snapshot — or anywhere inside the spread — rests above
         # the bid, TTL-cancels, and the cleared exit suppression re-posts it
-        # next pass: the Obama winner looped that way for 2 days, and market
-        # 1287614 the same (bid 0.27 vs a 0.48 mark, order resting at 0.45).
+        # next pass: a held winner looped that way unfilled for days against a
+        # wide-spread book.
         # So take the bid outright when it's within the slippage band and above
         # the junk floor; otherwise skip. Returning False (no order placed)
         # leaves the portfolio monitor's exit-failure suppression set, which

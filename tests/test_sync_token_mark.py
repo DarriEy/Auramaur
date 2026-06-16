@@ -1,9 +1,9 @@
 """Position marks must price the token actually held.
 
 Outcome labels like "Something"/"Nothing" aren't YES/NO, and the syncer's
-old YES-default marked such holdings at the first outcome's price: the
-Obama "Something" token (worth ~$0.105) was marked at "Nothing"'s $0.885 —
-a phantom +$77 whose fantasy-priced exit the bot chased for two days.
+old YES-default marked such holdings at the first outcome's price: a
+low-priced held side marked at its complement's high price — a phantom gain
+whose fantasy-priced exit the bot chased for days.
 
 Side resolution ladder: token_id match against the market's CLOB token ids
 (authoritative) → literal YES/NO label → price the held token off its own

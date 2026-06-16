@@ -183,8 +183,8 @@ class TestKalshiLivePositionAccounting:
                 """INSERT INTO portfolio
                    (market_id, exchange, side, size, avg_price, current_price,
                     unrealized_pnl, category, token, token_id, is_paper, updated_at)
-                   VALUES ('KXSTALE', 'kalshi', 'BUY', 144, 0.81, 0.0965,
-                           -102.0, 'other', 'NO', 'KXSTALE', 1, '2026-06-07 15:23:46')"""
+                   VALUES ('KXSTALE', 'kalshi', 'BUY', 100, 0.80, 0.10,
+                           -70.0, 'other', 'NO', 'KXSTALE', 1, '2026-01-01 00:00:00')"""
             )
             await db.execute(
                 """INSERT INTO markets (id, exchange, question, category, active,
@@ -194,7 +194,7 @@ class TestKalshiLivePositionAccounting:
             await db.execute(
                 """INSERT INTO cost_basis
                    (market_id, token, token_id, size, avg_cost, total_cost, is_paper, updated_at)
-                   VALUES ('KXSTALE', 'NO', 'KXSTALE', 144, 0.81, 116.6, 1, '2026-06-07 15:23:46')"""
+                   VALUES ('KXSTALE', 'NO', 'KXSTALE', 100, 0.80, 80.0, 1, '2026-01-01 00:00:00')"""
             )
             await db.commit()
 

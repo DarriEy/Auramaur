@@ -270,9 +270,9 @@ async def test_binary_exits_skipped_for_ibkr_options(settings):
 @pytest.mark.asyncio
 async def test_token_id_overrides_yes_label(settings):
     """A position whose outcome label defaulted to YES but whose held token id
-    is the market's NO-slot token must be marked at the NO price. The Obama
-    "Something" held at $0.105 was marked at "Nothing"'s $0.895 — a phantom
-    +$77 that fired PROFIT_TARGET every cycle."""
+    is the market's NO-slot token must be marked at the NO price. A low-priced
+    held side marked at its complement's high price is a phantom gain that
+    fires PROFIT_TARGET every cycle."""
     db = Database(":memory:")
     await db.connect()
     try:

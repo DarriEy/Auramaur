@@ -244,9 +244,9 @@ class PortfolioTracker:
         The held token id is authoritative. The YES/NO label defaults to YES
         for markets whose outcomes aren't literally Yes/No ("Nothing"/
         "Something", team names), so marking off the label prices those
-        positions at the wrong outcome — the Obama "Something" held at
-        ~$0.105 was marked at "Nothing"'s $0.895, and the phantom +$77
-        PROFIT_TARGET exit looped unfilled for days. When the market's
+        positions at the wrong outcome — a low-priced held side marked at
+        its complement's high price, and the phantom-gain PROFIT_TARGET exit
+        looped unfilled for days. When the market's
         tokens are known but ours matches neither, return None: the live
         syncer marks unresolved tokens off their own order book, and
         re-marking from the label here would clobber that with the wrong

@@ -123,9 +123,9 @@ class PositionSyncer:
                 # outcome label only works when it literally is YES/NO. For
                 # anything else ("Something"/"Nothing", "Up"/"Down", team
                 # names) the old YES-default marked the position at the wrong
-                # outcome's price — the Obama "Something" held at ~$0.105 was
-                # marked at "Nothing"'s $0.885, a phantom +$77 whose exit the
-                # bot chased for two days.
+                # outcome's price — e.g. a low-priced held side marked at its
+                # complement's high price, a phantom gain whose exit the bot
+                # then chased for days.
                 direct_price: float | None = None
                 if token_id and token_id == (row["clob_token_no"] or ""):
                     token = TokenType.NO
