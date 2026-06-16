@@ -1370,6 +1370,40 @@ class AuramaurBot:
                 log.error("feedback.error", error=str(e))
             await asyncio.sleep(3600)  # Every hour
 
+    @staticmethod
+    def _rotate_scan_window(universe, offset, window):
+        """Return (slice, next_offset) for a rolling window over ``universe``.
+
+        Advances a cursor across the full market list so relationship detection
+        covers niche/low-volume markets over time instead of only the
+        top-by-volume head. Wraps at the end. Empty/short universes are handled.
+        """
+        if not universe:
+            return [], 0
+        if offset >= len(universe):
+            offset = 0
+        return universe[offset:offset + window], offset + window
+
+    async def _prune_resolved_relationships(self, db) -> int:
+        """Delete market_relationships whose either leg has resolved/closed.
+
+        market_relationships was never pruned, so it filled with resolved
+        markets (entailment then found ~no live conditional pairs to evaluate).
+        A leg with markets.active = 0 is settled on the venue; drop the pair.
+        Returns the number of relationship rows removed.
+        """
+        try:
+            cur = await db.execute(
+                """DELETE FROM market_relationships
+                   WHERE market_id_a IN (SELECT id FROM markets WHERE active = 0)
+                      OR market_id_b IN (SELECT id FROM markets WHERE active = 0)"""
+            )
+            await db.commit()
+            return int(getattr(cur, "rowcount", 0) or 0)
+        except Exception as e:
+            log.debug("correlation.prune_error", error=str(e))
+            return 0
+
     async def _task_correlation_scan(self) -> None:
         """Scan for correlated markets and execute conditional / divergence arbs.
 
@@ -1387,9 +1421,12 @@ class AuramaurBot:
         risk_manager: RiskManager = self._components["risk_manager"]
         engines: dict[str, TradingEngine] = self._components["engines"]
 
+        db: Database = self._components["db"]
         scan_interval = 120              # act on arbs every 2 minutes
         relationship_refresh_cycles = 15  # refresh LLM relationships ~every 30 min
         cycle = 0
+        scan_offset = 0
+        scan_window = 10  # markets analyzed per refresh (== detector batch_size)
 
         while self._running:
             if await self._check_kill_switch():
@@ -1398,9 +1435,24 @@ class AuramaurBot:
                 # Refresh semantic relationships infrequently to bound LLM cost;
                 # the detector also TTL-caches per market internally.
                 if cycle % relationship_refresh_cycles == 0:
-                    markets = await discovery.get_markets(limit=20)
-                    if markets:
-                        await correlator.detect_relationships(markets)
+                    # Rotate the analysis window across the BROAD universe rather
+                    # than re-feeding the top-by-volume head every cycle. Conditional
+                    # / entailment pairs live in niche, lower-volume markets that
+                    # never entered a top-20 window — so that pool only ever decayed
+                    # (newest conditional was 3 days stale, mostly resolved legs).
+                    # The window advances each refresh and wraps; the 24h TTL-cache
+                    # dedups, so over a full pass every market is analyzed ~once.
+                    # Budget-neutral: same LLM batch size, just a different slice.
+                    universe = await discovery.get_markets(limit=300)
+                    window, scan_offset = self._rotate_scan_window(
+                        universe, scan_offset, scan_window)
+                    if window:
+                        await correlator.detect_relationships(window, batch_size=len(window))
+                    # Prune relationships whose markets have resolved/closed so
+                    # entailment's conditional pool reflects only live markets.
+                    pruned = await self._prune_resolved_relationships(db)
+                    if pruned:
+                        log.info("correlation.pruned_resolved", count=pruned)
                 cycle += 1
 
                 # Generate and execute arbitrage signals (cheap DB read).
