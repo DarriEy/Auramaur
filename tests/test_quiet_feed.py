@@ -113,26 +113,26 @@ def test_zero_candidate_scan_is_silent():
 
 def test_ticker_prints_first_then_suppresses_unchanged():
     with display.console.capture() as cap:
-        display.show_portfolio(34.88, -55.72, 202, 0.0, schedule_mode="off_peak")
-        display.show_portfolio(34.88, -55.72, 202, 0.0, schedule_mode="off_peak")
+        display.show_portfolio(100.00, -10.00, 50, 0.0, schedule_mode="off_peak")
+        display.show_portfolio(100.00, -10.00, 50, 0.0, schedule_mode="off_peak")
     out = cap.get()
     assert out.count("P&L") == 1
 
 
 def test_ticker_prints_on_material_change():
     with display.console.capture() as cap:
-        display.show_portfolio(34.88, -55.72, 202, 0.0)
-        display.show_portfolio(34.88, -50.00, 202, 0.0)  # +$5.72 move
-        display.show_portfolio(34.88, -50.00, 203, 0.0)  # position count change
+        display.show_portfolio(100.00, -10.00, 50, 0.0)
+        display.show_portfolio(100.00, -4.00, 50, 0.0)   # P&L move
+        display.show_portfolio(100.00, -4.00, 51, 0.0)   # position count change
     assert cap.get().count("P&L") == 3
 
 
 def test_ticker_shows_reserved_cash():
     with display.console.capture() as cap:
-        display.show_portfolio(34.88, -55.72, 202, 0.0, reserved=123.79)
+        display.show_portfolio(100.00, -10.00, 50, 0.0, reserved=20.00)
     out = cap.get()
-    assert "$34.88" in out
-    assert "$123.79" in out
+    assert "$100.00" in out
+    assert "$20.00" in out
     assert "in orders" in out
 
 
@@ -140,7 +140,7 @@ def test_ticker_flushes_noise_summary_when_due():
     display.noise.interval_seconds = 0.0  # always due
     display.noise.bump("mm_quote", 24)
     with display.console.capture() as cap:
-        display.show_portfolio(34.88, -55.72, 202, 0.0)
+        display.show_portfolio(100.00, -10.00, 50, 0.0)
     assert "24 mm quotes" in cap.get()
 
 
