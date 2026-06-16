@@ -24,7 +24,13 @@ _DEFAULTS = _load_defaults()
 
 class ExecutionConfig(BaseModel):
     live: bool = False
-    paper_initial_balance: float = 1000.0
+    # Paper book capital. Sized for headroom, not realism: the provisional
+    # paper-forced strategies must hold enough concurrent positions across
+    # (strategy x category) cells to accrue >=20 settled events each for the
+    # graduation decision. At ~$10/paper-entry, $5k is ~500 concurrent slots, so
+    # paper cash is never the binding constraint (it was: a $111 book left $1.30
+    # free and rejected ~1k entries/day). Recycles on settlement (see #132).
+    paper_initial_balance: float = 5000.0
     limit_order_ttl_seconds: int = 120
     # Max cents the router may pay above the signal's reference price to lift
     # the ask (marketable entry) instead of resting a maker quote at bid+1
