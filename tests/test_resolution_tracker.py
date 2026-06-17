@@ -321,6 +321,47 @@ class TestSettlePosition:
         ]
         assert len(delete_calls) == 0
 
+    def test_settle_zeroes_cost_basis_despite_token_case(self):
+        """cost_basis stores the venue's mixed-case label ("No") while the
+        portfolio/ledger use the upper-cased TokenType ("NO"). Settlement must
+        zero cost_basis.size and accrue realized_pnl regardless of case — a
+        case-sensitive match left the row un-zeroed, resurrecting the position
+        and never booking realized P&L into cost_basis."""
+        from auramaur.db.database import Database
+
+        async def run():
+            db = Database(":memory:")
+            await db.connect()
+            try:
+                # Held NO, mixed case in cost_basis; market resolved YES => loss.
+                await db.execute(
+                    """INSERT INTO cost_basis (market_id, token, token_id, size,
+                                               avg_cost, total_cost, realized_pnl, is_paper)
+                       VALUES ('mkt-1', 'No', 'tok', 20.0, 0.50, 10.0, 0, 0)"""
+                )
+                await db.execute(
+                    """INSERT INTO portfolio (market_id, exchange, side, size, avg_price,
+                                              current_price, token, is_paper, updated_at)
+                       VALUES ('mkt-1', 'polymarket', 'BUY', 20.0, 0.50, 0, 'NO', 0, datetime('now'))"""
+                )
+                await db.commit()
+
+                tracker = ResolutionTracker(db=db, calibration=AsyncMock(), discoveries={})
+                await tracker._settle_position("mkt-1", outcome=True)  # YES wins, NO held => -10
+
+                cb = await db.fetchone(
+                    "SELECT size, realized_pnl FROM cost_basis WHERE market_id='mkt-1' AND is_paper=0")
+                assert cb["size"] == 0, "cost_basis.size must be zeroed on settlement"
+                assert abs(cb["realized_pnl"] - (-10.0)) < 1e-9, cb["realized_pnl"]
+
+                pf = await db.fetchone(
+                    "SELECT COUNT(*) AS n FROM portfolio WHERE market_id='mkt-1' AND is_paper=0")
+                assert pf["n"] == 0, "portfolio row must be removed"
+            finally:
+                await db.close()
+
+        asyncio.run(run())
+
 
 # ---------------------------------------------------------------------------
 # Venue-truth sweep (Polymarket data-api) — settles positions the Gamma loop
@@ -386,7 +427,7 @@ async def test_venue_sweep_settles_matched_token(monkeypatch):
     # The portfolio row was deleted token-scoped and the market deactivated.
     executed_sql = " ".join(str(c.args[0]) for c in db.execute.call_args_list)
     assert "DELETE FROM portfolio" in executed_sql
-    assert "AND token = ?" in executed_sql
+    assert "AND UPPER(token) = UPPER(?)" in executed_sql
     assert "UPDATE markets SET active = 0" in executed_sql
 
 
