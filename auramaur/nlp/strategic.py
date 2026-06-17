@@ -1063,14 +1063,39 @@ class StrategicAnalyzer:
 
         text = text.strip()
 
+        def _norm_item(it: dict) -> dict:
+            # The model varies field names vs the schema (observed: id/p_yes and
+            # a numeric confidence). Map common aliases so items validate instead
+            # of being dropped — the dominant cause of strategic.parse_failed.
+            d = dict(it)
+            if "market_id" not in d:
+                for alt in ("id", "ticker", "marketId"):
+                    if alt in d:
+                        d["market_id"] = d[alt]
+                        break
+            if "probability" not in d:
+                for alt in ("p_yes", "prob", "fair_prob", "yes_prob", "p"):
+                    if alt in d:
+                        d["probability"] = d[alt]
+                        break
+            c = d.get("confidence")
+            if isinstance(c, (int, float)):  # 0-1 float -> tier label
+                d["confidence"] = "HIGH" if c >= 0.7 else "LOW" if c < 0.4 else "MEDIUM"
+            return d
+
         def _coerce(data):
             # The model frequently returns a BARE ARRAY of per-market results
-            # ([{market_id, probability, ...}, ...]) instead of the full object
-            # ({"markets": [...], ...}). Treat a list as the markets payload —
+            # ([{...}, ...]) instead of the full object ({"markets": [...], ...}).
+            # Treat a list as the markets payload (normalizing item keys) —
             # otherwise StrategicAnalysis(**list) blew up and every batch was
             # discarded (100% strategic.parse_failed, pure wasted LLM spend).
             if isinstance(data, list):
-                return StrategicAnalysis(markets=data)
+                items = [_norm_item(it) for it in data if isinstance(it, dict)]
+                return StrategicAnalysis(markets=items)
+            if isinstance(data.get("markets"), list):
+                data = dict(data)
+                data["markets"] = [_norm_item(it) for it in data["markets"]
+                                   if isinstance(it, dict)]
             return StrategicAnalysis(**data)
 
         # Try direct parse (object or array)
