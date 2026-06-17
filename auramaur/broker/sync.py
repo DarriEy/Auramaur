@@ -323,6 +323,17 @@ class PositionSyncer:
             side = OrderSide.BUY.value
             token = pos.token.value if pos.token else "YES"
             token_id = pos.token_id or ""
+            # Mark-integrity floor: never persist a live held position at <=0.
+            # Reconciler positions can arrive at current_price 0 when the token's
+            # price couldn't be resolved (e.g. the markets row lacks clob tokens,
+            # so side-resolution fails) — a phantom -100% that distorts the risk
+            # gates. Floor to avg_cost (mirrors _sync_live) and zero the matching
+            # unrealized so the books stay consistent. Real marks still win.
+            if pos.current_price > 0:
+                current_price, upnl = pos.current_price, pos.unrealized_pnl
+            else:
+                current_price = float(pos.avg_cost or 0)
+                upnl = 0.0
             await self._db.execute(
                 """INSERT INTO portfolio
                    (market_id, exchange, side, size, avg_price, current_price,
@@ -339,7 +350,7 @@ class PositionSyncer:
                        is_paper = excluded.is_paper,
                        updated_at = excluded.updated_at""",
                 (pos.market_id, side, pos.size, pos.avg_cost,
-                 pos.current_price, pos.unrealized_pnl, pos.category,
+                 current_price, upnl, pos.category,
                  token, token_id, is_paper_flag, now),
             )
         await self._db.commit()
