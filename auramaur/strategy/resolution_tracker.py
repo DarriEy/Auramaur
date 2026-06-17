@@ -277,6 +277,16 @@ class ResolutionTracker:
                     return result == "yes"
                 return market.outcome_yes_price > 0.5
 
+        # Dispute guard (Polymarket UMA): a contested resolution can be
+        # price-pinned to the *proposed* outcome and then flip when the dispute
+        # clears. Never finalize while a dispute is open — wait for the venue to
+        # reach "resolved". A market resolved AFTER a dispute reports
+        # uma_status="resolved" (READY), so this only holds back live disputes.
+        if getattr(market, "dispute_risk", "READY") == "DO_NOT_ACT":
+            log.info("resolution.dispute_open_wait", market_id=market.id,
+                     uma_status=getattr(market, "uma_status", ""))
+            return None
+
         # The exchange's active flag is the primary resolution signal, but on
         # Polymarket it lags the actual outcome: a market stays active=True for
         # a while after resolving, price pinned to 0/1. A market is therefore

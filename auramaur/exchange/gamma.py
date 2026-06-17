@@ -257,6 +257,27 @@ class GammaClient:
             category = (classify_tags(tag_labels)
                         or data.get("category", data.get("groupSlug", "")))
 
+            # UMA optimistic-oracle resolution state. `umaResolutionStatuses`
+            # is a JSON-encoded array of the lifecycle stages; the current stage
+            # is its last element (Gamma also exposes the scalar
+            # `umaResolutionStatus`, used as the fallback).
+            import json as _uma_json
+            uma_statuses_raw = data.get("umaResolutionStatuses")
+            uma_statuses: list[str] = []
+            if isinstance(uma_statuses_raw, str):
+                try:
+                    parsed = _uma_json.loads(uma_statuses_raw)
+                    if isinstance(parsed, list):
+                        uma_statuses = [str(s) for s in parsed]
+                except (ValueError, TypeError):
+                    uma_statuses = []
+            elif isinstance(uma_statuses_raw, list):
+                uma_statuses = [str(s) for s in uma_statuses_raw]
+            uma_status = str(
+                data.get("umaResolutionStatus")
+                or (uma_statuses[-1] if uma_statuses else "")
+            )
+
             return Market(
                 id=str(data.get("id", data.get("conditionId", ""))),
                 exchange="polymarket",
@@ -276,6 +297,8 @@ class GammaClient:
                 clob_token_no=clob_no,
                 neg_risk=neg_risk,
                 neg_risk_market_id=neg_risk_market_id,
+                uma_status=uma_status,
+                uma_statuses=uma_statuses,
             )
         except Exception as e:
             log.warning("gamma.parse_error", error=str(e), data_keys=list(data.keys()))

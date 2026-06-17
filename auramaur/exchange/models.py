@@ -57,7 +57,42 @@ class Market(BaseModel):
     # settled into the ledger. Empty for venues that don't report these.
     status: str = ""
     result: str = ""
+    # Polymarket UMA optimistic-oracle resolution state, surfaced by Gamma.
+    # `uma_status` is the current stage ("" → no proposal yet, "proposed" →
+    # outcome proposed and in the liveness window, "disputed" → actively
+    # contested, "resolved" → final). `uma_statuses` is the full lifecycle
+    # history (e.g. ["proposed","disputed","proposed","disputed","resolved"]).
+    # A market mid-dispute can be price-pinned to the *proposed* outcome and
+    # then flip, so the dispute-risk gate keys off these to avoid acting on /
+    # settling a contested resolution. Empty for non-Polymarket venues.
+    uma_status: str = ""
+    uma_statuses: list[str] = Field(default_factory=list)
     last_updated: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @property
+    def dispute_risk(self) -> str:
+        """Resolution/dispute diagnostic from the venue's UMA state.
+
+        Returns one of:
+            "DO_NOT_ACT"            — an active, unresolved dispute: the outcome
+                                      is genuinely contested, so neither enter
+                                      nor settle off the (pinned-but-provisional)
+                                      price.
+            "INSUFFICIENT_EVIDENCE" — the venue reported a status we don't
+                                      recognise; can't classify, fail closed.
+            "READY"                 — no active dispute ("" not yet proposed,
+                                      "proposed" in-window, or "resolved" final;
+                                      a *resolved* market that was disputed in
+                                      its history is still final, hence READY).
+
+        Non-Polymarket venues (no UMA) report "" → READY.
+        """
+        status = (self.uma_status or "").strip().lower()
+        if status == "disputed":
+            return "DO_NOT_ACT"
+        if status in ("", "proposed", "resolved"):
+            return "READY"
+        return "INSUFFICIENT_EVIDENCE"
 
 
 class OrderSide(str, Enum):
