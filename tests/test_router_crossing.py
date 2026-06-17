@@ -109,6 +109,73 @@ async def test_skips_on_dead_book():
         await router.route(_signal(edge=10.0), Market(id="m1", question="Q?"), 10.0, False)
 
 
+# ---------------------------------------------------------------------------
+# Depth-aware routing (phase 1): trim to in-budget capacity, sweep pricing
+# ---------------------------------------------------------------------------
+
+def _depth_settings(*, max_cross_cents=4, min_edge_pct=2.5,
+                    cap_frac=0.5, min_fill=0.5) -> MagicMock:
+    s = MagicMock()
+    s.execution.entry_max_cross_cents = max_cross_cents
+    s.execution.depth_aware_routing = True
+    s.execution.book_capacity_fraction = cap_frac
+    s.execution.min_fill_fraction = min_fill
+    s.risk.min_edge_pct = min_edge_pct
+    return s
+
+
+def _depth_router(book: OrderBook, base_price: float, order_size: float,
+                  settings: MagicMock) -> SmartOrderRouter:
+    exchange = MagicMock()
+    exchange.prepare_order = MagicMock(return_value=Order(
+        market_id="m1", exchange="polymarket", token_id="tok",
+        side=OrderSide.BUY, token=TokenType.YES, size=order_size,
+        price=base_price, dry_run=True))
+    exchange.get_order_book = AsyncMock(return_value=book)
+    return SmartOrderRouter(settings, exchange)
+
+
+@pytest.mark.asyncio
+async def test_depth_trims_size_to_capacity():
+    """Order bigger than the in-budget depth allows -> trim to capacity_fraction
+    of it, price at the (single-level) sweep price."""
+    book = OrderBook(bids=[OrderBookLevel(price=0.48, size=500.0)],
+                     asks=[OrderBookLevel(price=0.50, size=40.0)])
+    router = _depth_router(book, base_price=0.49, order_size=30.0,
+                           settings=_depth_settings(cap_frac=0.5, min_fill=0.5))
+    order = await router.route(_signal(edge=10.0), Market(id="m1", question="Q?"), 30.0, False)
+    assert order is not None
+    assert order.size == 20.0          # depth 40 * 0.5 capacity
+    assert order.price == 0.50         # fits the 0.50 level -> ask
+
+
+@pytest.mark.asyncio
+async def test_depth_skips_when_below_min_fill():
+    """In-budget capacity below min_fill_fraction of the requested size -> skip."""
+    book = OrderBook(bids=[OrderBookLevel(price=0.48, size=500.0)],
+                     asks=[OrderBookLevel(price=0.50, size=40.0)])
+    router = _depth_router(book, base_price=0.49, order_size=50.0,
+                           settings=_depth_settings(cap_frac=0.5, min_fill=0.5))
+    # capacity = 40*0.5 = 20 < min_fill(0.5)*50 = 25 -> skip
+    with pytest.raises(UnmarketableSignal, match="absorbs only"):
+        await router.route(_signal(edge=10.0), Market(id="m1", question="Q?"), 50.0, False)
+
+
+@pytest.mark.asyncio
+async def test_depth_sweep_prices_at_marginal_level():
+    """A size needing two levels prices the limit at the deeper (marginal)
+    level, not the best ask -- so it can actually sweep to fill."""
+    book = OrderBook(bids=[OrderBookLevel(price=0.48, size=500.0)],
+                     asks=[OrderBookLevel(price=0.50, size=10.0),
+                           OrderBookLevel(price=0.55, size=50.0)])
+    router = _depth_router(book, base_price=0.49, order_size=40.0,
+                           settings=_depth_settings(max_cross_cents=10, cap_frac=1.0, min_fill=0.5))
+    order = await router.route(_signal(edge=12.0), Market(id="m1", question="Q?"), 40.0, False)
+    assert order is not None
+    assert order.size == 40.0          # capacity ample (cap_frac 1.0)
+    assert order.price == 0.55         # marginal sweep level, not the 0.50 ask
+
+
 @pytest.mark.asyncio
 async def test_takes_price_improvement_when_ask_below_reference():
     """Ask below the reference price is free improvement -> take it; the

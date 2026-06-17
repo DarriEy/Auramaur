@@ -141,12 +141,68 @@ class SmartOrderRouter:
             crossed_to_ask = True
             order_type = OrderType.LIMIT
             limit_price = max(0.01, min(0.99, round(ask, 2)))
+
+            # Depth-aware sizing: the gate above only proved the BEST ask clears
+            # the floor. For the FULL size we walk the asks up to the slippage
+            # budget — the price at which realizable edge would fall to the
+            # min-edge floor, also bounded by the cents cap — and trim the order
+            # to the in-budget depth (a fraction of it, so we're not the whole
+            # book). If too little of the requested size fits within budget, the
+            # rest would only fill by paying through the floor, so skip.
+            try:
+                depth_aware = bool(self._settings.execution.depth_aware_routing)
+            except Exception:
+                depth_aware = False
+            if depth_aware and base_order.size > 0:
+                cap_frac = float(getattr(self._settings.execution, "book_capacity_fraction", 0.5))
+                min_fill = float(getattr(self._settings.execution, "min_fill_fraction", 0.5))
+                # Highest price that still leaves >= min_edge after slippage.
+                edge_budget_pts = max(0.0, edge_pct - min_edge_pct)
+                price_cap = base_order.price + edge_budget_pts / 100.0
+                # Honor the cents cap too (waived above 40% edge, mirroring above).
+                if edge_pct <= 40.0:
+                    price_cap = min(price_cap, base_order.price + max_cross)
+                price_cap = max(price_cap, ask)  # always at least take the best ask
+                price_cap = min(0.99, price_cap)
+
+                in_budget_depth = book.depth_within(price_cap, is_buy=True)
+                capacity = in_budget_depth * cap_frac
+                executable = min(base_order.size, capacity)
+                if executable < min_fill * base_order.size - 1e-9:
+                    raise UnmarketableSignal(
+                        f"book absorbs only {executable:.1f} of {base_order.size:.1f} "
+                        f"shares within slippage budget (cap {price_cap:.2f}, "
+                        f"min fill {min_fill:.0%}) for {market.id}"
+                    )
+                _, vwap, sweep_price = book.fill_to_size(executable, is_buy=True)
+                if executable < base_order.size - 1e-9:
+                    log.info(
+                        "router.size_trimmed_to_capacity",
+                        market_id=market.id,
+                        requested=round(base_order.size, 1),
+                        executable=round(executable, 1),
+                        in_budget_depth=round(in_budget_depth, 1),
+                        price_cap=round(price_cap, 3),
+                    )
+                    base_order = base_order.model_copy(update={"size": executable})
+                # Price the limit at the SWEEP price — the worst level the size
+                # actually needs — not the full budget cap: a size that fits in
+                # the best ask still prices at the ask, and only a multi-level
+                # sweep lifts the limit (always <= price_cap). Cheapest-first
+                # matching means the effective fill is the VWAP (<= the limit).
+                if sweep_price > 0:
+                    limit_price = max(0.01, min(0.99, round(sweep_price, 2)))
+                cross_cost_pts = (vwap - base_order.price) * 100.0 if vwap else cross_cost_pts
+                realizable_edge = edge_pct - cross_cost_pts
+
             log.info(
                 "router.crossed_to_ask",
                 market_id=market.id,
                 edge_pct=round(edge_pct, 2),
                 realizable_edge=round(realizable_edge, 2),
                 ask=ask,
+                limit_price=limit_price,
+                size=round(base_order.size, 1),
                 cross_cost_pts=round(cross_cost_pts, 2),
             )
         elif not has_book:

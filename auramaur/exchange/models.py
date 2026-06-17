@@ -204,6 +204,50 @@ class OrderBook(BaseModel):
             return self.best_ask - self.best_bid
         return None
 
+    def fill_to_size(self, shares: float, is_buy: bool) -> tuple[float, float, float]:
+        """Walk the book as a taker and return ``(fillable_shares, vwap,
+        marginal_price)``.
+
+        A BUY lifts asks cheapest-first; a SELL hits bids highest-first.
+        ``fillable_shares`` is what the book can actually absorb (<= the
+        requested ``shares``); ``vwap`` is the volume-weighted price over them
+        (the *effective* price the size pays/receives, not the top-of-book
+        quote); ``marginal_price`` is the worst level touched — the minimum
+        limit price that still fills the whole size. Returns ``(0.0, 0.0, 0.0)``
+        when the relevant side is empty or ``shares`` is non-positive.
+        """
+        levels = self.asks if is_buy else self.bids
+        if not levels or shares <= 0:
+            return 0.0, 0.0, 0.0
+        # Taker lifts the best price first: asks ascending, bids descending.
+        ordered = sorted(levels, key=lambda lvl: lvl.price, reverse=not is_buy)
+        remaining = shares
+        cost = 0.0
+        filled = 0.0
+        marginal = 0.0
+        for lvl in ordered:
+            if remaining <= 1e-9:
+                break
+            take = min(remaining, lvl.size)
+            cost += take * lvl.price
+            filled += take
+            marginal = lvl.price
+            remaining -= take
+        if filled <= 0:
+            return 0.0, 0.0, 0.0
+        return filled, cost / filled, marginal
+
+    def depth_within(self, price_cap: float, is_buy: bool) -> float:
+        """Total shares available no worse than ``price_cap`` on the taker side.
+
+        For a BUY, sums ask sizes at price <= cap (the shares we could lift
+        without paying more than the cap); for a SELL, bid sizes at price >= cap.
+        """
+        levels = self.asks if is_buy else self.bids
+        if is_buy:
+            return sum(lvl.size for lvl in levels if lvl.price <= price_cap + 1e-9)
+        return sum(lvl.size for lvl in levels if lvl.price >= price_cap - 1e-9)
+
 
 class ExitReason(str, Enum):
     STOP_LOSS = "STOP_LOSS"
