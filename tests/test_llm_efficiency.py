@@ -234,6 +234,15 @@ class TestStrategicParseAndThrottle:
         assert [r.market_id for r in out.markets] == ["m1"]
         assert out.markets[0].probability == 0.3
 
+    def test_parse_normalizes_aliased_keys(self):
+        # Real-world Gemini output: id/p_yes + numeric confidence (not the schema
+        # field names) — these must be normalized, not dropped.
+        raw = '[{"id": "KX-1", "p_yes": 0.09, "confidence": 0.85, "reasoning": "x"}]'
+        out = StrategicAnalyzer._parse_strategic_response(raw)
+        assert out.markets[0].market_id == "KX-1"
+        assert out.markets[0].probability == 0.09
+        assert out.markets[0].confidence == "HIGH"  # 0.85 -> tier
+
     def test_parse_still_accepts_object(self):
         raw = '{"markets": [{"market_id": "m2", "probability": 0.7}], "world_model_update": "x"}'
         out = StrategicAnalyzer._parse_strategic_response(raw)
