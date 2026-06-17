@@ -556,6 +556,42 @@ def redeem_check():
     asyncio.run(_check())
 
 
+@main.command("health")
+def health():
+    """Operational live-readiness preflight — is it safe to arm live now?
+
+    Runs the live_gate checks (kill switch, DB, fee model, drawdown, mark
+    integrity, LLM budget, arming gates) and prints a verdict. Exit code 0 if
+    live is allowed, 1 if any BLOCK condition is present.
+    """
+    import sys
+
+    async def _run() -> int:
+        from auramaur.monitoring.live_gate import preflight
+
+        settings = Settings()
+        db = Database()
+        await db.connect()
+        try:
+            report = await preflight(settings, db)
+        finally:
+            await db.close()
+
+        colour = {"OK": "green", "WARN": "yellow", "BLOCK": "red"}
+        for r in report.results:
+            console.print(f"  [{colour[r.severity]}]{r.severity:<5}[/] {r.name}: {r.detail}")
+        if report.live_allowed:
+            warns = len(report.warnings)
+            console.print(f"\n[bold green]LIVE ALLOWED[/]"
+                          + (f" ([yellow]{warns} warning(s)[/])" if warns else ""))
+            return 0
+        console.print("\n[bold red]LIVE BLOCKED[/] — "
+                      + ", ".join(b.name for b in report.blocks))
+        return 1
+
+    sys.exit(asyncio.run(_run()))
+
+
 @main.command("pnl")
 @click.option("--paper", "paper", is_flag=True, default=False,
               help="Show the paper book instead of live.")

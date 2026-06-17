@@ -3341,6 +3341,34 @@ class AuramaurBot:
         if exchange_filter:
             console.print(f"  [cyan]Exchange filter: {exchange_filter} only[/]")
 
+        # Operational live-readiness preflight. If any BLOCK condition is present
+        # while armed live, force new ENTRIES to paper (exits bypass the risk
+        # manager, so held positions can still get out). Same checks as
+        # `auramaur health`; a "refuse to fool itself" gate.
+        if self.settings.is_live:
+            try:
+                from auramaur.monitoring.live_gate import preflight
+                report = await preflight(self.settings, self._components["db"])
+                if not report.live_allowed:
+                    rm = self._components.get("risk_manager")
+                    if rm is not None:
+                        rm.live_entries_blocked = True
+                    blocked = ", ".join(b.name for b in report.blocks)
+                    log.error("live_gate.entries_blocked",
+                              blocks=[f"{b.name}: {b.detail}" for b in report.blocks])
+                    console.print(f"  [bold red]LIVE ENTRIES BLOCKED by preflight:[/] "
+                                  f"{blocked} — exits stay live")
+                    alerts = self._components.get("alerts")
+                    if alerts is not None:
+                        await alerts.send(
+                            f"LIVE ENTRIES BLOCKED by preflight: {blocked}", level="critical")
+                else:
+                    log.info("live_gate.passed", warnings=len(report.warnings))
+                    if report.warnings:
+                        console.print(f"  [yellow]preflight OK, {len(report.warnings)} warning(s)[/]")
+            except Exception as e:
+                log.error("live_gate.error", error=str(e))
+
         tasks = [
             asyncio.create_task(self._task_kill_switch_monitor(), name="kill_switch"),
             asyncio.create_task(self._task_cache_cleanup(), name="cache_cleanup"),
