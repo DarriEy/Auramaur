@@ -221,3 +221,52 @@ class TestStrategicCache:
         cached, to_analyze, _ = run(a._partition_cached([market], evidence), event_loop)
         assert cached == []  # disabled → no reuse
         assert len(to_analyze) == 1
+
+
+class TestStrategicParseAndThrottle:
+    """Parse robustness (bare array vs object) + batch cadence throttle."""
+
+    def test_parse_accepts_bare_array(self):
+        # The model frequently returns a bare array of per-market results;
+        # this used to 100% parse_fail and discard the (paid-for) batch.
+        raw = '[{"market_id": "m1", "probability": 0.3, "confidence": "MEDIUM"}]'
+        out = StrategicAnalyzer._parse_strategic_response(raw)
+        assert [r.market_id for r in out.markets] == ["m1"]
+        assert out.markets[0].probability == 0.3
+
+    def test_parse_still_accepts_object(self):
+        raw = '{"markets": [{"market_id": "m2", "probability": 0.7}], "world_model_update": "x"}'
+        out = StrategicAnalyzer._parse_strategic_response(raw)
+        assert [r.market_id for r in out.markets] == ["m2"]
+        assert out.world_model_update == "x"
+
+    def test_parse_array_in_fences_and_prose(self):
+        raw = 'Sure:\n```json\n[{"market_id":"m3","probability":0.5}]\n```\ndone'
+        out = StrategicAnalyzer._parse_strategic_response(raw)
+        assert [r.market_id for r in out.markets] == ["m3"]
+
+    def test_parse_garbage_returns_empty(self):
+        out = StrategicAnalyzer._parse_strategic_response("no json here at all")
+        assert out.markets == []
+
+    def test_batch_throttle_skips_llm_within_interval(self, db, event_loop):
+        s = Settings()
+        s.nlp.strategic_min_interval_seconds = 3600
+        s.nlp.skip_second_opinion = True  # isolate to the batch call
+        a = StrategicAnalyzer(settings=s, db=db)
+        market = _market("m1", 0.40)
+        evidence: dict = {}  # no evidence → avoids the compressor stub mismatch
+        calls = {"n": 0}
+
+        async def fake_llm(*args, **kwargs):
+            calls["n"] += 1
+            return '[{"market_id": "m1", "probability": 0.3, "confidence": "MEDIUM"}]'
+
+        a._call_llm = fake_llm  # type: ignore[assignment]
+
+        run(a.analyze_batch_with_adversarial([market], evidence), event_loop)
+        assert calls["n"] == 1  # first run hits the LLM
+
+        # Immediate second run is within the interval → served from cache, no call.
+        run(a.analyze_batch_with_adversarial([market], evidence), event_loop)
+        assert calls["n"] == 1

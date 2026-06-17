@@ -1628,6 +1628,8 @@ class AuramaurBot:
         on markets where the strategic batch found potential edge but
         confidence was low or the market is high-value.
         """
+        from datetime import datetime, timezone
+
         from auramaur.strategy.agent_analyzer import AgentAnalyzer
 
         depth_agent: AgentAnalyzer = self._components["depth_agent"]
@@ -1636,6 +1638,13 @@ class AuramaurBot:
         engine = engines.get("polymarket")
         if engine is None:
             return
+
+        # Dedup: deep_research is the heaviest LLM call (multi-turn web research).
+        # A persistent high-edge/low-confidence market would otherwise be
+        # re-researched every cycle for hours; remember what we've researched and
+        # skip repeats within the window.
+        researched: dict[str, datetime] = {}
+        research_ttl = 86400.0  # 24h
 
         while self._running:
             if await self._check_kill_switch():
@@ -1653,17 +1662,27 @@ class AuramaurBot:
                        FROM signals s
                        JOIN markets m ON s.market_id = m.id
                        WHERE s.timestamp > datetime('now', '-6 hours')
-                         AND ABS(s.edge) >= 8
+                         AND ABS(s.edge) >= 12
                          AND s.claude_confidence IN ('LOW', 'MEDIUM_LOW', 'MEDIUM')
                          AND m.active = 1
                          AND m.exchange = 'polymarket'
+                         AND COALESCE(m.liquidity, 0) >= 1000
                        ORDER BY ABS(s.edge) DESC
                        LIMIT 3"""
                 )
 
+                now_ts = datetime.now(timezone.utc)
+                researched = {k: v for k, v in researched.items()
+                              if (now_ts - v).total_seconds() < research_ttl}
                 for row in rows:
                     if await self._check_kill_switch():
                         return
+
+                    # Skip markets researched within the dedup window.
+                    last = researched.get(row["market_id"])
+                    if last is not None and (now_ts - last).total_seconds() < research_ttl:
+                        continue
+                    researched[row["market_id"]] = now_ts
 
                     # Build market from DB + enrich from Gamma
                     from auramaur.exchange.models import Market

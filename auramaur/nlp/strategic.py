@@ -273,6 +273,7 @@ class StrategicAnalyzer:
         self._db = db
         self._cache = NLPCache(db)
         self._world_model = self._load_world_model()
+        self._last_batch_at = None  # throttle: last batch+adversarial LLM run
 
         # Initialize LLM ensemble if enabled
         self._ensemble = None
@@ -658,6 +659,19 @@ class StrategicAnalyzer:
         evidence_map: dict[str, list[NewsItem]],
     ) -> StrategicAnalysis:
         """Batch analysis + adversarial review in one context-rich flow."""
+        # Cadence throttle: the engine calls this per scan cycle, but with
+        # directional signals paper-forced the marginal value of re-batching
+        # every ~10 min is low. Outside the interval, serve only fresh cached
+        # results and skip BOTH LLM calls (batch + adversarial).
+        interval = getattr(self._settings.nlp, "strategic_min_interval_seconds", 0)
+        if interval and markets and self._last_batch_at is not None:
+            elapsed = (datetime.now(timezone.utc) - self._last_batch_at).total_seconds()
+            if elapsed < interval:
+                cached, _, _ = await self._partition_cached(markets, evidence_map)
+                return StrategicAnalysis(markets=cached)
+        if markets:
+            self._last_batch_at = datetime.now(timezone.utc)
+
         primary = await self.analyze_batch(markets, evidence_map)
 
         if not primary.markets or self._settings.nlp.skip_second_opinion:
@@ -1049,21 +1063,30 @@ class StrategicAnalyzer:
 
         text = text.strip()
 
-        # Try direct parse
-        try:
-            data = json.loads(text)
+        def _coerce(data):
+            # The model frequently returns a BARE ARRAY of per-market results
+            # ([{market_id, probability, ...}, ...]) instead of the full object
+            # ({"markets": [...], ...}). Treat a list as the markets payload —
+            # otherwise StrategicAnalysis(**list) blew up and every batch was
+            # discarded (100% strategic.parse_failed, pure wasted LLM spend).
+            if isinstance(data, list):
+                return StrategicAnalysis(markets=data)
             return StrategicAnalysis(**data)
+
+        # Try direct parse (object or array)
+        try:
+            return _coerce(json.loads(text))
         except (json.JSONDecodeError, Exception):
             pass
 
-        # Extract JSON object
-        match = re.search(r"\{[\s\S]*\}", text)
-        if match:
-            try:
-                data = json.loads(match.group(0))
-                return StrategicAnalysis(**data)
-            except (json.JSONDecodeError, Exception):
-                pass
+        # Extract the first JSON array or object embedded in prose.
+        for pat in (r"\[[\s\S]*\]", r"\{[\s\S]*\}"):
+            match = re.search(pat, text)
+            if match:
+                try:
+                    return _coerce(json.loads(match.group(0)))
+                except (json.JSONDecodeError, Exception):
+                    continue
 
         # Recoverable: caller falls back to an empty StrategicAnalysis. The LLM
         # occasionally returns prose instead of JSON — worth visibility, not an

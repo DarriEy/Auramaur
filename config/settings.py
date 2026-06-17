@@ -191,6 +191,11 @@ class NLPConfig(BaseModel):
     # edge signal; "tool_use" forces it for every batched market;
     # "strategic_batch" disables the refinement path entirely.
     analysis_mode: Literal["strategic_batch", "tool_use", "auto"] = "auto"
+    # Min seconds between strategic batch+adversarial LLM runs. The engine calls
+    # it per scan cycle (~every 10 min) but directional signals are paper-forced,
+    # so per-cycle batching mostly burned budget; cap the cadence and serve
+    # cached results in between. 0 disables the throttle.
+    strategic_min_interval_seconds: int = 1800
     # Lever 3: tool-use refinement is the single heaviest call (multi-turn web).
     # Tightened from 5.0/4 — only strong edges earn a web-research pass, and at
     # most 2 per cycle — which is where most of the realized token burn lived.
