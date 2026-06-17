@@ -49,6 +49,18 @@ class ExecutionConfig(BaseModel):
     # guard), regardless of the slippage band above.
     exit_min_bid_price: float = 0.05
     spread_capture_min_bps: int = 50
+    # Depth-aware entry routing: size an entry against the ACTUAL book, not just
+    # the top-of-book ask. The router walks the asks up to the slippage budget
+    # (the price at which realizable edge would fall to min_edge, also bounded
+    # by entry_max_cross_cents), and trims the order to the depth available
+    # there. depth_aware_routing toggles the behavior; book_capacity_fraction
+    # caps how much of that in-budget depth a single order may take (don't be
+    # the whole book); min_fill_fraction skips the entry when less than this
+    # share of the requested size fits within budget (a dust fill isn't worth
+    # the entry). Set depth_aware_routing False to restore top-of-book pricing.
+    depth_aware_routing: bool = True
+    book_capacity_fraction: float = 0.5
+    min_fill_fraction: float = 0.5
     stop_loss_pct: float = 30.0
     profit_target_pct: float = 50.0
     edge_erosion_min_pct: float = 2.0
