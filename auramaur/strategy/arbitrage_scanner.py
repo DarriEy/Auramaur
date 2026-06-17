@@ -17,6 +17,7 @@ import structlog
 from auramaur.exchange.models import Market
 from auramaur.exchange.protocols import MarketDiscovery
 from auramaur.nlp.errors import BudgetExhausted
+from auramaur.strategy.signals import taker_fee_rate
 
 log = structlog.get_logger()
 
@@ -248,17 +249,26 @@ class ArbitrageScanner:
                     # Identify cheap/expensive sides for fee calc
                     if market_a.outcome_yes_price <= market_b.outcome_yes_price:
                         cheap_exchange, expensive_exchange = name_a, name_b
+                        cheap_mkt, exp_mkt = market_a, market_b
                     else:
                         cheap_exchange, expensive_exchange = name_b, name_a
+                        cheap_mkt, exp_mkt = market_b, market_a
 
-                    # Fee-aware profit: buy YES cheap, buy NO on expensive side
-                    # Gross profit = spread (one side resolves $1, other $0)
-                    # Fees: each leg's fee applies to the profit from that leg
-                    fee_cheap = self._exchange_fees.get(cheap_exchange, 0.0)
-                    fee_expensive = self._exchange_fees.get(expensive_exchange, 0.0)
-                    # Worst case: profit is taxed at the higher fee on the winning leg
-                    max_fee_rate = max(fee_cheap, fee_expensive)
-                    net_profit = spread * (1.0 - max_fee_rate)
+                    # Fee-aware profit: buy YES cheap, buy NO on the expensive side.
+                    # Both legs are CROSSING (taker) buys, so each pays its real
+                    # taker fee: rate * price * (1-price) per share (p(1-p) is
+                    # symmetric, so the NO leg uses the expensive YES price). The
+                    # Polymarket rate is per-category (was modeled as 0, which
+                    # overstated every cross-exchange arb that crosses a Poly leg).
+                    cheap_yes = cheap_mkt.outcome_yes_price
+                    exp_yes = exp_mkt.outcome_yes_price
+                    fee_cheap = (taker_fee_rate(cheap_exchange, cheap_mkt.category,
+                                                self._exchange_fees)
+                                 * cheap_yes * (1.0 - cheap_yes))
+                    fee_expensive = (taker_fee_rate(expensive_exchange, exp_mkt.category,
+                                                    self._exchange_fees)
+                                     * exp_yes * (1.0 - exp_yes))
+                    net_profit = spread - fee_cheap - fee_expensive
                     profit_pct = net_profit * 100
 
                     if profit_pct < self._min_profit_after_fees_pct:
@@ -506,8 +516,6 @@ class ArbitrageScanner:
         opportunities: list[NegRiskArbOpportunity] = []
 
         for exchange_name, markets in markets_by_exchange.items():
-            fee = self._exchange_fees.get(exchange_name, 0.0)
-
             # Group mutually-exclusive legs by their NegRisk grouping key.
             groups: dict[str, list[Market]] = {}
             for m in markets:
@@ -523,6 +531,11 @@ class ArbitrageScanner:
                 # Skip groups with unpriced legs — can't trust the sum.
                 if any(leg.outcome_no_price <= 0 for leg in legs):
                     continue
+
+                # Per-category taker rate (legs of one group share a category);
+                # Polymarket NegRisk legs were modeled fee-free (0.0) before.
+                fee = taker_fee_rate(exchange_name, legs[0].category,
+                                     self._exchange_fees)
 
                 total_no_cost = sum(leg.outcome_no_price for leg in legs)
                 # Exactly one outcome wins: its NO pays $0, the other (n-1) pay

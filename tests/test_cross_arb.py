@@ -18,11 +18,13 @@ from auramaur.strategy.arbitrage_scanner import ArbOpportunity, ArbitrageScanner
 # ---------------------------------------------------------------------------
 
 
-def _make_market(exchange: str, yes_price: float, question: str = "Will X happen?") -> Market:
+def _make_market(exchange: str, yes_price: float, question: str = "Will X happen?",
+                 category: str = "other") -> Market:
     return Market(
         id=f"{exchange}_123",
         exchange=exchange,
         question=question,
+        category=category,
         outcome_yes_price=yes_price,
         outcome_no_price=round(1.0 - yes_price, 4),
         volume=10000,
@@ -52,7 +54,9 @@ class TestFeeAwareProfit:
 
     @pytest.mark.asyncio
     async def test_cross_exchange_arb_detected_with_fees(self):
-        """A 10% spread should produce ~9.3% profit after 7% Kalshi fee."""
+        """10% spread, both legs taker. Poly cheap@0.40 (cat 'other' -> 0.05):
+        0.05*0.4*0.6=0.012. Kalshi exp@0.50: 0.07*0.25=0.0175. Net 0.10 - 0.012
+        - 0.0175 = 0.0705 = 7.05%."""
         poly = _make_market("polymarket", 0.40, "Will X happen?")
         kalshi = _make_market("kalshi", 0.50, "Will X happen?")
         scanner = self._make_scanner([poly], [kalshi])
@@ -62,15 +66,14 @@ class TestFeeAwareProfit:
         assert len(cross) == 1
 
         opp = cross[0]
-        # Spread = 0.10, after 7% fee on profit: 0.10 * 0.93 = 0.093 = 9.3%
         assert opp.spread == pytest.approx(0.10, abs=0.001)
-        assert opp.expected_profit_pct == pytest.approx(9.3, abs=0.1)
+        assert opp.expected_profit_pct == pytest.approx(7.05, abs=0.1)
 
     @pytest.mark.asyncio
-    async def test_small_spread_filtered_by_min_profit(self):
-        """A 3.5% spread with 7% fee = ~3.255% profit. Should pass default 1.5% min."""
+    async def test_moderate_spread_passes_min_profit(self):
+        """A 10% spread nets ~7% after both legs' taker fees — clears 1.5% min."""
         poly = _make_market("polymarket", 0.50, "Will Y happen?")
-        kalshi = _make_market("kalshi", 0.535, "Will Y happen?")
+        kalshi = _make_market("kalshi", 0.60, "Will Y happen?")
         scanner = self._make_scanner([poly], [kalshi])
 
         opps = await scanner.scan()
@@ -171,9 +174,10 @@ class TestFeeAwareProfit:
 
     @pytest.mark.asyncio
     async def test_zero_fees_full_profit(self):
-        """With no fees on either exchange, profit = spread."""
-        poly = _make_market("polymarket", 0.40, "Will A happen?")
-        kalshi = _make_market("kalshi", 0.50, "Will A happen?")
+        """With genuinely fee-free legs, profit = spread. Polymarket is fee-free
+        only for the geopolitics category (makers aside); Kalshi via override."""
+        poly = _make_market("polymarket", 0.40, "Will A happen?", category="geopolitics")
+        kalshi = _make_market("kalshi", 0.50, "Will A happen?", category="geopolitics")
         scanner = self._make_scanner(
             [poly], [kalshi],
             fees={"polymarket": 0.0, "kalshi": 0.0},

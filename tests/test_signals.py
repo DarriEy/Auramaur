@@ -51,10 +51,12 @@ def test_skipped_analysis():
 
 
 def test_edge_accounts_for_fees():
-    # 3% raw edge, 0% fee = 3% net edge (reward tier)
+    # 3% raw edge on a Polymarket market, unmapped category -> 0.05 taker rate,
+    # at P=0.50: fee = 0.05 * 0.5 * 0.5 = 0.0125 (1.25pt). Net edge 1.75%.
+    # (The directional signal path assumes crossing/taker execution.)
     signal = detect_edge(_make_market(0.50), _make_analysis(0.53))
     assert signal is not None
-    assert signal.edge == pytest.approx(3.0, abs=0.5)
+    assert signal.edge == pytest.approx(1.75, abs=0.1)
 
 
 def _make_kalshi_market(yes_price: float) -> Market:
@@ -171,3 +173,19 @@ def test_calibrated_probability_used_in_edge():
     # Edge should be based on 0.65, not 0.80
     assert signal is not None
     assert signal.claude_prob < 0.70  # Uses calibrated, not raw
+
+
+def test_taker_fee_rate_per_category_and_venue():
+    """Polymarket taker rate is per-category (makers bypass this); other venues
+    use the flat per-exchange coefficient."""
+    from auramaur.strategy.signals import taker_fee_rate
+
+    assert taker_fee_rate("polymarket", "crypto") == 0.07
+    assert taker_fee_rate("polymarket", "politics_us") == 0.04
+    assert taker_fee_rate("polymarket", "sports") == 0.03
+    assert taker_fee_rate("polymarket", "geopolitics") == 0.0
+    assert taker_fee_rate("polymarket", "zzz-unknown") == 0.05   # conservative default
+    assert taker_fee_rate("polymarket", None) == 0.05
+    # Non-poly venues use the flat coefficient from the fees map.
+    assert taker_fee_rate("kalshi", "crypto") == 0.07
+    assert taker_fee_rate("kalshi", None, {"kalshi": 0.03}) == 0.03

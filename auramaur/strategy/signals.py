@@ -14,6 +14,9 @@ log = structlog.get_logger()
 
 # Fallback fee rates — callers should prefer passing exchange_fees from config.
 # Kept as a default so standalone calls (tests, REPL) still work.
+# NOTE polymarket=0.0 here is the MAKER rate; takers pay a per-category rate —
+# see POLYMARKET_TAKER_FEES and taker_fee_rate() below. Resolve via taker_fee_rate
+# rather than reading this dict directly for any crossing (taker) execution.
 EXCHANGE_FEES: dict[str, float] = {
     "polymarket": 0.0,
     "kalshi": 0.07,
@@ -21,6 +24,40 @@ EXCHANGE_FEES: dict[str, float] = {
 }
 
 POLYMARKET_FEE_PCT = 0.0
+
+# Polymarket TAKER fee coefficients by category. Makers are NEVER charged; takers
+# pay  fee = rate * price * (1 - price)  per share (same quadratic shape as the
+# Kalshi coefficient). https://docs.polymarket.com/trading/fees (2026-06).
+POLYMARKET_TAKER_FEES: dict[str, float] = {
+    "crypto": 0.07,
+    "sports": 0.03,
+    "tech": 0.04, "politics": 0.04, "politics_us": 0.04, "politics_intl": 0.04,
+    "finance": 0.04, "mentions": 0.04,
+    "economics": 0.05, "culture": 0.05, "weather": 0.05, "other": 0.05,
+    "science": 0.05, "legal": 0.05, "entertainment": 0.05,
+    "geopolitics": 0.0,
+}
+# Conservative default for an unmapped/unknown category — err toward charging the
+# fee (understating it is the bug this fixes).
+POLYMARKET_DEFAULT_TAKER_FEE = 0.05
+
+
+def taker_fee_rate(
+    exchange: str | None,
+    category: str | None = None,
+    exchange_fees: dict[str, float] | None = None,
+) -> float:
+    """Per-share TAKER fee coefficient for the ``rate * p*(1-p)`` formula.
+
+    Polymarket takers pay a per-category rate (makers pay 0 and bypass this —
+    maker-only strategies like bias_harvest / the post-only market-maker never
+    net a fee). Other venues use the flat per-exchange coefficient.
+    """
+    if (exchange or "polymarket") == "polymarket":
+        return POLYMARKET_TAKER_FEES.get(
+            (category or "").lower(), POLYMARKET_DEFAULT_TAKER_FEE)
+    fees = exchange_fees if exchange_fees is not None else EXCHANGE_FEES
+    return fees.get(exchange or "", 0.0)
 
 
 def _blend_estimates(
@@ -188,8 +225,10 @@ def detect_edge(
     # percentage haircut: 0.07 -> at most ~1.75pt (at P=0.5), ~1.1pt at the
     # extremes. Treating it as flat 7pt made nearly every Kalshi edge negative.
     # Polymarket (0.0) is unaffected.
-    fees = exchange_fees if exchange_fees is not None else EXCHANGE_FEES
-    fee_rate = fees.get(market.exchange, 0.0)
+    # Crossing (taker) execution: net the per-category Polymarket taker fee (or
+    # the flat per-exchange coefficient elsewhere). Maker-only strategies don't
+    # reach this path, so this conservatively assumes the edge will be taken.
+    fee_rate = taker_fee_rate(market.exchange, market.category, exchange_fees)
     net_edge = edge - fee_rate * market_prob * (1.0 - market_prob)
 
     if net_edge <= 0:
