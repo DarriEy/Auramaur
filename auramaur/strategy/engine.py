@@ -33,7 +33,7 @@ from auramaur.risk.manager import RiskManager
 from auramaur.strategy.classifier import ensure_category
 from auramaur.strategy.order_flow import OrderFlowTracker
 from auramaur.strategy.protocols import MarketAnalyzer, TradeCandidate
-from auramaur.strategy.signals import detect_edge
+from auramaur.strategy.signals import detect_edge, taker_fee_rate
 
 log = structlog.get_logger()
 
@@ -1442,9 +1442,11 @@ class TradingEngine:
             if abs(raw_edge) < 0.001:
                 continue
             side = OrderSide.BUY if raw_edge > 0 else OrderSide.SELL
-            # Fee coefficient applies to per-contract P*(1-P), not a flat
-            # percentage (see detect_edge in signals.py).
-            fee_rate = exchange_fees.get(market.exchange or self.exchange_name, 0.0)
+            # Taker fee coefficient applies to per-contract P*(1-P), not a flat
+            # percentage. Polymarket is per-category (see taker_fee_rate); this
+            # is a crossing execution path so the taker rate is the right one.
+            fee_rate = taker_fee_rate(
+                market.exchange or self.exchange_name, market.category, exchange_fees)
             edge = abs(raw_edge) - fee_rate * market_prob * (1.0 - market_prob)
 
             signal = Signal(

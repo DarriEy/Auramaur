@@ -10,12 +10,19 @@ from auramaur.exchange.models import Market
 from auramaur.strategy.arbitrage_scanner import ArbitrageScanner
 
 
-def _leg(idx: int, no_price: float, group: str = "evt_1", neg_risk: bool = True) -> Market:
-    """One outcome of a NegRisk event, priced by its NO price."""
+def _leg(idx: int, no_price: float, group: str = "evt_1", neg_risk: bool = True,
+         category: str = "geopolitics") -> Market:
+    """One outcome of a NegRisk event, priced by its NO price.
+
+    Defaults to the geopolitics category (Polymarket taker fee 0) so fee-agnostic
+    detection tests keep their original payout math; pass a fee-bearing category
+    to exercise the fee.
+    """
     return Market(
         id=f"poly_{group}_{idx}",
         exchange="polymarket",
         question=f"Will candidate {idx} win?",
+        category=category,
         outcome_yes_price=round(1.0 - no_price, 4),
         outcome_no_price=no_price,
         clob_token_no=f"tok_no_{idx}",
@@ -39,8 +46,10 @@ def _scanner(markets: list[Market], min_profit: float = 1.5) -> ArbitrageScanner
 
 @pytest.mark.asyncio
 async def test_negrisk_arb_detected_when_no_legs_underpriced():
-    """3 outcomes with NO prices summing to 1.8 < (N-1)=2 is risk-free profit."""
-    legs = [_leg(0, 0.6), _leg(1, 0.6), _leg(2, 0.6)]
+    """3 outcomes with NO prices summing to 1.8 < (N-1)=2, net of the taker fee.
+    politics category -> 0.04 taker: guaranteed_payout = 2*(1-0.04)=1.92."""
+    legs = [_leg(0, 0.6, category="politics"), _leg(1, 0.6, category="politics"),
+            _leg(2, 0.6, category="politics")]
     scanner = _scanner(legs)
 
     opps = await scanner.scan_negrisk()
@@ -49,9 +58,9 @@ async def test_negrisk_arb_detected_when_no_legs_underpriced():
     opp = opps[0]
     assert opp.n_outcomes == 3
     assert opp.total_no_cost == pytest.approx(1.8)
-    assert opp.guaranteed_payout == pytest.approx(2.0)
-    # profit 0.2 on cost 1.8 -> ~11.1%
-    assert opp.expected_profit_pct == pytest.approx(0.2 / 1.8 * 100, rel=1e-3)
+    assert opp.guaranteed_payout == pytest.approx(1.92)
+    # profit 0.12 on cost 1.8 -> ~6.67%
+    assert opp.expected_profit_pct == pytest.approx(0.12 / 1.8 * 100, rel=1e-3)
 
 
 @pytest.mark.asyncio
@@ -66,11 +75,12 @@ async def test_no_arb_when_legs_sum_above_payout():
 
 @pytest.mark.asyncio
 async def test_fee_erodes_marginal_arb():
-    """A thin arb that clears with 0% fee is rejected once a fee applies."""
-    legs = [_leg(0, 0.655), _leg(1, 0.655), _leg(2, 0.655)]  # sum 1.965, profit ~1.8%
+    """A thin arb that clears fee-free is rejected once the category taker fee
+    applies. 'other' -> 0.05: net payout 2*(1-0.05)=1.9 < cost 1.965."""
+    legs = [_leg(0, 0.655, category="other"), _leg(1, 0.655, category="other"),
+            _leg(2, 0.655, category="other")]  # sum 1.965
     disc = AsyncMock()
     disc.get_markets = AsyncMock(return_value=legs)
-    # 5% fee on the (N-1) payout pushes net payout below cost.
     scanner = ArbitrageScanner(
         discoveries={"polymarket": disc},
         exchange_fees={"polymarket": 0.05},

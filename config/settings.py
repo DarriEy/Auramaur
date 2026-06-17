@@ -645,6 +645,10 @@ class ArbitrageConfig(BaseModel):
     max_arb_size: float = 25.0
     cross_exchange_auto_execute: bool = True
     negrisk_auto_execute: bool = False
+    # Flat per-exchange TAKER fee coefficients (fee = rate * P*(1-P)).
+    # polymarket=0.0 here is only the MAKER rate; Polymarket TAKERS pay a
+    # per-category rate resolved by signals.taker_fee_rate() (POLYMARKET_TAKER_FEES),
+    # NOT this entry. Crossing/taker code paths must go through taker_fee_rate.
     exchange_fees: dict[str, float] = Field(default_factory=lambda: {
         "polymarket": 0.0,
         "kalshi": 0.07,
