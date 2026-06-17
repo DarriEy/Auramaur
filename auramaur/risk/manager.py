@@ -64,6 +64,10 @@ class RiskManager:
         # wired by the bot after the analyzer exists. None -> the gate
         # blocks unexplained divergences without spending an LLM call.
         self.gap_auditor = None
+        # Set by the operational live-readiness preflight (monitoring/live_gate):
+        # when a BLOCK condition is present, force every ENTRY to paper. Exits
+        # bypass evaluate() entirely, so held positions can still get out.
+        self.live_entries_blocked = False
 
     def _paper_forced_strategy(self, strategy_source: str) -> bool:
         """True if this strategy is paper-forced by its own config flag
@@ -167,6 +171,7 @@ class RiskManager:
             signal.strategy_source, market.category or "")
         is_paper_entry = (
             not self.settings.is_live
+            or self.live_entries_blocked  # operational preflight BLOCK
             or self._paper_forced_strategy(signal.strategy_source)
             or cell.force_paper
         )
