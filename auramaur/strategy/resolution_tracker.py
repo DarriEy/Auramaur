@@ -54,6 +54,11 @@ class ResolutionTracker:
         # and from the portfolio row directly for the position arm; MAX() picks
         # a non-NULL value when a market appears in both, falling back to
         # "polymarket" below when neither knows the venue.
+        # The cost_basis arm catches held legs the portfolio view is missing:
+        # a row dropped mid-sync, or a settled leg whose cost_basis size never
+        # zeroed (so it resurrects every cycle). Driving settlement off actual
+        # holdings — not just the portfolio snapshot — closes the gap where such
+        # a leg never books and lingers at a $0 mark.
         rows = await self._db.fetchall(
             """SELECT market_id, MAX(exchange) AS exchange FROM (
                    SELECT c.market_id AS market_id, m.exchange AS exchange
@@ -64,6 +69,11 @@ class ResolutionTracker:
                    SELECT p.market_id AS market_id, p.exchange AS exchange
                    FROM portfolio p
                    WHERE p.size > 0
+                   UNION ALL
+                   SELECT cb.market_id AS market_id, m.exchange AS exchange
+                   FROM cost_basis cb
+                   LEFT JOIN markets m ON cb.market_id = m.id
+                   WHERE cb.size > 0
                )
                GROUP BY market_id"""
         )
@@ -329,19 +339,49 @@ class ResolutionTracker:
             f"SELECT * FROM portfolio WHERE {where}",
             tuple(params),
         )
-        if pos_row is None:
-            # No position — we only had a calibration prediction, not a trade.
-            return
-
         # aiosqlite.Row supports __getitem__ but not .get(); normalise to a
         # plain dict so we can safely use defaults for columns added in
         # later migrations (token, is_paper).
-        pos = dict(pos_row)
-        entry_price = pos["avg_price"]
-        size = pos["size"]
-        side = pos["side"]
-        token = pos.get("token") or "YES"
-        is_paper_flag = int(pos.get("is_paper", 1))
+        if pos_row is not None:
+            pos = dict(pos_row)
+            entry_price = pos["avg_price"]
+            size = pos["size"]
+            side = pos["side"]
+            token = pos.get("token") or "YES"
+            is_paper_flag = int(pos.get("is_paper", 1))
+        else:
+            # No portfolio row — fall back to cost_basis, the holdings source of
+            # truth. The portfolio view can briefly drop a row mid-sync (so a
+            # settlement that raced it never booked), or a settled leg's row was
+            # removed while its cost_basis size stayed non-zero (resurrecting it
+            # every cycle). Settling off cost_basis closes both gaps; the
+            # idempotency guard below stops an already-booked leg double-counting.
+            cb_where = "market_id = ? AND size > 0"
+            cb_params: list = [market_id]
+            if token_scope is not None:
+                cb_where += " AND UPPER(token) = UPPER(?)"
+                cb_params.append(token_scope)
+            if is_paper_scope is not None:
+                cb_where += " AND is_paper = ?"
+                cb_params.append(is_paper_scope)
+            cb_row = await self._db.fetchone(
+                f"SELECT * FROM cost_basis WHERE {cb_where} ORDER BY size DESC",
+                tuple(cb_params),
+            )
+            if cb_row is None:
+                # Neither a position nor a holding — only a calibration prediction.
+                return
+            cb = dict(cb_row)
+            entry_price = cb["avg_cost"]
+            size = cb["size"]
+            side = "BUY"  # Polymarket holdings are always long
+            token = cb.get("token") or "YES"
+            is_paper_flag = int(cb.get("is_paper", 1))
+
+        # Normalise to the upper-cased TokenType used by the portfolio/ledger, so
+        # the source_ref, cost_basis match, and exit-price logic are all
+        # consistent regardless of the venue's mixed-case cost_basis label.
+        token = (token or "YES").upper()
 
         # Settlement price: YES resolves to $1, NO resolves to $0
         if token == "NO":
@@ -356,51 +396,65 @@ class ResolutionTracker:
         else:
             pnl = (entry_price - exit_price) * size
 
-        # Record PnL in daily stats
-        try:
-            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            await self._db.execute(
-                """INSERT INTO daily_stats (date, total_pnl, trades_count, wins, losses)
-                   VALUES (?, ?, 1, ?, ?)
-                   ON CONFLICT(date) DO UPDATE SET
-                       total_pnl = total_pnl + excluded.total_pnl,
-                       trades_count = trades_count + 1,
-                       wins = wins + excluded.wins,
-                       losses = losses + excluded.losses""",
-                (today, pnl, 1 if pnl > 0 else 0, 1 if pnl < 0 else 0),
-            )
-        except Exception as e:
-            log.debug("resolution.daily_stats_error", error=str(e))
+        # Idempotency: the ledger is INSERT-OR-IGNORE on source_ref, but
+        # daily_stats and cost_basis.realized_pnl are running totals that WOULD
+        # double-count on a re-settle. So only book the P&L when this leg isn't
+        # already in the ledger; an already-booked leg still falls through to the
+        # cleanup below (zero its residual cost_basis size, drop the portfolio
+        # row) so it stops resurrecting.
+        source_ref = f"settle:{market_id}:{token}:{is_paper_flag}"
+        already_booked = await self._db.fetchone(
+            "SELECT 1 FROM pnl_ledger WHERE source_ref = ?", (source_ref,)
+        )
 
-        # Update cost_basis realized PnL — scoped to the same paper/live mode
-        # AND token as the settled position, so a paper resolution can't zero a
-        # live row's cost basis and settling one side can't zero the other
-        # (YES+NO can coexist since the #78 PKs).
+        if already_booked is None:
+            # Record PnL in daily stats
+            try:
+                today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                await self._db.execute(
+                    """INSERT INTO daily_stats (date, total_pnl, trades_count, wins, losses)
+                       VALUES (?, ?, 1, ?, ?)
+                       ON CONFLICT(date) DO UPDATE SET
+                           total_pnl = total_pnl + excluded.total_pnl,
+                           trades_count = trades_count + 1,
+                           wins = wins + excluded.wins,
+                           losses = losses + excluded.losses""",
+                    (today, pnl, 1 if pnl > 0 else 0, 1 if pnl < 0 else 0),
+                )
+            except Exception as e:
+                log.debug("resolution.daily_stats_error", error=str(e))
+
+            # Unified realized-P&L ledger: settlement of the residual position.
+            from auramaur.broker.ledger import record_ledger_event
+            await record_ledger_event(
+                self._db,
+                market_id=market_id,
+                kind="settlement",
+                token=token,
+                qty=size,
+                pnl=pnl,
+                fees=0.0,
+                is_paper=bool(is_paper_flag),
+                source_ref=source_ref,
+            )
+            cost_basis_pnl_delta = pnl
+        else:
+            cost_basis_pnl_delta = 0.0
+
+        # Zero the cost_basis size (always) and accrue realized P&L only when we
+        # booked above. Scoped to the same paper/live mode AND token as the
+        # settled position, so a paper resolution can't zero a live row's cost
+        # basis and settling one side can't zero the other (YES+NO can coexist
+        # since the #78 PKs).
         try:
             await self._db.execute(
                 """UPDATE cost_basis
                    SET realized_pnl = realized_pnl + ?, size = 0, updated_at = datetime('now')
                    WHERE market_id = ? AND is_paper = ? AND UPPER(token) = UPPER(?)""",
-                (pnl, market_id, is_paper_flag, token),
+                (cost_basis_pnl_delta, market_id, is_paper_flag, token),
             )
         except Exception as e:
             log.debug("resolution.cost_basis_error", error=str(e))
-
-        # Unified realized-P&L ledger: settlement of the residual position.
-        # Same source_ref scheme as the backfill, so re-running either is a
-        # no-op rather than a double-count.
-        from auramaur.broker.ledger import record_ledger_event
-        await record_ledger_event(
-            self._db,
-            market_id=market_id,
-            kind="settlement",
-            token=token,
-            qty=size,
-            pnl=pnl,
-            fees=0.0,
-            is_paper=bool(is_paper_flag),
-            source_ref=f"settle:{market_id}:{token}:{is_paper_flag}",
-        )
 
         # Remove from portfolio — scoped by is_paper so a paper resolution
         # doesn't delete a live position for the same market (and vice versa).

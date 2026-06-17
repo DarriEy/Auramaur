@@ -362,6 +362,72 @@ class TestSettlePosition:
 
         asyncio.run(run())
 
+    def test_settle_from_cost_basis_when_portfolio_row_absent(self):
+        """A held leg with no portfolio row (raced/dropped mid-sync) still
+        books off cost_basis and is removed — closing the gap where such a leg
+        never settled and resurrected at $0."""
+        from auramaur.db.database import Database
+
+        async def run():
+            db = Database(":memory:")
+            await db.connect()
+            try:
+                await db.execute(
+                    """INSERT INTO cost_basis (market_id, token, token_id, size,
+                                               avg_cost, total_cost, realized_pnl, is_paper)
+                       VALUES ('mkt-x', 'Yes', 'tok', 10.0, 0.1682, 1.682, 0, 0)"""
+                )
+                await db.commit()  # NOTE: no portfolio row at all
+                tracker = ResolutionTracker(db=db, calibration=AsyncMock(), discoveries={})
+                await tracker._settle_position("mkt-x", outcome=False)  # NO wins, YES held => loss
+
+                cb = await db.fetchone(
+                    "SELECT size, realized_pnl FROM cost_basis WHERE market_id='mkt-x' AND is_paper=0")
+                assert cb["size"] == 0
+                assert abs(cb["realized_pnl"] - (-1.682)) < 1e-9, cb["realized_pnl"]
+                led = await db.fetchone(
+                    "SELECT pnl FROM pnl_ledger WHERE source_ref='settle:mkt-x:YES:0'")
+                assert led is not None and abs(led["pnl"] - (-1.682)) < 1e-9
+            finally:
+                await db.close()
+
+        asyncio.run(run())
+
+    def test_resettle_is_idempotent_no_double_count(self):
+        """Settling an already-booked leg a second time must not double-count
+        daily_stats / cost_basis.realized_pnl — it only cleans up residual size."""
+        from auramaur.db.database import Database
+
+        async def run():
+            db = Database(":memory:")
+            await db.connect()
+            try:
+                await db.execute(
+                    """INSERT INTO cost_basis (market_id, token, token_id, size,
+                                               avg_cost, total_cost, realized_pnl, is_paper)
+                       VALUES ('mkt-y', 'No', 'tok', 20.0, 0.50, 10.0, 0, 0)"""
+                )
+                await db.commit()
+                tracker = ResolutionTracker(db=db, calibration=AsyncMock(), discoveries={})
+                await tracker._settle_position("mkt-y", outcome=True)  # YES wins, NO held => -10
+                # simulate the row resurrecting (cost_basis size set back > 0)
+                await db.execute("UPDATE cost_basis SET size = 20.0 WHERE market_id='mkt-y'")
+                await db.commit()
+                await tracker._settle_position("mkt-y", outcome=True)  # second pass
+
+                cb = await db.fetchone(
+                    "SELECT size, realized_pnl FROM cost_basis WHERE market_id='mkt-y' AND is_paper=0")
+                assert cb["size"] == 0
+                assert abs(cb["realized_pnl"] - (-10.0)) < 1e-9, "must not double-count"
+                n = await db.fetchone("SELECT COUNT(*) AS n FROM pnl_ledger WHERE market_id='mkt-y'")
+                assert n["n"] == 1, "ledger must hold exactly one settlement row"
+                ds = await db.fetchone("SELECT total_pnl, trades_count FROM daily_stats")
+                assert abs(ds["total_pnl"] - (-10.0)) < 1e-9 and ds["trades_count"] == 1
+            finally:
+                await db.close()
+
+        asyncio.run(run())
+
 
 # ---------------------------------------------------------------------------
 # Venue-truth sweep (Polymarket data-api) — settles positions the Gamma loop
