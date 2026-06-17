@@ -311,10 +311,16 @@ class ResolutionTracker:
         scoped to that exact row (the venue sweep settles per held token);
         without them the legacy market-wide behavior is preserved.
         """
+        # Token comparisons are case-insensitive throughout settlement: the
+        # cost_basis table stores the venue's mixed-case label ("Yes"/"No")
+        # while the portfolio/ledger use the upper-cased TokenType ("YES"/"NO").
+        # A case-sensitive match left cost_basis.size un-zeroed on settlement,
+        # so _sync_live resurrected the position every cycle (only _drop_settled
+        # kept the portfolio clean), and realized_pnl never accrued.
         where = "market_id = ?"
         params: list = [market_id]
         if token_scope is not None:
-            where += " AND token = ?"
+            where += " AND UPPER(token) = UPPER(?)"
             params.append(token_scope)
         if is_paper_scope is not None:
             where += " AND is_paper = ?"
@@ -374,7 +380,7 @@ class ResolutionTracker:
             await self._db.execute(
                 """UPDATE cost_basis
                    SET realized_pnl = realized_pnl + ?, size = 0, updated_at = datetime('now')
-                   WHERE market_id = ? AND is_paper = ? AND token = ?""",
+                   WHERE market_id = ? AND is_paper = ? AND UPPER(token) = UPPER(?)""",
                 (pnl, market_id, is_paper_flag, token),
             )
         except Exception as e:
@@ -403,7 +409,7 @@ class ResolutionTracker:
         if token_scope is not None:
             await self._db.execute(
                 "DELETE FROM portfolio WHERE market_id = ? AND is_paper = ? "
-                "AND token = ?",
+                "AND UPPER(token) = UPPER(?)",
                 (market_id, is_paper_flag, token_scope),
             )
         else:
