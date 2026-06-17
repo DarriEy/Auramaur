@@ -128,6 +128,25 @@ def test_lens_triggers():
     assert not has_lens_trigger("Bitcoin up or down this week?")
 
 
+def test_eligible_loosens_thresholds_in_paper_mode():
+    """A short-dated, lower-liquidity market is eligible while paper-forced
+    (venue guards don't apply) but rejected once flipped to live."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        # ~2h to resolution, $400 liquidity: fails live (12h / $1000),
+        # passes paper (1h / $250).
+        m = _market(days_out=2.0 / 24.0, liquidity=400.0)
+
+        paper = _pillar(db, _settings(paper=True), [m])
+        assert paper._eligible(m) is True
+
+        live = _pillar(db, _settings(paper=False), [m])
+        assert live._eligible(m) is False
+
+    asyncio.run(run())
+
+
 # ----------------------------------------------------------------------
 # Lens pillar
 # ----------------------------------------------------------------------

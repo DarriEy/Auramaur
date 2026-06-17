@@ -93,11 +93,19 @@ class ResolutionLensPillar:
 
     def _eligible(self, m: Market) -> bool:
         cfg = self._settings.resolution_lens
+        # While paper-forced the strategy can't reach the venue, so the
+        # live-trading eligibility guards (hold horizon, fillable liquidity)
+        # don't apply and the strict values starve accrual. Use the loosened
+        # paper thresholds; they revert to strict automatically if paper is
+        # flipped to graduate the cell to live.
+        min_liq = cfg.paper_min_liquidity if cfg.paper else cfg.min_liquidity
+        min_hours = (cfg.paper_min_hours_to_resolution if cfg.paper
+                     else cfg.min_hours_to_resolution)
         if not m.active or not (0.0 < m.outcome_yes_price < 1.0):
             return False
         if (m.exchange or "polymarket") != "polymarket":
             return False
-        if m.liquidity < cfg.min_liquidity:
+        if m.liquidity < min_liq:
             return False
         if m.spread and m.spread * 100.0 > cfg.max_spread_pct:
             return False
@@ -109,7 +117,7 @@ class ResolutionLensPillar:
             return False
         end = m.end_date if m.end_date.tzinfo else m.end_date.replace(tzinfo=timezone.utc)
         hours = (end - datetime.now(timezone.utc)).total_seconds() / 3600.0
-        return cfg.min_hours_to_resolution <= hours <= cfg.max_days_to_resolution * 24.0
+        return min_hours <= hours <= cfg.max_days_to_resolution * 24.0
 
     async def _verdict(self, m: Market):
         """Cached lens verdict (criteria are static — cache forever)."""
