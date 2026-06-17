@@ -270,11 +270,17 @@ class ResolutionTracker:
         # 95/5 market from being settled prematurely and feeding a fake outcome
         # into calibration. (Paper positions settle ONLY through this path, so
         # the stale active flag was stranding them indefinitely.)
+        # `closed` is the venue's explicit "trading has ended" flag and flips
+        # before the lagging `active` flag does. Without it, a market that
+        # resolved while still flagged active=True with a future end_date — the
+        # exact shape of a held losing leg pinned to 0/1 — never became eligible
+        # and lingered in the portfolio at a $0 mark, its realized loss unbooked.
         end = getattr(market, "end_date", None)
         if end is not None and end.tzinfo is None:
             end = end.replace(tzinfo=timezone.utc)
         past_end_date = end is not None and datetime.now(timezone.utc) > end
-        if market.active and not past_end_date:
+        closed = bool(getattr(market, "closed", False))
+        if market.active and not past_end_date and not closed:
             return None
 
         # Eligible (inactive, or past end_date) + tightly converged price →

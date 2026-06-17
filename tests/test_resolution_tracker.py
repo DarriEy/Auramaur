@@ -22,12 +22,14 @@ def _make_market(
     yes_price: float = 1.0,
     exchange: str = "polymarket",
     end_date=None,
+    closed: bool = False,
 ) -> Market:
     return Market(
         id=market_id,
         exchange=exchange,
         question="Will it rain tomorrow?",
         active=active,
+        closed=closed,
         outcome_yes_price=yes_price,
         outcome_no_price=1.0 - yes_price,
         end_date=end_date,
@@ -91,6 +93,22 @@ class TestDetectResolution:
         """Past end_date but price mid (closed awaiting oracle) — still wait."""
         past = datetime.now(timezone.utc) - timedelta(days=1)
         market = _make_market(active=True, yes_price=0.55, end_date=past)
+        assert ResolutionTracker._detect_resolution(market, "polymarket") is None
+
+    def test_closed_active_future_end_date_pinned_resolves(self):
+        """A resolved losing leg: venue says closed=True but the lagging active
+        flag is still True with a FUTURE end_date and price pinned to 0/1.
+        Before the fix this returned None and the position lingered at $0."""
+        future = datetime.now(timezone.utc) + timedelta(days=160)
+        won_yes = _make_market(active=True, closed=True, yes_price=1.0, end_date=future)
+        assert ResolutionTracker._detect_resolution(won_yes, "polymarket") is True
+        won_no = _make_market(active=True, closed=True, yes_price=0.0, end_date=future)
+        assert ResolutionTracker._detect_resolution(won_no, "polymarket") is False
+
+    def test_closed_but_ambiguous_price_stays_none(self):
+        """closed=True but price mid (awaiting oracle) — don't guess a winner."""
+        future = datetime.now(timezone.utc) + timedelta(days=10)
+        market = _make_market(active=True, closed=True, yes_price=0.6, end_date=future)
         assert ResolutionTracker._detect_resolution(market, "polymarket") is None
 
     def test_resolved_yes(self):
