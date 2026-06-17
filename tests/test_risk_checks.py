@@ -21,7 +21,28 @@ from auramaur.risk.checks import (
     check_correlation,
     check_time_to_resolution,
     check_second_opinion_divergence,
+    check_dispute_risk,
 )
+
+
+@pytest.mark.asyncio
+async def test_dispute_risk_blocks_active_dispute():
+    r = await check_dispute_risk("DO_NOT_ACT")
+    assert not r.passed and "dispute" in r.reason.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verdict", ["READY", "INSUFFICIENT_EVIDENCE"])
+async def test_dispute_risk_allows_non_active(verdict):
+    r = await check_dispute_risk(verdict)
+    assert r.passed and r.reason == ""
+
+
+@pytest.mark.asyncio
+async def test_dispute_risk_skipped_when_not_applies():
+    # Even an active dispute passes when the check doesn't apply (paper mode).
+    r = await check_dispute_risk("DO_NOT_ACT", applies=False)
+    assert r.passed
 
 
 # 1. Kill switch

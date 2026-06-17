@@ -111,6 +111,25 @@ class TestDetectResolution:
         market = _make_market(active=True, closed=True, yes_price=0.6, end_date=future)
         assert ResolutionTracker._detect_resolution(market, "polymarket") is None
 
+    def test_active_uma_dispute_blocks_settlement_even_if_pinned(self):
+        """A market mid-UMA-dispute is price-pinned to the PROPOSED outcome and
+        can flip — never finalize it, even closed + pinned to 0/1."""
+        past = datetime.now(timezone.utc) - timedelta(days=1)
+        m = _make_market(active=False, closed=True, yes_price=1.0, end_date=past)
+        m.uma_status = "disputed"
+        assert m.dispute_risk == "DO_NOT_ACT"
+        assert ResolutionTracker._detect_resolution(m, "polymarket") is None
+
+    def test_resolved_after_past_dispute_still_settles(self):
+        """uma_status 'resolved' is final even if its history shows disputes —
+        the guard only holds back ACTIVE disputes."""
+        past = datetime.now(timezone.utc) - timedelta(days=1)
+        m = _make_market(active=False, closed=True, yes_price=1.0, end_date=past)
+        m.uma_status = "resolved"
+        m.uma_statuses = ["proposed", "disputed", "proposed", "disputed", "resolved"]
+        assert m.dispute_risk == "READY"
+        assert ResolutionTracker._detect_resolution(m, "polymarket") is True
+
     def test_resolved_yes(self):
         market = _make_market(active=False, yes_price=0.99)
         assert ResolutionTracker._detect_resolution(market, "polymarket") is True

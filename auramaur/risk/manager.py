@@ -27,6 +27,7 @@ from auramaur.risk.checks import (
     check_min_liquidity,
     check_blocked_category,
     check_category_allowlist,
+    check_dispute_risk,
     check_mispricing_named,
     check_second_opinion_divergence,
     check_time_to_resolution,
@@ -232,6 +233,10 @@ class RiskManager:
                 applies=category_applies,
                 fallback_category=fresh_category,
             ))
+            # Dispute gate (all live entries, incl. structural strategies — a
+            # contested resolution is adverse to arb/MM too): don't enter a
+            # market whose UMA resolution is actively disputed.
+            pre_checks.append(await check_dispute_risk(market.dispute_risk))
 
         # ----------------------------------------------------------------
         # Name-the-gap gate: a significant LLM divergence must name the

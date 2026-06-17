@@ -469,3 +469,28 @@ async def check_category_allowlist(
                 else f"category '{label}' is not allowed for live entries"),
         value=label,
     )
+
+
+async def check_dispute_risk(dispute_risk: str, applies: bool = True) -> CheckResult:
+    """Block a live entry when the venue's resolution is under active dispute.
+
+    Polymarket's UMA oracle can leave a market mid-dispute (``uma_status ==
+    "disputed"``): the price is pinned to the *proposed* outcome but can flip
+    when the dispute clears, so entering is buying into a contested resolution.
+    Only an ACTIVE dispute ("DO_NOT_ACT") blocks — a market that resolved after
+    a past dispute reads "READY", and a status we can't classify reads
+    "INSUFFICIENT_EVIDENCE" (allowed at entry; the real entry risk is an open
+    dispute, and the settlement path fails closed separately). Non-UMA venues
+    (Kalshi) report "READY". Paper mode passes ``applies=False``.
+    """
+    if not applies:
+        return CheckResult(name="dispute_risk", passed=True, reason="",
+                           value=dispute_risk)
+    passed = dispute_risk != "DO_NOT_ACT"
+    return CheckResult(
+        name="dispute_risk",
+        passed=passed,
+        reason=("" if passed
+                else "market resolution is under an active UMA dispute"),
+        value=dispute_risk,
+    )
