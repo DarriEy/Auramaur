@@ -111,8 +111,14 @@ class ResolutionTracker:
                 # Feed into calibration — triggers online Platt update
                 await self._calibration.record_resolution(market_id, outcome)
 
-                # Compute realized PnL from the portfolio position and clean up
-                await self._settle_position(market_id, outcome)
+                # Compute realized PnL from the position and clean up. Settle
+                # each mode explicitly: a market can be held in BOTH paper and
+                # live (the paper track mirrors live markets), and a mode-blind
+                # settle would book just one — picking the wrong one when the
+                # portfolio row is absent and it falls back to cost_basis (which
+                # carries both modes). Each call is a no-op if that mode isn't held.
+                await self._settle_position(market_id, outcome, is_paper_scope=0)
+                await self._settle_position(market_id, outcome, is_paper_scope=1)
 
                 # Mark the market as inactive in our DB so other queries
                 # (e.g. depth research, correlation) stop considering it.
