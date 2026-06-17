@@ -428,6 +428,39 @@ class TestSettlePosition:
 
         asyncio.run(run())
 
+    def test_cost_basis_fallback_respects_is_paper_scope(self):
+        """When a market is held in BOTH modes and the portfolio row is absent,
+        a mode-scoped settle must book only the targeted mode off cost_basis —
+        not pick the wrong leg (the bug that booked a live loss as paper)."""
+        from auramaur.db.database import Database
+
+        async def run():
+            db = Database(":memory:")
+            await db.connect()
+            try:
+                for paper in (0, 1):
+                    await db.execute(
+                        """INSERT INTO cost_basis (market_id, token, token_id, size,
+                                                   avg_cost, total_cost, realized_pnl, is_paper)
+                           VALUES ('mkt-z', 'Yes', 'tok', 10.0, 0.20, 2.0, 0, ?)""",
+                        (paper,),
+                    )
+                await db.commit()
+                tracker = ResolutionTracker(db=db, calibration=AsyncMock(), discoveries={})
+                await tracker._settle_position("mkt-z", outcome=False, is_paper_scope=0)  # live only
+
+                live = await db.fetchone("SELECT size FROM cost_basis WHERE market_id='mkt-z' AND is_paper=0")
+                paper = await db.fetchone("SELECT size FROM cost_basis WHERE market_id='mkt-z' AND is_paper=1")
+                assert live["size"] == 0, "live leg must settle"
+                assert paper["size"] == 10.0, "paper leg must be untouched"
+                refs = [r["source_ref"] for r in await db.fetchall(
+                    "SELECT source_ref FROM pnl_ledger WHERE market_id='mkt-z'")]
+                assert refs == ["settle:mkt-z:YES:0"], refs
+            finally:
+                await db.close()
+
+        asyncio.run(run())
+
 
 # ---------------------------------------------------------------------------
 # Venue-truth sweep (Polymarket data-api) — settles positions the Gamma loop
