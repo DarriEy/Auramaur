@@ -33,6 +33,10 @@ class Market(BaseModel):
     category: str = ""
     end_date: datetime | None = None
     active: bool = True
+    # Polymarket's `active` flag lags resolution (a market stays active=True for
+    # a while after it settles), but `closed` flips at venue closure — it is the
+    # reliable "trading has ended" signal the resolution tracker keys off.
+    closed: bool = False
     outcome_yes_price: float = 0.5
     outcome_no_price: float = 0.5
     volume: float = 0

@@ -266,6 +266,7 @@ class GammaClient:
                 category=category,
                 end_date=end_date,
                 active=data.get("active", True),
+                closed=bool(data.get("closed", False)),
                 outcome_yes_price=yes_price,
                 outcome_no_price=no_price,
                 volume=float(data.get("volume", 0) or 0),
