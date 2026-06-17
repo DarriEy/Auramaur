@@ -367,6 +367,16 @@ class ResolutionLensConfig(BaseModel):
     min_hours_to_resolution: float = 12.0
     max_days_to_resolution: float = 90.0
     interval_seconds: int = 1800
+    # Paper-phase eligibility: while the cell is hard paper-forced (paper=True)
+    # it can never reach the venue, so the live-trading guards (hold horizon,
+    # liquidity for fillability) don't apply — and the strict live values starve
+    # accrual (only ~92 of 3700 lexical candidates pass; most rejected as
+    # <12h-to-resolve or <$1k liquidity). Loosen them in paper to build the
+    # graduation record: short-dated markets also SETTLE fast, so paper events
+    # accrue quickly. Auto-reverts to the strict values above if paper is
+    # flipped to graduate the cell to live.
+    paper_min_hours_to_resolution: float = 1.0
+    paper_min_liquidity: float = 250.0
 
 
 class GraduationConfig(BaseModel):
