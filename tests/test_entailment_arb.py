@@ -31,11 +31,59 @@ from auramaur.exchange.models import (
 )
 from auramaur.strategy.entailment_arb import (
     EntailmentArbPillar,
+    kalshi_ladder_pairs,
     ladder_pairs,
+    parse_kalshi_ladder,
     parse_threshold,
     parse_topn,
 )
 from config.settings import Settings
+
+
+def _kx(ticker, yes, question="What will CPI YoY be?") -> Market:
+    return Market(
+        id=ticker, exchange="kalshi", ticker=ticker, question=question,
+        description="Above X%", active=True,
+        outcome_yes_price=yes, outcome_no_price=round(1 - yes, 2),
+        liquidity=5000.0, volume=5000.0, spread=0.01,
+        end_date=datetime.now(timezone.utc) + timedelta(days=5),
+    )
+
+
+def test_parse_kalshi_ladder():
+    assert parse_kalshi_ladder("KXCPIYOY-26NOV-T4.5") == (("kxthr", "KXCPIYOY-26NOV"), 4.5)
+    assert parse_kalshi_ladder("KXPAYROLLS-26NOV-T90000") == (("kxthr", "KXPAYROLLS-26NOV"), 90000.0)
+    # categorical Fed strikes are NOT monotonic ladders -> excluded
+    assert parse_kalshi_ladder("KXFEDDECISION-28JAN-H26") is None
+    assert parse_kalshi_ladder("KXFEDDECISION-28JAN-C25") is None
+    assert parse_kalshi_ladder("KXSOMETHING") is None
+
+
+def test_kalshi_ladder_pairs_direction_and_no_cross_series():
+    markets = [
+        _kx("KXCPIYOY-26NOV-T4.5", 0.30),
+        _kx("KXCPIYOY-26NOV-T4.4", 0.40),
+        _kx("KXCPIYOY-26NOV-T4.6", 0.20),
+        # different series, same "Above %" subtitle — must NOT pair with CPI
+        _kx("KXU3-26NOV-T4.5", 0.30, question="What will unemployment be?"),
+        # different PERIOD — must not pair with the NOV CPI bins
+        _kx("KXCPIYOY-26DEC-T4.5", 0.30),
+    ]
+    pairs = kalshi_ladder_pairs(markets)
+    fams = {(a.ticker, b.ticker) for a, b, _why in pairs}
+    # 3 NOV-CPI bins -> 3 ordered pairs, all implier=higher-strike => implied=lower
+    assert ("KXCPIYOY-26NOV-T4.6", "KXCPIYOY-26NOV-T4.5") in fams
+    assert ("KXCPIYOY-26NOV-T4.6", "KXCPIYOY-26NOV-T4.4") in fams
+    assert ("KXCPIYOY-26NOV-T4.5", "KXCPIYOY-26NOV-T4.4") in fams
+    assert len(pairs) == 3  # no cross-series / cross-period contamination
+    # every implier is the higher strike (so P(implier) <= P(implied) must hold)
+    for impl, imp, _ in pairs:
+        assert float(impl.ticker.split("-T")[1]) > float(imp.ticker.split("-T")[1])
+
+
+def test_kalshi_ladder_ignores_non_kalshi():
+    poly = _market("p1", "BTC above 70000 on Friday?", 0.5)
+    assert kalshi_ladder_pairs([poly]) == []
 
 
 def _market(mid, question, yes, liquidity=5000.0, spread=0.01,

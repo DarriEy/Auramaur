@@ -134,6 +134,66 @@ def ladder_pairs(markets: list[Market]) -> list[tuple[Market, Market, str]]:
 
 
 # ----------------------------------------------------------------------
+# Kalshi "Above X" econ-bin ladders (ticker-keyed, not question-keyed)
+# ----------------------------------------------------------------------
+#
+# Kalshi expresses a threshold ladder as a set of markets sharing one event
+# title ("What will CPI YoY be?") with per-bin subtitles ("Above 4.5%"); the
+# THRESHOLD and the FAMILY both live in the ticker, e.g.
+# KXCPIYOY-26NOV-T4.5 -> family "KXCPIYOY-26NOV", threshold 4.5. The
+# question-text parser can't be used here: every series uses "Above N%", so
+# grouping on the subtitle would wrongly merge CPI / unemployment / GDP bins.
+# Only the "-T<number>" strike form is a MONOTONIC ladder (above(hi) =>
+# above(lo)); categorical strikes (KXFEDDECISION -H26/-C25) are excluded.
+
+_KALSHI_LADDER_RE = re.compile(r"^(?P<family>.+)-T(?P<num>-?\d[\d,]*(?:\.\d+)?)$")
+
+
+def parse_kalshi_ladder(ticker: str):
+    """Return (family_key, value) for a Kalshi '-T<number>' threshold market,
+    else None (categorical strikes and non-ladder tickers don't match)."""
+    m = _KALSHI_LADDER_RE.match((ticker or "").strip())
+    if not m:
+        return None
+    try:
+        value = float(m.group("num").replace(",", ""))
+    except ValueError:
+        return None
+    return ("kxthr", m.group("family")), value
+
+
+def kalshi_ladder_pairs(markets: list[Market]) -> list[tuple[Market, Market, str]]:
+    """(implier, implied, why) pairs from Kalshi 'Above X' ticker ladders.
+
+    above(hi) => above(lo), so P(implier) <= P(implied) must hold — same
+    model-free bound as ladder_pairs, but families/strikes come from the
+    ticker. Kalshi-only; non-Kalshi or non-ladder tickers are ignored.
+    """
+    families: dict[tuple, list[tuple[float, Market]]] = {}
+    for m in markets:
+        if (m.exchange or "") != "kalshi":
+            continue
+        parsed = parse_kalshi_ladder(m.ticker)
+        if parsed is None:
+            continue
+        key, value = parsed
+        families.setdefault(key, []).append((value, m))
+
+    pairs: list[tuple[Market, Market, str]] = []
+    for _key, members in families.items():
+        if len(members) < 2:
+            continue
+        members.sort()
+        for i, (v_lo, m_lo) in enumerate(members):
+            for v_hi, m_hi in members[i + 1:]:
+                if v_hi == v_lo:
+                    continue
+                # "Above hi" implies "Above lo".
+                pairs.append((m_hi, m_lo, f"above {v_hi:g} => above {v_lo:g}"))
+    return pairs
+
+
+# ----------------------------------------------------------------------
 # LLM verification prompt (fuzzy pairs only)
 # ----------------------------------------------------------------------
 
