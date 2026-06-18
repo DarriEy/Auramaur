@@ -447,6 +447,55 @@ class TestSettlePosition:
 
         asyncio.run(run())
 
+    def test_detect_void(self):
+        """closed + uma resolved + ~0.5 price = VOID (refund); pinned or
+        still-open or non-poly is not a void."""
+        from auramaur.exchange.models import Market
+
+        def mk(**kw):
+            d = dict(active=True, closed=True, yes_price=0.5)
+            d.update(kw)
+            m = _make_market(active=d["active"], yes_price=d["yes_price"], closed=d["closed"])
+            m.uma_status = d.get("uma_status", "resolved")
+            return m
+        assert ResolutionTracker._detect_void(mk(), "polymarket") is True
+        assert ResolutionTracker._detect_void(mk(yes_price=0.98), "polymarket") is False   # pinned winner
+        assert ResolutionTracker._detect_void(mk(uma_status="proposed"), "polymarket") is False
+        assert ResolutionTracker._detect_void(mk(closed=False), "polymarket") is False
+        assert ResolutionTracker._detect_void(mk(), "kalshi") is False
+
+    def test_void_settles_held_token_at_refund_price(self):
+        """A void settles the held token at ~0.5 (refund), not 0/1 — booking the
+        real pnl vs entry and freeing the position."""
+        from auramaur.db.database import Database
+
+        async def run():
+            db = Database(":memory:")
+            await db.connect()
+            try:
+                # held NO @ 0.51, refunded at 0.5 -> tiny loss
+                await db.execute(
+                    """INSERT INTO cost_basis (market_id, token, token_id, size,
+                                               avg_cost, total_cost, realized_pnl, is_paper)
+                       VALUES ('void-1', 'No', 'tok', 13.0, 0.51, 6.63, 0, 0)""")
+                await db.execute(
+                    """INSERT INTO portfolio (market_id, exchange, side, size, avg_price,
+                                              current_price, token, is_paper, updated_at)
+                       VALUES ('void-1', 'polymarket', 'BUY', 13.0, 0.51, 0.5, 'NO', 0, datetime('now'))""")
+                await db.commit()
+                tracker = ResolutionTracker(db=db, calibration=AsyncMock(), discoveries={})
+                await tracker._settle_position("void-1", False, is_paper_scope=0,
+                                               override_exit_price=0.5)
+                led = await db.fetchone(
+                    "SELECT pnl FROM pnl_ledger WHERE source_ref='settle:void-1:NO:0'")
+                assert led is not None
+                assert abs(led["pnl"] - (0.5 - 0.51) * 13.0) < 1e-9   # refund, not -100%
+                pf = await db.fetchone("SELECT COUNT(*) AS n FROM portfolio WHERE market_id='void-1'")
+                assert pf["n"] == 0
+            finally:
+                await db.close()
+        asyncio.run(run())
+
     def test_cost_basis_fallback_respects_is_paper_scope(self):
         """When a market is held in BOTH modes and the portfolio row is absent,
         a mode-scoped settle must book only the targeted mode off cost_basis —
