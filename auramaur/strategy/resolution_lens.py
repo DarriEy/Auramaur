@@ -77,6 +77,23 @@ Respond with ONLY this JSON:
 {{"fair_prob": <float 0-1>, "gap_score": <float 0-1, how much the strict reading diverges from the headline reading>, "mechanism": "<one concrete sentence naming the specific fine-print mechanism, or 'none'>"}}"""
 
 
+# Phase 2: adversarial verification — a SECOND, skeptical pass that tries to
+# REFUTE the claimed mechanism, defaulting to refuted. Kills hallucinated /
+# over-read fine print before any (paper or live) capital is committed.
+VERIFY_PROMPT = """A resolution-criteria auditor claims a prediction market is mispriced because of a fine-print mechanism. Your job is to ADVERSARIALLY CHECK that claim — default to REFUTED unless the mechanism is clearly real and decisive under the LITERAL written criteria.
+
+Question: "{question}"
+Resolution criteria: {description}
+Market price (YES): {market_prob:.2f}
+Claimed strict-criteria fair P(YES): {fair:.2f}
+Claimed mechanism: "{mechanism}"
+
+Check: does the cited clause ACTUALLY qualify/disqualify as claimed, or is the auditor over-reading or inventing a rule the criteria don't state? If you can't point to specific criteria text that supports the mechanism, it is REFUTED.
+
+Respond with ONLY this JSON:
+{{"verdict": "confirmed" | "refuted", "confidence": <float 0-1>, "why": "<one sentence citing the criteria>"}}"""
+
+
 class ResolutionLensPillar:
     def __init__(self, db, settings, discovery, exchange, risk_manager,
                  pnl_tracker, calibration, analyzer) -> None:
@@ -119,21 +136,44 @@ class ResolutionLensPillar:
         hours = (end - datetime.now(timezone.utc)).total_seconds() / 3600.0
         return min_hours <= hours <= cfg.max_days_to_resolution * 24.0
 
+    def _criteria_text(self, desc: str) -> str:
+        """Full resolution criteria, capped — keeping the TAIL where the
+        decisive qualifier/source/edge-case clauses live (the old [:800] cut
+        them off). Head+tail when over the cap, so context survives too."""
+        cap = self._settings.resolution_lens.criteria_char_cap
+        desc = desc or ""
+        if len(desc) <= cap:
+            return desc
+        head = cap // 3
+        return desc[:head] + "\n…[criteria trimmed]…\n" + desc[-(cap - head):]
+
+    async def _ensure_schema(self) -> None:
+        """Idempotent: add the `verified` column on pre-existing DBs."""
+        try:
+            await self._db.execute(
+                "ALTER TABLE lens_verdicts ADD COLUMN verified INTEGER NOT NULL DEFAULT -1")
+            await self._db.commit()
+        except Exception:
+            pass  # already exists
+
     async def _verdict(self, m: Market):
-        """Cached lens verdict (criteria are static — cache forever)."""
+        """Cached lens verdict -> (fair, gap_score, mechanism, verified). The
+        criteria reading is static (cache it); `verified` is -1 until the
+        adversarial check runs at trade-decision time."""
         row = await self._db.fetchone(
-            "SELECT fair_prob, gap_score, mechanism FROM lens_verdicts WHERE market_id = ?",
+            "SELECT fair_prob, gap_score, mechanism, verified FROM lens_verdicts WHERE market_id = ?",
             (m.id,),
         )
         if row is not None:
-            return float(row["fair_prob"]), float(row["gap_score"]), row["mechanism"]
+            return (float(row["fair_prob"]), float(row["gap_score"]),
+                    row["mechanism"], int(row["verified"]))
         if self._analyzer is None:
             return None
         fair, score, mech = m.outcome_yes_price, 0.0, "none"
         try:
             raw = await self._analyzer._call_llm(LENS_PROMPT.format(
                 question=m.question,
-                description=(m.description or "")[:800],
+                description=self._criteria_text(m.description),  # Phase 1: full criteria
                 market_prob=m.outcome_yes_price,
             ))
             parsed = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
@@ -144,12 +184,36 @@ class ResolutionLensPillar:
             log.warning("lens.llm_parse_error", market_id=m.id, error=str(e))
         await self._db.execute(
             """INSERT OR REPLACE INTO lens_verdicts
-               (market_id, fair_prob, gap_score, mechanism)
-               VALUES (?, ?, ?, ?)""",
+               (market_id, fair_prob, gap_score, mechanism, verified)
+               VALUES (?, ?, ?, ?, -1)""",
             (m.id, fair, score, mech),
         )
         await self._db.commit()
-        return fair, score, mech
+        return fair, score, mech, -1
+
+    async def _verify_mechanism(self, m: Market, fair: float, mechanism: str) -> bool:
+        """Phase 2: adversarial check of the named mechanism. Returns True only
+        when the second pass CONFIRMS it at >= verify_min_confidence. Persists
+        the verdict (0/1) so it isn't re-checked. Fails closed (refuted) on
+        parse/LLM error — a hallucinated mechanism must not slip through."""
+        cfg = self._settings.resolution_lens
+        confirmed = False
+        try:
+            raw = await self._analyzer._call_llm(VERIFY_PROMPT.format(
+                question=m.question,
+                description=self._criteria_text(m.description),
+                market_prob=m.outcome_yes_price, fair=fair, mechanism=mechanism,
+            ))
+            parsed = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
+            confirmed = (str(parsed.get("verdict", "refuted")).lower() == "confirmed"
+                         and float(parsed.get("confidence", 0.0)) >= cfg.verify_min_confidence)
+        except Exception as e:
+            log.warning("lens.verify_parse_error", market_id=m.id, error=str(e))
+        await self._db.execute(
+            "UPDATE lens_verdicts SET verified = ? WHERE market_id = ?",
+            (1 if confirmed else 0, m.id))
+        await self._db.commit()
+        return confirmed
 
     async def _already_entered_or_held(self, market_id: str) -> bool:
         row = await self._db.fetchone(
@@ -223,6 +287,7 @@ class ResolutionLensPillar:
         cfg = self._settings.resolution_lens
         if not cfg.enabled:
             return 0
+        await self._ensure_schema()
         # Lexical pre-filter over the whole universe; fall back to the volume
         # scan only if the markets table is empty (cold start).
         markets = await self._lexical_candidates()
@@ -248,10 +313,21 @@ class ResolutionLensPillar:
             v = await self._verdict(m)
             if v is None:
                 continue
-            fair, score, mech = v
+            fair, score, mech, verified = v
             edge = fair - m.outcome_yes_price
             if (score < cfg.min_gap_score or abs(edge) < cfg.min_edge
                     or mech.strip().lower() == "none"):
+                continue
+            # Phase 2: a real gap is on the table — adversarially verify the
+            # mechanism before trading (skip hallucinated fine print). Bounded
+            # by the same per-cycle LLM budget; result cached in `verified`.
+            if cfg.verify_enabled and verified == -1:
+                if calls >= cfg.max_llm_calls_per_cycle:
+                    continue  # out of budget; verify next cycle
+                calls += 1
+                verified = 1 if await self._verify_mechanism(m, fair, mech) else 0
+            if cfg.verify_enabled and verified != 1:
+                log.info("lens.mechanism_refuted", market_id=m.id, mechanism=mech[:80])
                 continue
             try:
                 if await self._enter(m, fair, score, mech, edge):

@@ -273,7 +273,9 @@ CREATE TABLE IF NOT EXISTS lens_verdicts (
     gap_score REAL NOT NULL DEFAULT 0,
     mechanism TEXT NOT NULL DEFAULT '',
     reasoning TEXT NOT NULL DEFAULT '',
-    checked_at TEXT NOT NULL DEFAULT (datetime('now'))
+    checked_at TEXT NOT NULL DEFAULT (datetime('now')),
+    -- Adversarial mechanism check: -1 not yet verified, 0 refuted, 1 confirmed.
+    verified INTEGER NOT NULL DEFAULT -1
 );
 
 CREATE TABLE IF NOT EXISTS entailment_verdicts (

@@ -94,10 +94,17 @@ def _risk(approved=True, size=8.0, force_paper=False):
 
 
 def _analyzer(fair=0.10, gap=0.8, mech="'permanent' requires explicit permanence language; "
-                                       "crowd prices mere de-escalation"):
+                                       "crowd prices mere de-escalation",
+              verify="confirmed", verify_conf=0.9):
     a = MagicMock()
-    a._call_llm = AsyncMock(return_value=(
-        f'{{"fair_prob": {fair}, "gap_score": {gap}, "mechanism": "{mech}"}}'))
+
+    async def _call(prompt, **kw):
+        # The verify pass asks for a {"verdict": ...}; the lens pass for fair_prob.
+        if "ADVERSARIALLY CHECK" in prompt or '"verdict"' in prompt:
+            return f'{{"verdict": "{verify}", "confidence": {verify_conf}, "why": "x"}}'
+        return f'{{"fair_prob": {fair}, "gap_score": {gap}, "mechanism": "{mech}"}}'
+
+    a._call_llm = AsyncMock(side_effect=_call)
     return a
 
 
@@ -144,6 +151,48 @@ def test_eligible_loosens_thresholds_in_paper_mode():
         live = _pillar(db, _settings(paper=False), [m])
         assert live._eligible(m) is False
 
+    asyncio.run(run())
+
+
+# ----------------------------------------------------------------------
+# Phase 1 + 2 upgrades
+# ----------------------------------------------------------------------
+
+def test_full_criteria_not_truncated_at_800():
+    """The lens must feed the FULL criteria (tail kept) — the decisive clause
+    lives at the end and the old [:800] cut it off."""
+    async def run():
+        db = Database(":memory:"); await db.connect()
+        try:
+            tail = "RESOLVES NO unless an OFFICIAL signed treaty is filed."
+            desc = ("filler. " * 200) + tail        # ~1600 chars, clause at end
+            analyzer = _analyzer()
+            pillar = _pillar(db, _settings(), [_market(yes=0.30)], analyzer=analyzer)
+            m = _market(yes=0.30); m.description = desc
+            await pillar._verdict(m)
+            sent = analyzer._call_llm.await_args_list[0].args[0]
+            assert tail in sent                      # tail survived
+            assert len(desc) > 800                   # would have been cut before
+        finally:
+            await db.close()
+    asyncio.run(run())
+
+
+def test_refuted_mechanism_blocks_entry():
+    """A strong gap whose mechanism the adversarial pass REFUTES does not trade."""
+    async def run():
+        db = Database(":memory:"); await db.connect()
+        try:
+            ex = _exchange()
+            analyzer = _analyzer(verify="refuted", verify_conf=0.9)
+            pillar = _pillar(db, _settings(), [_market(yes=0.30)], exchange=ex, analyzer=analyzer)
+            assert await pillar.run_once() == 0
+            ex.place_order.assert_not_awaited()
+            # cached as refuted (0) so it isn't re-verified
+            row = await db.fetchone("SELECT verified FROM lens_verdicts WHERE market_id='m1'")
+            assert int(row["verified"]) == 0
+        finally:
+            await db.close()
     asyncio.run(run())
 
 
