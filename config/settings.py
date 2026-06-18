@@ -316,6 +316,13 @@ class BiasHarvestConfig(BaseModel):
     min_hours_to_resolution: float = 6.0
     max_days_to_resolution: float = 45.0
     interval_seconds: int = 600
+    # Tail-filter: skip a favorite whose UMA resolution is actively disputed.
+    # The deep-band backtest won 99.3%, but the rare flips that produced the
+    # paper track's fat-tail losses are disproportionately contested
+    # resolutions — a disputed market is price-pinned to the *proposed* outcome
+    # and can reverse. Fails open (only an ACTIVE dispute is skipped), so a
+    # market with no UMA data still enters as before. See [[uma-dispute-gate]].
+    skip_disputed: bool = True
 
 
 class EntailmentArbConfig(BaseModel):
