@@ -2812,6 +2812,31 @@ class AuramaurBot:
                 log.error("econ_indicator.cycle_error", error=str(e))
             await asyncio.sleep(interval)
 
+    async def _task_weather_temp(self) -> None:
+        """Open-Meteo ensemble pricing of Polymarket city-temperature bins (paper)."""
+        from auramaur.data_sources.openmeteo import OpenMeteoSource
+        from auramaur.strategy.weather_temp import WeatherTempPillar
+
+        pillar = WeatherTempPillar(
+            db=self._components["db"],
+            settings=self.settings,
+            discovery=self._components["discovery"],
+            exchange=self._components["exchange"],
+            risk_manager=self._components["risk_manager"],
+            pnl_tracker=self._components["pnl_tracker"],
+            calibration=self._components["calibration"],
+            weather=OpenMeteoSource(),
+        )
+        interval = max(60, self.settings.weather_temp.interval_seconds)
+        while self._running:
+            if await self._check_kill_switch():
+                return
+            try:
+                await pillar.run_once()
+            except Exception as e:
+                log.error("weather_temp.cycle_error", error=str(e))
+            await asyncio.sleep(interval)
+
     async def _task_resolution_lens(self) -> None:
         """Periodic resolution-language lens scan (paper-forced by config)."""
         from auramaur.strategy.resolution_lens import ResolutionLensPillar
@@ -3484,6 +3509,10 @@ class AuramaurBot:
         # Data-driven Kalshi econ-indicator pricing (paper-forced until proven)
         if self.settings.econ_indicator.enabled:
             tasks.append(asyncio.create_task(self._task_econ_indicator(), name="econ_indicator"))
+
+        # Open-Meteo ensemble city-temperature pricing (paper-forced spike)
+        if self.settings.weather_temp.enabled:
+            tasks.append(asyncio.create_task(self._task_weather_temp(), name="weather_temp"))
 
         # Resolution-language lens (paper-forced until proven)
         if self.settings.resolution_lens.enabled:
