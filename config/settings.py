@@ -352,6 +352,17 @@ class EconIndicatorConfig(BaseModel):
     interval_seconds: int = 1800
 
 
+class HydroWatchConfig(BaseModel):
+    """Hydrology-market watcher (monitoring/hydro_market_watch.py). Alert-only:
+    no liquid water markets exist today, so this just flags the first time one
+    appears on a venue, so the compHydro data moat can be deployed. Cheap."""
+
+    enabled: bool = False
+    scan_limit: int = 500
+    min_liquidity: float = 100.0
+    interval_seconds: int = 21600  # every 6h — new markets aren't urgent
+
+
 class WeatherTempConfig(BaseModel):
     """Open-Meteo ensemble pricing of Polymarket city-temperature bins
     (strategy/weather_temp.py). Measurement spike: PAPER-FORCED and disabled
@@ -847,6 +858,7 @@ class Settings(BaseSettings):
     entailment_arb: EntailmentArbConfig = Field(default_factory=lambda: EntailmentArbConfig(**_DEFAULTS.get("entailment_arb", {})))
     econ_indicator: EconIndicatorConfig = Field(default_factory=lambda: EconIndicatorConfig(**_DEFAULTS.get("econ_indicator", {})))
     weather_temp: WeatherTempConfig = Field(default_factory=lambda: WeatherTempConfig(**_DEFAULTS.get("weather_temp", {})))
+    hydro_watch: HydroWatchConfig = Field(default_factory=lambda: HydroWatchConfig(**_DEFAULTS.get("hydro_watch", {})))
     resolution_lens: ResolutionLensConfig = Field(default_factory=lambda: ResolutionLensConfig(**_DEFAULTS.get("resolution_lens", {})))
     oddlot_tender: OddLotTenderConfig = Field(default_factory=lambda: OddLotTenderConfig(**_DEFAULTS.get("oddlot_tender", {})))
     arbitrage: ArbitrageConfig = Field(default_factory=lambda: ArbitrageConfig(**_DEFAULTS.get("arbitrage", {})))
