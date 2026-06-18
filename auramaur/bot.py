@@ -2768,6 +2768,9 @@ class AuramaurBot:
             risk_manager=self._components["risk_manager"],
             pnl_tracker=self._components["pnl_tracker"],
             analyzer=self._components.get("analyzer"),
+            # Kalshi econ-bin ladder arb fetches its own series; pass the Kalshi
+            # discovery if present (no-op when Kalshi isn't configured).
+            kalshi_discovery=(self._components.get("discoveries") or {}).get("kalshi"),
         )
         interval = max(60, self.settings.entailment_arb.interval_seconds)
         while self._running:

@@ -143,6 +143,34 @@ class KalshiClient:
         data = json.loads(raw)
         return data.get("market")
 
+    async def get_markets_by_series(self, series_ticker: str,
+                                    limit: int = 200) -> list[Market]:
+        """Fetch open markets for ONE series — i.e. all bins of a threshold
+        ladder (e.g. every KXCPIYOY-26NOV-T* strike).
+
+        The generic get_markets() scans events by recency/volume and misses
+        niche econ ladders; the series filter pulls the whole bin set so the
+        ladder-arb scanner sees a complete, orderable family.
+        """
+        self._init_api()
+        try:
+            import json
+            raw = await self._call_raw(
+                self._markets_api.get_markets_without_preload_content,
+                series_ticker=series_ticker, status="open", limit=min(limit, 200),
+            )
+            rows = json.loads(raw).get("markets", [])
+            out: list[Market] = []
+            for m in rows:
+                parsed = self._parse_market(m)
+                if parsed is not None:
+                    out.append(parsed)
+            return out
+        except Exception as e:
+            log.error("kalshi.series_fetch_error", series=series_ticker,
+                      error=str(e))
+            return []
+
     async def get_markets(self, active: bool = True, limit: int = 100) -> list[Market]:
         """Fetch markets from Kalshi API."""
         self._init_api()

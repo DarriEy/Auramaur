@@ -346,6 +346,18 @@ class EntailmentArbConfig(BaseModel):
     llm_enabled: bool = True
     llm_min_confidence: float = 0.9
     interval_seconds: int = 900
+    # Kalshi "Above X" economic-indicator ladders (model-free monotonicity arb).
+    # Fetched per-series (not via the generic scan — econ bins are niche and a
+    # top-N scan misses them). Unlike Polymarket (0% maker), Kalshi charges a
+    # taker fee per leg, so a violation must clear BOTH legs' fees + a buffer to
+    # be real — kalshi_min_gap is computed from the fee model at runtime, not
+    # this flat min_gap. Paper-forced by the graduation ladder like every cell.
+    kalshi_ladders_enabled: bool = True
+    kalshi_series: list[str] = Field(default_factory=lambda: [
+        "KXCPIYOY", "KXGDP", "KXU3", "KXPAYROLLS", "KXPCEYOY",
+    ])
+    kalshi_min_liquidity: float = 50.0
+    kalshi_gap_buffer: float = 0.01
 
 
 class OddLotTenderConfig(BaseModel):
