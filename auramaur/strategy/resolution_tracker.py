@@ -106,6 +106,21 @@ class ResolutionTracker:
 
                 outcome = self._detect_resolution(market, exchange)
                 if outcome is None:
+                    # Resolved-but-unpinned VOID (50/50 refund): the binary
+                    # detector waits forever, but the venue has finalized it, so
+                    # settle each mode at the refund price to free the capital.
+                    if self._detect_void(market, exchange):
+                        refund = market.outcome_yes_price  # ~0.5 for both sides
+                        await self._settle_position(market_id, False, is_paper_scope=0,
+                                                    override_exit_price=refund)
+                        await self._settle_position(market_id, False, is_paper_scope=1,
+                                                    override_exit_price=refund)
+                        await self._db.execute(
+                            "UPDATE markets SET active = 0 WHERE id = ?", (market_id,))
+                        await self._db.commit()
+                        log.info("resolution.void_settled", market_id=market_id,
+                                 refund=round(refund, 3))
+                        resolved_count += 1
                     continue
 
                 # Feed into calibration — triggers online Platt update
@@ -322,13 +337,33 @@ class ResolutionTracker:
         # Eligible but price ambiguous (e.g. closed awaiting oracle) — wait.
         return None
 
+    @staticmethod
+    def _detect_void(market: Market, exchange: str) -> bool:
+        """A VOID is a market that resolved to ~50/50 (both sides refunded at
+        ~0.5) — e.g. a cancelled event. The binary detector returns None for
+        such an unpinned price and waits forever, even though the venue has
+        FINALIZED it (closed=True + uma resolved). Detect that terminal state
+        so it can settle at the refund price instead of stranding capital.
+
+        Requires the venue's explicit closure + resolution signals (never just
+        a mid-range price on a still-open market) and a near-midpoint price.
+        """
+        if exchange != "polymarket":
+            return False
+        if not (getattr(market, "closed", False)
+                and (getattr(market, "uma_status", "") or "").lower() == "resolved"):
+            return False
+        yes = market.outcome_yes_price
+        return 0.4 <= yes <= 0.6  # symmetric refund, not a pinned winner
+
     # ------------------------------------------------------------------
     # Position settlement
     # ------------------------------------------------------------------
 
     async def _settle_position(self, market_id: str, outcome: bool,
                                token_scope: str | None = None,
-                               is_paper_scope: int | None = None) -> None:
+                               is_paper_scope: int | None = None,
+                               override_exit_price: float | None = None) -> None:
         """Clean up the portfolio entry and log realized PnL for a resolved market.
 
         Computes the realized profit/loss from the position, records it in
@@ -336,6 +371,11 @@ class ResolutionTracker:
         ``token_scope`` / ``is_paper_scope`` are given the settlement is
         scoped to that exact row (the venue sweep settles per held token);
         without them the legacy market-wide behavior is preserved.
+
+        ``override_exit_price`` settles the held token at that exact price
+        instead of the binary 0/1 — used for VOID resolutions (a market that
+        resolved 50/50, refunding both sides at ~0.5), where the binary outcome
+        doesn't apply.
         """
         # Token comparisons are case-insensitive throughout settlement: the
         # cost_basis table stores the venue's mixed-case label ("Yes"/"No")
@@ -399,8 +439,11 @@ class ResolutionTracker:
         # consistent regardless of the venue's mixed-case cost_basis label.
         token = (token or "YES").upper()
 
-        # Settlement price: YES resolves to $1, NO resolves to $0
-        if token == "NO":
+        # Settlement price: a VOID refunds the held token at override_exit_price
+        # (~0.5); otherwise YES resolves to $1, NO to $0 by the binary outcome.
+        if override_exit_price is not None:
+            exit_price = max(0.0, min(1.0, override_exit_price))
+        elif token == "NO":
             # Holding NO tokens: worth $1 if outcome is NO, $0 if YES
             exit_price = 0.0 if outcome else 1.0
         else:
