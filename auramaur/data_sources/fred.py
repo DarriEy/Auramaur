@@ -92,6 +92,30 @@ class FREDSource:
         logger.info("fred_fetched", count=len(items[:limit]))
         return items[:limit]
 
+    async def get_observations(self, series_id: str, n: int = 60) -> list[tuple[datetime, float]]:
+        """Latest ``n`` (date, value) observations for a series, oldest-first.
+
+        Pricing-oriented accessor (distinct from the news ``fetch``): the
+        econ-indicator pricer estimates a distribution from the recent history.
+        Returns [] on failure — callers must handle the empty case (don't
+        price a bin off no data).
+        """
+        loop = asyncio.get_running_loop()
+
+        def _run() -> list[tuple[datetime, float]]:
+            series = self._fred.get_series(series_id).dropna().tail(n)
+            out: list[tuple[datetime, float]] = []
+            for date, value in series.items():
+                ts = date.to_pydatetime() if hasattr(date, "to_pydatetime") else date
+                out.append((ts, float(value)))
+            return out
+
+        try:
+            return await loop.run_in_executor(None, _run)
+        except Exception:
+            logger.exception("fred_observations_failed", series_id=series_id)
+            return []
+
     async def fetch(self, query: str, limit: int = 20) -> list[NewsItem]:
         """Run the blocking FRED API call in a thread-pool executor."""
         loop = asyncio.get_running_loop()
