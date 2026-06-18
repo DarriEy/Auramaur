@@ -340,6 +340,12 @@ class EconIndicatorConfig(BaseModel):
     series: list[str] = Field(default_factory=list)
     stake_usd: float = 10.0
     min_edge: float = 0.07
+    # Upper sanity bound on |model - market|. A random-walk nowcast disagreeing
+    # with the market by more than this isn't edge — it's the model being naive
+    # against a forward-looking crowd (e.g. CPI YoY: the model anchors to the
+    # last stale print while the market prices expected disinflation). Beyond
+    # this gap, trust the market and skip — the econ analog of name-the-gap.
+    max_divergence: float = 0.30
     max_open: int = 30
     max_entries_per_cycle: int = 5
     history_n: int = 60

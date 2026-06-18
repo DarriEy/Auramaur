@@ -152,6 +152,13 @@ class EconIndicatorPillar:
         edge = model_p - market_p
         if abs(edge) < self._required_edge(market):
             return False
+        # Implausible-disagreement guard: a random-walk nowcast that disagrees
+        # with the market by a huge margin is naive (the crowd prices forward
+        # info the model lacks), not an edge — trust the market and skip.
+        if abs(edge) > cfg.max_divergence:
+            log.info("econ_indicator.implausible_divergence", market_id=market.id,
+                     model_p=round(model_p, 3), market_p=round(market_p, 3))
+            return False
         if await self._already_entered_or_held(market.id):
             return False
         side = OrderSide.BUY if edge > 0 else OrderSide.SELL  # SELL -> Kalshi buys NO

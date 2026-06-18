@@ -90,7 +90,9 @@ def test_enters_mispriced_bin_and_skips_fair():
         db = Database(":memory:"); await db.connect()
         try:
             vals = [4.0, 4.1, 3.9, 4.0, 4.1, 3.9, 4.0, 4.0]   # ~4.0, low vol
-            bins = [_bin(4.5, 0.70), _bin(4.6, 0.31)]          # one rich, one fair
+            # model P(above 4.5)~0.31: priced 0.50 is a plausible ~19pt edge
+            # (within max_divergence); the 4.6 bin priced ~0.27 is fair.
+            bins = [_bin(4.5, 0.50), _bin(4.6, 0.27)]
             pillar = _pillar(db, _settings(), bins, vals)
             entered = await pillar.run_once()
             assert entered == 1
@@ -99,6 +101,22 @@ def test_enters_mispriced_bin_and_skips_fair():
             assert len(rows) == 1
             assert rows[0]["market_id"] == "KXU3-26NOV-T4.5"
             assert rows[0]["action"] == "SELL"               # market too high -> buy NO
+        finally:
+            await db.close()
+    asyncio.run(run())
+
+
+def test_skips_implausible_divergence():
+    """A model that disagrees with the market by more than max_divergence is
+    naive (forward-priced crowd), not edge -> skip rather than bet hard."""
+    async def run():
+        db = Database(":memory:"); await db.connect()
+        try:
+            vals = [4.0, 4.1, 3.9, 4.0, 4.1, 3.9, 4.0, 4.0]   # model mean ~4.0
+            # market prices "above 4.0" at 0.03 -> model ~0.5 vs 0.03 = ~0.47 gap
+            bins = [_bin(4.0, 0.03), _bin(4.1, 0.03)]
+            pillar = _pillar(db, _settings(max_divergence=0.30), bins, vals)
+            assert await pillar.run_once() == 0
         finally:
             await db.close()
     asyncio.run(run())
