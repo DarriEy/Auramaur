@@ -2812,6 +2812,26 @@ class AuramaurBot:
                 log.error("econ_indicator.cycle_error", error=str(e))
             await asyncio.sleep(interval)
 
+    async def _task_hydro_watch(self) -> None:
+        """Alert when a tradeable hydrology market appears (compHydro moat armed)."""
+        from auramaur.monitoring.hydro_market_watch import HydroMarketWatcher
+
+        watcher = HydroMarketWatcher(
+            db=self._components["db"],
+            settings=self.settings,
+            discoveries=self._components.get("discoveries") or {},
+            alerts=self._components.get("alerts"),
+        )
+        interval = max(300, self.settings.hydro_watch.interval_seconds)
+        while self._running:
+            if await self._check_kill_switch():
+                return
+            try:
+                await watcher.run_once()
+            except Exception as e:
+                log.error("hydro_watch.cycle_error", error=str(e))
+            await asyncio.sleep(interval)
+
     async def _task_weather_temp(self) -> None:
         """Open-Meteo ensemble pricing of Polymarket city-temperature bins (paper)."""
         from auramaur.data_sources.openmeteo import OpenMeteoSource
@@ -3513,6 +3533,10 @@ class AuramaurBot:
         # Open-Meteo ensemble city-temperature pricing (paper-forced spike)
         if self.settings.weather_temp.enabled:
             tasks.append(asyncio.create_task(self._task_weather_temp(), name="weather_temp"))
+
+        # Hydrology-market watcher (alert-only; arms the compHydro moat)
+        if self.settings.hydro_watch.enabled:
+            tasks.append(asyncio.create_task(self._task_hydro_watch(), name="hydro_watch"))
 
         # Resolution-language lens (paper-forced until proven)
         if self.settings.resolution_lens.enabled:
