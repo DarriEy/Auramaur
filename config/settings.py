@@ -460,6 +460,14 @@ class ResolutionLensConfig(BaseModel):
     min_description_chars: int = 80
     min_hours_to_resolution: float = 12.0
     max_days_to_resolution: float = 90.0
+    # Phase 1: read the FULL criteria, not the first 800 chars (the decisive
+    # qualifier usually lives at the end). Cap to bound LLM cost; head+tail kept.
+    criteria_char_cap: int = 4500
+    # Phase 2: adversarially verify the named mechanism (a 2nd skeptical LLM
+    # pass that defaults to refuted) before trading — kills hallucinated
+    # fine-print. Only trade when confirmed at >= verify_min_confidence.
+    verify_enabled: bool = True
+    verify_min_confidence: float = 0.7
     interval_seconds: int = 1800
     # Paper-phase eligibility: while the cell is hard paper-forced (paper=True)
     # it can never reach the venue, so the live-trading guards (hold horizon,
