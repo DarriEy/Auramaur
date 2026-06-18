@@ -207,6 +207,30 @@ def test_skips_out_of_band_and_ineligible():
     asyncio.run(run())
 
 
+def test_skips_actively_disputed_favorite():
+    """A perfectly in-band favorite is skipped when its UMA resolution is
+    actively disputed (the fat-tail flip filter). A non-disputed twin enters."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        disputed = _market("disp", yes=0.90)
+        disputed.uma_status = "disputed"            # -> dispute_risk DO_NOT_ACT
+        pillar, _ = _pillar(db, _settings(), [disputed])
+        assert pillar._eligible(disputed) is False
+        assert await pillar.run_once() == 0
+
+        clean = _market("clean", yes=0.90)          # resolved-after-dispute/none -> READY
+        clean.uma_status = "resolved"
+        assert pillar._eligible(clean) is True
+
+        # toggle off -> dispute no longer filters
+        pillar2, _ = _pillar(db, _settings(skip_disputed=False), [disputed])
+        assert pillar2._eligible(disputed) is True
+        await db.close()
+
+    asyncio.run(run())
+
+
 def test_one_entry_per_market_and_skips_held():
     async def run():
         db = Database(":memory:")

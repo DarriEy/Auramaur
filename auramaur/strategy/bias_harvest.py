@@ -113,6 +113,13 @@ class BiasHarvestPillar:
             return False
         if (market.exchange or "polymarket") != "polymarket":
             return False  # backtest validated Polymarket only (0% fees)
+        # Tail-filter: don't harvest a favorite whose resolution is actively
+        # disputed — the pinned price can flip when the dispute clears, which is
+        # exactly the fat-tail loss the paper track surfaced. Fails open (only a
+        # confirmed DO_NOT_ACT is skipped; markets with no UMA data still enter).
+        if cfg.skip_disputed and market.dispute_risk == "DO_NOT_ACT":
+            log.debug("bias_harvest.skip_disputed", market_id=market.id)
+            return False
         if market.liquidity < cfg.min_liquidity:
             return False
         if (market.category or "") in set(self._settings.risk.blocked_categories):
