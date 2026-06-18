@@ -325,6 +325,27 @@ class BiasHarvestConfig(BaseModel):
     skip_disputed: bool = True
 
 
+class EconIndicatorConfig(BaseModel):
+    """Data-driven Kalshi economic-indicator bin pricing (strategy/econ_indicator.py).
+
+    PAPER-FORCED by default (and disabled until opted in). Prices "Above X"
+    ladders from FRED history; directional, so the graduation ladder keeps it
+    paper until the ledger + calibration prove it. The edge must clear the
+    Kalshi taker fee on top of min_edge (computed at runtime from the fee model).
+    series=[] means "all registered" (econ_pricing.ECON_SERIES).
+    """
+
+    enabled: bool = False
+    paper: bool = True
+    series: list[str] = Field(default_factory=list)
+    stake_usd: float = 10.0
+    min_edge: float = 0.07
+    max_open: int = 30
+    max_entries_per_cycle: int = 5
+    history_n: int = 60
+    interval_seconds: int = 1800
+
+
 class EntailmentArbConfig(BaseModel):
     """Entailment arbitrage (strategy/entailment_arb.py).
 
@@ -798,6 +819,7 @@ class Settings(BaseSettings):
     bias_harvest: BiasHarvestConfig = Field(default_factory=lambda: BiasHarvestConfig(**_DEFAULTS.get("bias_harvest", {})))
     graduation: GraduationConfig = Field(default_factory=lambda: GraduationConfig(**_DEFAULTS.get("graduation", {})))
     entailment_arb: EntailmentArbConfig = Field(default_factory=lambda: EntailmentArbConfig(**_DEFAULTS.get("entailment_arb", {})))
+    econ_indicator: EconIndicatorConfig = Field(default_factory=lambda: EconIndicatorConfig(**_DEFAULTS.get("econ_indicator", {})))
     resolution_lens: ResolutionLensConfig = Field(default_factory=lambda: ResolutionLensConfig(**_DEFAULTS.get("resolution_lens", {})))
     oddlot_tender: OddLotTenderConfig = Field(default_factory=lambda: OddLotTenderConfig(**_DEFAULTS.get("oddlot_tender", {})))
     arbitrage: ArbitrageConfig = Field(default_factory=lambda: ArbitrageConfig(**_DEFAULTS.get("arbitrage", {})))

@@ -2782,6 +2782,36 @@ class AuramaurBot:
                 log.error("entailment.cycle_error", error=str(e))
             await asyncio.sleep(interval)
 
+    async def _task_econ_indicator(self) -> None:
+        """Periodic data-driven Kalshi econ-indicator bin pricing (paper-forced)."""
+        from auramaur.data_sources.fred import FREDSource
+        from auramaur.strategy.econ_indicator import EconIndicatorPillar
+
+        kalshi_discovery = (self._components.get("discoveries") or {}).get("kalshi")
+        kalshi_exchange = (self._components.get("exchanges") or {}).get("kalshi")
+        if kalshi_discovery is None or kalshi_exchange is None or not self.settings.fred_api_key:
+            log.info("econ_indicator.disabled", reason="missing kalshi or FRED key")
+            return
+        pillar = EconIndicatorPillar(
+            db=self._components["db"],
+            settings=self.settings,
+            kalshi_discovery=kalshi_discovery,
+            fred_source=FREDSource(api_key=self.settings.fred_api_key),
+            exchange=kalshi_exchange,
+            risk_manager=self._components["risk_manager"],
+            pnl_tracker=self._components["pnl_tracker"],
+            calibration=self._components["calibration"],
+        )
+        interval = max(60, self.settings.econ_indicator.interval_seconds)
+        while self._running:
+            if await self._check_kill_switch():
+                return
+            try:
+                await pillar.run_once()
+            except Exception as e:
+                log.error("econ_indicator.cycle_error", error=str(e))
+            await asyncio.sleep(interval)
+
     async def _task_resolution_lens(self) -> None:
         """Periodic resolution-language lens scan (paper-forced by config)."""
         from auramaur.strategy.resolution_lens import ResolutionLensPillar
@@ -3450,6 +3480,10 @@ class AuramaurBot:
         # Entailment arbitrage (paper-forced until proven)
         if self.settings.entailment_arb.enabled:
             tasks.append(asyncio.create_task(self._task_entailment_arb(), name="entailment_arb"))
+
+        # Data-driven Kalshi econ-indicator pricing (paper-forced until proven)
+        if self.settings.econ_indicator.enabled:
+            tasks.append(asyncio.create_task(self._task_econ_indicator(), name="econ_indicator"))
 
         # Resolution-language lens (paper-forced until proven)
         if self.settings.resolution_lens.enabled:
