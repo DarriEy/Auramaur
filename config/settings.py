@@ -352,6 +352,26 @@ class EconIndicatorConfig(BaseModel):
     interval_seconds: int = 1800
 
 
+class WeatherTempConfig(BaseModel):
+    """Open-Meteo ensemble pricing of Polymarket city-temperature bins
+    (strategy/weather_temp.py). Measurement spike: PAPER-FORCED and disabled
+    by default. Every bin is logged (model vs market) regardless of trading;
+    the edge must clear the Polymarket taker fee on top of min_edge, and
+    max_divergence skips implausibly large gaps (likely a bin-rounding or
+    station-match artifact, not edge) until realized highs validate the model.
+    """
+
+    enabled: bool = False
+    paper: bool = True
+    stake_usd: float = 10.0
+    min_edge: float = 0.10
+    max_divergence: float = 0.40
+    max_open: int = 40
+    max_entries_per_cycle: int = 8
+    scan_limit: int = 500
+    interval_seconds: int = 3600
+
+
 class EntailmentArbConfig(BaseModel):
     """Entailment arbitrage (strategy/entailment_arb.py).
 
@@ -826,6 +846,7 @@ class Settings(BaseSettings):
     graduation: GraduationConfig = Field(default_factory=lambda: GraduationConfig(**_DEFAULTS.get("graduation", {})))
     entailment_arb: EntailmentArbConfig = Field(default_factory=lambda: EntailmentArbConfig(**_DEFAULTS.get("entailment_arb", {})))
     econ_indicator: EconIndicatorConfig = Field(default_factory=lambda: EconIndicatorConfig(**_DEFAULTS.get("econ_indicator", {})))
+    weather_temp: WeatherTempConfig = Field(default_factory=lambda: WeatherTempConfig(**_DEFAULTS.get("weather_temp", {})))
     resolution_lens: ResolutionLensConfig = Field(default_factory=lambda: ResolutionLensConfig(**_DEFAULTS.get("resolution_lens", {})))
     oddlot_tender: OddLotTenderConfig = Field(default_factory=lambda: OddLotTenderConfig(**_DEFAULTS.get("oddlot_tender", {})))
     arbitrage: ArbitrageConfig = Field(default_factory=lambda: ArbitrageConfig(**_DEFAULTS.get("arbitrage", {})))
