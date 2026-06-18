@@ -24,14 +24,21 @@ def test_matcher_hits_real_hydro_terms():
 
 
 def test_matcher_rejects_false_positives():
-    # the exact substrings that broke the naive scan
+    # the exact substrings that broke the naive scan + the live false positive
     for q in [
         "Will Oscar Piastri get pole at the 2026 F1 Austrian Grand Prix?",
         "Rainbow Six Siege: 100 Thieves vs Shopify Rebellion",
         "Will it be a snowboard gold for Team USA?",   # 'snow' substring, not hydro
         "Will Nithya Raman win the LA mayoral election?",
+        "Will there be a runoff election in the Georgia Senate race?",  # ELECTION runoff
     ]:
         assert not is_hydro_market(q), q
+
+
+def test_matcher_only_checks_question_not_description():
+    """Description boilerplate ('a runoff election will be held') must not match —
+    the watcher scopes to the question; the matcher is what's exercised here."""
+    assert not is_hydro_market("a majority of the vote, a runoff election will be held")
 
 
 def _settings():

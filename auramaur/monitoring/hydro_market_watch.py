@@ -20,12 +20,13 @@ import structlog
 
 log = structlog.get_logger()
 
-# Word-boundaried, hydrology-specific terms. Bare "rain"/"snow"/"water" are
-# excluded (too many false positives: Austrian, Rainbow, snowboard); only terms
-# that unambiguously denote a water/hydrology event qualify.
+# Word-boundaried, hydrology-specific terms. Excluded as ambiguous: bare
+# "rain"/"snow"/"water" (Austrian/Rainbow/snowboard), "runoff" (ELECTION
+# runoff — the first false positive in the wild), and "swe" (abbreviation).
+# Only terms that unambiguously denote a water/hydrology event qualify.
 _HYDRO_RE = re.compile(
     r"\b("
-    r"streamflow|runoff|reservoir|snowpack|snow water equivalent|swe|"
+    r"streamflow|snowmelt|reservoir|snowpack|snow water equivalent|"
     r"drought|flood|flooding|flood stage|"
     r"water level|river level|lake level|river flow|"
     r"lake mead|lake powell|colorado river|mississippi river|"
@@ -36,7 +37,11 @@ _HYDRO_RE = re.compile(
 
 
 def is_hydro_market(text: str) -> bool:
-    """True if the text denotes a hydrology/water market (precise, not substring)."""
+    """True if the text denotes a hydrology/water market (precise, not substring).
+
+    Matched against the market QUESTION only — descriptions carry verbose
+    boilerplate (e.g. "a runoff election will be held") that false-positives.
+    """
     return bool(_HYDRO_RE.search(text or ""))
 
 
@@ -66,8 +71,9 @@ class HydroMarketWatcher:
                 log.debug("hydro_watch.scan_error", venue=venue, error=str(e))
                 continue
             for m in markets:
-                text = f"{m.question or ''} {getattr(m, 'description', '') or ''}"
-                if not is_hydro_market(text):
+                # Question/title only — descriptions false-positive on boilerplate
+                # ("a runoff election will be held").
+                if not is_hydro_market(m.question or ""):
                     continue
                 liq = max(float(m.liquidity or 0), float(m.volume or 0))
                 if liq < cfg.min_liquidity:
