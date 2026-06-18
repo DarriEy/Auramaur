@@ -94,6 +94,11 @@ def ladder_pairs(markets: list[Market]) -> list[tuple[Market, Market, str]]:
     thr_families: dict[tuple, list[tuple[float, Market]]] = {}
     top_families: dict[tuple, list[tuple[int, Market]]] = {}
     for m in markets:
+        # Question-text ladders are Polymarket's; Kalshi ladders are matched
+        # separately by ticker (kalshi_ladder_pairs). Never cross venues — the
+        # legs must execute and settle on the same exchange.
+        if (m.exchange or "polymarket") != "polymarket":
+            continue
         t = parse_threshold(m.question)
         if t:
             key, _direction, value = t
@@ -217,7 +222,7 @@ Respond with ONLY this JSON:
 
 class EntailmentArbPillar:
     def __init__(self, db, settings, discovery, exchange, risk_manager,
-                 pnl_tracker, analyzer=None) -> None:
+                 pnl_tracker, analyzer=None, kalshi_discovery=None) -> None:
         self._db = db
         self._settings = settings
         self._discovery = discovery
@@ -225,6 +230,8 @@ class EntailmentArbPillar:
         self._risk = risk_manager
         self._pnl = pnl_tracker
         self._analyzer = analyzer
+        # Optional Kalshi discovery for the econ-bin ladder arb (series-fetched).
+        self._kalshi_discovery = kalshi_discovery
 
     # -- market quality -------------------------------------------------
 
@@ -233,7 +240,19 @@ class EntailmentArbPillar:
         cfg = self._settings.entailment_arb
         if not m.active or not (0.0 < m.outcome_yes_price < 1.0):
             return False
-        if (m.exchange or "polymarket") != "polymarket":
+        venue = m.exchange or "polymarket"
+        if venue == "kalshi":
+            # Kalshi ladder legs: same dead-book guards, venue-scaled liquidity.
+            if m.liquidity < cfg.kalshi_min_liquidity:
+                return False
+            if m.spread and m.spread * 100.0 > cfg.max_spread_pct:
+                return False
+            if m.end_date is None:
+                return False
+            end = m.end_date if m.end_date.tzinfo else m.end_date.replace(tzinfo=timezone.utc)
+            hours = (end - datetime.now(timezone.utc)).total_seconds() / 3600.0
+            return hours >= cfg.min_hours_to_resolution
+        if venue != "polymarket":
             return False
         if m.liquidity < cfg.min_liquidity:
             return False
@@ -319,6 +338,44 @@ class EntailmentArbPillar:
         await self._db.commit()
         return direction, confidence
 
+    def _required_gap(self, implier: Market, implied: Market) -> float:
+        """Minimum violation gap to be a real arb on these legs.
+
+        Polymarket makers pay nothing → the plain min_gap (slippage/leg-risk
+        buffer). Kalshi charges a taker fee per leg, so a "model-free" gap that
+        doesn't clear BOTH legs' fees is a guaranteed loss — require
+        gap > fee(implier) + fee(implied) + buffer, fees from the live model.
+        """
+        cfg = self._settings.entailment_arb
+        if (implier.exchange or "polymarket") != "kalshi":
+            return cfg.min_gap
+        from auramaur.strategy.signals import taker_fee_rate
+        fees = self._settings.arbitrage.exchange_fees
+        pa, pb = implier.outcome_yes_price, implied.outcome_yes_price
+        fee_a = taker_fee_rate("kalshi", implier.category or "", fees) * pa * (1.0 - pa)
+        fee_b = taker_fee_rate("kalshi", implied.category or "", fees) * pb * (1.0 - pb)
+        return fee_a + fee_b + cfg.kalshi_gap_buffer
+
+    async def _kalshi_ladder_candidates(self):
+        """Fetch the configured Kalshi econ series and return model-free ladder
+        pairs (implier, implied, why, confidence=1.0). Series-fetched so the
+        whole bin set is visible; empty if Kalshi discovery isn't wired."""
+        cfg = self._settings.entailment_arb
+        if not cfg.kalshi_ladders_enabled or self._kalshi_discovery is None:
+            return []
+        markets: list[Market] = []
+        for series in cfg.kalshi_series:
+            try:
+                rows = await self._kalshi_discovery.get_markets_by_series(series)
+            except Exception as e:
+                log.debug("entailment.kalshi_series_error", series=series, error=str(e))
+                continue
+            markets.extend(m for m in rows if self._real_book(m))
+        pairs = [(impl, imp, why, 1.0) for impl, imp, why in kalshi_ladder_pairs(markets)]
+        if pairs:
+            log.info("entailment.kalshi_ladders", pairs=len(pairs), markets=len(markets))
+        return pairs
+
     async def _already_traded(self, a_id: str, b_id: str) -> bool:
         row = await self._db.fetchone(
             """SELECT 1 FROM trades WHERE strategy_source = 'entailment_arb'
@@ -337,7 +394,12 @@ class EntailmentArbPillar:
         by_id = {m.id: m for m in good}
 
         # 1. Deterministic ladders — direction known mathematically.
-        candidates: list[tuple[Market, Market, str, float]] = [
+        #    Polymarket (question-keyed) + Kalshi econ bins (ticker-keyed,
+        #    series-fetched, fee-cleared in the gate below).
+        candidates: list[tuple[Market, Market, str, float]] = (
+            await self._kalshi_ladder_candidates()
+        )
+        candidates += [
             (impl, imp, why, 1.0) for impl, imp, why in ladder_pairs(good)
         ]
 
@@ -362,7 +424,9 @@ class EntailmentArbPillar:
             if placed >= cfg.max_pairs_per_cycle:
                 break
             gap = implier.outcome_yes_price - implied.outcome_yes_price
-            if gap < cfg.min_gap:
+            # Fee-aware floor: Polymarket uses min_gap; Kalshi must clear both
+            # legs' taker fees + buffer, or the "free" arb loses to fees.
+            if gap < self._required_gap(implier, implied):
                 continue
             if await self._already_traded(implier.id, implied.id):
                 continue

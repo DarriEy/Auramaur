@@ -86,6 +86,31 @@ def test_kalshi_ladder_ignores_non_kalshi():
     assert kalshi_ladder_pairs([poly]) == []
 
 
+def test_required_gap_clears_kalshi_fees():
+    """Polymarket legs use the flat min_gap; Kalshi legs must clear BOTH legs'
+    taker fees + buffer (so a 'model-free' arb that ignores fees is rejected)."""
+    from auramaur.strategy.signals import taker_fee_rate
+    s = _settings(kalshi_gap_buffer=0.01)
+    pillar = EntailmentArbPillar.__new__(EntailmentArbPillar)
+    pillar._settings = s
+
+    poly_a = _market("pa", "X above 5?", 0.5)
+    poly_b = _market("pb", "X above 4?", 0.4)
+    assert pillar._required_gap(poly_a, poly_b) == s.entailment_arb.min_gap
+
+    ka = _kx("KXCPIYOY-26NOV-T4.5", 0.50)
+    kb = _kx("KXCPIYOY-26NOV-T4.4", 0.40)
+    fees = s.arbitrage.exchange_fees
+    expected = (taker_fee_rate("kalshi", "", fees) * 0.50 * 0.50
+                + taker_fee_rate("kalshi", "", fees) * 0.40 * 0.60
+                + 0.01)
+    req = pillar._required_gap(ka, kb)
+    assert abs(req - expected) < 1e-9
+    # a sub-fee "violation" is rejected; a fee-clearing one is not
+    assert (0.50 - 0.49) < req          # 1c gap doesn't clear fees
+    assert (0.50 - 0.40) > req          # 10c gap does
+
+
 def _market(mid, question, yes, liquidity=5000.0, spread=0.01,
             exchange="polymarket", days_out=5.0, active=True) -> Market:
     return Market(
