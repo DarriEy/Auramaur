@@ -577,6 +577,81 @@ class AuramaurBot:
 
             await asyncio.sleep(self._adaptive_interval(self.settings.intervals.analysis_seconds))
 
+    async def _task_orderbook_recorder(self, engine: TradingEngine, name: str = "") -> None:
+        """Persist top-of-book bid/ask (plus one depth level) for active, liquid
+        markets into orderbook_snapshots.
+
+        price_history is mid-only, which can't answer "does an edge clear the
+        spread"; this captures the real spread so cost-aware research and honest
+        paper fills become possible. Read-only on the exchange (places no
+        orders). Order books can't be backfilled, so it only captures from when
+        it's enabled — hence it runs by default. Throttled and capped to stay
+        well within CLOB rate limits and not starve the live trading calls.
+        Disable via settings.intervals.orderbook_recorder_enabled = false; tune
+        via orderbook_seconds / orderbook_min_liquidity / orderbook_max_markets.
+        """
+        if not hasattr(engine.exchange, "get_order_book"):
+            return
+        interval = int(getattr(self.settings.intervals, "orderbook_seconds", 300))
+        min_liquidity = float(getattr(self.settings.intervals, "orderbook_min_liquidity", 1000.0))
+        max_markets = int(getattr(self.settings.intervals, "orderbook_max_markets", 150))
+        pause = float(getattr(self.settings.intervals, "orderbook_call_pause_seconds", 0.25))
+
+        while self._running:
+            if await self._check_kill_switch():
+                return
+            try:
+                rows = await engine.db.fetchall(
+                    "SELECT id, clob_token_yes FROM markets "
+                    "WHERE active = 1 AND exchange = ? AND clob_token_yes != '' "
+                    "AND liquidity >= ? ORDER BY liquidity DESC LIMIT ?",
+                    (engine.exchange_name or "polymarket", min_liquidity, max_markets),
+                )
+                recorded = 0
+                for row in rows:
+                    if not self._running:
+                        break
+                    market_id, token_id = row[0], row[1]
+                    try:
+                        book = await engine.exchange.get_order_book(token_id)
+                    except Exception as e:
+                        log.debug("orderbook_recorder.book_failed", market_id=market_id, error=str(e))
+                        await asyncio.sleep(pause)
+                        continue
+                    bid, ask = book.best_bid, book.best_ask
+                    if bid is None or ask is None or ask <= bid:
+                        await asyncio.sleep(pause)
+                        continue
+                    # CLOB levels are worst-first; sort explicitly, never index
+                    # bids[0]/asks[0] (see OrderBook docstring).
+                    bids = sorted(book.bids, key=lambda lv: lv.price, reverse=True)
+                    asks = sorted(book.asks, key=lambda lv: lv.price)
+                    await engine.db.execute(
+                        "INSERT INTO orderbook_snapshots "
+                        "(market_id, token_id, exchange, best_bid, best_ask, bid_size, "
+                        "ask_size, mid, bid2, ask2, bid2_size, ask2_size) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            market_id, token_id, engine.exchange_name or "polymarket",
+                            bid, ask,
+                            bids[0].size if bids else None,
+                            asks[0].size if asks else None,
+                            (bid + ask) / 2.0,
+                            bids[1].price if len(bids) > 1 else None,
+                            asks[1].price if len(asks) > 1 else None,
+                            bids[1].size if len(bids) > 1 else None,
+                            asks[1].size if len(asks) > 1 else None,
+                        ),
+                    )
+                    recorded += 1
+                    await asyncio.sleep(pause)
+                if recorded:
+                    await engine.db.commit()
+                    log.debug("orderbook_recorder.swept", exchange=name, recorded=recorded)
+            except Exception as e:
+                show_error(f"Order-book recorder failed ({name}): {e}")
+            await asyncio.sleep(self._adaptive_interval(interval))
+
     async def _task_portfolio_monitor(self) -> None:
         """Monitor portfolio using the broker syncers for ground truth.
 
@@ -3517,6 +3592,13 @@ class AuramaurBot:
             tasks.append(asyncio.create_task(
                 self._task_trading_cycle(engine, ex_name), name=f"trade_{ex_name}",
             ))
+            # Capture real bid/ask depth for cost-aware research + honest paper
+            # fills. Read-only; disable via intervals.orderbook_recorder_enabled.
+            if getattr(self.settings.intervals, "orderbook_recorder_enabled", True):
+                tasks.append(asyncio.create_task(
+                    self._task_orderbook_recorder(engine, ex_name),
+                    name=f"orderbook_{ex_name}",
+                ))
 
         if self._components.get("attributor"):
             tasks.append(asyncio.create_task(self._task_attribution_update(), name="attribution"))
