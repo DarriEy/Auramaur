@@ -293,6 +293,24 @@ CREATE TABLE IF NOT EXISTS entailment_verdicts (
 CREATE INDEX IF NOT EXISTS idx_price_history_market ON price_history(market_id);
 CREATE INDEX IF NOT EXISTS idx_price_history_time ON price_history(recorded_at);
 
+CREATE TABLE IF NOT EXISTS orderbook_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id TEXT NOT NULL,
+    token_id TEXT NOT NULL,
+    exchange TEXT NOT NULL DEFAULT 'polymarket',
+    best_bid REAL,
+    best_ask REAL,
+    bid_size REAL,
+    ask_size REAL,
+    mid REAL,
+    bid2 REAL,
+    ask2 REAL,
+    bid2_size REAL,
+    ask2_size REAL,
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_orderbook_market_time ON orderbook_snapshots(market_id, recorded_at);
+
 CREATE INDEX IF NOT EXISTS idx_signals_market ON signals(market_id);
 CREATE INDEX IF NOT EXISTS idx_trades_market ON trades(market_id);
 CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp);

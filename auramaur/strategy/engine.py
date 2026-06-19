@@ -377,9 +377,11 @@ class TradingEngine:
             )
         await self.db.commit()
 
-        # Prune old price history to prevent unbounded table growth
+        # Prune old price history to bound table growth. Extended 7 -> 30 days
+        # so reversion/intraday research has a multi-week sample; the 7-day
+        # window was too short to rule out a regime artifact.
         await self.db.execute(
-            "DELETE FROM price_history WHERE recorded_at < datetime('now', '-7 days')"
+            "DELETE FROM price_history WHERE recorded_at < datetime('now', '-30 days')"
         )
         await self.db.commit()
 

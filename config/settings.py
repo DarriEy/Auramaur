@@ -162,6 +162,14 @@ class IntervalsConfig(BaseModel):
     quiet_hours_utc: list[int] = Field(
         default_factory=lambda: [4, 5, 6, 7, 8, 9],
     )
+    # Order-book recorder (data capture for the reversion cost-gate). Read-only;
+    # shares the live CLOB client, so it's throttled + capped. Real off-switch /
+    # tuning so it can be backed off if it ever slows live trade/exit calls.
+    orderbook_recorder_enabled: bool = True
+    orderbook_seconds: int = 300
+    orderbook_min_liquidity: float = 1000.0
+    orderbook_max_markets: int = 150
+    orderbook_call_pause_seconds: float = 0.25
 
 
 _INTENSITY_PRESETS: dict[str, dict] = {
