@@ -352,6 +352,22 @@ class EconIndicatorConfig(BaseModel):
     interval_seconds: int = 1800
 
 
+class IntradayDriftConfig(BaseModel):
+    """Intraday-drift measurement spike (monitoring/intraday_drift.py). NO
+    trading — reuses the signals table + snapshots mids to test whether price
+    drifts toward the LLM estimate intraday (the under-reaction thesis) before
+    any intraday strategy is built. Cheap; disabled by default."""
+
+    enabled: bool = False
+    strategies: list[str] = Field(default_factory=lambda: ["news_speed", "llm"])
+    interval_seconds: int = 300
+    register_lookback_min: int = 15
+    time_box_hours: float = 8.0
+    max_tracks_per_cycle: int = 60
+    fee_threshold: float = 0.02
+    report_min_signals: int = 20
+
+
 class HydroWatchConfig(BaseModel):
     """Hydrology-market watcher (monitoring/hydro_market_watch.py). Alert-only:
     no liquid water markets exist today, so this just flags the first time one
@@ -867,6 +883,7 @@ class Settings(BaseSettings):
     econ_indicator: EconIndicatorConfig = Field(default_factory=lambda: EconIndicatorConfig(**_DEFAULTS.get("econ_indicator", {})))
     weather_temp: WeatherTempConfig = Field(default_factory=lambda: WeatherTempConfig(**_DEFAULTS.get("weather_temp", {})))
     hydro_watch: HydroWatchConfig = Field(default_factory=lambda: HydroWatchConfig(**_DEFAULTS.get("hydro_watch", {})))
+    intraday_drift: IntradayDriftConfig = Field(default_factory=lambda: IntradayDriftConfig(**_DEFAULTS.get("intraday_drift", {})))
     resolution_lens: ResolutionLensConfig = Field(default_factory=lambda: ResolutionLensConfig(**_DEFAULTS.get("resolution_lens", {})))
     oddlot_tender: OddLotTenderConfig = Field(default_factory=lambda: OddLotTenderConfig(**_DEFAULTS.get("oddlot_tender", {})))
     arbitrage: ArbitrageConfig = Field(default_factory=lambda: ArbitrageConfig(**_DEFAULTS.get("arbitrage", {})))
