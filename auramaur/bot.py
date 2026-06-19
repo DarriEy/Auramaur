@@ -2812,6 +2812,26 @@ class AuramaurBot:
                 log.error("econ_indicator.cycle_error", error=str(e))
             await asyncio.sleep(interval)
 
+    async def _task_intraday_drift(self) -> None:
+        """Measurement spike: track post-signal price drift toward the LLM estimate
+        (no trading). Gates the intraday-convergence strategy on real evidence."""
+        from auramaur.monitoring.intraday_drift import IntradayDriftTracker
+
+        tracker = IntradayDriftTracker(
+            db=self._components["db"],
+            settings=self.settings,
+            discovery=self._components["discovery"],
+        )
+        interval = max(60, self.settings.intraday_drift.interval_seconds)
+        while self._running:
+            if await self._check_kill_switch():
+                return
+            try:
+                await tracker.run_once()
+            except Exception as e:
+                log.error("intraday_drift.cycle_error", error=str(e))
+            await asyncio.sleep(interval)
+
     async def _task_hydro_watch(self) -> None:
         """Alert when a tradeable hydrology market appears (compHydro moat armed)."""
         from auramaur.monitoring.hydro_market_watch import HydroMarketWatcher
@@ -3537,6 +3557,10 @@ class AuramaurBot:
         # Hydrology-market watcher (alert-only; arms the compHydro moat)
         if self.settings.hydro_watch.enabled:
             tasks.append(asyncio.create_task(self._task_hydro_watch(), name="hydro_watch"))
+
+        # Intraday-drift measurement spike (no trading; gates the intraday strat)
+        if self.settings.intraday_drift.enabled:
+            tasks.append(asyncio.create_task(self._task_intraday_drift(), name="intraday_drift"))
 
         # Resolution-language lens (paper-forced until proven)
         if self.settings.resolution_lens.enabled:
