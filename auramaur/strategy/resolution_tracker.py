@@ -221,7 +221,11 @@ class ResolutionTracker:
             # Only the ledger insert is idempotent — re-running settlement
             # would re-add the P&L to daily_stats and cost_basis.
             held_token = row["token"] or "YES"
-            ref = f"settle:{row['market_id']}:{held_token}:0"
+            # Match the canonical (side-keyed) source_ref used by _settle_position
+            # so a side already booked under a different label ("YES" vs the
+            # literal outcome) is recognised and not re-settled.
+            canon = "NO" if held_token.upper() == "NO" else "YES"
+            ref = f"settle:{row['market_id']}:{canon}:0"
             if await self._db.fetchone(
                     "SELECT 1 FROM pnl_ledger WHERE source_ref = ?", (ref,)):
                 continue
@@ -461,7 +465,16 @@ class ResolutionTracker:
         # already in the ledger; an already-booked leg still falls through to the
         # cleanup below (zero its residual cost_basis size, drop the portfolio
         # row) so it stops resurrecting.
-        source_ref = f"settle:{market_id}:{token}:{is_paper_flag}"
+        # Canonicalize the source_ref to the binary YES/NO SIDE the exit-price
+        # branch above already uses (every non-"NO" token is the YES side). A
+        # non-binary market's held side carries a varying label across cycles —
+        # "YES" one pass, the literal outcome ("ARKANSAS RAZORBACKS") the next —
+        # which produced distinct source_refs and DOUBLE-BOOKED the settlement.
+        # Keying the ref on the side (not the label) makes the dedup hold; the
+        # ledger row, cost_basis match and portfolio delete still use the real
+        # label so the right rows are zeroed/removed.
+        canon_token = "NO" if token == "NO" else "YES"
+        source_ref = f"settle:{market_id}:{canon_token}:{is_paper_flag}"
         already_booked = await self._db.fetchone(
             "SELECT 1 FROM pnl_ledger WHERE source_ref = ?", (source_ref,)
         )

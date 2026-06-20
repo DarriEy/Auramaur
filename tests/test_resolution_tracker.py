@@ -447,6 +447,53 @@ class TestSettlePosition:
 
         asyncio.run(run())
 
+    def test_settle_same_side_under_different_labels_books_once(self):
+        """A non-binary market's held side carries a varying label across cycles
+        — "YES" one pass, the literal outcome ("ARKANSAS RAZORBACKS") the next.
+        Both settle the SAME economic side, so the source_ref must key on the
+        side (canonical YES/NO), not the label, or the settlement double-books.
+        """
+        from auramaur.db.database import Database
+
+        async def run():
+            db = Database(":memory:")
+            await db.connect()
+            try:
+                tracker = ResolutionTracker(db=db, calibration=AsyncMock(), discoveries={})
+
+                # Pass 1: row labelled "YES" (the YES side), market resolves NO => loss.
+                await db.execute(
+                    """INSERT INTO cost_basis (market_id, token, token_id, size,
+                                               avg_cost, total_cost, realized_pnl, is_paper)
+                       VALUES ('game-1', 'YES', 'tok', 24.0, 0.23, 5.52, 0, 0)""")
+                await db.commit()
+                await tracker._settle_position("game-1", outcome=False, is_paper_scope=0)
+
+                # Pass 2: SAME side resurfaces relabelled with the literal outcome.
+                await db.execute(
+                    """INSERT INTO cost_basis (market_id, token, token_id, size,
+                                               avg_cost, total_cost, realized_pnl, is_paper)
+                       VALUES ('game-1', 'ARKANSAS RAZORBACKS', 'tok', 24.0, 0.23, 5.52, 0, 0)""")
+                await db.commit()
+                await tracker._settle_position(
+                    "game-1", outcome=False, token_scope="ARKANSAS RAZORBACKS",
+                    is_paper_scope=0)
+
+                # Exactly one settlement booked, under the canonical side ref.
+                n = await db.fetchone(
+                    "SELECT COUNT(*) AS n FROM pnl_ledger WHERE market_id='game-1'")
+                assert n["n"] == 1, "label variant must not create a second ledger row"
+                row = await db.fetchone(
+                    "SELECT source_ref, pnl FROM pnl_ledger WHERE market_id='game-1'")
+                assert row["source_ref"] == "settle:game-1:YES:0"
+                assert abs(row["pnl"] - (0.0 - 0.23) * 24.0) < 1e-9
+                ds = await db.fetchone("SELECT total_pnl, trades_count FROM daily_stats")
+                assert ds["trades_count"] == 1, "daily_stats must not double-count"
+            finally:
+                await db.close()
+
+        asyncio.run(run())
+
     def test_detect_void(self):
         """closed + uma resolved + ~0.5 price = VOID (refund); pinned or
         still-open or non-poly is not a void."""
