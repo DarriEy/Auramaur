@@ -30,7 +30,7 @@ from auramaur.nlp.calibration import CalibrationTracker
 from auramaur.broker.allocator import CandidateTrade, CapitalAllocator
 from auramaur.broker.router import SmartOrderRouter, UnmarketableSignal
 from auramaur.risk.manager import RiskManager
-from auramaur.strategy.classifier import ensure_category
+from auramaur.strategy.classifier import blocked_category_hit, ensure_category
 from auramaur.strategy.order_flow import OrderFlowTracker
 from auramaur.strategy.protocols import MarketAnalyzer, TradeCandidate
 from auramaur.strategy.signals import detect_edge, taker_fee_rate
@@ -976,7 +976,10 @@ class TradingEngine:
                         if self.settings.is_live else None)
 
         for m in candidates:
-            if m.category in blocked:
+            # Classify-before-block like the gateway: a market stored 'other'
+            # that is really sports slips past a raw `category in blocked` test,
+            # so check the stored label OR a fresh classification (mislabel-safe).
+            if blocked_category_hit(blocked, m.question, m.description, m.category):
                 filtered_count += 1
                 continue
             if allowed_live is not None and m.category not in allowed_live:

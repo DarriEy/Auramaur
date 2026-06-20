@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 
 import structlog
 
-from auramaur.strategy.classifier import ensure_category
+from auramaur.strategy.classifier import blocked_category_hit, ensure_category
 from auramaur.exchange.models import (
     Confidence,
     Fill,
@@ -126,7 +126,11 @@ class ResolutionLensPillar:
             return False
         if m.spread and m.spread * 100.0 > cfg.max_spread_pct:
             return False
-        if (m.category or "") in set(self._settings.risk.blocked_categories):
+        # Classify-before-block like the gateway: trust the stored label OR a
+        # fresh classification, so a mislabeled blocked market is filtered here
+        # instead of only at the gateway (saves an LLM read).
+        if blocked_category_hit(self._settings.risk.blocked_categories,
+                                m.question, m.description, m.category):
             return False
         if len(m.description or "") < cfg.min_description_chars:
             return False  # no fine print to read

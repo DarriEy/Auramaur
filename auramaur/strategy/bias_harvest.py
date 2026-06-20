@@ -36,7 +36,7 @@ from datetime import datetime, timezone
 
 import structlog
 
-from auramaur.strategy.classifier import ensure_category
+from auramaur.strategy.classifier import blocked_category_hit, ensure_category
 from auramaur.exchange.models import (
     Confidence,
     Fill,
@@ -124,14 +124,14 @@ class BiasHarvestPillar:
             return False
         # Classify before the block: discovery often hands us an empty/mislabeled
         # category, which slips through a raw `category in blocked` test and only
-        # gets corrected after entry — that bypass let sports/politics_us markets
-        # (both already blocked) into the paper book. Resolve the category the
-        # same way persistence does, then reject it against the global block AND
-        # the bias-harvest no-edge list (weather/sports/politics_us).
-        cat = ensure_category(market.question, market.description, market.category)
+        # gets corrected after entry. blocked_category_hit checks the stored label
+        # OR a fresh classification (mislabel-safe, like the gateway), against the
+        # global block AND the bias-harvest no-edge list (weather/sports/politics_us).
         excluded = set(self._settings.risk.blocked_categories) | set(cfg.exclude_categories)
-        if cat in excluded:
-            log.debug("bias_harvest.skip_category", market_id=market.id, category=cat)
+        hit = blocked_category_hit(excluded, market.question, market.description,
+                                   market.category)
+        if hit:
+            log.debug("bias_harvest.skip_category", market_id=market.id, category=hit)
             return False
         if market.end_date is None:
             return False
