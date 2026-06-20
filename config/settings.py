@@ -331,6 +331,16 @@ class BiasHarvestConfig(BaseModel):
     # and can reverse. Fails open (only an ACTIVE dispute is skipped), so a
     # market with no UMA data still enters as before. See [[uma-dispute-gate]].
     skip_disputed: bool = True
+    # Categories where the favorite-longshot harvest has NO edge and bleeds —
+    # the "longshot" carries genuine directional signal, not mispricing, so the
+    # band sells correctly-priced outcomes and pays the asymmetric tail. The
+    # paper track localised the loss to weather (summer heat genuinely hits temp
+    # thresholds) and sports/politics_us (already in risk.blocked_categories,
+    # but those are bias-harvest-specific no-edge zones too — weather can't be a
+    # global block because weather_temp trades it profitably). Checked on top of
+    # risk.blocked_categories, against the CLASSIFIED category (not the raw label
+    # that an unclassified market would slip through). See [[bias-harvest-strategy]].
+    exclude_categories: list[str] = ["weather", "sports", "politics_us"]
 
 
 class EconIndicatorConfig(BaseModel):

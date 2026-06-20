@@ -122,7 +122,16 @@ class BiasHarvestPillar:
             return False
         if market.liquidity < cfg.min_liquidity:
             return False
-        if (market.category or "") in set(self._settings.risk.blocked_categories):
+        # Classify before the block: discovery often hands us an empty/mislabeled
+        # category, which slips through a raw `category in blocked` test and only
+        # gets corrected after entry — that bypass let sports/politics_us markets
+        # (both already blocked) into the paper book. Resolve the category the
+        # same way persistence does, then reject it against the global block AND
+        # the bias-harvest no-edge list (weather/sports/politics_us).
+        cat = ensure_category(market.question, market.description, market.category)
+        excluded = set(self._settings.risk.blocked_categories) | set(cfg.exclude_categories)
+        if cat in excluded:
+            log.debug("bias_harvest.skip_category", market_id=market.id, category=cat)
             return False
         if market.end_date is None:
             return False
