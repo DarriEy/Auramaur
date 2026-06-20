@@ -494,6 +494,132 @@ class TestSettlePosition:
 
         asyncio.run(run())
 
+    def test_venue_override_corrects_stale_prior_settlement(self):
+        """settle_via_venue is authoritative (data-api is_winner). When a side
+        already settled at a STALE value (e.g. the winning side booked at $0),
+        the venue sweep corrects the booked pnl in place and adjusts daily_stats
+        — without creating a second row."""
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        from auramaur.db.database import Database
+
+        async def run():
+            db = Database(":memory:")
+            await db.connect()
+            try:
+                # Stale prior settlement: the YES side booked as a LOSS at $0.
+                await db.execute(
+                    """INSERT INTO pnl_ledger (market_id, venue, category,
+                         strategy_source, kind, token, qty, pnl, fees, is_paper, source_ref)
+                       VALUES ('gm', 'polymarket', 'sports', 'llm', 'settlement',
+                               'YES', 10.0, -5.0, 0.0, 0, 'settle:gm:YES:0')""")
+                # The wallet still holds the tokens, so the syncer resurrected the
+                # row — relabelled with the literal outcome.
+                await db.execute(
+                    """INSERT INTO portfolio (market_id, exchange, side, size, avg_price,
+                         current_price, token, token_id, is_paper, updated_at)
+                       VALUES ('gm', 'polymarket', 'BUY', 10.0, 0.50, 1.0,
+                               'ARKANSAS RAZORBACKS', 'tok', 0, datetime('now'))""")
+                await db.execute(
+                    """INSERT INTO cost_basis (market_id, token, token_id, size,
+                         avg_cost, total_cost, realized_pnl, is_paper)
+                       VALUES ('gm', 'ARKANSAS RAZORBACKS', 'tok', 10.0, 0.50, 5.0, 0, 0)""")
+                await db.commit()
+
+                vp = SimpleNamespace(asset_id="tok", is_winner=True,
+                                     status="redeemable", title="Arkansas vs Arizona")
+                tracker = ResolutionTracker(db=db, calibration=AsyncMock(), discoveries={})
+                with patch("auramaur.broker.redeemer.fetch_redeemable_positions",
+                           AsyncMock(return_value=[vp])):
+                    await tracker.settle_via_venue("0xproxy")
+
+                # Exactly one settlement row for the side, corrected to the win.
+                rows = await db.fetchall(
+                    "SELECT pnl FROM pnl_ledger WHERE market_id='gm' AND kind='settlement'")
+                assert len(rows) == 1
+                assert abs(rows[0]["pnl"] - (1.0 - 0.50) * 10.0) < 1e-9  # +5.0 win
+                ds = await db.fetchone("SELECT total_pnl FROM daily_stats")
+                assert abs(ds["total_pnl"] - 10.0) < 1e-9   # delta +5 - (-5)
+                pf = await db.fetchone("SELECT COUNT(*) AS n FROM portfolio WHERE market_id='gm'")
+                assert pf["n"] == 0   # resurrected row cleaned up
+            finally:
+                await db.close()
+
+        asyncio.run(run())
+
+    def test_venue_consistent_prior_is_noop(self):
+        """A prior settlement already matching the venue value is left untouched
+        (no correction, no daily_stats churn)."""
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        from auramaur.db.database import Database
+
+        async def run():
+            db = Database(":memory:")
+            await db.connect()
+            try:
+                await db.execute(
+                    """INSERT INTO pnl_ledger (market_id, venue, category,
+                         strategy_source, kind, token, qty, pnl, fees, is_paper, source_ref)
+                       VALUES ('gm', 'polymarket', 'sports', 'llm', 'settlement',
+                               'YES', 10.0, 5.0, 0.0, 0, 'settle:gm:YES:0')""")
+                await db.execute(
+                    """INSERT INTO portfolio (market_id, exchange, side, size, avg_price,
+                         current_price, token, token_id, is_paper, updated_at)
+                       VALUES ('gm', 'polymarket', 'BUY', 10.0, 0.50, 1.0,
+                               'YES', 'tok', 0, datetime('now'))""")
+                await db.commit()
+                vp = SimpleNamespace(asset_id="tok", is_winner=True,
+                                     status="redeemable", title="t")
+                tracker = ResolutionTracker(db=db, calibration=AsyncMock(), discoveries={})
+                with patch("auramaur.broker.redeemer.fetch_redeemable_positions",
+                           AsyncMock(return_value=[vp])):
+                    await tracker.settle_via_venue("0xproxy")
+                row = await db.fetchone("SELECT pnl FROM pnl_ledger WHERE source_ref='settle:gm:YES:0'")
+                assert abs(row["pnl"] - 5.0) < 1e-9      # unchanged
+                ds = await db.fetchone("SELECT COUNT(*) AS n FROM daily_stats")
+                assert ds["n"] == 0                      # no daily_stats churn
+            finally:
+                await db.close()
+
+        asyncio.run(run())
+
+    def test_venue_fresh_settles_teamname_label_as_held_payout(self):
+        """A fresh venue settlement of a non-binary (team-name) held token uses
+        the data-api payout directly — a winning team-name token books a WIN,
+        not a loss from the old YES/NO round-trip that mis-mapped it to NO."""
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        from auramaur.db.database import Database
+
+        async def run():
+            db = Database(":memory:")
+            await db.connect()
+            try:
+                await db.execute(
+                    """INSERT INTO portfolio (market_id, exchange, side, size, avg_price,
+                         current_price, token, token_id, is_paper, updated_at)
+                       VALUES ('gm', 'polymarket', 'BUY', 10.0, 0.40, 1.0,
+                               'BLAZERS', 'tok', 0, datetime('now'))""")
+                await db.execute(
+                    """INSERT INTO cost_basis (market_id, token, token_id, size,
+                         avg_cost, total_cost, realized_pnl, is_paper)
+                       VALUES ('gm', 'BLAZERS', 'tok', 10.0, 0.40, 4.0, 0, 0)""")
+                await db.commit()
+                vp = SimpleNamespace(asset_id="tok", is_winner=True,
+                                     status="redeemable", title="t")
+                tracker = ResolutionTracker(db=db, calibration=AsyncMock(), discoveries={})
+                with patch("auramaur.broker.redeemer.fetch_redeemable_positions",
+                           AsyncMock(return_value=[vp])):
+                    await tracker.settle_via_venue("0xproxy")
+                row = await db.fetchone("SELECT pnl FROM pnl_ledger WHERE source_ref='settle:gm:YES:0'")
+                assert row is not None
+                assert abs(row["pnl"] - (1.0 - 0.40) * 10.0) < 1e-9   # +6.0 win, not a loss
+            finally:
+                await db.close()
+
+        asyncio.run(run())
+
     def test_detect_void(self):
         """closed + uma resolved + ~0.5 price = VOID (refund); pinned or
         still-open or non-poly is not a void."""
@@ -713,7 +839,9 @@ async def test_venue_sweep_skips_already_settled_token(monkeypatch):
     async def _fetchone(sql, params=None):
         if "pnl_ledger" in sql:
             assert params == ("settle:m1:NO:0",)
-            return {"1": 1}  # settlement already recorded
+            # NO @ 0.62 won (is_winner) => (1.0-0.62)*20 = 7.6; a matching prior
+            # is consistent, so the leg is skipped (not re-settled/corrected).
+            return {"pnl": (1.0 - 0.62) * 20.0}
         return row
     db.fetchone = AsyncMock(side_effect=_fetchone)
 
