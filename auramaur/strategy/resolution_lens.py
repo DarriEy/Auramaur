@@ -255,6 +255,13 @@ class ResolutionLensPillar:
                       clob_token_yes, clob_token_no
                FROM markets
                WHERE active = 1 AND exchange = 'polymarket'
+                 -- Only future-dated markets: the table is ~87% stale rows
+                 -- (resolved markets keep active=1 with a past end_date), and the
+                 -- lens can't trade a resolved market. Without this the scan loads
+                 -- tens of thousands of dead rows every cycle just to drop them in
+                 -- _eligible. NULL end_date is kept (undated markets still eligible).
+                 AND (end_date IS NULL
+                      OR end_date >= strftime('%Y-%m-%dT%H:%M:%SZ','now'))
                  AND (question LIKE '%announce%' OR question LIKE '%official%'
                       OR question LIKE '%confirm%' OR question LIKE '%permanent%'
                       OR question LIKE '%exactly%' OR question LIKE '%ceasefire%'

@@ -397,7 +397,8 @@ def test_lexical_candidates_scan_whole_table_not_volume_top():
         db = Database(":memory:")
         await db.connect()
         try:
-            async def _ins(mid, q, exchange="polymarket", active=1, liq=5000.0):
+            async def _ins(mid, q, exchange="polymarket", active=1, liq=5000.0,
+                           end_days=20):
                 await db.execute(
                     "INSERT INTO markets (id, exchange, question, description, "
                     "category, end_date, outcome_yes_price, outcome_no_price, "
@@ -407,12 +408,15 @@ def test_lexical_candidates_scan_whole_table_not_volume_top():
                      "Long fine-print resolution criteria describing the strict "
                      "written bar that must be met for YES to resolve.",
                      "politics_intl",
-                     (datetime.now(timezone.utc) + timedelta(days=20)).isoformat(),
+                     (datetime.now(timezone.utc) + timedelta(days=end_days)).isoformat(),
                      0.30, 0.70, liq, "ty", "tn", active))
             await _ins("hit", "Will Iran officially announce a permanent ceasefire?")
             await _ins("plain", "Will Bitcoin go up tomorrow?")            # no trigger
             await _ins("inactive", "Will X officially confirm it?", active=0)
             await _ins("kalshi", "Will Y officially announce?", exchange="kalshi")
+            # resolved-but-active rows (past end_date) are ~87% of the table —
+            # the lens can't trade them, so the lexical scan must exclude them.
+            await _ins("stale", "Will Z officially announce a permanent deal?", end_days=-5)
             await db.commit()
 
             pillar = _pillar(db, _settings(), markets=[])
