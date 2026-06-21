@@ -221,43 +221,85 @@ class ResolutionTracker:
             # Only the ledger insert is idempotent — re-running settlement
             # would re-add the P&L to daily_stats and cost_basis.
             held_token = row["token"] or "YES"
-            ref = f"settle:{row['market_id']}:{held_token}:0"
-            if await self._db.fetchone(
-                    "SELECT 1 FROM pnl_ledger WHERE source_ref = ?", (ref,)):
-                continue
-            # cur_price/is_winner are relative to OUR held side; map back to
-            # the market-level YES outcome the settlement path expects.
-            held_yes = (row["token"] or "YES") == "YES"
-            outcome_yes = vp.is_winner if held_yes else (not vp.is_winner)
+            # Match the canonical (side-keyed) source_ref used by _settle_position
+            # so a side already booked under a different label ("YES" vs the
+            # literal outcome) is recognised.
+            canon = "NO" if held_token.upper() == "NO" else "YES"
+            ref = f"settle:{row['market_id']}:{canon}:0"
+
+            # The data-api reports OUR held token's payout directly: is_winner
+            # means this token redeems for $1, else $0. That's authoritative and
+            # label-agnostic, so settle the held token at that exact exit price
+            # (override) rather than re-deriving it from a YES/NO outcome — the
+            # YES/NO round-trip mis-mapped non-binary labels (a team name was
+            # treated as the NO side). outcome_yes is kept only for the report.
             exit_price = 1.0 if vp.is_winner else 0.0
+            venue_pnl = (exit_price - row["avg_price"]) * row["size"]
+            outcome_yes = vp.is_winner if canon == "YES" else (not vp.is_winner)
+
+            # An already-settled side whose booked value MATCHES the venue is
+            # done — skip (the syncer resurrects the row until redemption).
+            prior = await self._db.fetchone(
+                "SELECT pnl FROM pnl_ledger WHERE source_ref = ?", (ref,))
+            if prior is not None and abs(prior["pnl"] - venue_pnl) <= 0.01:
+                continue
+
             settlements.append({
                 "market_id": row["market_id"],
                 "title": vp.title,
-                "token": row["token"] or "YES",
+                "token": held_token,
                 "size": row["size"],
                 "avg_price": row["avg_price"],
-                "pnl": (exit_price - row["avg_price"]) * row["size"],
+                "pnl": venue_pnl,
                 "status": vp.status,
                 "outcome_yes": outcome_yes,
+                "correction": prior is not None,
             })
             if dry_run:
                 continue
+
+            if prior is not None:
+                # A STALE prior settlement disagrees with the authoritative venue
+                # outcome (e.g. it booked the winning side at $0). The venue wins:
+                # correct the booked value in place — one row per side with the
+                # right value (a delta row would distort event/win counts) — and
+                # adjust daily_stats by the delta. _settle_position below then
+                # cleans up the resurrected row (cleanup-only, ref already booked).
+                delta = venue_pnl - prior["pnl"]
+                await self._db.execute(
+                    "UPDATE pnl_ledger SET pnl = ?, qty = ? WHERE source_ref = ?",
+                    (venue_pnl, row["size"], ref))
+                today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                await self._db.execute(
+                    """INSERT INTO daily_stats (date, total_pnl, trades_count, wins, losses)
+                       VALUES (?, ?, 0, 0, 0)
+                       ON CONFLICT(date) DO UPDATE SET
+                           total_pnl = total_pnl + excluded.total_pnl""",
+                    (today, delta))
+                log.info(
+                    "resolution.venue_correction",
+                    market_id=row["market_id"], token=held_token,
+                    prior_pnl=round(prior["pnl"], 2),
+                    venue_pnl=round(venue_pnl, 2), title=vp.title[:60])
+
             await self._settle_position(
-                row["market_id"], outcome_yes,
-                token_scope=row["token"] or "YES", is_paper_scope=0,
+                row["market_id"], bool(vp.is_winner),
+                token_scope=held_token, is_paper_scope=0,
+                override_exit_price=exit_price,
             )
             await self._db.execute(
                 "UPDATE markets SET active = 0 WHERE id = ?",
                 (row["market_id"],),
             )
             await self._db.commit()
-            log.info(
-                "resolution.venue_settled",
-                market_id=row["market_id"],
-                token=row["token"],
-                status=vp.status,
-                title=vp.title[:60],
-            )
+            if prior is None:
+                log.info(
+                    "resolution.venue_settled",
+                    market_id=row["market_id"],
+                    token=held_token,
+                    status=vp.status,
+                    title=vp.title[:60],
+                )
         return settlements
 
     # ------------------------------------------------------------------
@@ -461,7 +503,16 @@ class ResolutionTracker:
         # already in the ledger; an already-booked leg still falls through to the
         # cleanup below (zero its residual cost_basis size, drop the portfolio
         # row) so it stops resurrecting.
-        source_ref = f"settle:{market_id}:{token}:{is_paper_flag}"
+        # Canonicalize the source_ref to the binary YES/NO SIDE the exit-price
+        # branch above already uses (every non-"NO" token is the YES side). A
+        # non-binary market's held side carries a varying label across cycles —
+        # "YES" one pass, the literal outcome ("ARKANSAS RAZORBACKS") the next —
+        # which produced distinct source_refs and DOUBLE-BOOKED the settlement.
+        # Keying the ref on the side (not the label) makes the dedup hold; the
+        # ledger row, cost_basis match and portfolio delete still use the real
+        # label so the right rows are zeroed/removed.
+        canon_token = "NO" if token == "NO" else "YES"
+        source_ref = f"settle:{market_id}:{canon_token}:{is_paper_flag}"
         already_booked = await self._db.fetchone(
             "SELECT 1 FROM pnl_ledger WHERE source_ref = ?", (source_ref,)
         )

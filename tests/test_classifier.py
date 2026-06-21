@@ -1,6 +1,29 @@
 """Tests for market category classification."""
 
-from auramaur.strategy.classifier import classify_market, classify_tags
+from auramaur.strategy.classifier import (
+    blocked_category_hit,
+    classify_market,
+    classify_tags,
+)
+
+
+def test_blocked_category_hit_stored_empty_and_mislabeled():
+    """The pre-filter helper mirrors the gateway: block on the stored label OR a
+    fresh classification, so it catches an empty label (the bypass) AND a
+    stale/mislabeled one (stored 'other' that is really sports)."""
+    blocked = {"sports", "politics_us"}
+    # stored label is blocked
+    assert blocked_category_hit(blocked, "Team A vs Team B", "", "sports") == "sports"
+    # empty label, but the question classifies into a blocked category
+    assert blocked_category_hit(
+        blocked, "Will Republicans win the Senate?", "", "") == "politics_us"
+    # mislabeled 'other' that is really sports -> caught via fresh classify
+    assert blocked_category_hit(
+        blocked, "United States vs. Paraguay: USA O/U 2.5", "", "other") == "sports"
+    # a genuinely allowed market returns None
+    assert blocked_category_hit(blocked, "Will OpenAI release GPT-6?", "", "tech") is None
+    # empty blocked set never blocks
+    assert blocked_category_hit(set(), "Team A vs Team B", "", "sports") is None
 
 
 def test_politics_us():
@@ -89,6 +112,17 @@ def test_foreign_election_is_politics_intl():
     ) == "politics_intl"
     assert classify_market("Rodrigo Paz out as President of Bolivia?") == "politics_intl"
     assert classify_market("Will Germany hold a snap election in 2026?") == "politics_intl"
+
+
+def test_subnational_and_byelection_are_politics_intl():
+    """Sub-national/Commonwealth markers without a country word used to default
+    to politics_us (governance term + no intl marker). Alberta/Quebec/Scotland
+    separatist votes and UK by-elections must route to politics_intl."""
+    assert classify_market("Will Alberta vote for independence in 2026?") == "politics_intl"
+    assert classify_market(
+        "Will Andy Burnham win the 2026 Makerfield by-election?") == "politics_intl"
+    assert classify_market("Will Scotland vote for independence?") == "politics_intl"
+    assert classify_market("Will Quebec hold an independence referendum?") == "politics_intl"
 
 
 def test_us_election_stays_politics_us():

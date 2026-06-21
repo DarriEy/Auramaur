@@ -108,6 +108,117 @@ def _analyzer(fair=0.10, gap=0.8, mech="'permanent' requires explicit permanence
     return a
 
 
+def _analyzer3(fair=0.10, gap=0.8, mech="'permanent' bar", verify="confirmed",
+               verify_conf=0.9, grounded=0.10, ground_conf=0.9):
+    """Analyzer mock that also answers the Phase 3 GROUND_PROMPT."""
+    a = MagicMock()
+
+    async def _call(prompt, **kw):
+        if "grounded_prob" in prompt:
+            return f'{{"grounded_prob": {grounded}, "confidence": {ground_conf}, "why": "x"}}'
+        if "ADVERSARIALLY CHECK" in prompt or '"verdict"' in prompt:
+            return f'{{"verdict": "{verify}", "confidence": {verify_conf}, "why": "x"}}'
+        return f'{{"fair_prob": {fair}, "gap_score": {gap}, "mechanism": "{mech}"}}'
+
+    a._call_llm = AsyncMock(side_effect=_call)
+    return a
+
+
+def _aggregator_mock(n=2):
+    from auramaur.data_sources.base import NewsItem
+    agg = MagicMock()
+    items = [NewsItem(id=f"e{i}", source="news", title=f"headline {i}",
+                      content="evidence body") for i in range(n)]
+    agg.gather = AsyncMock(return_value=items)
+    return agg
+
+
+def _pillar3(db, settings, markets, exchange=None, risk=None, analyzer=None,
+                 aggregator=None):
+    discovery = MagicMock()
+    discovery.get_markets = AsyncMock(return_value=markets)
+    calibration = MagicMock(); calibration.record_prediction = AsyncMock()
+    return ResolutionLensPillar(
+        db=db, settings=settings, discovery=discovery,
+        exchange=exchange or _exchange(), risk_manager=risk or _risk(),
+        pnl_tracker=PnLTracker(db, settings), calibration=calibration,
+        analyzer=analyzer if analyzer is not None else _analyzer3(),
+        aggregator=aggregator,
+    )
+
+
+def test_phase3_grounding_confirms_gap_then_enters():
+    """Evidence-grounded comprehension on a verified gap: when grounding agrees
+    the strict bar is unmet (low grounded P(YES)), the edge holds and the lens
+    trades the grounded fair; lens_verdicts records grounded_fair."""
+    async def run():
+        db = Database(":memory:"); await db.connect()
+        try:
+            with patch("auramaur.nlp.query_decomposer.extract_search_queries",
+                       return_value=["q"]), \
+                 patch("auramaur.nlp.evidence_ranker.rank_evidence",
+                       side_effect=lambda q, items, **kw: items):
+                m = _market(yes=0.30)
+                pillar = _pillar3(db, _settings(), [m],
+                                      analyzer=_analyzer3(fair=0.10, grounded=0.10),
+                                      aggregator=_aggregator_mock())
+                entered = await pillar.run_once()
+                assert entered == 1
+                row = await db.fetchone(
+                    "SELECT grounded_fair FROM lens_verdicts WHERE market_id=?", (m.id,))
+                assert row["grounded_fair"] is not None
+                assert abs(row["grounded_fair"] - 0.10) < 1e-6
+        finally:
+            await db.close()
+    asyncio.run(run())
+
+
+def test_phase3_grounding_kills_edge_skips():
+    """The synergy gate: a real fine-print gap that current evidence shows is
+    ALREADY priced for reality (grounded fair ≈ market) drops the recomputed edge
+    below the floor — the lens skips instead of trading a stale mechanic."""
+    async def run():
+        db = Database(":memory:"); await db.connect()
+        try:
+            with patch("auramaur.nlp.query_decomposer.extract_search_queries",
+                       return_value=["q"]), \
+                 patch("auramaur.nlp.evidence_ranker.rank_evidence",
+                       side_effect=lambda q, items, **kw: items):
+                m = _market(yes=0.30)
+                # criteria fair 0.10 (edge 0.20), but grounding says 0.29 ≈ market
+                pillar = _pillar3(db, _settings(), [m],
+                                      analyzer=_analyzer3(fair=0.10, grounded=0.29),
+                                      aggregator=_aggregator_mock())
+                entered = await pillar.run_once()
+                assert entered == 0   # grounded edge 0.01 < min_edge 0.08
+        finally:
+            await db.close()
+    asyncio.run(run())
+
+
+def test_phase3_low_confidence_falls_back_to_criteria_fair():
+    """Low grounding confidence is ignored — the lens falls back to the
+    Phase 1+2-validated criteria fair rather than trusting weak evidence."""
+    async def run():
+        db = Database(":memory:"); await db.connect()
+        try:
+            with patch("auramaur.nlp.query_decomposer.extract_search_queries",
+                       return_value=["q"]), \
+                 patch("auramaur.nlp.evidence_ranker.rank_evidence",
+                       side_effect=lambda q, items, **kw: items):
+                m = _market(yes=0.30)
+                # grounding would kill the edge (0.29) BUT confidence is low -> ignored
+                pillar = _pillar3(db, _settings(), [m],
+                                      analyzer=_analyzer3(fair=0.10, grounded=0.29,
+                                                          ground_conf=0.2),
+                                      aggregator=_aggregator_mock())
+                entered = await pillar.run_once()
+                assert entered == 1   # criteria fair 0.10 used -> edge 0.20 holds
+        finally:
+            await db.close()
+    asyncio.run(run())
+
+
 def _pillar(db, settings, markets, exchange=None, risk=None, analyzer=None):
     discovery = MagicMock()
     discovery.get_markets = AsyncMock(return_value=markets)
@@ -397,7 +508,8 @@ def test_lexical_candidates_scan_whole_table_not_volume_top():
         db = Database(":memory:")
         await db.connect()
         try:
-            async def _ins(mid, q, exchange="polymarket", active=1, liq=5000.0):
+            async def _ins(mid, q, exchange="polymarket", active=1, liq=5000.0,
+                           end_days=20):
                 await db.execute(
                     "INSERT INTO markets (id, exchange, question, description, "
                     "category, end_date, outcome_yes_price, outcome_no_price, "
@@ -407,12 +519,15 @@ def test_lexical_candidates_scan_whole_table_not_volume_top():
                      "Long fine-print resolution criteria describing the strict "
                      "written bar that must be met for YES to resolve.",
                      "politics_intl",
-                     (datetime.now(timezone.utc) + timedelta(days=20)).isoformat(),
+                     (datetime.now(timezone.utc) + timedelta(days=end_days)).isoformat(),
                      0.30, 0.70, liq, "ty", "tn", active))
             await _ins("hit", "Will Iran officially announce a permanent ceasefire?")
             await _ins("plain", "Will Bitcoin go up tomorrow?")            # no trigger
             await _ins("inactive", "Will X officially confirm it?", active=0)
             await _ins("kalshi", "Will Y officially announce?", exchange="kalshi")
+            # resolved-but-active rows (past end_date) are ~87% of the table —
+            # the lens can't trade them, so the lexical scan must exclude them.
+            await _ins("stale", "Will Z officially announce a permanent deal?", end_days=-5)
             await db.commit()
 
             pillar = _pillar(db, _settings(), markets=[])

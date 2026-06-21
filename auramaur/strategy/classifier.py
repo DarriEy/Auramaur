@@ -125,6 +125,13 @@ POLITICS_INTL_KEYWORDS: list[str] = [
     "netherlands", "dutch", "denmark", "danish", "greenland",
     "norway", "norwegian", "sweden", "swedish", "hungary", "hungarian",
     "austria", "austrian", "kenya", "kenyan", "congo",
+    # Sub-national/Commonwealth markers seen mislabeled politics_us: governance
+    # terms ("vote"/"election") with no country marker default to US, so foreign
+    # separatist/by-election markets ("Alberta vote for independence", "Andy
+    # Burnham ... by-election") landed in politics_us. "by-election" is a
+    # distinctly Commonwealth/parliamentary term (the US says "special election").
+    "by-election", "alberta", "quebec", "ontario",
+    "scotland", "scottish", "wales", "welsh", "catalonia", "catalan",
 ]
 # "primary" is intentionally absent: description boilerplate ("primary
 # listing", "primary market") filed SpaceX-IPO and tennis markets as
@@ -331,3 +338,29 @@ def ensure_category(question: str, description: str = "",
     routes through this instead of writing ``market.category`` raw.
     """
     return category or classify_market(question or "", description or "")
+
+
+def blocked_category_hit(
+    blocked, question: str, description: str = "",
+    stored_category: str | None = "",
+) -> str | None:
+    """Return the offending category if this market is blocked, else None.
+
+    Mirrors the single gateway (risk.checks.check_blocked_category): a market is
+    blocked when its STORED label OR a fresh ``classify_market`` is in
+    ``blocked``. ``ensure_category`` only fills an EMPTY label, so it closes the
+    empty-label bypass but not the stale/mislabeled case (a market stored 'other'
+    that is really sports); this checks both. Use it for strategy-level
+    efficiency pre-filters so they agree with the gateway instead of trusting the
+    raw stored label.
+    """
+    blocked_set = set(blocked or [])
+    if not blocked_set:
+        return None
+    stored = stored_category or ""
+    if stored in blocked_set:
+        return stored
+    fresh = classify_market(question or "", description or "")
+    if fresh in blocked_set:
+        return fresh
+    return None

@@ -207,6 +207,40 @@ def test_skips_out_of_band_and_ineligible():
     asyncio.run(run())
 
 
+def test_excludes_no_edge_categories_even_when_unclassified():
+    """The favorite-longshot harvest has no edge in weather/sports/politics_us —
+    the 'longshot' carries real signal. These must be skipped both when labelled
+    AND when discovery hands an EMPTY category (the bypass that let blocked
+    sports/politics_us markets into the paper book): the check classifies first.
+    A genuinely in-band 'other'/'tech' favorite still enters."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        pillar, _ = _pillar(db, _settings(), [])
+
+        # labelled no-edge category -> skipped
+        labelled = _market("w1", yes=0.90, category="weather")
+        assert pillar._eligible(labelled) is False
+
+        # EMPTY category but a temperature question -> classified weather -> skipped
+        unlabelled_temp = _market("w2", yes=0.90, category="")
+        unlabelled_temp.question = "Will the highest temperature in Moscow exceed 35C?"
+        assert pillar._eligible(unlabelled_temp) is False
+
+        # EMPTY category but a sports question -> classified sports -> skipped
+        unlabelled_sport = _market("s1", yes=0.90, category="")
+        unlabelled_sport.question = "United States vs. Paraguay: United States to win?"
+        assert pillar._eligible(unlabelled_sport) is False
+
+        # an in-band tech favorite is unaffected
+        ok = _market("t1", yes=0.90, category="tech")
+        ok.question = "Will OpenAI release GPT-6 this year?"
+        assert pillar._eligible(ok) is True
+        await db.close()
+
+    asyncio.run(run())
+
+
 def test_skips_actively_disputed_favorite():
     """A perfectly in-band favorite is skipped when its UMA resolution is
     actively disputed (the fat-tail flip filter). A non-disputed twin enters."""

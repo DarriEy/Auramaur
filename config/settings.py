@@ -331,6 +331,16 @@ class BiasHarvestConfig(BaseModel):
     # and can reverse. Fails open (only an ACTIVE dispute is skipped), so a
     # market with no UMA data still enters as before. See [[uma-dispute-gate]].
     skip_disputed: bool = True
+    # Categories where the favorite-longshot harvest has NO edge and bleeds —
+    # the "longshot" carries genuine directional signal, not mispricing, so the
+    # band sells correctly-priced outcomes and pays the asymmetric tail. The
+    # paper track localised the loss to weather (summer heat genuinely hits temp
+    # thresholds) and sports/politics_us (already in risk.blocked_categories,
+    # but those are bias-harvest-specific no-edge zones too — weather can't be a
+    # global block because weather_temp trades it profitably). Checked on top of
+    # risk.blocked_categories, against the CLASSIFIED category (not the raw label
+    # that an unclassified market would slip through). See [[bias-harvest-strategy]].
+    exclude_categories: list[str] = ["weather", "sports", "politics_us"]
 
 
 class EconIndicatorConfig(BaseModel):
@@ -442,6 +452,33 @@ class EntailmentArbConfig(BaseModel):
     kalshi_gap_buffer: float = 0.01
 
 
+class CrossVenueArbConfig(BaseModel):
+    """Cross-venue semantic-equivalence arbitrage (strategy/cross_venue_arb.py).
+
+    Trades price gaps between Polymarket and Kalshi markets that are logically
+    equivalent but worded differently. Candidate pairs are pre-filtered by word
+    overlap, then verified ADVERSARIALLY by an LLM (default: not equivalent) at a
+    high confidence floor — a false match is a paired loss, not a free arb. The
+    gap must clear both legs' taker fees + a buffer. PAPER-FORCED by default and
+    NOT graduation-exempt (resolution-mismatch risk = a real directional loss).
+    """
+
+    enabled: bool = False
+    paper: bool = True
+    min_word_overlap: float = 0.5
+    gap_buffer: float = 0.02
+    stake_usd: float = 10.0
+    max_pairs_per_cycle: int = 2
+    max_llm_calls_per_cycle: int = 8
+    scan_limit: int = 200
+    min_liquidity: float = 1000.0
+    kalshi_min_liquidity: float = 50.0
+    max_spread_pct: float = 5.0
+    min_hours_to_resolution: float = 6.0
+    llm_min_confidence: float = 0.9
+    interval_seconds: int = 1200
+
+
 class OddLotTenderConfig(BaseModel):
     """Odd-lot tender harvester (strategy/oddlot_tender.py).
 
@@ -492,6 +529,22 @@ class ResolutionLensConfig(BaseModel):
     # fine-print. Only trade when confirmed at >= verify_min_confidence.
     verify_enabled: bool = True
     verify_min_confidence: float = 0.7
+    # Phase 3: evidence-grounded comprehension. The lens reads CURRENT evidence
+    # (the same aggregator pipeline the ensemble uses) AGAINST the strict
+    # criteria — "do the literal criteria resolve YES given this evidence and the
+    # deadline?" — not a re-forecast. This fuses the two things that individually
+    # work (LLM comprehension + live evidence) on the task where the LLM has edge
+    # (reading a rule against facts), instead of forecasting (where it loses).
+    # Runs ONLY on candidates that already cleared gap_score + adversarial verify,
+    # so evidence/LLM spend lands only on real fine-print gaps. The grounded
+    # estimate is NOT permanently cached (evidence is fresh): re-grounds when
+    # older than phase3_ttl_hours. Falls back to the criteria-strict fair (already
+    # Phase 1+2 validated) if evidence/grounding is unavailable — never blocks
+    # accrual on a fetch miss.
+    phase3_grounding_enabled: bool = True
+    phase3_ttl_hours: float = 12.0
+    phase3_min_confidence: float = 0.5
+    phase3_max_evidence: int = 6
     interval_seconds: int = 1800
     # Paper-phase eligibility: while the cell is hard paper-forced (paper=True)
     # it can never reach the venue, so the live-trading guards (hold horizon,
@@ -888,6 +941,7 @@ class Settings(BaseSettings):
     bias_harvest: BiasHarvestConfig = Field(default_factory=lambda: BiasHarvestConfig(**_DEFAULTS.get("bias_harvest", {})))
     graduation: GraduationConfig = Field(default_factory=lambda: GraduationConfig(**_DEFAULTS.get("graduation", {})))
     entailment_arb: EntailmentArbConfig = Field(default_factory=lambda: EntailmentArbConfig(**_DEFAULTS.get("entailment_arb", {})))
+    cross_venue_arb: CrossVenueArbConfig = Field(default_factory=lambda: CrossVenueArbConfig(**_DEFAULTS.get("cross_venue_arb", {})))
     econ_indicator: EconIndicatorConfig = Field(default_factory=lambda: EconIndicatorConfig(**_DEFAULTS.get("econ_indicator", {})))
     weather_temp: WeatherTempConfig = Field(default_factory=lambda: WeatherTempConfig(**_DEFAULTS.get("weather_temp", {})))
     hydro_watch: HydroWatchConfig = Field(default_factory=lambda: HydroWatchConfig(**_DEFAULTS.get("hydro_watch", {})))
