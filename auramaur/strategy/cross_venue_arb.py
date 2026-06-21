@@ -56,11 +56,15 @@ Respond with ONLY this JSON:
 
 class CrossVenueArbPillar:
     def __init__(self, db, settings, discovery, exchange, risk_manager,
-                 pnl_tracker, analyzer=None, kalshi_discovery=None) -> None:
+                 pnl_tracker, analyzer=None, kalshi_discovery=None,
+                 exchanges=None) -> None:
         self._db = db
         self._settings = settings
         self._discovery = discovery            # Polymarket discovery
         self._exchange = exchange
+        self._exchanges = dict(exchanges or {})
+        if exchange is not None:
+            self._exchanges.setdefault("polymarket", exchange)
         self._risk = risk_manager
         self._pnl = pnl_tracker
         self._analyzer = analyzer
@@ -77,8 +81,19 @@ class CrossVenueArbPillar:
                    confidence REAL NOT NULL DEFAULT 0,
                    reasoning TEXT NOT NULL DEFAULT '',
                    traded_at TEXT,
+                   partial_at TEXT,
+                   last_error TEXT,
                    checked_at TEXT NOT NULL DEFAULT (datetime('now')),
                    PRIMARY KEY (poly_id, kalshi_id))""")
+        for ddl in (
+            "ALTER TABLE cross_venue_verdicts ADD COLUMN partial_at TEXT",
+            "ALTER TABLE cross_venue_verdicts ADD COLUMN last_error TEXT",
+        ):
+            try:
+                await self._db.execute(ddl)
+                await self._db.commit()
+            except Exception:
+                pass
         await self._db.commit()
 
     # -- market quality --------------------------------------------------
@@ -106,7 +121,7 @@ class CrossVenueArbPillar:
         """Poly × Kalshi pairs above a word-overlap floor (cheap pre-filter
         before the LLM equivalence check). Both legs must be real books."""
         cfg = self._settings.cross_venue_arb
-        if self._kalshi_discovery is None:
+        if self._discovery is None or self._kalshi_discovery is None:
             return []
         try:
             poly = await self._discovery.get_markets(limit=cfg.scan_limit)
@@ -205,14 +220,38 @@ class CrossVenueArbPillar:
 
     async def _already_traded(self, a_id: str, b_id: str) -> bool:
         row = await self._db.fetchone(
-            "SELECT traded_at FROM cross_venue_verdicts WHERE poly_id = ? AND kalshi_id = ?",
+            "SELECT traded_at, partial_at FROM cross_venue_verdicts "
+            "WHERE poly_id = ? AND kalshi_id = ?",
             (a_id, b_id))
-        return bool(row and row["traded_at"])
+        return bool(row and (row["traded_at"] or row["partial_at"]))
+
+    def _exchange_for(self, market: Market):
+        return self._exchanges.get(market.exchange or "polymarket")
+
+    async def _mark_partial(self, a_id: str, b_id: str, error: str) -> None:
+        await self._db.execute(
+            """UPDATE cross_venue_verdicts
+               SET partial_at = datetime('now'), last_error = ?
+               WHERE poly_id = ? AND kalshi_id = ?""",
+            (error[:400], a_id, b_id))
+        await self._db.commit()
 
     async def _enter_pair(self, a: Market, b: Market, edge: float,
                           side_a: OrderSide, side_b: OrderSide,
                           orientation: str, conf: float) -> bool:
         cfg = self._settings.cross_venue_arb
+        exchange_a = self._exchange_for(a)
+        exchange_b = self._exchange_for(b)
+        if exchange_a is None or exchange_b is None:
+            log.info(
+                "cross_venue.missing_exchange",
+                a=a.id,
+                b=b.id,
+                exchange_a=a.exchange,
+                exchange_b=b.exchange,
+            )
+            return False
+
         why = f"{orientation}; gap {edge:.3f}"
         sig_a = self._leg_signal(a, side_a, fair=b.outcome_yes_price, edge=edge, why=why)
         sig_b = self._leg_signal(b, side_b, fair=a.outcome_yes_price, edge=edge, why=why)
@@ -230,21 +269,33 @@ class CrossVenueArbPillar:
                        or getattr(dec_b, "force_paper", False))
         is_live = self._settings.is_live and not cfg.paper and not force_paper
 
-        order_a = self._exchange.prepare_order(sig_a, a, size, is_live)
-        order_b = self._exchange.prepare_order(sig_b, b, size, is_live)
+        order_a = exchange_a.prepare_order(sig_a, a, size, is_live)
+        order_b = exchange_b.prepare_order(sig_b, b, size, is_live)
         if order_a is None or order_b is None:
             return False
-        result_a = await self._exchange.place_order(order_a)
-        if result_a.status not in ("filled", "paper", "partial", "pending"):
+        ok_statuses = ("filled", "paper", "partial", "pending")
+        result_a = await exchange_a.place_order(order_a)
+        if result_a.status not in ok_statuses:
             log.warning("cross_venue.leg_a_rejected", a=a.id, status=result_a.status)
             return False
-        result_b = await self._exchange.place_order(order_b)
-        if result_b.status not in ("filled", "paper", "partial", "pending"):
+
+        result_b = await exchange_b.place_order(order_b)
+        if result_b.status not in ok_statuses:
             log.error("cross_venue.leg_b_failed_single_leg", a=a.id, b=b.id,
                       status=result_b.status)
+            await self._record_leg(a, order_a, result_a, why)
+            if result_a.status == "pending" and not result_a.is_paper:
+                try:
+                    await exchange_a.cancel_order(result_a.order_id)
+                except Exception as e:
+                    log.warning("cross_venue.leg_a_cancel_failed",
+                                a=a.id, order_id=result_a.order_id, error=str(e))
+            await self._mark_partial(
+                a.id, b.id, result_b.error_message or f"leg_b_{result_b.status}")
+            return False
+
         for market, order, result in ((a, order_a, result_a), (b, order_b, result_b)):
-            if result.status in ("filled", "paper", "partial", "pending"):
-                await self._record_leg(market, order, result, why)
+            await self._record_leg(market, order, result, why)
         await self._db.execute(
             "UPDATE cross_venue_verdicts SET traded_at = datetime('now') "
             "WHERE poly_id = ? AND kalshi_id = ?", (a.id, b.id))

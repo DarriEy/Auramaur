@@ -2839,13 +2839,14 @@ class AuramaurBot:
             db=self._components["db"],
             settings=self.settings,
             discovery=self._components["discovery"],
-            exchange=self._components["exchange"],
+            exchange=(self._components.get("exchanges") or {}).get("polymarket"),
             risk_manager=self._components["risk_manager"],
             pnl_tracker=self._components["pnl_tracker"],
             analyzer=self._components.get("analyzer"),
             # Kalshi econ-bin ladder arb fetches its own series; pass the Kalshi
             # discovery if present (no-op when Kalshi isn't configured).
             kalshi_discovery=(self._components.get("discoveries") or {}).get("kalshi"),
+            exchanges=self._components.get("exchanges") or {},
         )
         interval = max(60, self.settings.entailment_arb.interval_seconds)
         while self._running:
@@ -2865,12 +2866,13 @@ class AuramaurBot:
         pillar = CrossVenueArbPillar(
             db=self._components["db"],
             settings=self.settings,
-            discovery=self._components["discovery"],
-            exchange=self._components["exchange"],
+            discovery=(self._components.get("discoveries") or {}).get("polymarket"),
+            exchange=(self._components.get("exchanges") or {}).get("polymarket"),
             risk_manager=self._components["risk_manager"],
             pnl_tracker=self._components["pnl_tracker"],
             analyzer=self._components.get("analyzer"),
             kalshi_discovery=(self._components.get("discoveries") or {}).get("kalshi"),
+            exchanges=self._components.get("exchanges") or {},
         )
         interval = max(60, self.settings.cross_venue_arb.interval_seconds)
         while self._running:

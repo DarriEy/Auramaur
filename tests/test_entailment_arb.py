@@ -133,26 +133,40 @@ def _settings(**overrides) -> Settings:
     return s
 
 
-def _exchange():
+def _exchange(reject: bool = False, reject_on_call: int | None = None):
     ex = MagicMock()
 
     def prepare_order(signal, market, size, is_live):
         token = TokenType.NO if signal.recommended_side == OrderSide.SELL else TokenType.YES
         price = market.outcome_yes_price if token == TokenType.YES else 1 - market.outcome_yes_price
         return Order(
-            market_id=market.id, token_id="tok", side=OrderSide.BUY,
+            market_id=market.id, exchange=market.exchange, token_id=market.ticker or "tok",
+            side=OrderSide.BUY,
             token=token, size=round(size / max(price, 0.01), 2),
             price=round(price, 2), order_type=OrderType.LIMIT,
             dry_run=not is_live,
         )
 
     ex.prepare_order = MagicMock(side_effect=prepare_order)
-    ex.place_order = AsyncMock(side_effect=lambda order: OrderResult(
-        order_id=f"ord-{order.market_id}", market_id=order.market_id,
-        status="paper" if order.dry_run else "filled",
-        filled_size=order.size, filled_price=order.price,
-        is_paper=order.dry_run,
-    ))
+    calls = 0
+
+    def place_order(order):
+        nonlocal calls
+        calls += 1
+        if reject or calls == reject_on_call:
+            return OrderResult(
+                order_id=f"err-{order.market_id}", market_id=order.market_id,
+                status="rejected", is_paper=order.dry_run, error_message="venue rejected",
+            )
+        return OrderResult(
+            order_id=f"ord-{order.market_id}", market_id=order.market_id,
+            status="paper" if order.dry_run else "filled",
+            filled_size=order.size, filled_price=order.price,
+            is_paper=order.dry_run,
+        )
+
+    ex.place_order = AsyncMock(side_effect=place_order)
+    ex.cancel_order = AsyncMock(return_value=True)
     return ex
 
 
@@ -167,13 +181,17 @@ def _risk(approved=True, size=8.0, force_paper=False):
     return rm
 
 
-def _pillar(db, settings, markets, exchange=None, risk=None, analyzer=None):
+def _pillar(db, settings, markets, exchange=None, risk=None, analyzer=None,
+            kalshi_discovery=None, exchanges=None):
     discovery = MagicMock()
     discovery.get_markets = AsyncMock(return_value=markets)
+    exchanges = exchanges or {"polymarket": exchange or _exchange()}
     return EntailmentArbPillar(
         db=db, settings=settings, discovery=discovery,
-        exchange=exchange or _exchange(), risk_manager=risk or _risk(),
+        exchange=exchanges.get("polymarket"), risk_manager=risk or _risk(),
         pnl_tracker=PnLTracker(db, settings), analyzer=analyzer,
+        kalshi_discovery=kalshi_discovery,
+        exchanges=exchanges,
     )
 
 
@@ -255,6 +273,58 @@ def test_enters_violating_pair_both_legs_paper():
 
         # One shot per pair: second scan does nothing.
         assert await pillar.run_once() == 0
+        await db.close()
+
+    asyncio.run(run())
+
+
+def test_kalshi_ladder_uses_kalshi_exchange_and_records_kalshi_rows():
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        settings = _settings(kalshi_series=["KXCPIYOY"])
+        kalshi_discovery = MagicMock()
+        kalshi_discovery.get_markets_by_series = AsyncMock(return_value=[
+            _kx("KXCPIYOY-26NOV-T4.4", 0.40),
+            _kx("KXCPIYOY-26NOV-T4.6", 0.60),
+        ])
+        poly_ex = _exchange()
+        kalshi_ex = _exchange()
+        pillar = _pillar(
+            db, settings, [],
+            kalshi_discovery=kalshi_discovery,
+            exchanges={"polymarket": poly_ex, "kalshi": kalshi_ex},
+        )
+
+        assert await pillar.run_once() == 1
+        poly_ex.place_order.assert_not_awaited()
+        assert kalshi_ex.place_order.await_count == 2
+        assert {c.args[0].exchange for c in kalshi_ex.place_order.await_args_list} == {"kalshi"}
+
+        trade_rows = await db.fetchall(
+            "SELECT DISTINCT exchange FROM trades WHERE strategy_source='entailment_arb'")
+        assert {r["exchange"] for r in trade_rows} == {"kalshi"}
+        portfolio_rows = await db.fetchall("SELECT DISTINCT exchange FROM portfolio")
+        assert {r["exchange"] for r in portfolio_rows} == {"kalshi"}
+        await db.close()
+
+    asyncio.run(run())
+
+
+def test_second_leg_rejection_is_not_counted_as_entered_or_retried():
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        ex = _exchange(reject_on_call=2)
+        pillar = _pillar(db, _settings(), _violating_ladder(), exchange=ex)
+
+        assert await pillar.run_once() == 0
+        trades = await db.fetchall(
+            "SELECT market_id FROM trades WHERE strategy_source='entailment_arb'")
+        assert [t["market_id"] for t in trades] == ["hi"]
+
+        assert await pillar.run_once() == 0
+        assert ex.place_order.await_count == 2
         await db.close()
 
     asyncio.run(run())
