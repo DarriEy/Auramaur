@@ -94,9 +94,34 @@ Respond with ONLY this JSON:
 {{"verdict": "confirmed" | "refuted", "confidence": <float 0-1>, "why": "<one sentence citing the criteria>"}}"""
 
 
+# Phase 3: evidence-grounded comprehension — the synergy stage. The model reads
+# CURRENT evidence AGAINST the strict criteria. This is deliberately NOT a
+# forecast ("will the event happen?", where the crowd beats the LLM); it is a
+# reading task ("do the literal criteria resolve YES given THIS evidence by the
+# deadline?", where reading-a-rule-against-facts is the LLM's edge). Catches the
+# case where a fine-print mechanism is real but current reality has already moved
+# the true probability — so the lens doesn't trade a stale mechanic against a
+# market that is correctly priced for the present.
+GROUND_PROMPT = """You are grounding a prediction market's STRICT resolution reading in CURRENT EVIDENCE. Do NOT forecast whether the headline event will happen — assess whether the LITERAL written criteria resolve YES given the evidence and the deadline.
+
+Question: "{question}"
+Resolution criteria: {description}
+Deadline / resolution window: {deadline}
+Identified fine-print mechanism: "{mechanism}"
+Strict-criteria fair P(YES) before evidence: {fair:.2f}
+
+Current evidence (most recent / relevant first):
+{evidence}
+
+Read the evidence against the CRITERIA, not the headline. Where does current reality stand relative to the specific written bar (officiality, permanence, exact source, deadline, compound conditions)? Has the bar already been met, is it clearly on track, or is it unmet/blocked? If the evidence shows the strict bar is unlikely to be met as written, P(YES) should be LOW even if the headline event seems likely — and vice versa.
+
+Respond with ONLY this JSON:
+{{"grounded_prob": <float 0-1, P(YES) under the strict criteria given the evidence>, "confidence": <float 0-1, how much the evidence actually informs this>, "why": "<one sentence on what the evidence shows about the strict bar>"}}"""
+
+
 class ResolutionLensPillar:
     def __init__(self, db, settings, discovery, exchange, risk_manager,
-                 pnl_tracker, calibration, analyzer) -> None:
+                 pnl_tracker, calibration, analyzer, aggregator=None) -> None:
         self._db = db
         self._settings = settings
         self._discovery = discovery
@@ -105,6 +130,10 @@ class ResolutionLensPillar:
         self._pnl = pnl_tracker
         self._calibration = calibration
         self._analyzer = analyzer
+        # Phase 3: the evidence aggregator (same one the ensemble uses). Optional
+        # so the pillar still constructs without it (grounding then no-ops and the
+        # lens falls back to the criteria-strict fair).
+        self._aggregator = aggregator
 
     # -- candidate filtering ---------------------------------------------
 
@@ -152,13 +181,19 @@ class ResolutionLensPillar:
         return desc[:head] + "\n…[criteria trimmed]…\n" + desc[-(cap - head):]
 
     async def _ensure_schema(self) -> None:
-        """Idempotent: add the `verified` column on pre-existing DBs."""
-        try:
-            await self._db.execute(
-                "ALTER TABLE lens_verdicts ADD COLUMN verified INTEGER NOT NULL DEFAULT -1")
-            await self._db.commit()
-        except Exception:
-            pass  # already exists
+        """Idempotent: add columns on pre-existing DBs (verified for Phase 2;
+        grounded_fair/grounded_at for Phase 3 — the latter is TTL'd, not a
+        permanent cache, since evidence is fresh while criteria are static)."""
+        for ddl in (
+            "ALTER TABLE lens_verdicts ADD COLUMN verified INTEGER NOT NULL DEFAULT -1",
+            "ALTER TABLE lens_verdicts ADD COLUMN grounded_fair REAL",
+            "ALTER TABLE lens_verdicts ADD COLUMN grounded_at TEXT",
+        ):
+            try:
+                await self._db.execute(ddl)
+                await self._db.commit()
+            except Exception:
+                pass  # column already exists
 
     async def _verdict(self, m: Market):
         """Cached lens verdict -> (fair, gap_score, mechanism, verified). The
@@ -218,6 +253,84 @@ class ResolutionLensPillar:
             (1 if confirmed else 0, m.id))
         await self._db.commit()
         return confirmed
+
+    async def _gather_evidence(self, m: Market) -> list:
+        """Fetch + rank current evidence for one market via the shared aggregator
+        (the same pipeline the ensemble uses). Returns [] on any failure so
+        grounding degrades gracefully to the criteria-strict fair."""
+        if self._aggregator is None:
+            return []
+        cfg = self._settings.resolution_lens
+        try:
+            from auramaur.nlp.query_decomposer import extract_search_queries
+            from auramaur.nlp.evidence_ranker import rank_evidence
+            queries = extract_search_queries(
+                m.question, m.description or "", m.category or "")
+            seen: set[str] = set()
+            items: list = []
+            per_q = max(1, self._settings.nlp.evidence_per_source)
+            for q in (queries or [m.question])[:3]:
+                for it in await self._aggregator.gather(
+                        q, limit_per_source=per_q, category=m.category or None):
+                    if it.id not in seen:
+                        seen.add(it.id)
+                        items.append(it)
+            nlp = self._settings.nlp
+            ranked = rank_evidence(
+                m.question, items, top_n=cfg.phase3_max_evidence,
+                backend=nlp.relevance_backend, model_name=nlp.embedding_model)
+            return ranked or items[:cfg.phase3_max_evidence]
+        except Exception as e:
+            log.warning("lens.evidence_error", market_id=m.id, error=str(e))
+            return []
+
+    async def _ground(self, m: Market, fair: float, mech: str) -> tuple[float, float] | None:
+        """Phase 3: read CURRENT evidence against the strict criteria → a grounded
+        fair P(YES) + confidence. Persists (grounded_fair, grounded_at) with a TTL
+        re-check. Returns (grounded_fair, confidence), or None when evidence/LLM
+        is unavailable (caller falls back to the criteria-strict fair)."""
+        cfg = self._settings.resolution_lens
+        evidence = await self._gather_evidence(m)
+        if not evidence:
+            return None
+        ev_lines = []
+        for it in evidence[:cfg.phase3_max_evidence]:
+            when = it.published_at.strftime("%Y-%m-%d") if it.published_at else "?"
+            snippet = (it.content or it.title or "")[:200]
+            ev_lines.append(f"- [{when}] {it.source}: {it.title} — {snippet}")
+        deadline = (m.end_date.strftime("%Y-%m-%d") if m.end_date else "unspecified")
+        try:
+            raw = await self._analyzer._call_llm(GROUND_PROMPT.format(
+                question=m.question,
+                description=self._criteria_text(m.description),
+                deadline=deadline, mechanism=mech, fair=fair,
+                evidence="\n".join(ev_lines),
+            ))
+            parsed = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
+            g = max(0.01, min(0.99, float(parsed.get("grounded_prob", fair))))
+            conf = max(0.0, min(1.0, float(parsed.get("confidence", 0.0))))
+        except Exception as e:
+            log.warning("lens.ground_parse_error", market_id=m.id, error=str(e))
+            return None
+        await self._db.execute(
+            "UPDATE lens_verdicts SET grounded_fair = ?, grounded_at = datetime('now') WHERE market_id = ?",
+            (g, m.id))
+        await self._db.commit()
+        log.info("lens.grounded", market_id=m.id, criteria_fair=round(fair, 3),
+                 grounded_fair=round(g, 3), confidence=round(conf, 2),
+                 evidence_n=len(evidence))
+        return g, conf
+
+    async def _grounding_fresh(self, market_id: str) -> float | None:
+        """Return a still-fresh grounded_fair (within the TTL), else None."""
+        cfg = self._settings.resolution_lens
+        row = await self._db.fetchone(
+            """SELECT grounded_fair FROM lens_verdicts
+               WHERE market_id = ? AND grounded_fair IS NOT NULL
+                 AND grounded_at IS NOT NULL
+                 AND (julianday('now') - julianday(grounded_at)) * 24.0 < ?""",
+            (market_id, cfg.phase3_ttl_hours))
+        return float(row["grounded_fair"]) if row else None
 
     async def _already_entered_or_held(self, market_id: str) -> bool:
         row = await self._db.fetchone(
@@ -340,8 +453,30 @@ class ResolutionLensPillar:
             if cfg.verify_enabled and verified != 1:
                 log.info("lens.mechanism_refuted", market_id=m.id, mechanism=mech[:80])
                 continue
+            # Phase 3: evidence-grounded comprehension on a VERIFIED gap. Read
+            # current evidence against the strict criteria (not a re-forecast). If
+            # grounding has edge, trade the grounded fair; if it shows the gap is
+            # already priced for current reality, the recomputed edge falls below
+            # the floor and we skip — the synergy gate. Falls back to the
+            # criteria-strict fair when evidence/LLM is unavailable or low-
+            # confidence, so a fetch miss never blocks accrual.
+            trade_fair = fair
+            if cfg.phase3_grounding_enabled and self._aggregator is not None:
+                g = await self._grounding_fresh(m.id)
+                if g is None and calls < cfg.max_llm_calls_per_cycle:
+                    calls += 1
+                    res = await self._ground(m, fair, mech)
+                    if res is not None and res[1] >= cfg.phase3_min_confidence:
+                        g = res[0]
+                if g is not None:
+                    trade_fair = g
+            edge = trade_fair - m.outcome_yes_price
+            if abs(edge) < cfg.min_edge:
+                log.info("lens.grounded_no_edge", market_id=m.id,
+                         grounded_fair=round(trade_fair, 3), market=m.outcome_yes_price)
+                continue
             try:
-                if await self._enter(m, fair, score, mech, edge):
+                if await self._enter(m, trade_fair, score, mech, edge):
                     entered += 1
             except Exception as e:
                 log.error("lens.entry_error", market_id=m.id, error=str(e))

@@ -502,6 +502,22 @@ class ResolutionLensConfig(BaseModel):
     # fine-print. Only trade when confirmed at >= verify_min_confidence.
     verify_enabled: bool = True
     verify_min_confidence: float = 0.7
+    # Phase 3: evidence-grounded comprehension. The lens reads CURRENT evidence
+    # (the same aggregator pipeline the ensemble uses) AGAINST the strict
+    # criteria — "do the literal criteria resolve YES given this evidence and the
+    # deadline?" — not a re-forecast. This fuses the two things that individually
+    # work (LLM comprehension + live evidence) on the task where the LLM has edge
+    # (reading a rule against facts), instead of forecasting (where it loses).
+    # Runs ONLY on candidates that already cleared gap_score + adversarial verify,
+    # so evidence/LLM spend lands only on real fine-print gaps. The grounded
+    # estimate is NOT permanently cached (evidence is fresh): re-grounds when
+    # older than phase3_ttl_hours. Falls back to the criteria-strict fair (already
+    # Phase 1+2 validated) if evidence/grounding is unavailable — never blocks
+    # accrual on a fetch miss.
+    phase3_grounding_enabled: bool = True
+    phase3_ttl_hours: float = 12.0
+    phase3_min_confidence: float = 0.5
+    phase3_max_evidence: int = 6
     interval_seconds: int = 1800
     # Paper-phase eligibility: while the cell is hard paper-forced (paper=True)
     # it can never reach the venue, so the live-trading guards (hold horizon,

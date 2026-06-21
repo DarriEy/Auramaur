@@ -2965,6 +2965,8 @@ class AuramaurBot:
             pnl_tracker=self._components["pnl_tracker"],
             calibration=self._components["calibration"],
             analyzer=self._components.get("analyzer"),
+            # Phase 3: evidence-grounded comprehension taps the shared aggregator.
+            aggregator=self._components.get("aggregator"),
         )
         interval = max(60, self.settings.resolution_lens.interval_seconds)
         while self._running:
