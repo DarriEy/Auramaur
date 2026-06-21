@@ -313,7 +313,12 @@ class BiasHarvestConfig(BaseModel):
 
     enabled: bool = False
     paper: bool = True
-    band_lo: float = 0.80
+    # Deep band only. The backtest's edge lived in 0.90-0.97 (won 99.3% of 151);
+    # the shallow 0.80-0.90 tier has no favorite-longshot edge in practice — paper
+    # showed it busting ~24% vs the ~12-20% its price implied (net-negative), while
+    # 0.90-0.97 ran 94% win / net-positive. Raised 0.80->0.90 so the cell harvests
+    # only where the bias is real. See [[bias-harvest-strategy]].
+    band_lo: float = 0.90
     band_hi: float = 0.97
     edge_uplift: float = 0.04
     stake_usd: float = 10.0
