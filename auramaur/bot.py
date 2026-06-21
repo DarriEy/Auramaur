@@ -2857,6 +2857,31 @@ class AuramaurBot:
                 log.error("entailment.cycle_error", error=str(e))
             await asyncio.sleep(interval)
 
+    async def _task_cross_venue_arb(self) -> None:
+        """Periodic cross-venue (Poly×Kalshi) semantic-equivalence arb scan.
+        Paper-forced by config; no-op unless Kalshi discovery is wired."""
+        from auramaur.strategy.cross_venue_arb import CrossVenueArbPillar
+
+        pillar = CrossVenueArbPillar(
+            db=self._components["db"],
+            settings=self.settings,
+            discovery=self._components["discovery"],
+            exchange=self._components["exchange"],
+            risk_manager=self._components["risk_manager"],
+            pnl_tracker=self._components["pnl_tracker"],
+            analyzer=self._components.get("analyzer"),
+            kalshi_discovery=(self._components.get("discoveries") or {}).get("kalshi"),
+        )
+        interval = max(60, self.settings.cross_venue_arb.interval_seconds)
+        while self._running:
+            if await self._check_kill_switch():
+                return
+            try:
+                await pillar.run_once()
+            except Exception as e:
+                log.error("cross_venue.cycle_error", error=str(e))
+            await asyncio.sleep(interval)
+
     async def _task_econ_indicator(self) -> None:
         """Periodic data-driven Kalshi econ-indicator bin pricing (paper-forced)."""
         from auramaur.data_sources.fred import FREDSource
@@ -3629,6 +3654,8 @@ class AuramaurBot:
         # Entailment arbitrage (paper-forced until proven)
         if self.settings.entailment_arb.enabled:
             tasks.append(asyncio.create_task(self._task_entailment_arb(), name="entailment_arb"))
+        if self.settings.cross_venue_arb.enabled:
+            tasks.append(asyncio.create_task(self._task_cross_venue_arb(), name="cross_venue_arb"))
 
         # Data-driven Kalshi econ-indicator pricing (paper-forced until proven)
         if self.settings.econ_indicator.enabled:

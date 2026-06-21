@@ -452,6 +452,33 @@ class EntailmentArbConfig(BaseModel):
     kalshi_gap_buffer: float = 0.01
 
 
+class CrossVenueArbConfig(BaseModel):
+    """Cross-venue semantic-equivalence arbitrage (strategy/cross_venue_arb.py).
+
+    Trades price gaps between Polymarket and Kalshi markets that are logically
+    equivalent but worded differently. Candidate pairs are pre-filtered by word
+    overlap, then verified ADVERSARIALLY by an LLM (default: not equivalent) at a
+    high confidence floor — a false match is a paired loss, not a free arb. The
+    gap must clear both legs' taker fees + a buffer. PAPER-FORCED by default and
+    NOT graduation-exempt (resolution-mismatch risk = a real directional loss).
+    """
+
+    enabled: bool = False
+    paper: bool = True
+    min_word_overlap: float = 0.5
+    gap_buffer: float = 0.02
+    stake_usd: float = 10.0
+    max_pairs_per_cycle: int = 2
+    max_llm_calls_per_cycle: int = 8
+    scan_limit: int = 200
+    min_liquidity: float = 1000.0
+    kalshi_min_liquidity: float = 50.0
+    max_spread_pct: float = 5.0
+    min_hours_to_resolution: float = 6.0
+    llm_min_confidence: float = 0.9
+    interval_seconds: int = 1200
+
+
 class OddLotTenderConfig(BaseModel):
     """Odd-lot tender harvester (strategy/oddlot_tender.py).
 
@@ -914,6 +941,7 @@ class Settings(BaseSettings):
     bias_harvest: BiasHarvestConfig = Field(default_factory=lambda: BiasHarvestConfig(**_DEFAULTS.get("bias_harvest", {})))
     graduation: GraduationConfig = Field(default_factory=lambda: GraduationConfig(**_DEFAULTS.get("graduation", {})))
     entailment_arb: EntailmentArbConfig = Field(default_factory=lambda: EntailmentArbConfig(**_DEFAULTS.get("entailment_arb", {})))
+    cross_venue_arb: CrossVenueArbConfig = Field(default_factory=lambda: CrossVenueArbConfig(**_DEFAULTS.get("cross_venue_arb", {})))
     econ_indicator: EconIndicatorConfig = Field(default_factory=lambda: EconIndicatorConfig(**_DEFAULTS.get("econ_indicator", {})))
     weather_temp: WeatherTempConfig = Field(default_factory=lambda: WeatherTempConfig(**_DEFAULTS.get("weather_temp", {})))
     hydro_watch: HydroWatchConfig = Field(default_factory=lambda: HydroWatchConfig(**_DEFAULTS.get("hydro_watch", {})))
