@@ -197,7 +197,7 @@ _INTENSITY_PRESETS: dict[str, dict] = {
 class NLPConfig(BaseModel):
     cache_ttl_breaking_seconds: int = 900
     cache_ttl_slow_seconds: int = 7200
-    model: str = "claude-sonnet-4-20250514"
+    model: str = "claude-opus-4-8"
     max_tokens: int = 4096
     api_intensity: Literal["low", "medium", "full_blast"] = "medium"
     skip_second_opinion: bool = False
@@ -222,7 +222,7 @@ class NLPConfig(BaseModel):
     tool_use_edge_threshold_pct: float = 8.0  # edge % above which tool-use fires in auto mode
     tool_use_max_budget_usd: float = 0.50  # per-market tool-use budget cap
     tool_use_max_markets_per_cycle: int = 2  # cap concurrent refinements per cycle
-    tool_use_model: str = "claude-opus-4-7"  # can differ from strategic batch model
+    tool_use_model: str = "claude-opus-4-8"  # can differ from strategic batch model
 
     # Lever 1: effort tiering. `--effort` scales thinking-token burn per call,
     # which is what eats the Max+ rate-limit window. Reserve `max` for the
