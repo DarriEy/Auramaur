@@ -197,7 +197,7 @@ _INTENSITY_PRESETS: dict[str, dict] = {
 class NLPConfig(BaseModel):
     cache_ttl_breaking_seconds: int = 900
     cache_ttl_slow_seconds: int = 7200
-    model: str = "claude-sonnet-4-20250514"
+    model: str = "claude-opus-4-8"
     max_tokens: int = 4096
     api_intensity: Literal["low", "medium", "full_blast"] = "medium"
     skip_second_opinion: bool = False
@@ -222,7 +222,7 @@ class NLPConfig(BaseModel):
     tool_use_edge_threshold_pct: float = 8.0  # edge % above which tool-use fires in auto mode
     tool_use_max_budget_usd: float = 0.50  # per-market tool-use budget cap
     tool_use_max_markets_per_cycle: int = 2  # cap concurrent refinements per cycle
-    tool_use_model: str = "claude-opus-4-7"  # can differ from strategic batch model
+    tool_use_model: str = "claude-opus-4-8"  # can differ from strategic batch model
 
     # Lever 1: effort tiering. `--effort` scales thinking-token burn per call,
     # which is what eats the Max+ rate-limit window. Reserve `max` for the
@@ -313,7 +313,12 @@ class BiasHarvestConfig(BaseModel):
 
     enabled: bool = False
     paper: bool = True
-    band_lo: float = 0.80
+    # Deep band only. The backtest's edge lived in 0.90-0.97 (won 99.3% of 151);
+    # the shallow 0.80-0.90 tier has no favorite-longshot edge in practice — paper
+    # showed it busting ~24% vs the ~12-20% its price implied (net-negative), while
+    # 0.90-0.97 ran 94% win / net-positive. Raised 0.80->0.90 so the cell harvests
+    # only where the bias is real. See [[bias-harvest-strategy]].
+    band_lo: float = 0.90
     band_hi: float = 0.97
     edge_uplift: float = 0.04
     stake_usd: float = 10.0
