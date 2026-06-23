@@ -34,9 +34,9 @@ from datetime import datetime, timezone
 import structlog
 
 from auramaur.strategy.classifier import blocked_category_hit, ensure_category
+from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
 from auramaur.exchange.models import (
     Confidence,
-    Fill,
     Market,
     OrderSide,
     Signal,
@@ -129,6 +129,11 @@ class ResolutionLensPillar:
         self._risk = risk_manager
         self._pnl = pnl_tracker
         self._calibration = calibration
+        # Shared execution tail; no router (passive entry at the observed price).
+        self._gateway = ExecutionGateway(
+            router=None, exchange=exchange, exchange_name="polymarket",
+            settings=settings, db=db, pnl_tracker=pnl_tracker,
+        )
         self._analyzer = analyzer
         # Phase 3: the evidence aggregator (same one the ensemble uses). Optional
         # so the pillar still constructs without it (grounding then no-ops and the
@@ -511,31 +516,25 @@ class ResolutionLensPillar:
             log.info("lens.risk_rejected", market_id=m.id, reason=decision.reason)
             return False
         size = min(decision.position_size, cfg.stake_usd)
-        is_live = (self._settings.is_live and not cfg.paper
-                   and not getattr(decision, "force_paper", False))
-        order = self._exchange.prepare_order(signal, m, size, is_live)
-        if order is None:
+        force_paper = cfg.paper or getattr(decision, "force_paper", False)
+        res = await self._gateway.submit(TradeIntent(
+            signal=signal, market=m, size_dollars=size, force_paper=force_paper))
+        if res.status not in ("filled", "paper", "partial", "pending"):
+            log.warning("lens.order_rejected", market_id=m.id, status=res.status)
             return False
-        result = await self._exchange.place_order(order)
-        if result.status not in ("filled", "paper", "partial", "pending"):
-            log.warning("lens.order_rejected", market_id=m.id, status=result.status)
-            return False
-        await self._record_entry(signal, m, order, result)
+        await self._record_position(signal, m, res.order, res.result)
         log.info("lens.entered", market_id=m.id, fair=fair, market=m.outcome_yes_price,
-                 gap_score=score, paper=result.is_paper)
+                 gap_score=score, paper=res.result.is_paper)
         return True
 
-    async def _record_entry(self, signal: Signal, market: Market,
-                            order, result) -> None:
+    async def _record_position(self, signal: Signal, market: Market,
+                               order, result) -> None:
+        # Fill + trades-mirror owned by the ExecutionGateway; this keeps the
+        # markets/signals persist, the portfolio row (resolution tracker settles
+        # it), and the calibration prediction.
         fill_size = result.filled_size if result.filled_size > 0 else order.size
         fill_price = result.filled_price if result.filled_price > 0 else order.price
         is_paper = bool(result.is_paper)
-        if result.status in ("filled", "paper", "partial") and fill_size > 0:
-            await self._pnl.record_fill(Fill(
-                order_id=result.order_id, market_id=order.market_id,
-                token_id=order.token_id, side=order.side, token=order.token,
-                size=fill_size, price=fill_price, is_paper=is_paper,
-            ))
         await self._db.execute(
             """INSERT OR IGNORE INTO markets (id, exchange, question, description,
                category, active, outcome_yes_price, outcome_no_price, volume,
@@ -553,15 +552,6 @@ class ResolutionLensPillar:
             (signal.market_id, signal.claude_prob, signal.claude_confidence.value,
              signal.market_prob, signal.edge, signal.evidence_summary,
              signal.recommended_side.value),
-        )
-        await self._db.execute(
-            """INSERT INTO trades (market_id, timestamp, side, size, price,
-               is_paper, order_id, status, strategy_source, exchange)
-               VALUES (?, datetime('now'), ?, ?, ?, ?, ?, ?, 'resolution_lens',
-                       'polymarket')""",
-            (order.market_id, order.side.value, fill_size, fill_price,
-             1 if is_paper else 0, result.order_id,
-             "filled" if result.status in ("filled", "paper") else result.status),
         )
         await self._db.execute(
             """INSERT INTO portfolio (market_id, exchange, side, size, avg_price,
