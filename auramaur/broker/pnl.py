@@ -255,20 +255,24 @@ class PnLTracker:
         return total
 
     async def get_realized_pnl(self, start_date: str | None = None) -> float:
-        """Sum ``realized_pnl`` from the cost_basis table for the current mode.
+        """Realized P&L from the authoritative ``pnl_ledger`` for the current mode.
 
-        If *start_date* is provided (ISO format ``YYYY-MM-DD``), only include
-        rows updated on or after that date.
+        Reporting read (feeds the displayed session P&L). Sources the unified
+        ledger rather than summing ``cost_basis.realized_pnl``, which
+        under-counted (zeroed rows + settlements with no basis row). If
+        *start_date* (ISO ``YYYY-MM-DD``) is given, include realizations on or
+        after that date — ``realized_at`` is the realization time, which is the
+        correct basis for a since-date sum.
         """
         flag = self._mode_flag()
         if start_date:
             row = await self._db.fetchone(
-                "SELECT COALESCE(SUM(realized_pnl), 0) as total FROM cost_basis WHERE updated_at >= ? AND is_paper = ?",
+                "SELECT COALESCE(SUM(pnl), 0) as total FROM pnl_ledger WHERE realized_at >= ? AND is_paper = ?",
                 (start_date, flag),
             )
         else:
             row = await self._db.fetchone(
-                "SELECT COALESCE(SUM(realized_pnl), 0) as total FROM cost_basis WHERE is_paper = ?",
+                "SELECT COALESCE(SUM(pnl), 0) as total FROM pnl_ledger WHERE is_paper = ?",
                 (flag,),
             )
         return float(row["total"]) if row else 0.0
@@ -295,29 +299,27 @@ class PnLTracker:
     # ------------------------------------------------------------------
 
     async def get_pnl_by_exchange(self) -> dict[str, float]:
-        """Realized P&L grouped by exchange (joins cost_basis → markets)."""
+        """Realized P&L grouped by venue, from the authoritative pnl_ledger.
+
+        Uses the ledger's own ``venue`` column — no cost_basis→markets join, so
+        it's immune to markets aging out (which left 'unknown'-bucketed rows).
+        """
         flag = self._mode_flag()
         rows = await self._db.fetchall(
-            """SELECT COALESCE(m.exchange, 'unknown') as exchange,
-                      SUM(cb.realized_pnl) as total
-               FROM cost_basis cb
-               LEFT JOIN markets m ON cb.market_id = m.id
-               WHERE cb.is_paper = ?
-               GROUP BY m.exchange""",
+            """SELECT COALESCE(NULLIF(venue, ''), 'unknown') as exchange,
+                      COALESCE(SUM(pnl), 0) as total
+               FROM pnl_ledger WHERE is_paper = ? GROUP BY venue""",
             (flag,),
         )
         return {r["exchange"]: float(r["total"]) for r in (rows or [])}
 
     async def get_pnl_by_category(self) -> dict[str, float]:
-        """Realized P&L grouped by market category."""
+        """Realized P&L grouped by category, from the authoritative pnl_ledger."""
         flag = self._mode_flag()
         rows = await self._db.fetchall(
-            """SELECT COALESCE(m.category, 'unknown') as category,
-                      SUM(cb.realized_pnl) as total
-               FROM cost_basis cb
-               LEFT JOIN markets m ON cb.market_id = m.id
-               WHERE cb.is_paper = ?
-               GROUP BY m.category""",
+            """SELECT COALESCE(NULLIF(category, ''), 'unknown') as category,
+                      COALESCE(SUM(pnl), 0) as total
+               FROM pnl_ledger WHERE is_paper = ? GROUP BY category""",
             (flag,),
         )
         return {r["category"]: float(r["total"]) for r in (rows or [])}
