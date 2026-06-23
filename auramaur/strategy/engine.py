@@ -28,6 +28,7 @@ from auramaur.nlp.analyzer import ClaudeAnalyzer
 from auramaur.nlp.cache import NLPCache
 from auramaur.nlp.calibration import CalibrationTracker
 from auramaur.broker.allocator import CandidateTrade, CapitalAllocator
+from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
 from auramaur.broker.router import SmartOrderRouter, UnmarketableSignal
 from auramaur.risk.manager import RiskManager
 from auramaur.strategy.classifier import blocked_category_hit, ensure_category
@@ -76,6 +77,7 @@ class TradingEngine:
         self._hybrid = False  # Set by bot when --hybrid flag is active
         self.strategic = None  # StrategicAnalyzer, set by bot after init
         self._components_pnl = None  # Set by bot after init
+        self._exec_gateway: ExecutionGateway | None = None  # Lazily built; see _gateway
         # News-flagged markets: market_id -> UTC timestamp of flag.
         # Populated by NewsReactor when a headline matches; read by run_cycle
         # to boost these markets into the strategic batch without triggering
@@ -695,156 +697,46 @@ class TradingEngine:
 
         return {"market": market, "signal": signal, "decision": decision, "order": order}
 
+    @property
+    def _gateway(self) -> ExecutionGateway:
+        """Lazily build (and keep in sync with) the ExecutionGateway.
+
+        ``exchange_name`` and ``_components_pnl`` are bound by the bot AFTER
+        engine init, so the gateway is built on first use and rebuilt if either
+        late-bound collaborator changes.
+        """
+        gw = self._exec_gateway
+        if (gw is None
+                or gw.exchange_name != self.exchange_name
+                or gw.pnl_tracker is not self._components_pnl):
+            gw = ExecutionGateway(
+                router=self.router,
+                exchange=self.exchange,
+                exchange_name=self.exchange_name,
+                settings=self.settings,
+                db=self.db,
+                pnl_tracker=self._components_pnl,
+            )
+            self._exec_gateway = gw
+        return gw
+
     async def _build_and_place_order(
         self, signal: Signal, market: Market, size_dollars: float,
         force_paper: bool = False,
     ) -> OrderResult | None:
         """Build an order (via router or direct) and place it.
 
-        ``force_paper`` (graduation ladder) downgrades this ENTRY to dry-run
-        regardless of global live mode — it can only restrict, never arm.
+        Delegates to :class:`ExecutionGateway`; returns the underlying
+        ``OrderResult`` (or ``None`` when the trade was skipped before
+        submission — unmarketable / build failure), preserving the prior
+        return contract. ``force_paper`` (graduation ladder) downgrades this
+        ENTRY to dry-run regardless of global live mode.
         """
-        is_live = self.settings.is_live and not force_paper
-        try:
-            if self.router:
-                order = await self.router.route(signal, market, size_dollars, is_live)
-            else:
-                order = self.exchange.prepare_order(signal, market, size_dollars, is_live)
-        except UnmarketableSignal as skip:
-            # No realizable edge at the book. This gate runs before the
-            # paper/live split on purpose: paper fills simulate at the
-            # reference price, so letting paper books keep these trades
-            # would graduate strategies on fills live could never get.
-            show_order_dropped(market.id, f"unmarketable: {skip}")
-            log.info(
-                "engine.entry_unmarketable",
-                market_id=market.id,
-                strategy=signal.strategy_source,
-                reason=str(skip),
-            )
-            try:
-                # Shorter block than build failures: the book can move.
-                await self.db.execute(
-                    """INSERT OR REPLACE INTO order_build_drops
-                       (market_id, blocked_until, reason)
-                       VALUES (?, datetime('now', '+30 minutes'), ?)""",
-                    (market.id, f"unmarketable: {skip}"),
-                )
-                await self.db.commit()
-            except Exception:
-                pass
-            return None
-
-        if order is None:
-            show_order_dropped(market.id, f"order build failed (${size_dollars:.2f} — could not build a valid order)")
-            log.warning(
-                "engine.order_dropped",
-                market_id=market.id,
-                size_dollars=size_dollars,
-                reason="prepare_order returned None (bad price/token or router rejection)",
-            )
-            # Sub-minimum sizing is now bumped up in prepare_order, so a None
-            # order here is a genuine build failure (bad price/token). Block
-            # only briefly so a transient issue can retry next cycle.
-            try:
-                await self.db.execute(
-                    """INSERT OR REPLACE INTO order_build_drops
-                       (market_id, blocked_until, reason)
-                       VALUES (?, datetime('now', '+2 hours'), ?)""",
-                    (market.id, f"order build failed at ${size_dollars:.2f}"),
-                )
-                await self.db.commit()
-            except Exception:
-                pass  # Table may not exist yet
-            return None
-
-        if not order.source:
-            order.source = signal.strategy_source or "llm"
-        result = await self.exchange.place_order(order)
-        show_order(result.status, result.order_id, order.side.value, order.size, order.price, result.is_paper, exchange=self.exchange_name, error_message=result.error_message, market_id=order.market_id)
-
-        # Cooldown on API errors — retry in 30 min, not every cycle
-        if result.status == "rejected" and result.order_id == "ERROR":
-            try:
-                await self.db.execute(
-                    """INSERT OR REPLACE INTO order_build_drops
-                       (market_id, blocked_until, reason)
-                       VALUES (?, datetime('now', '+30 minutes'), ?)""",
-                    (order.market_id, "place_order API error"),
-                )
-                await self.db.commit()
-            except Exception:
-                pass
-
-        # Log slippage only for actual executions.  Live pending orders echo
-        # the limit price but have not filled yet.
-        if result.status in ("filled", "paper", "partial") and result.filled_price > 0:
-            slippage_bps = (result.filled_price - order.price) / order.price * 10000
-            if order.side == OrderSide.SELL:
-                slippage_bps = -slippage_bps  # For sells, lower fill = worse
-            try:
-                await self.db.execute(
-                    """INSERT INTO slippage_log (market_id, exchange, side, expected_price, filled_price, slippage_bps, size, order_type)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (order.market_id, order.exchange or self.exchange_name, order.side.value,
-                     order.price, result.filled_price, round(slippage_bps, 2), order.size,
-                     order.order_type.value if hasattr(order, 'order_type') else 'limit'),
-                )
-                await self.db.commit()
-            except Exception:
-                pass
-
-        fill_size = result.filled_size if result.filled_size > 0 else order.size
-        fill_price = result.filled_price if result.filled_price > 0 else order.price
-
-        # Record P&L only for actual executions.  Pending live orders are
-        # mirrored to trades below, then finalized by the order monitor.
-        if result.status in ("filled", "paper", "partial") and result.filled_size > 0:
-            from auramaur.exchange.models import Fill
-            fill = Fill(
-                order_id=result.order_id,
-                market_id=order.market_id,
-                token_id=order.token_id,
-                side=order.side,
-                token=order.token,
-                size=result.filled_size,
-                price=fill_price,
-                is_paper=result.is_paper,
-            )
-            pnl_tracker = self._components_pnl
-            if pnl_tracker:
-                await pnl_tracker.record_fill(fill)
-
-        if result.status in ("filled", "paper", "partial", "pending"):
-            # Mirror into legacy `trades` table so the CLI stats view,
-            # order monitor, and holding-period lookups stay in sync.
-            # PnLTracker writes authoritative execution rows to `fills`.
-            try:
-                trade_status = "filled" if result.status == "paper" else result.status
-                await self.db.execute(
-                    """INSERT INTO trades
-                       (market_id, signal_id, side, size, price, is_paper,
-                        order_id, status, kelly_fraction, exchange, strategy_source)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        order.market_id,
-                        getattr(signal, "id", None),
-                        order.side.value,
-                        fill_size,
-                        fill_price,
-                        1 if result.is_paper else 0,
-                        result.order_id,
-                        trade_status,
-                        None,
-                        order.exchange or self.exchange_name,
-                        signal.strategy_source,
-                    ),
-                )
-                await self.db.commit()
-            except Exception as e:
-                log.debug("engine.trade_mirror_error", error=str(e))
-
-        return result
+        intent = TradeIntent(
+            signal=signal, market=market, size_dollars=size_dollars,
+            force_paper=force_paper,
+        )
+        return (await self._gateway.submit(intent)).result
 
     async def _record_trade_for_attribution(self, market: Market, signal, decision) -> None:
         """Deprecated hook kept for compatibility.
