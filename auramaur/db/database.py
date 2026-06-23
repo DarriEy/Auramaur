@@ -19,6 +19,13 @@ class Database:
         self._db = await aiosqlite.connect(self.db_path)
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("PRAGMA journal_mode=WAL")
+        # foreign_keys stays OFF by design, NOT as repair debt. The markets
+        # table is curated/ephemeral — resolved markets age out of it — so a
+        # trade/signal/portfolio row legitimately outlives its markets row.
+        # The schema's trades->markets FK is therefore too strict: an audit
+        # (PRAGMA foreign_key_check, 2026-06-23) found ~1843 such legitimate
+        # orphans. Re-enabling FKs would reject valid inserts; the fix, if ever
+        # wanted, is to RELAX the FK declarations, not flip this PRAGMA.
         await self._db.execute("PRAGMA foreign_keys=OFF")
         # CLI commands share the file with the running bot; without a busy
         # timeout a writer collision fails instantly ("database is locked" —
