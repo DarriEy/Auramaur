@@ -75,6 +75,7 @@ class AuramaurBot:
         self._rebalance_cooldowns: dict[str, float] = {}  # kept for reference, allocator handles concentration
         self._exit_failures: set[str] = set()  # Track failed exit sells to avoid spam
         self._exit_pending: set[str] = set()  # Track exits with resting orders
+        self.__exit_gateway = None  # Lazily built; see _exit_gateway property
         # Track attempted cross-exchange arbs so the scanner doesn't re-execute
         # the same opportunity every 5-minute cycle. Maps arb-key -> expiry ts.
         self._arb_attempts: dict[str, float] = {}
@@ -831,6 +832,27 @@ class AuramaurBot:
         self._exit_failures.discard(exit_key)
         log.debug("exit.suppression_cleared", exit_key=exit_key, status=status)
 
+    @property
+    def _exit_gateway(self):
+        """Lazily build the ExecutionGateway used for exits.
+
+        Exits price the SELL themselves and skip risk, so this is only used via
+        ``submit_exit`` (prebuilt order, per-call exchange). The gateway's own
+        exchange/router are unused for that path; db + pnl_tracker come from the
+        wired components. Rebuilt if the pnl_tracker reference changes.
+        """
+        db = self._components.get("db")
+        pnl = self._components.get("pnl_tracker")
+        gw = self.__exit_gateway
+        if gw is None or gw.db is not db or gw.pnl_tracker is not pnl:
+            from auramaur.broker.execution_gateway import ExecutionGateway
+            gw = ExecutionGateway(
+                router=None, exchange=None, exchange_name="",
+                settings=self.settings, db=db, pnl_tracker=pnl,
+            )
+            self.__exit_gateway = gw
+        return gw
+
     async def _execute_poly_exit(
         self,
         pos,
@@ -1007,8 +1029,9 @@ class AuramaurBot:
             dry_run=not self.settings.is_live,
             source="exit",
         )
-        result = await exchange.place_order(sell_order)
-        if result.status == "rejected":
+        res = await self._exit_gateway.submit_exit(
+            sell_order, exchange=exchange, exchange_name="polymarket")
+        if res.status == "rejected":
             log.warning("exit.sell_failed", market_id=pos.market_id)
             return False
 
@@ -1090,14 +1113,9 @@ class AuramaurBot:
             return False
 
         order.source = "exit"
-        result = await exchange.place_order(order)
-        from auramaur.monitoring.display import show_order
-        show_order(
-            result.status, result.order_id, "SELL", order.size, order.price,
-            result.is_paper, exchange="kalshi", error_message=result.error_message,
-            market_id=pos.market_id,
-        )
-        if result.status == "rejected":
+        res = await self._exit_gateway.submit_exit(
+            order, exchange=exchange, exchange_name="kalshi")
+        if res.status == "rejected":
             return False
 
         await alerts.send(
