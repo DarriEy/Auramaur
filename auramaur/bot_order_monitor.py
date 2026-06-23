@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from auramaur.exchange.models import Fill, Order, OrderResult, OrderSide, TokenType
+from auramaur.monitoring.display import console
 
 if TYPE_CHECKING:
     from auramaur.db.database import Database
