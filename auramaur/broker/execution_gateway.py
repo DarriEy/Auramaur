@@ -274,7 +274,35 @@ class ExecutionGateway:
         """
         result = await exchange.place_order(order)
         show_order(result.status, result.order_id, order.side.value, order.size, order.price, result.is_paper, exchange=exchange_name, error_message=result.error_message, market_id=order.market_id)
+        return await self._record_result(
+            order, result, strategy_source=strategy_source,
+            signal_id=signal_id, exchange_name=exchange_name)
 
+    async def record_external_fill(
+        self, order: Order, result: OrderResult, *,
+        strategy_source: str, exchange_name: str,
+    ) -> ExecutionResult:
+        """Record a fill for an order placed OUTSIDE the gateway.
+
+        The arb scanner places its legs CONCURRENTLY (asyncio.gather) to minimize
+        the leg-risk window, so it can't go through submit_*; this gives those
+        already-placed legs the same recording invariant — slippage, record_fill
+        (paper/filled), and the pending trades-mirror the order monitor later
+        UPDATEs for live fills. No double-record: a live leg is pending at
+        placement (filled_size 0), so its fill is recorded once, by the monitor.
+        """
+        return await self._record_result(
+            order, result, strategy_source=strategy_source,
+            signal_id=None, exchange_name=exchange_name)
+
+    async def _record_result(
+        self, order: Order, result: OrderResult, *,
+        strategy_source: str, signal_id, exchange_name: str,
+    ) -> ExecutionResult:
+        """Post-placement recording shared by _place_and_record (single-leg /
+        paired / exit) and record_external_fill (the concurrently-placed arb
+        legs): API-error cooldown, slippage, record_fill, and the trades-mirror.
+        """
         # Cooldown on API errors — retry in 30 min, not every cycle
         if result.status == "rejected" and result.order_id == "ERROR":
             try:

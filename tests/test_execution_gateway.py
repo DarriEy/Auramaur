@@ -236,6 +236,47 @@ def test_submit_paired_leg_b_fail_unwinds_pending_a():
     asyncio.run(run())
 
 
+def test_record_external_fill_paper_records_fill_and_trade():
+    """The arb scanner places legs concurrently, then records each via
+    record_external_fill — a paper fill must land in fills + trades, attributed
+    to the arb strategy (not 'order_monitor')."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        order = Order(market_id="arb1", exchange="polymarket", token_id="tok",
+                      side=OrderSide.BUY, token=TokenType.YES, size=20.0, price=0.40)
+        result = OrderResult(order_id="ax", market_id="arb1", status="paper",
+                             filled_size=20.0, filled_price=0.40, is_paper=True)
+        gw = _gateway(db, MagicMock())  # exchange unused — order already placed
+        res = await gw.record_external_fill(
+            order, result, strategy_source="cross_exchange_arb", exchange_name="polymarket")
+        assert res.status == "paper" and res.fill is not None
+        assert len(await db.fetchall("SELECT 1 FROM fills WHERE market_id='arb1'")) == 1
+        t = await db.fetchall("SELECT strategy_source FROM trades WHERE market_id='arb1'")
+        assert len(t) == 1 and dict(t[0])["strategy_source"] == "cross_exchange_arb"
+
+    asyncio.run(run())
+
+
+def test_record_external_fill_live_pending_defers_to_monitor():
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        order = Order(market_id="arb2", exchange="polymarket", token_id="tok",
+                      side=OrderSide.BUY, token=TokenType.YES, size=20.0, price=0.40)
+        result = OrderResult(order_id="live-ax", market_id="arb2", status="pending",
+                             filled_size=0.0, is_paper=False)
+        gw = _gateway(db, MagicMock())
+        res = await gw.record_external_fill(
+            order, result, strategy_source="cross_exchange_arb", exchange_name="polymarket")
+        assert res.status == "pending"
+        assert await db.fetchall("SELECT 1 FROM fills") == []  # monitor records it
+        t = await db.fetchall("SELECT status FROM trades WHERE order_id='live-ax'")
+        assert len(t) == 1 and dict(t[0])["status"] == "pending"
+
+    asyncio.run(run())
+
+
 def test_submit_exit_paper_records_fill_and_trade():
     async def run():
         db = Database(":memory:")
