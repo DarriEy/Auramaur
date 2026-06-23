@@ -16,9 +16,11 @@ execution:
   # Max cents above the reference price the router may pay to lift the ask;
   # crossing additionally requires post-cross edge >= risk.min_edge_pct.
   entry_max_cross_cents: 4
-  # Max cents below the snapshot price an exit SELL may cross down to take
-  # the real bid (otherwise exits rest at the ask and TTL-cancel forever).
-  exit_max_cross_cents: 3
+  # Slippage band for marketable exits: take the real bid when it's within
+  # this many cents of the snapshot, else skip + back off (a SELL only fills
+  # by crossing to the bid; resting inside the spread TTL-cancels forever).
+  exit_max_cross_cents: 10
+  exit_min_bid_price: 0.05   # never cross into a bid below this (junk-bid guard)
   spread_capture_min_bps: 50
   stop_loss_pct: 30.0
   profit_target_pct: 50.0
@@ -144,7 +146,7 @@ nlp:
   # or a news flag lifts the bench immediately.
   rejection_cooldown_minutes: 240
   rejection_reprice_threshold: 0.03
-  model: "opus"
+  model: "claude-opus-4-8"
   max_tokens: 4096
   # API intensity: "low", "medium", or "full_blast"
   # low:        10 markets, 3 evidence, skip second opinion, 50 calls/day
@@ -155,7 +157,7 @@ nlp:
   skip_second_opinion: false
   max_markets_per_cycle: 5
   evidence_per_source: 5
-  daily_claude_call_budget: 80
+  daily_claude_call_budget: 175
 
 calibration:
   min_samples: 30
@@ -415,6 +417,51 @@ entailment_arb:
   llm_enabled: true
   llm_min_confidence: 0.9
   interval_seconds: 900
+  # Kalshi "Above X" econ-bin ladder arb (model-free monotonicity), fetched
+  # per-series; violations must clear BOTH legs' Kalshi taker fees + buffer.
+  kalshi_ladders_enabled: true
+
+econ_indicator:
+  # Data-driven Kalshi econ-indicator bin pricing: price "Above X" ladders from
+  # FRED history (random-walk nowcast + change-vol, sigma floored), trade bins
+  # the crowd misprices. Directional -> PAPER-FORCED until the ledger +
+  # calibration prove it; edge must clear the Kalshi taker fee on top of min_edge.
+  enabled: true
+  paper: true
+  series: []             # empty = all registered (KXCPIYOY, KXU3, KXPAYROLLS)
+  stake_usd: 10.0
+  min_edge: 0.07
+  max_open: 30
+  max_entries_per_cycle: 5
+  history_n: 60
+  interval_seconds: 1800
+
+weather_temp:
+  # Open-Meteo ensemble pricing of Polymarket daily city-temperature bins.
+  # Measurement spike: PAPER-FORCED, logs model-vs-market every cycle; edge must
+  # clear the poly taker fee + min_edge, max_divergence skips artifact-scale gaps.
+  enabled: true
+  paper: true
+  min_edge: 0.10
+  max_divergence: 0.40
+  stake_usd: 10.0
+  max_entries_per_cycle: 8
+  interval_seconds: 3600
+
+intraday_drift:
+  # Measurement spike (NO trading): tracks post-signal price drift toward the LLM
+  # estimate to test the intraday under-reaction thesis before building the strat.
+  enabled: true
+  interval_seconds: 300
+  time_box_hours: 8.0
+
+hydro_watch:
+  # Alert-only: flags the first time a tradeable hydrology market (Lake Mead,
+  # drought, flood stage, snowpack, reservoir, ...) appears, so the compHydro
+  # streamflow moat can be deployed. No trading.
+  enabled: true
+  min_liquidity: 100.0
+  interval_seconds: 21600
 
 oddlot_tender:
   # Odd-lot tender harvester — first equity pillar. Issuer tender offers
@@ -470,7 +517,7 @@ bias_harvest:
   # paper: false (still behind the three live gates).
   enabled: true
   paper: true
-  band_lo: 0.80
+  band_lo: 0.90
   band_hi: 0.97
   # claude_prob = favored price + uplift (the measured band gap is +4..+6pts).
   # MUST stay < 0.05 or the divergence filter blocks entries at MEDIUM conf.
@@ -499,3 +546,20 @@ logging:
   level: "INFO"
   json_format: true
   file: "auramaur.log"
+
+cross_venue_arb:
+  # Cross-venue semantic-equivalence arb (Poly x Kalshi): logically equivalent
+  # but differently-worded markets priced apart. Candidate pairs pre-filtered by
+  # word overlap, then verified ADVERSARIALLY by the LLM (default: not equivalent)
+  # at a high confidence floor — a false match is a paired loss, not a free arb.
+  # Gap must clear both legs' taker fees + buffer. PAPER-FORCED + NOT graduation-
+  # exempt (resolution-mismatch risk = real directional loss).
+  enabled: true
+  paper: true
+  min_word_overlap: 0.5
+  llm_min_confidence: 0.9
+  gap_buffer: 0.02
+  stake_usd: 10.0
+  max_pairs_per_cycle: 2
+  max_llm_calls_per_cycle: 8
+  interval_seconds: 1200
