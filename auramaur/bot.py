@@ -2738,7 +2738,13 @@ class AuramaurBot:
                                    avg_cost = excluded.avg_cost,
                                    total_cost = excluded.total_cost,
                                    updated_at = excluded.updated_at""",
-                            (rp.market_id, rp.outcome, rp.token_id, rp.size,
+                            # Normalize the raw CLOB outcome ("Yes"/"No") to the
+                            # canonical TokenType value ("YES"/"NO"). Writing the raw
+                            # title-case outcome here was the one site that diverged
+                            # from the fill/Kalshi paths, splitting a single position
+                            # into duplicate (market, "No") + (market, "NO") rows.
+                            (rp.market_id, TokenType.from_str(rp.outcome).value,
+                             rp.token_id, rp.size,
                              rp.avg_cost, rp.size * rp.avg_cost),
                         )
 

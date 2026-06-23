@@ -104,6 +104,17 @@ class TokenType(str, Enum):
     YES = "YES"
     NO = "NO"
 
+    @classmethod
+    def from_str(cls, value: str | None) -> "TokenType":
+        """Normalize an outcome string to a canonical TokenType.
+
+        Case-insensitive so external strings — the reconciler/CLOB raw
+        outcomes ("Yes"/"No"), Kalshi sides, legacy rows — all collapse to
+        the same canonical ``.value`` ("YES"/"NO"). Anything that isn't a
+        recognizable NO defaults to YES (the historical default).
+        """
+        return cls.NO if str(value or "").strip().upper() == "NO" else cls.YES
+
 
 class OrderType(str, Enum):
     MARKET = "MARKET"
