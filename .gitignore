@@ -4,6 +4,7 @@ __pycache__/
 dist/
 build/
 .env
+config/defaults.local.yaml
 *.db
 *.db-shm
 *.db-wal

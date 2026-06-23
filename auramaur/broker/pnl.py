@@ -200,12 +200,18 @@ class PnLTracker:
     # ------------------------------------------------------------------
 
     async def get_cost_basis(self, market_id: str) -> tuple[float, float]:
-        """Return ``(avg_cost, size)`` for a market in the current mode.
+        """Return ``(avg_cost, size)`` for a market's dominant position in the
+        current mode.
 
-        Returns ``(0.0, 0.0)`` if no cost basis exists.
+        cost_basis is keyed by ``(market_id, token, is_paper)``, so a market
+        may have more than one row (a real two-sided position, or — pre-v20 —
+        casing-split duplicates). Pick deterministically: the largest open
+        size, then the most recently updated. Returns ``(0.0, 0.0)`` if no
+        cost basis exists.
         """
         row = await self._db.fetchone(
-            "SELECT avg_cost, size FROM cost_basis WHERE market_id = ? AND is_paper = ?",
+            "SELECT avg_cost, size FROM cost_basis WHERE market_id = ? AND is_paper = ?"
+            " ORDER BY size DESC, updated_at DESC LIMIT 1",
             (market_id, self._mode_flag()),
         )
         if row is None:
@@ -213,18 +219,21 @@ class PnLTracker:
         return float(row["avg_cost"]), float(row["size"])
 
     async def get_token_info(self, market_id: str) -> tuple[TokenType, str]:
-        """Return ``(token_type, token_id)`` for a market from cost_basis.
+        """Return ``(token_type, token_id)`` for a market's dominant position.
 
-        Returns ``(TokenType.YES, "")`` if no cost basis exists.
+        Same deterministic disambiguation as :meth:`get_cost_basis` (largest
+        open size, then most recently updated) and case-insensitive token
+        parsing via :meth:`TokenType.from_str`, so it stays aligned with the
+        row that method returns. Returns ``(TokenType.YES, "")`` if none.
         """
         row = await self._db.fetchone(
-            "SELECT token, token_id FROM cost_basis WHERE market_id = ? AND is_paper = ?",
+            "SELECT token, token_id FROM cost_basis WHERE market_id = ? AND is_paper = ?"
+            " ORDER BY size DESC, updated_at DESC LIMIT 1",
             (market_id, self._mode_flag()),
         )
         if row is None:
             return TokenType.YES, ""
-        token = TokenType(row["token"]) if row["token"] else TokenType.YES
-        return token, row["token_id"] or ""
+        return TokenType.from_str(row["token"]), row["token_id"] or ""
 
     # ------------------------------------------------------------------
     # P&L calculations

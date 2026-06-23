@@ -86,6 +86,8 @@ class Database:
             await self._migrate_v17_to_v18()
         if from_version < 19:
             await self._migrate_v18_to_v19()
+        if from_version < 20:
+            await self._migrate_v19_to_v20()
 
     async def _migrate_v1_to_v2(self) -> None:
         """Add category to calibration, add new tables."""
@@ -444,6 +446,75 @@ class Database:
         await self._db.execute("UPDATE schema_version SET version = 19")
         await self._db.commit()
         log.info("database.migrated", from_version=18, to_version=19)
+
+    async def _migrate_v19_to_v20(self) -> None:
+        """Collapse casing-split cost_basis rows into canonical YES/NO tokens.
+
+        Pre-v20 the live reconciler wrote the raw CLOB outcome ("Yes"/"No")
+        while the fill and Kalshi paths wrote TokenType values ("YES"/"NO"),
+        so one position could exist as two PK-distinct rows differing only by
+        case — and the token-blind getters returned an arbitrary one. Merge
+        each (market_id, is_paper, canonical-token) group into a single row:
+        the newest ``updated_at`` wins for size/avg_cost/total_cost (the
+        reconciler's CLOB ground truth), and realized_pnl is summed so no
+        realized history is dropped. Genuine two-sided positions (distinct
+        canonical YES and NO) are preserved as two rows. A full pre-migration
+        snapshot is kept in ``cost_basis_backup_v20`` (reversible).
+        """
+        await self._db.execute("DROP TABLE IF EXISTS cost_basis_backup_v20")
+        await self._db.execute(
+            "CREATE TABLE cost_basis_backup_v20 AS SELECT * FROM cost_basis"
+        )
+
+        cursor = await self._db.execute(
+            "SELECT market_id, token, token_id, size, avg_cost, total_cost,"
+            " realized_pnl, is_paper, updated_at FROM cost_basis"
+        )
+        rows = await cursor.fetchall()
+
+        def canon(t: object) -> str:
+            return "NO" if str(t or "").strip().upper() == "NO" else "YES"
+
+        groups: dict[tuple, list] = {}
+        for r in rows:
+            groups.setdefault((r["market_id"], r["is_paper"], canon(r["token"])), []).append(r)
+
+        merged = 0
+        for (market_id, is_paper, token), grp in groups.items():
+            # Already-canonical singleton: nothing to rewrite.
+            if len(grp) == 1 and grp[0]["token"] == token:
+                continue
+            # Newest write wins for current holdings; tiebreak on larger size.
+            authoritative = max(
+                grp, key=lambda r: (str(r["updated_at"] or ""), float(r["size"] or 0))
+            )
+            realized = sum(float(r["realized_pnl"] or 0) for r in grp)
+            token_id = authoritative["token_id"] or next(
+                (r["token_id"] for r in grp if r["token_id"]), ""
+            )
+            for r in grp:
+                await self._db.execute(
+                    "DELETE FROM cost_basis WHERE market_id = ? AND is_paper = ? AND token = ?",
+                    (market_id, is_paper, r["token"]),
+                )
+            await self._db.execute(
+                "INSERT INTO cost_basis (market_id, token, token_id, size, avg_cost,"
+                " total_cost, realized_pnl, is_paper, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    market_id, token, token_id,
+                    float(authoritative["size"] or 0),
+                    float(authoritative["avg_cost"] or 0),
+                    float(authoritative["total_cost"] or 0),
+                    realized, is_paper, authoritative["updated_at"],
+                ),
+            )
+            if len(grp) > 1:
+                merged += 1
+
+        await self._db.execute("UPDATE schema_version SET version = 20")
+        await self._db.commit()
+        log.info("database.migrated", from_version=19, to_version=20, merged_groups=merged)
 
     async def _migrate_v11_to_v12(self) -> None:
         """Add strategy_source column to signals and trades for hybrid mode attribution."""

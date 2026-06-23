@@ -11,12 +11,36 @@ from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 
 
+def _deep_merge(base: dict, over: dict) -> dict:
+    """Recursively merge ``over`` onto ``base`` (override wins; dicts merge)."""
+    out = dict(base)
+    for key, value in (over or {}).items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
 def _load_defaults() -> dict:
+    """Load tracked ``defaults.yaml`` then deep-merge optional local overrides.
+
+    ``defaults.local.yaml`` (gitignored) holds operational / never-commit
+    values — the live gate, paper-book headroom, model-budget conservation
+    knobs — so the tracked file stays a paper-safe baseline. The local file is
+    absent in CI and fresh clones, so behavior there falls back to the tracked
+    defaults (and, for keys not present in either, the pydantic field defaults).
+    """
+    base: dict = {}
     defaults_path = Path(__file__).parent / "defaults.yaml"
     if defaults_path.exists():
         with open(defaults_path) as f:
-            return yaml.safe_load(f)
-    return {}
+            base = yaml.safe_load(f) or {}
+    local_path = Path(__file__).parent / "defaults.local.yaml"
+    if local_path.exists():
+        with open(local_path) as f:
+            base = _deep_merge(base, yaml.safe_load(f) or {})
+    return base
 
 
 _DEFAULTS = _load_defaults()
