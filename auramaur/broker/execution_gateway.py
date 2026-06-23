@@ -110,7 +110,33 @@ class ExecutionGateway:
         if order is None:
             return ExecutionResult(status="skipped", reason="not submitted")
         return await self._place_and_record(
-            order, intent.signal, self.exchange, self.exchange_name)
+            order, strategy_source=intent.signal.strategy_source,
+            signal_id=getattr(intent.signal, "id", None),
+            exchange=self.exchange, exchange_name=self.exchange_name)
+
+    async def submit_exit(
+        self,
+        order: Order,
+        *,
+        exchange: ExchangeClient,
+        exchange_name: str,
+        strategy_source: str = "exit",
+    ) -> ExecutionResult:
+        """Place a PREBUILT exit order and record it.
+
+        Exits skip risk (the portfolio monitor already decided) and skip routing
+        (the caller prices the SELL against the live bid). The gateway places it
+        and writes the pending trades-mirror — so the order monitor, which
+        finalizes a live exit's fill asynchronously, UPDATEs that row instead of
+        inserting an 'order_monitor'-attributed one (and an immediate paper-mode
+        fill is recorded here). No double-write: a live exit is pending at
+        placement (filled_size 0), so the fill is recorded once, by the monitor.
+        """
+        if not order.source:
+            order.source = strategy_source
+        return await self._place_and_record(
+            order, strategy_source=strategy_source, signal_id=None,
+            exchange=exchange, exchange_name=exchange_name)
 
     async def submit_paired(
         self,
@@ -146,13 +172,17 @@ class ExecutionGateway:
             return skip, ExecutionResult(status="skipped", reason="leg build failed")
 
         res_a = await self._place_and_record(
-            order_a, a.signal, exchange_a, exchange_name_a)
+            order_a, strategy_source=a.signal.strategy_source,
+            signal_id=getattr(a.signal, "id", None),
+            exchange=exchange_a, exchange_name=exchange_name_a)
         if res_a.status not in _OK_STATUSES:
             # Leg A rejected — B is never placed, nothing to unwind.
             return res_a, ExecutionResult(status="skipped", reason="leg_a_not_ok")
 
         res_b = await self._place_and_record(
-            order_b, b.signal, exchange_b, exchange_name_b)
+            order_b, strategy_source=b.signal.strategy_source,
+            signal_id=getattr(b.signal, "id", None),
+            exchange=exchange_b, exchange_name=exchange_name_b)
         if res_b.status not in _OK_STATUSES:
             # Leg risk: A is in, B failed. Cancel a live-pending A so we don't
             # sit on a naked directional leg (paper / already-filled A can't be
@@ -236,11 +266,11 @@ class ExecutionGateway:
         return order
 
     async def _place_and_record(
-        self, order: Order, signal: Signal,
+        self, order: Order, *, strategy_source: str, signal_id,
         exchange: ExchangeClient, exchange_name: str,
     ) -> ExecutionResult:
         """Place a built order, then log slippage, record the fill, and mirror
-        to ``trades``. Shared by the single-leg and paired paths.
+        to ``trades``. Shared by the single-leg, paired, and exit paths.
         """
         result = await exchange.place_order(order)
         show_order(result.status, result.order_id, order.side.value, order.size, order.price, result.is_paper, exchange=exchange_name, error_message=result.error_message, market_id=order.market_id)
@@ -310,7 +340,7 @@ class ExecutionGateway:
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         order.market_id,
-                        getattr(signal, "id", None),
+                        signal_id,
                         order.side.value,
                         fill_size,
                         fill_price,
@@ -319,7 +349,7 @@ class ExecutionGateway:
                         trade_status,
                         None,
                         order.exchange or exchange_name,
-                        signal.strategy_source,
+                        strategy_source,
                     ),
                 )
                 await self.db.commit()

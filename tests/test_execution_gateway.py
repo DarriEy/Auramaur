@@ -236,6 +236,54 @@ def test_submit_paired_leg_b_fail_unwinds_pending_a():
     asyncio.run(run())
 
 
+def test_submit_exit_paper_records_fill_and_trade():
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        sell = Order(market_id="x", exchange="polymarket", token_id="tok",
+                     side=OrderSide.SELL, token=TokenType.YES, size=20.0, price=0.60)
+        place = OrderResult(order_id="px", market_id="x", status="paper",
+                            filled_size=20.0, filled_price=0.60, is_paper=True)
+        ex = MagicMock(); ex.place_order = AsyncMock(return_value=place)
+        gw = ExecutionGateway(router=None, exchange=MagicMock(), exchange_name="polymarket",
+                              settings=Settings(), db=db, pnl_tracker=PnLTracker(db, Settings()))
+        res = await gw.submit_exit(sell, exchange=ex, exchange_name="polymarket")
+        assert res.status == "paper"
+        assert len(await db.fetchall("SELECT 1 FROM fills WHERE market_id='x'")) == 1
+        t = await db.fetchall("SELECT strategy_source, side FROM trades WHERE market_id='x'")
+        assert len(t) == 1
+        assert dict(t[0])["strategy_source"] == "exit" and dict(t[0])["side"] == "SELL"
+
+    asyncio.run(run())
+
+
+def test_submit_exit_live_pending_writes_trades_but_defers_fill_to_monitor():
+    """A live exit is pending at placement — submit_exit writes the pending
+    trades row (so the monitor UPDATEs it, not INSERTs 'order_monitor') but does
+    NOT record the fill; the monitor records it once when it fills."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        sell = Order(market_id="x", exchange="polymarket", token_id="tok",
+                     side=OrderSide.SELL, token=TokenType.YES, size=20.0, price=0.60)
+        place = OrderResult(order_id="live-x", market_id="x", status="pending",
+                            filled_size=0.0, is_paper=False)
+        ex = MagicMock(); ex.place_order = AsyncMock(return_value=place)
+        gw = ExecutionGateway(router=None, exchange=MagicMock(), exchange_name="polymarket",
+                              settings=Settings(), db=db, pnl_tracker=PnLTracker(db, Settings()))
+        res = await gw.submit_exit(sell, exchange=ex, exchange_name="polymarket")
+        assert res.status == "pending"
+        # No fill recorded yet (the monitor will, once).
+        assert await db.fetchall("SELECT 1 FROM fills") == []
+        # A pending trades row exists keyed by order_id, so the monitor's
+        # UPDATE ... WHERE order_id finds it (no 'order_monitor' duplicate).
+        t = await db.fetchall("SELECT status, order_id, strategy_source FROM trades WHERE order_id='live-x'")
+        assert len(t) == 1
+        assert dict(t[0])["status"] == "pending" and dict(t[0])["strategy_source"] == "exit"
+
+    asyncio.run(run())
+
+
 def test_submit_paired_build_failure_places_neither():
     async def run():
         db = Database(":memory:")
