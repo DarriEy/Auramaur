@@ -31,7 +31,8 @@ from datetime import datetime, timezone
 
 import structlog
 
-from auramaur.exchange.models import Confidence, Fill, Market, OrderSide, Signal
+from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
+from auramaur.exchange.models import Confidence, Market, OrderSide, Signal
 from auramaur.strategy.arbitrage_scanner import _word_overlap_score
 
 log = structlog.get_logger()
@@ -69,6 +70,12 @@ class CrossVenueArbPillar:
         self._pnl = pnl_tracker
         self._analyzer = analyzer
         self._kalshi_discovery = kalshi_discovery
+        # Shared execution tail; submit_paired takes the per-leg exchange, so the
+        # gateway's own exchange is only a default (legs are cross-venue).
+        self._gateway = ExecutionGateway(
+            router=None, exchange=exchange, exchange_name="polymarket",
+            settings=settings, db=db, pnl_tracker=pnl_tracker,
+        )
 
     # -- schema ----------------------------------------------------------
 
@@ -265,53 +272,45 @@ class CrossVenueArbPillar:
         size = min(dec_a.position_size, dec_b.position_size, cfg.stake_usd)
         if size <= 0:
             return False
-        force_paper = (getattr(dec_a, "force_paper", False)
+        # Paper-force the pair together (cfg.paper or either leg's graduation
+        # downgrade). The gateway owns both-or-nothing placement, fills, the
+        # trades-mirror, and the live-pending leg-A unwind; the pillar keeps its
+        # signals-per-leg + verdict bookkeeping below.
+        force_paper = (cfg.paper or getattr(dec_a, "force_paper", False)
                        or getattr(dec_b, "force_paper", False))
-        is_live = self._settings.is_live and not cfg.paper and not force_paper
+        res_a, res_b = await self._gateway.submit_paired(
+            TradeIntent(signal=sig_a, market=a, size_dollars=size, force_paper=force_paper),
+            TradeIntent(signal=sig_b, market=b, size_dollars=size, force_paper=force_paper),
+            exchange_a=exchange_a, exchange_name_a=(a.exchange or "polymarket"),
+            exchange_b=exchange_b, exchange_name_b=(b.exchange or "kalshi"))
 
-        order_a = exchange_a.prepare_order(sig_a, a, size, is_live)
-        order_b = exchange_b.prepare_order(sig_b, b, size, is_live)
-        if order_a is None or order_b is None:
-            return False
         ok_statuses = ("filled", "paper", "partial", "pending")
-        result_a = await exchange_a.place_order(order_a)
-        if result_a.status not in ok_statuses:
-            log.warning("cross_venue.leg_a_rejected", a=a.id, status=result_a.status)
+        if res_a.status not in ok_statuses:
+            log.warning("cross_venue.leg_a_rejected", a=a.id, status=res_a.status)
             return False
-
-        result_b = await exchange_b.place_order(order_b)
-        if result_b.status not in ok_statuses:
+        if res_b.status not in ok_statuses:
             log.error("cross_venue.leg_b_failed_single_leg", a=a.id, b=b.id,
-                      status=result_b.status)
-            await self._record_leg(a, order_a, result_a, why)
-            if result_a.status == "pending" and not result_a.is_paper:
-                try:
-                    await exchange_a.cancel_order(result_a.order_id)
-                except Exception as e:
-                    log.warning("cross_venue.leg_a_cancel_failed",
-                                a=a.id, order_id=result_a.order_id, error=str(e))
+                      status=res_b.status)
+            await self._record_leg(a, res_a.order, res_a.result, why)
             await self._mark_partial(
-                a.id, b.id, result_b.error_message or f"leg_b_{result_b.status}")
+                a.id, b.id, res_b.reason or f"leg_b_{res_b.status}")
             return False
 
-        for market, order, result in ((a, order_a, result_a), (b, order_b, result_b)):
-            await self._record_leg(market, order, result, why)
+        for market, res in ((a, res_a), (b, res_b)):
+            await self._record_leg(market, res.order, res.result, why)
         await self._db.execute(
             "UPDATE cross_venue_verdicts SET traded_at = datetime('now') "
             "WHERE poly_id = ? AND kalshi_id = ?", (a.id, b.id))
         await self._db.commit()
         log.info("cross_venue.entered", a=a.id, b=b.id, orientation=orientation,
-                 edge=round(edge, 3), confidence=conf, paper=result_a.is_paper)
+                 edge=round(edge, 3), confidence=conf, paper=res_a.result.is_paper)
         return True
 
     async def _record_leg(self, market: Market, order, result, why: str) -> None:
-        fill_size = result.filled_size if result.filled_size > 0 else order.size
-        fill_price = result.filled_price if result.filled_price > 0 else order.price
-        if result.status in ("filled", "paper", "partial") and fill_size > 0:
-            await self._pnl.record_fill(Fill(
-                order_id=result.order_id, market_id=order.market_id,
-                token_id=order.token_id, side=order.side, token=order.token,
-                size=fill_size, price=fill_price, is_paper=bool(result.is_paper)))
+        # The fill (-> cost_basis -> pnl_ledger) and the trades-mirror are owned
+        # by the ExecutionGateway; the pillar keeps the per-leg signals row (the
+        # arb-leg convention stores the market price as claude_prob — there is no
+        # LLM estimate for an arb leg).
         await self._db.execute(
             """INSERT INTO signals (market_id, claude_prob, claude_confidence,
                market_prob, edge, evidence_summary, action, strategy_source)

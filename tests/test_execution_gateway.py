@@ -153,5 +153,105 @@ def test_gateway_lazy_rebuild_tracks_late_bound_collaborators():
     asyncio.run(run())
 
 
-if __name__ == "__main__":  # pragma: no cover
-    pass
+def _leg(market_id, *, order_side=OrderSide.BUY, place: OrderResult, cancel=False):
+    """A per-leg exchange: prepare_order -> a built order, place_order -> place."""
+    order = Order(market_id=market_id, exchange="polymarket", token_id="tok",
+                  side=order_side, token=TokenType.YES, size=20.0, price=0.40)
+    ex = MagicMock()
+    ex.prepare_order = MagicMock(return_value=order)
+    ex.place_order = AsyncMock(return_value=place)
+    if cancel:
+        ex.cancel_order = AsyncMock()
+    return ex
+
+
+def _paired_gateway(db):
+    return ExecutionGateway(
+        router=None, exchange=MagicMock(), exchange_name="polymarket",
+        settings=Settings(), db=db, pnl_tracker=PnLTracker(db, Settings()),
+    )
+
+
+def _intent(market_id):
+    return TradeIntent(signal=_signal(market_id), market=Market(id=market_id, question="Q?"),
+                       size_dollars=10.0)
+
+
+def test_submit_paired_records_both_legs():
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        ex_a = _leg("a", place=OrderResult(order_id="pa", market_id="a", status="paper",
+                                           filled_size=20.0, filled_price=0.40, is_paper=True))
+        ex_b = _leg("b", place=OrderResult(order_id="pb", market_id="b", status="paper",
+                                           filled_size=20.0, filled_price=0.40, is_paper=True))
+        gw = _paired_gateway(db)
+        res_a, res_b = await gw.submit_paired(
+            _intent("a"), _intent("b"),
+            exchange_a=ex_a, exchange_name_a="polymarket",
+            exchange_b=ex_b, exchange_name_b="kalshi")
+        assert res_a.status == "paper" and res_b.status == "paper"
+        fills = await db.fetchall("SELECT market_id FROM fills")
+        assert {dict(f)["market_id"] for f in fills} == {"a", "b"}
+
+    asyncio.run(run())
+
+
+def test_submit_paired_leg_a_rejected_never_places_b():
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        ex_a = _leg("a", place=OrderResult(order_id="ERROR", market_id="a", status="rejected"))
+        ex_b = _leg("b", place=OrderResult(order_id="pb", market_id="b", status="paper",
+                                           filled_size=20.0, filled_price=0.40, is_paper=True))
+        gw = _paired_gateway(db)
+        res_a, res_b = await gw.submit_paired(
+            _intent("a"), _intent("b"),
+            exchange_a=ex_a, exchange_name_a="polymarket",
+            exchange_b=ex_b, exchange_name_b="polymarket")
+        assert res_a.status == "rejected"
+        assert res_b.status == "skipped"
+        ex_b.place_order.assert_not_awaited()  # both-or-nothing: B never attempted
+        assert await db.fetchall("SELECT * FROM fills") == []
+
+    asyncio.run(run())
+
+
+def test_submit_paired_leg_b_fail_unwinds_pending_a():
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        # A is a LIVE pending order; B rejects -> A must be cancelled.
+        ex_a = _leg("a", place=OrderResult(order_id="live-a", market_id="a", status="pending",
+                                           filled_size=0.0, is_paper=False), cancel=True)
+        ex_b = _leg("b", place=OrderResult(order_id="ERROR", market_id="b", status="rejected"))
+        gw = _paired_gateway(db)
+        res_a, res_b = await gw.submit_paired(
+            _intent("a"), _intent("b"),
+            exchange_a=ex_a, exchange_name_a="polymarket",
+            exchange_b=ex_b, exchange_name_b="polymarket")
+        assert res_a.status == "pending" and res_b.status == "rejected"
+        ex_a.cancel_order.assert_awaited_once_with("live-a")
+
+    asyncio.run(run())
+
+
+def test_submit_paired_build_failure_places_neither():
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        ex_a = _leg("a", place=OrderResult(order_id="pa", market_id="a", status="paper",
+                                           filled_size=20.0, filled_price=0.40, is_paper=True))
+        ex_a.prepare_order = MagicMock(return_value=None)  # A can't be built
+        ex_b = _leg("b", place=OrderResult(order_id="pb", market_id="b", status="paper",
+                                           filled_size=20.0, filled_price=0.40, is_paper=True))
+        gw = _paired_gateway(db)
+        res_a, res_b = await gw.submit_paired(
+            _intent("a"), _intent("b"),
+            exchange_a=ex_a, exchange_name_a="polymarket",
+            exchange_b=ex_b, exchange_name_b="polymarket")
+        assert res_a.status == "skipped" and res_b.status == "skipped"
+        ex_a.place_order.assert_not_awaited()
+        ex_b.place_order.assert_not_awaited()  # neither leg placed
+
+    asyncio.run(run())
