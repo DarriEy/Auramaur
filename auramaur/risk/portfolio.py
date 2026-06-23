@@ -195,12 +195,20 @@ class PortfolioTracker:
     # ------------------------------------------------------------------
 
     async def get_daily_pnl(self) -> float:
-        """Return today's realised PnL from the daily_stats table."""
-        today = date.today().isoformat()
+        """Return today's LIVE realised PnL from the authoritative pnl_ledger.
+
+        Sources the daily-loss risk gate (risk/manager.py check_daily_loss) from
+        the unified ledger scoped to ``is_paper = 0``, rather than
+        ``daily_stats.total_pnl`` — which conflated paper + live realized P&L,
+        so the paper-forced strategies' (by-design) losses leaked into the gate
+        that blocks LIVE trading. The day boundary is UTC to match the ledger's
+        ``realized_at`` timestamps. ``daily_stats`` remains for reporting only.
+        """
         row = await self.db.fetchone(
-            "SELECT total_pnl FROM daily_stats WHERE date = ?", (today,)
+            "SELECT COALESCE(SUM(pnl), 0) AS pnl FROM pnl_ledger "
+            "WHERE is_paper = 0 AND date(realized_at) = date('now')"
         )
-        return float(row["total_pnl"]) if row else 0.0
+        return float(row["pnl"]) if row else 0.0
 
     # ------------------------------------------------------------------
     # Drawdown

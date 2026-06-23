@@ -115,9 +115,12 @@ class PnLTracker:
                 size=fill.size,
             )
 
-            # Update daily_stats so the CLI/risk view sees realized PnL as
-            # soon as exits fire — previously only market resolution wrote
-            # this table, which made the running P&L invisible for weeks.
+            # Update daily_stats for REPORTING only (CLI / cockpit). NOTE:
+            # total_pnl here is mode-MIXED (this runs for paper + live fills),
+            # so it must NOT gate live trading — the daily-loss risk gate now
+            # sources today's LIVE realized P&L from pnl_ledger (is_paper=0) via
+            # PortfolioTracker.get_daily_pnl. peak_balance (drawdown) still uses
+            # daily_stats, which is a balance tracker, not realized P&L.
             try:
                 today = date.today().isoformat()
                 await self._db.execute(
