@@ -26,23 +26,89 @@ _EXTRACTED = [
 ]
 
 
-def _unbound_names(path: Path) -> list[str]:
-    tree = ast.parse(path.read_text())
-    bound = set(dir(builtins)) | {"self", "cls", "__class__"}
-    for node in ast.walk(tree):
+def _scope_bindings(fn) -> set[str]:
+    """Names bound directly in a function/lambda's OWN scope: params + its body's
+    assignments / local imports / nested-def names / except + comprehension
+    targets — descending through control-flow blocks but NOT into nested function
+    bodies (those are their own scope, though their *name* binds here).
+    """
+    bound: set[str] = set()
+    args = fn.args
+    for a in (*args.posonlyargs, *args.args, *args.kwonlyargs):
+        bound.add(a.arg)
+    if args.vararg:
+        bound.add(args.vararg.arg)
+    if args.kwarg:
+        bound.add(args.kwarg.arg)
+
+    def walk(node):
+        # Process `node` itself, then descend (except into nested scopes).
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)  # binds here; its body is a separate scope
+            return
+        if isinstance(node, ast.Lambda):
+            return  # separate scope
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             for a in node.names:
                 bound.add((a.asname or a.name).split(".")[0])
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            bound.add(node.name)
-        elif isinstance(node, ast.arg):
-            bound.add(node.arg)
-        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            return
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
             bound.add(node.id)
-        elif isinstance(node, ast.ExceptHandler) and node.name:
+        if isinstance(node, ast.ExceptHandler) and node.name:
             bound.add(node.name)
-    used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
-    return sorted(u for u in used if u not in bound)
+        for child in ast.iter_child_nodes(node):
+            walk(child)
+
+    body = fn.body if isinstance(fn.body, list) else [fn.body]
+    for stmt in body:
+        walk(stmt)
+    return bound
+
+
+def _module_bindings(tree: ast.Module) -> set[str]:
+    """Module-scope names: top-level (and top-level if-block, e.g. TYPE_CHECKING)
+    imports + top-level def/class names + top-level assignments. Function-local
+    imports are deliberately excluded — they bind only inside their function.
+    """
+    bound: set[str] = set(dir(builtins)) | {"self", "cls", "__class__"}
+    stack = list(tree.body)
+    while stack:
+        stmt = stack.pop()
+        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            for a in stmt.names:
+                bound.add((a.asname or a.name).split(".")[0])
+        elif isinstance(stmt, ast.If):
+            stack.extend(stmt.body)
+            stack.extend(stmt.orelse)
+        elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(stmt.name)
+        elif isinstance(stmt, ast.Assign):
+            for t in stmt.targets:
+                if isinstance(t, ast.Name):
+                    bound.add(t.id)
+    return bound
+
+
+def _unbound_names(path: Path) -> list[str]:
+    """Proper lexical-scope audit: a Load name is unbound only if it's missing
+    from module scope AND every enclosing function scope (so closures and
+    same-function local imports are fine; a symbol imported in method A but used
+    free in method B is flagged)."""
+    tree = ast.parse(path.read_text())
+    problems: set[str] = set()
+
+    def visit(node, scope: set[str]) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                visit(child, scope | _scope_bindings(child))
+            else:
+                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load) \
+                        and child.id not in scope:
+                    problems.add(child.id)
+                visit(child, scope)
+
+    visit(tree, _module_bindings(tree))
+    return sorted(problems)
 
 
 @pytest.mark.parametrize("rel", _EXTRACTED)
