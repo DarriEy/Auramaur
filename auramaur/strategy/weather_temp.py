@@ -13,7 +13,8 @@ from datetime import timezone
 
 import structlog
 
-from auramaur.exchange.models import Confidence, Fill, Market, OrderSide, Signal
+from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
+from auramaur.exchange.models import Confidence, Market, OrderSide, Signal
 from auramaur.strategy.classifier import ensure_category
 from auramaur.strategy.weather_pricing import (
     bin_probability,
@@ -33,6 +34,11 @@ class WeatherTempPillar:
         self._risk = risk_manager
         self._pnl = pnl_tracker
         self._calibration = calibration
+        # Shared execution tail; no router (passive entry at the observed price).
+        self._gateway = ExecutionGateway(
+            router=None, exchange=exchange, exchange_name="polymarket",
+            settings=settings, db=db, pnl_tracker=pnl_tracker,
+        )
         self._weather = weather
 
     async def run_once(self) -> int:
@@ -106,18 +112,15 @@ class WeatherTempPillar:
             log.info("weather_temp.risk_rejected", market_id=market.id, reason=decision.reason)
             return False
         size = min(decision.position_size, cfg.stake_usd)
-        is_live_order = (self._settings.is_live and not cfg.paper
-                         and not getattr(decision, "force_paper", False))
-        order = self._exchange.prepare_order(signal, market, size, is_live_order)
-        if order is None:
+        force_paper = cfg.paper or getattr(decision, "force_paper", False)
+        res = await self._gateway.submit(TradeIntent(
+            signal=signal, market=market, size_dollars=size, force_paper=force_paper))
+        if res.status not in ("filled", "paper", "partial", "pending"):
+            log.warning("weather_temp.order_rejected", market_id=market.id, status=res.status)
             return False
-        result = await self._exchange.place_order(order)
-        if result.status not in ("filled", "paper", "partial", "pending"):
-            log.warning("weather_temp.order_rejected", market_id=market.id, status=result.status)
-            return False
-        await self._record_entry(signal, market, order, result)
+        await self._record_position(signal, market, res.order, res.result)
         log.info("weather_temp.entered", market_id=market.id, side=side.value,
-                 model_p=round(model_p, 3), market_p=round(market_p, 3), paper=result.is_paper)
+                 model_p=round(model_p, 3), market_p=round(market_p, 3), paper=res.result.is_paper)
         return True
 
     async def _already_entered_or_held(self, market_id: str) -> bool:
@@ -150,22 +153,13 @@ class WeatherTempPillar:
              signal.recommended_side.value))
         await self._db.commit()
 
-    async def _record_entry(self, signal: Signal, market: Market, order, result) -> None:
+    async def _record_position(self, signal: Signal, market: Market, order, result) -> None:
+        # Fill (-> cost_basis -> pnl_ledger) and the trades-mirror are owned by
+        # the ExecutionGateway; this keeps the portfolio row (resolution tracker
+        # settles against it; sync is mode-scoped) + the calibration prediction.
         fill_size = result.filled_size if result.filled_size > 0 else order.size
         fill_price = result.filled_price if result.filled_price > 0 else order.price
         is_paper = bool(result.is_paper)
-        if result.status in ("filled", "paper", "partial") and fill_size > 0:
-            await self._pnl.record_fill(Fill(
-                order_id=result.order_id, market_id=order.market_id,
-                token_id=order.token_id, side=order.side, token=order.token,
-                size=fill_size, price=fill_price, is_paper=is_paper))
-        await self._db.execute(
-            """INSERT INTO trades (market_id, timestamp, side, size, price,
-               is_paper, order_id, status, strategy_source, exchange)
-               VALUES (?, datetime('now'), ?, ?, ?, ?, ?, ?, 'weather_temp', 'polymarket')""",
-            (order.market_id, order.side.value, fill_size, fill_price,
-             1 if is_paper else 0, result.order_id,
-             "filled" if result.status in ("filled", "paper") else result.status))
         await self._db.execute(
             """INSERT INTO portfolio (market_id, exchange, side, size, avg_price,
                current_price, unrealized_pnl, category, token, token_id, is_paper, updated_at)

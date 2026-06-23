@@ -39,9 +39,9 @@ from datetime import datetime, timezone
 import structlog
 
 from auramaur.strategy.classifier import ensure_category
+from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
 from auramaur.exchange.models import (
     Confidence,
-    Fill,
     Market,
     OrderSide,
     Signal,
@@ -234,6 +234,11 @@ class EntailmentArbPillar:
         self._risk = risk_manager
         self._pnl = pnl_tracker
         self._analyzer = analyzer
+        # Shared execution tail; submit_paired takes the per-leg exchange.
+        self._gateway = ExecutionGateway(
+            router=None, exchange=exchange, exchange_name="polymarket",
+            settings=settings, db=db, pnl_tracker=pnl_tracker,
+        )
         # Optional Kalshi discovery for the econ-bin ladder arb (series-fetched).
         self._kalshi_discovery = kalshi_discovery
 
@@ -499,41 +504,32 @@ class EntailmentArbPillar:
         size = min(dec_a.position_size, dec_b.position_size, cfg.stake_usd)
         if size <= 0:
             return False
-        force_paper = (getattr(dec_a, "force_paper", False)
+        # Paper-force the pair together; the gateway owns both-or-nothing
+        # placement, fills, the trades-mirror, and the live-pending leg-A
+        # unwind. The pillar keeps its markets/signals/portfolio writes below.
+        force_paper = (cfg.paper or getattr(dec_a, "force_paper", False)
                        or getattr(dec_b, "force_paper", False))
-        is_live = self._settings.is_live and not cfg.paper and not force_paper
-
-        order_a = exchange_a.prepare_order(sig_a, implier, size, is_live)
-        order_b = exchange_b.prepare_order(sig_b, implied, size, is_live)
-        if order_a is None or order_b is None:
-            return False
+        res_a, res_b = await self._gateway.submit_paired(
+            TradeIntent(signal=sig_a, market=implier, size_dollars=size, force_paper=force_paper),
+            TradeIntent(signal=sig_b, market=implied, size_dollars=size, force_paper=force_paper),
+            exchange_a=exchange_a, exchange_name_a=(implier.exchange or "polymarket"),
+            exchange_b=exchange_b, exchange_name_b=(implied.exchange or "polymarket"))
 
         ok_statuses = ("filled", "paper", "partial", "pending")
-        result_a = await exchange_a.place_order(order_a)
-        if result_a.status not in ok_statuses:
-            log.warning("entailment.leg_a_rejected", a=implier.id,
-                        status=result_a.status)
+        if res_a.status not in ok_statuses:
+            log.warning("entailment.leg_a_rejected", a=implier.id, status=res_a.status)
             return False
-        result_b = await exchange_b.place_order(order_b)
-        if result_b.status not in ok_statuses:
+        if res_b.status not in ok_statuses:
             # Leg risk: A is in, B failed. Flag loudly — the position is
-            # directional until B fills or A is exited.
+            # directional until B fills or A is exited (the gateway already
+            # unwound a live-pending A).
             log.error("entailment.leg_b_failed_single_leg", a=implier.id,
-                      b=implied.id, status=result_b.status,
-                      error=result_b.error_message)
-            await self._record_leg(implier, order_a, result_a, why, gap)
-            if result_a.status == "pending" and not result_a.is_paper:
-                try:
-                    await exchange_a.cancel_order(result_a.order_id)
-                except Exception as e:
-                    log.warning("entailment.leg_a_cancel_failed",
-                                a=implier.id, order_id=result_a.order_id,
-                                error=str(e))
+                      b=implied.id, status=res_b.status, error=res_b.reason)
+            await self._record_leg(implier, res_a.order, res_a.result, why, gap)
             return False
 
-        for market, order, result in ((implier, order_a, result_a),
-                                      (implied, order_b, result_b)):
-            await self._record_leg(market, order, result, why, gap)
+        for market, res in ((implier, res_a), (implied, res_b)):
+            await self._record_leg(market, res.order, res.result, why, gap)
 
         await self._db.execute(
             "UPDATE entailment_verdicts SET traded_at = datetime('now') "
@@ -543,21 +539,18 @@ class EntailmentArbPillar:
         await self._db.commit()
         log.info("entailment.entered", a=implier.id, b=implied.id,
                  gap=round(gap, 3), why=why, confidence=conf,
-                 paper=result_a.is_paper)
+                 paper=res_a.result.is_paper)
         return True
 
     async def _record_leg(self, market: Market, order, result, why: str,
                           gap: float) -> None:
+        # The fill (-> cost_basis -> pnl_ledger) and the trades-mirror are owned
+        # by the ExecutionGateway; the pillar keeps the markets/signals persist
+        # and the portfolio row the resolution tracker settles against.
         fill_size = result.filled_size if result.filled_size > 0 else order.size
         fill_price = result.filled_price if result.filled_price > 0 else order.price
         is_paper = bool(result.is_paper)
         exchange_name = market.exchange or order.exchange or "polymarket"
-        if result.status in ("filled", "paper", "partial") and fill_size > 0:
-            await self._pnl.record_fill(Fill(
-                order_id=result.order_id, market_id=order.market_id,
-                token_id=order.token_id, side=order.side, token=order.token,
-                size=fill_size, price=fill_price, is_paper=is_paper,
-            ))
         await self._db.execute(
             """INSERT OR IGNORE INTO markets (id, exchange, question, category,
                active, outcome_yes_price, outcome_no_price, volume, liquidity,
@@ -577,26 +570,17 @@ class EntailmentArbPillar:
              order.side.value),
         )
         await self._db.execute(
-            """INSERT INTO trades (market_id, timestamp, side, size, price,
-               is_paper, order_id, status, strategy_source, exchange)
-               VALUES (?, datetime('now'), ?, ?, ?, ?, ?, ?, 'entailment_arb',
-                       ?)""",
-            (order.market_id, order.side.value, fill_size, fill_price,
-             1 if is_paper else 0, result.order_id,
-             "filled" if result.status in ("filled", "paper") else result.status,
-             exchange_name),
-        )
-        await self._db.execute(
             """INSERT INTO portfolio (market_id, exchange, side, size, avg_price,
                current_price, unrealized_pnl, category, token, token_id,
                is_paper, updated_at)
-               VALUES (?, ?, 'BUY', ?, ?, ?, 0, ?, ?, ?, ?, datetime('now'))
+               VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, datetime('now'))
                ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
                    exchange = excluded.exchange,
                    size = excluded.size, avg_price = excluded.avg_price,
                    current_price = excluded.current_price,
                    updated_at = excluded.updated_at""",
-            (order.market_id, exchange_name, fill_size, fill_price, fill_price,
+            (order.market_id, exchange_name, order.side.value, fill_size,
+             fill_price, fill_price,
              market.category or "", order.token.value, order.token_id,
              1 if is_paper else 0),
         )
