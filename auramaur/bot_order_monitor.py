@@ -155,7 +155,12 @@ class OrderMonitorMixin:
                                                     order_id,
                                                     result.status,
                                                     order.exchange or exchange_name,
-                                                    "order_monitor",
+                                                    # Attribute to the order's own source (market_maker,
+                                                    # exit, ...) when known — only orders placed OUTSIDE
+                                                    # the gateway reach this fallback INSERT (gateway
+                                                    # paths pre-write a row the UPDATE above hits), so
+                                                    # 'order_monitor' was masking the real strategy.
+                                                    getattr(order, "source", None) or "order_monitor",
                                                 ),
                                             )
                                         await db.commit()
