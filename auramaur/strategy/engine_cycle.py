@@ -17,6 +17,9 @@ import structlog
 
 from auramaur.broker.allocator import CandidateTrade, CapitalAllocator
 from auramaur.exchange.models import Market, OrderResult, OrderSide, Signal
+from auramaur.monitoring.display import show_scan_results
+from auramaur.strategy.classifier import blocked_category_hit, ensure_category
+from auramaur.strategy.signals import taker_fee_rate
 
 if TYPE_CHECKING:
     from auramaur.strategy.protocols import TradeCandidate

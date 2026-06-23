@@ -19,6 +19,7 @@ import structlog
 from auramaur.exchange.models import (
     Confidence, Market, Order, OrderSide, OrderType, Signal, TokenType,
 )
+from auramaur.monitoring.display import console
 from auramaur.nlp.errors import BudgetExhausted
 from auramaur.strategy.arbitrage_scanner import (
     ArbOpportunity, ArbitrageScanner, NegRiskArbOpportunity,
