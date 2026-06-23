@@ -36,10 +36,10 @@ from datetime import datetime, timezone
 
 import structlog
 
+from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
 from auramaur.strategy.classifier import blocked_category_hit, ensure_category
 from auramaur.exchange.models import (
     Confidence,
-    Fill,
     Market,
     OrderSide,
     Signal,
@@ -60,6 +60,13 @@ class BiasHarvestPillar:
         self._risk = risk_manager
         self._pnl = pnl_tracker
         self._calibration = calibration
+        # Shared execution tail (route -> place -> record_fill -> trades-mirror).
+        # No router: bias_harvest enters passively at the observed price, so the
+        # gateway falls back to prepare_order exactly as before.
+        self._gateway = ExecutionGateway(
+            router=None, exchange=exchange, exchange_name="polymarket",
+            settings=settings, db=db, pnl_tracker=pnl_tracker,
+        )
 
     # ------------------------------------------------------------------
     # Scan cycle
@@ -211,27 +218,25 @@ class BiasHarvestPillar:
             return False
         size = min(decision.position_size, cfg.stake_usd)
 
-        # Passive limit at the observed price (prepare_order uses the seen
-        # token price, tick-rounded — no improvement, no crossing). Paper-
-        # forced entries pass is_live=False so the order carries dry_run=True
-        # regardless of the global live gates. The graduation ladder
-        # (decision.force_paper) can also paper-force, never un-paper.
-        is_live_order = (self._settings.is_live and not cfg.paper
-                         and not getattr(decision, "force_paper", False))
-        order = self._exchange.prepare_order(signal, market, size, is_live_order)
-        if order is None:
-            log.warning("bias_harvest.order_build_failed", market_id=market.id)
-            return False
-        result = await self._exchange.place_order(order)
-        if result.status not in ("filled", "paper", "partial", "pending"):
+        # Passive limit at the observed price (prepare_order uses the seen token
+        # price, tick-rounded — no improvement, no crossing). Paper-forced
+        # entries pass force_paper so the order carries dry_run=True regardless
+        # of the global live gates; the graduation ladder (decision.force_paper)
+        # can also paper-force, never un-paper. The gateway owns route -> place
+        # -> record_fill -> trades-mirror; the pillar keeps its own
+        # portfolio + calibration writes below.
+        force_paper = cfg.paper or getattr(decision, "force_paper", False)
+        res = await self._gateway.submit(TradeIntent(
+            signal=signal, market=market, size_dollars=size, force_paper=force_paper))
+        if res.status not in ("filled", "paper", "partial", "pending"):
             log.warning("bias_harvest.order_rejected", market_id=market.id,
-                        status=result.status, error=result.error_message)
+                        status=res.status, error=res.reason)
             return False
 
-        await self._record_entry(signal, market, order, result)
+        await self._record_position(signal, market, res.order, res.result)
         log.info("bias_harvest.entered", market_id=market.id,
-                 token=order.token.value, price=order.price,
-                 size=order.size, paper=result.is_paper)
+                 token=res.order.token.value, price=res.order.price,
+                 size=res.order.size, paper=res.result.is_paper)
         return True
 
     # ------------------------------------------------------------------
@@ -260,35 +265,18 @@ class BiasHarvestPillar:
         )
         await self._db.commit()
 
-    async def _record_entry(self, signal: Signal, market: Market,
-                            order, result) -> None:
+    async def _record_position(self, signal: Signal, market: Market,
+                               order, result) -> None:
+        """Write the portfolio row + calibration prediction for a filled entry.
+
+        The fill (-> cost_basis -> pnl_ledger) and the trades-mirror are owned
+        by :class:`ExecutionGateway`; this keeps only the two writes the gateway
+        does not (yet) own: the portfolio row the resolution tracker settles
+        against, and the calibration prediction for resolution scoring.
+        """
         fill_size = result.filled_size if result.filled_size > 0 else order.size
         fill_price = result.filled_price if result.filled_price > 0 else order.price
         is_paper = bool(result.is_paper)
-
-        # Fills -> cost_basis (+ pnl_ledger at realization)
-        if result.status in ("filled", "paper", "partial") and fill_size > 0:
-            await self._pnl.record_fill(Fill(
-                order_id=result.order_id,
-                market_id=order.market_id,
-                token_id=order.token_id,
-                side=order.side,
-                token=order.token,
-                size=fill_size,
-                price=fill_price,
-                is_paper=is_paper,
-            ))
-
-        # trades mirror (entry-strategy attribution + dedup belt)
-        await self._db.execute(
-            """INSERT INTO trades (market_id, timestamp, side, size, price,
-               is_paper, order_id, status, strategy_source, exchange)
-               VALUES (?, datetime('now'), ?, ?, ?, ?, ?, ?, 'bias_harvest',
-                       'polymarket')""",
-            (order.market_id, order.side.value, fill_size, fill_price,
-             1 if is_paper else 0, result.order_id,
-             "filled" if result.status in ("filled", "paper") else result.status),
-        )
 
         # Portfolio row so the resolution tracker settles the position. The
         # mode-scoped position sync won't maintain paper rows in a live bot,
