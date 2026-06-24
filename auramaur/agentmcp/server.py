@@ -196,6 +196,22 @@ async def close_position(market_id: str, token: str, price: float) -> dict:
     )
 
 
+# ----------------------------------------------------------------------
+# Scoreboard — how the agent is doing vs the bot
+# ----------------------------------------------------------------------
+
+
+@mcp.tool()
+async def compare_to_bot() -> dict:
+    """Your head-to-head scorecard vs Auramaur: realized P&L, events, win%, and
+    $/event for your paper book vs the bot's paper book (the fair A/B) and the
+    bot's live book (context). Use it to judge whether your judgment is beating
+    the strategy ensemble."""
+    from auramaur.agentmcp.compare import build_comparison
+
+    return await build_comparison(_agent_db_path(), _auramaur_db_path())
+
+
 def main() -> None:
     mcp.run()  # stdio transport (Hermes default)
 
