@@ -19,6 +19,9 @@ from collections import defaultdict
 
 import structlog
 
+from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
+from auramaur.strategy.protocols import ExecutionMode
+
 log = structlog.get_logger()
 
 _PAIR = {"BTC": "XBTUSD", "ETH": "ETHUSD"}
@@ -26,13 +29,22 @@ _NAME = {"BTC": "Bitcoin", "ETH": "Ethereum"}
 
 
 class MomentumCouplingPillar:
+    # Uniform Strategy contract (see strategy/protocols.py). It is a directional,
+    # risk-evaluated pillar like the others, so it routes through the single
+    # ExecutionGateway — not a justified direct-placement exception.
+    name = "momentum_coupling"
+    execution_mode = ExecutionMode.GATEWAY_SINGLE
+
     def __init__(self, settings, console=None, polymarket_client=None,
-                 risk_manager=None, bot=None):
+                 risk_manager=None, bot=None, db=None, pnl_tracker=None):
         self._s = settings
         self._console = console
         self._poly = polymarket_client   # PolymarketClient (client.py) for execution
         self._risk = risk_manager        # RiskManager gateway — no trade bypasses it
         self._bot = bot                  # for available cash
+        self._db = db
+        self._pnl = pnl_tracker
+        self._gateway = None             # lazily built once db+pnl+client present
         self._spot_hist: dict[str, list[tuple[float, float]]] = defaultdict(list)
         self._kraken = None
         self._gamma = None
@@ -98,15 +110,19 @@ class MomentumCouplingPillar:
             break  # one signal per asset per cycle
 
     async def _execute(self, market, direction: str, move: float) -> None:
-        """Place the coupling trade through the RiskManager gateway (execute=True).
+        """Place the coupling trade through the ExecutionGateway (execute=True).
 
         The momentum signal is framed as a spot-implied prob nudge vs the market,
         so it flows through risk_manager.evaluate() — every check, the divergence
-        filter, Kelly sizing, AND the risk_tolerance lever apply. NOTHING bypasses
-        the gateway. Detection-only if the risk manager / client isn't wired.
+        filter, Kelly sizing, AND the risk_tolerance lever apply — and then the
+        single ExecutionGateway, which co-writes fill+trades and honors the
+        graduation ladder's force_paper (the old direct place_order skipped both,
+        and used raw is_live so an ungraduated cell could trade live). Detect-only
+        if risk/client/db/pnl aren't wired.
         """
-        if self._poly is None or self._risk is None:
-            log.warning("coupling.no_route", reason="no risk_manager/client; detect-only")
+        if (self._poly is None or self._risk is None
+                or self._db is None or self._pnl is None):
+            log.warning("coupling.no_route", reason="no risk/client/db/pnl; detect-only")
             return
         from auramaur.exchange.models import Signal, OrderSide, Confidence
         mp = market.outcome_yes_price
@@ -126,12 +142,16 @@ class MomentumCouplingPillar:
                 log.info("coupling.risk_rejected", market=market.id,
                          reason=decision.reason[:80])
                 return
-            order = self._poly.prepare_order(signal, market, decision.position_size,
-                                             self._s.is_live)
-            if not order:
-                return
-            res = await self._poly.place_order(order)
+            if self._gateway is None:
+                self._gateway = ExecutionGateway(
+                    router=None, exchange=self._poly, exchange_name="polymarket",
+                    settings=self._s, db=self._db, pnl_tracker=self._pnl)
+            res = await self._gateway.submit(TradeIntent(
+                signal=signal, market=market,
+                size_dollars=decision.position_size,
+                force_paper=getattr(decision, "force_paper", False)))
             log.warning("coupling.executed", market=market.id, direction=direction,
-                        size=decision.position_size, status=res.status, is_paper=res.is_paper)
+                        size=decision.position_size, status=res.status,
+                        is_paper=res.result.is_paper if res.result else None)
         except Exception as e:  # noqa: BLE001
             log.error("coupling.execute_error", market=market.id, error=str(e)[:120])
