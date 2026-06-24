@@ -338,6 +338,54 @@ async def test_unresolved_token_keeps_stored_mark(settings):
 
 
 @pytest.mark.asyncio
+async def test_remark_does_not_clobber_sibling_token(settings):
+    """A market held on BOTH sides has a NO row and a YES row. Re-marking one
+    leg must update ONLY that leg — the per-token write must not stamp the NO
+    row with the YES price (and vice versa), which would invert a winner into a
+    phantom loser in the persisted mark."""
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        settings.is_live = True
+        # Hold NO (cost 0.66, the real winner) and a small YES leg, same market.
+        await db.execute(
+            """INSERT INTO portfolio
+               (market_id, exchange, side, size, avg_price, current_price,
+                category, token, token_id, is_paper)
+               VALUES ('mkt', 'polymarket', 'BUY', 60, 0.66, 0.66,
+                       'tech', 'NO', 'tok_no', 0)"""
+        )
+        await db.execute(
+            """INSERT INTO portfolio
+               (market_id, exchange, side, size, avg_price, current_price,
+                category, token, token_id, is_paper)
+               VALUES ('mkt', 'polymarket', 'BUY', 2, 0.19, 0.19,
+                       'tech', 'YES', 'tok_yes', 0)"""
+        )
+        await db.commit()
+
+        # Live: NO=0.805 (the held winner), YES=0.195.
+        gamma = AsyncMock()
+        gamma.get_market = AsyncMock(return_value=_make_market(
+            "mkt", 0.195, no_price=0.805,
+            clob_yes="tok_yes", clob_no="tok_no",
+        ))
+
+        tracker = PortfolioTracker(db=db, settings=settings)
+        await tracker.check_exits(settings, gamma, exchange="polymarket")
+
+        no_row = await db.fetchone(
+            "SELECT current_price FROM portfolio WHERE market_id='mkt' AND token='NO'")
+        yes_row = await db.fetchone(
+            "SELECT current_price FROM portfolio WHERE market_id='mkt' AND token='YES'")
+        # Each leg marked at its OWN side's live price — no cross-clobber.
+        assert no_row["current_price"] == pytest.approx(0.805)
+        assert yes_row["current_price"] == pytest.approx(0.195)
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_label_used_when_market_tokens_unknown(settings):
     """No CLOB token ids on the market (e.g. Kalshi) — the YES/NO label keeps
     driving the mark, as before."""
