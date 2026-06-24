@@ -134,14 +134,10 @@ class ArbExecutionMixin:
         )
 
         try:
-            buy_result, sell_result = await asyncio.gather(
-                buy_client.place_order(buy_order),
-                sell_client.place_order(sell_order),
-            )
-            for _o, _r in ((buy_order, buy_result), (sell_order, sell_result)):
-                await self._exit_gateway.record_external_fill(
-                    _o, _r, strategy_source="conditional_arb",
-                    exchange_name=_o.exchange or "polymarket")
+            (buy_result, _), (sell_result, _) = await self._exit_gateway.place_legs(
+                [(buy_order, buy_client, buy_order.exchange or "polymarket"),
+                 (sell_order, sell_client, sell_order.exchange or "polymarket")],
+                strategy_source="conditional_arb", concurrent=True)
             buy_ok = buy_result.status not in ("rejected", "error")
             sell_ok = sell_result.status not in ("rejected", "error")
             mode = "PAPER" if not is_live else "LIVE"
@@ -492,13 +488,10 @@ class ArbExecutionMixin:
         )
 
         try:
-            results = await asyncio.gather(
-                *[exchange_client.place_order(o) for o in orders]
-            )
-            for _o, _r in zip(orders, results):
-                await self._exit_gateway.record_external_fill(
-                    _o, _r, strategy_source="negrisk_arb",
-                    exchange_name=_o.exchange or "polymarket")
+            placed = await self._exit_gateway.place_legs(
+                [(o, exchange_client, o.exchange or "polymarket") for o in orders],
+                strategy_source="negrisk_arb", concurrent=True)
+            results = [r for r, _ in placed]
             n_ok = sum(1 for r in results if r.status not in ("rejected", "error"))
             mode = "PAPER" if not is_live else "LIVE"
             if n_ok == len(orders):
@@ -648,12 +641,10 @@ class ArbExecutionMixin:
             return
 
         try:
-            yes_result = await exchange_client.place_order(yes_order)
-            no_result = await exchange_client.place_order(no_order)
-            for _o, _r in ((yes_order, yes_result), (no_order, no_result)):
-                await self._exit_gateway.record_external_fill(
-                    _o, _r, strategy_source="internal_arb",
-                    exchange_name=_o.exchange or "polymarket")
+            (yes_result, _), (no_result, _) = await self._exit_gateway.place_legs(
+                [(yes_order, exchange_client, yes_order.exchange or "polymarket"),
+                 (no_order, exchange_client, no_order.exchange or "polymarket")],
+                strategy_source="internal_arb", concurrent=False)
 
             log.info(
                 "arb_scanner.internal_executed",
@@ -823,20 +814,16 @@ class ArbExecutionMixin:
             }
 
         try:
-            yes_result, no_result = await asyncio.gather(
-                cheap_client.place_order(yes_order),
-                expensive_client.place_order(no_order),
-            )
-
-            # Record both legs through the gateway so they get the same invariant
-            # as every other money path (fills + cost_basis + pnl_ledger + the
-            # pending trades-mirror the order monitor finalizes). The legs were
-            # placed concurrently above to minimize the leg-risk window, so they
-            # use record_external_fill rather than submit_*.
-            for _o, _r, _exn in ((yes_order, yes_result, cheap_exchange),
-                                 (no_order, no_result, expensive_exchange)):
-                await self._exit_gateway.record_external_fill(
-                    _o, _r, strategy_source="cross_exchange_arb", exchange_name=_exn)
+            # Place + record both legs through the gateway (the single placement
+            # choke point). place_legs gathers them concurrently to minimize the
+            # leg-risk window and records each with the cross_exchange_arb
+            # invariant (fills + cost_basis + pnl_ledger + the pending
+            # trades-mirror the monitor finalizes). Raw results drive the
+            # half-fill rollback below.
+            (yes_result, _), (no_result, _) = await self._exit_gateway.place_legs(
+                [(yes_order, cheap_client, cheap_exchange),
+                 (no_order, expensive_client, expensive_exchange)],
+                strategy_source="cross_exchange_arb", concurrent=True)
 
             yes_ok = yes_result.status not in ("rejected", "error")
             no_ok = no_result.status not in ("rejected", "error")
@@ -1037,16 +1024,9 @@ class ArbExecutionMixin:
                 if order.size < 1:
                     continue
 
-                result = await engine.exchange.place_order(order)
-                from auramaur.monitoring.display import show_order
-                show_order(
-                    result.status, result.order_id, "SELL", order.size,
-                    order.price, result.is_paper, exchange="kalshi",
-                    error_message=result.error_message,
-                    market_id=pos["mid"],
-                )
-                await self._exit_gateway.record_external_fill(
-                    order, result, strategy_source="rebalance", exchange_name="kalshi")
+                (result, _), = await self._exit_gateway.place_legs(
+                    [(order, engine.exchange, "kalshi")],
+                    strategy_source="rebalance", concurrent=False, show=True)
 
                 if result.status not in ("rejected",):
                     sell_value = order.size * order.price

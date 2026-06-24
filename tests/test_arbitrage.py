@@ -175,11 +175,15 @@ async def test_internal_arb_uses_engine_exchange_attribute():
         order_id=f"ord-{o.token_id}", market_id=o.market_id, status="paper",
         filled_size=o.size, filled_price=o.price, is_paper=True))
 
+    _placed = OrderResult(order_id="ord", market_id="m1", status="paper",
+                          filled_size=20.0, filled_price=0.40, is_paper=True)
     mixin = ArbExecutionMixin.__new__(ArbExecutionMixin)
     mixin.settings = MagicMock()
     mixin.settings.is_live = False
     mixin._exit_gateway = MagicMock()
-    mixin._exit_gateway.record_external_fill = AsyncMock()
+    # internal arb now routes placement through the gateway's place_legs.
+    mixin._exit_gateway.place_legs = AsyncMock(
+        return_value=[(_placed, MagicMock()), (_placed, MagicMock())])
     db = MagicMock()
     db.fetchone = AsyncMock(return_value=None)  # pairing guard: not already held
     alerts = MagicMock()
@@ -203,6 +207,10 @@ async def test_internal_arb_uses_engine_exchange_attribute():
 
     await mixin._execute_internal_arb(opp, risk, engines)
 
-    # Both legs placed through engine.exchange — proves the attribute resolves.
-    assert exchange.place_order.await_count == 2
-    assert mixin._exit_gateway.record_external_fill.await_count == 2
+    # Reached place_legs with both legs bound to engine.exchange — proves the
+    # `.exchange` attribute resolves (old `._exchange` would AttributeError first)
+    # and that internal arb places through the gateway choke point.
+    mixin._exit_gateway.place_legs.assert_awaited_once()
+    legs = mixin._exit_gateway.place_legs.await_args.args[0]
+    assert len(legs) == 2
+    assert all(client is exchange for _order, client, _exn in legs)

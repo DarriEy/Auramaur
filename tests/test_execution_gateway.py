@@ -344,3 +344,78 @@ def test_submit_paired_build_failure_places_neither():
         ex_b.place_order.assert_not_awaited()  # neither leg placed
 
     asyncio.run(run())
+
+
+def test_place_legs_concurrent_places_all_and_records_each():
+    """place_legs gathers concurrent legs and records each (fills+trades),
+    returning the raw OrderResults for the caller's rollback logic."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        legs = []
+        clients = []
+        for i in range(3):
+            order = Order(market_id=f"m{i}", exchange="polymarket", token_id="tok",
+                          side=OrderSide.BUY, token=TokenType.YES, size=10.0, price=0.30)
+            result = OrderResult(order_id=f"o{i}", market_id=f"m{i}", status="paper",
+                                 filled_size=10.0, filled_price=0.30, is_paper=True)
+            client = MagicMock(); client.place_order = AsyncMock(return_value=result)
+            clients.append(client)
+            legs.append((order, client, "polymarket"))
+        gw = _gateway(db, MagicMock())
+        out = await gw.place_legs(legs, strategy_source="negrisk_arb", concurrent=True)
+        # raw results returned in order
+        assert [r.order_id for r, _ in out] == ["o0", "o1", "o2"]
+        for c in clients:
+            c.place_order.assert_awaited_once()
+        # each leg recorded with the strategy attribution
+        rows = await db.fetchall("SELECT strategy_source FROM trades")
+        assert len(rows) == 3 and all(dict(r)["strategy_source"] == "negrisk_arb" for r in rows)
+        assert len(await db.fetchall("SELECT 1 FROM fills")) == 3
+    asyncio.run(run())
+
+
+def test_place_legs_sequential_preserves_order():
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        seen = []
+        legs = []
+        for i in range(2):
+            order = Order(market_id="m", exchange="polymarket", token_id=f"t{i}",
+                          side=OrderSide.BUY, token=TokenType.YES, size=5.0, price=0.4)
+            async def _place(o, _i=i):
+                seen.append(_i)
+                return OrderResult(order_id=f"o{_i}", market_id="m", status="paper",
+                                   filled_size=5.0, filled_price=0.4, is_paper=True)
+            client = MagicMock(); client.place_order = _place
+            legs.append((order, client, "polymarket"))
+        gw = _gateway(db, MagicMock())
+        await gw.place_legs(legs, strategy_source="internal_arb", concurrent=False)
+        assert seen == [0, 1]  # sequential, in order
+    asyncio.run(run())
+
+
+def test_place_quote_pair_places_bid_then_ask_and_returns_both():
+    """The MM's owned placement entry point: bid then ask, both raw results back,
+    sequential (not both-or-nothing)."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        order_seen = []
+        bid = Order(market_id="mm", exchange="polymarket", token_id="yes",
+                    side=OrderSide.BUY, token=TokenType.YES, size=20.0, price=0.40,
+                    post_only=True, source="market_maker")
+        ask = Order(market_id="mm", exchange="polymarket", token_id="no",
+                    side=OrderSide.BUY, token=TokenType.NO, size=20.0, price=0.55,
+                    post_only=True, source="market_maker")
+        async def _place(o):
+            order_seen.append(o.token_id)
+            return OrderResult(order_id=f"oid-{o.token_id}", market_id="mm",
+                               status="pending", is_paper=False)
+        ex = MagicMock(); ex.place_order = _place
+        gw = _gateway(db, ex)
+        bid_res, ask_res = await gw.place_quote_pair(bid, ask, exchange=ex)
+        assert order_seen == ["yes", "no"]  # bid then ask
+        assert bid_res.order_id == "oid-yes" and ask_res.order_id == "oid-no"
+    asyncio.run(run())

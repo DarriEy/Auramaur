@@ -293,11 +293,11 @@ async def test_partial_quote_cancels_surviving_leg():
 
 @pytest.mark.asyncio
 async def test_mm_orders_self_stamp_market_maker_source():
-    """Invariant for the documented direct-placement exception: the market maker
-    places orders straight through the exchange (bypassing ExecutionGateway), so
-    it MUST self-stamp source='market_maker' and post_only — that source is what
-    lets the order monitor write a correctly-attributed trades-mirror for the
-    fill (preserving fill<->trades parity), and post_only keeps it maker-only."""
+    """The MM routes placement through the gateway's place_quote_pair, but it
+    still builds the orders, so they MUST self-stamp source='market_maker' and
+    post_only — that source is what lets the order monitor write a
+    correctly-attributed trades-mirror for the fill (preserving fill<->trades
+    parity), and post_only keeps it maker-only."""
     from types import SimpleNamespace
 
     from auramaur.exchange.models import TokenType

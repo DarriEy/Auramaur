@@ -20,27 +20,21 @@ class ExecutionMode(str, Enum):
     distinguishable from an accidental one (the conformance guard asserts it).
     """
 
-    # Route through the single ExecutionGateway money path:
-    # Gateway-submitted — the pillar never calls exchange.place_order itself;
-    # the gateway places AND records (this is what the conformance guard asserts):
+    # Every mode below routes ALL placement through the ExecutionGateway — no
+    # pillar/flow calls exchange.place_order directly — EXCEPT DIRECT_EQUITY.
     GATEWAY_SINGLE = "gateway_single"      # gateway.submit() — directional pillars
     GATEWAY_PAIRED = "gateway_paired"      # gateway.submit_paired() — both-or-nothing arb
-    # Places directly for timing/atomicity reasons, but still RECORDS through the
-    # gateway (record_external_fill) — so it does call place_order and is NOT a
-    # gateway-pure mode:
-    GATEWAY_EXTERNAL = "gateway_external"  # concurrently-placed arb legs, then record_external_fill()
-    # Fully direct, justified bypasses (own accounting):
-    DIRECT_QUOTING = "direct_quoting"      # market maker — resting two-sided quotes (no Signal/risk)
+    GATEWAY_EXTERNAL = "gateway_external"  # gateway.place_legs() — concurrent arb legs, then records
+    DIRECT_QUOTING = "direct_quoting"      # market maker — gateway.place_quote_pair() (resting two-sided)
+    # The one genuine off-gateway exception:
     DIRECT_EQUITY = "direct_equity"        # oddlot tender — IBKR equities, outside the PM gateway
 
 
-# Gateway-PURE modes: the pillar must not call exchange.place_order at all (the
-# gateway submits on its behalf). GATEWAY_EXTERNAL is deliberately excluded — it
-# places directly then records — matching the conformance guard's skip set.
-GATEWAY_PURE_MODES = frozenset({
-    ExecutionMode.GATEWAY_SINGLE,
-    ExecutionMode.GATEWAY_PAIRED,
-})
+# Modes whose module must NOT contain a raw exchange.place_order — placement goes
+# through a gateway method (submit / submit_paired / place_legs / place_quote_pair).
+# Only DIRECT_EQUITY (IBKR, genuinely off the prediction-market gateway) is exempt.
+NO_DIRECT_PLACE_MODES = frozenset(
+    m for m in ExecutionMode if m is not ExecutionMode.DIRECT_EQUITY)
 
 
 @runtime_checkable
