@@ -75,7 +75,7 @@ async def fetch_redeemable_positions(
 
     close_session = session is None
     if session is None:
-        session = aiohttp.ClientSession()
+        session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
 
     try:
         params = {"user": proxy_address, "sizeThreshold": "0.01"}

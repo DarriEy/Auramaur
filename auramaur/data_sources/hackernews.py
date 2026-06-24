@@ -53,7 +53,7 @@ class HackerNewsSource:
         q_lower = (query or "").lower()
         q_tokens = [t for t in q_lower.split() if len(t) > 2]
 
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
             ids = await self._fetch_ids(session)
             if not ids:
                 return []

@@ -36,7 +36,7 @@ class USGSSource:
     async def fetch(self, query: str, limit: int = 20) -> list[NewsItem]:
         items: list[NewsItem] = []
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
                 async with session.get(_FEED_URL, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     if resp.status != 200:
                         logger.warning("usgs.fetch_error", status=resp.status)

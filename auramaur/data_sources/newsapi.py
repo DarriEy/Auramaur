@@ -30,7 +30,7 @@ class NewsAPISource:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
         return self._session
 
     async def _rate_limit(self) -> None:
