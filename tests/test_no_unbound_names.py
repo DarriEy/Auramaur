@@ -24,6 +24,7 @@ _EXTRACTED = [
     "auramaur/bot_strategy_tasks.py",
     "auramaur/bot_order_monitor.py",
     "auramaur/components.py",
+    "auramaur/composition.py",
 ]
 
 

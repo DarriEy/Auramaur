@@ -23,8 +23,6 @@ from auramaur.data_sources.fred import FREDSource
 from auramaur.data_sources.rss import RSSSource
 from auramaur.data_sources.websearch import WebSearchSource
 from auramaur.db.database import Database
-from auramaur.exchange.client import PolymarketClient
-from auramaur.exchange.gamma import GammaClient
 from auramaur.exchange.models import OrderSide, TokenType
 
 if TYPE_CHECKING:
@@ -237,118 +235,29 @@ class AuramaurBot(
 
         log.info("bot.analyzer_mode", mode="strategic+depth_agent+technical")
 
-        # Strategy — per-exchange engines
-        engines: dict[str, TradingEngine] = {}
-        discoveries: dict[str, MarketDiscovery] = {}
-        exchanges_map: dict[str, ExchangeClient] = {}
-        syncers: list = []
-
-        from auramaur.broker.sync import PositionSyncer, KalshiPositionSyncer
-        from auramaur.broker.router import SmartOrderRouter
-        from auramaur.broker.reconciler import PositionReconciler
-
-        # Primary exchange (Polymarket) — only if not filtered to another exchange
-        exchange = None
-        gamma = None
-        syncer = None
-        reconciler = None
-        router = None
-        if self._exchange_filter is None or self._exchange_filter == "polymarket":
-            gamma = GammaClient()
-            exchange = PolymarketClient(settings=s, paper_trader=paper)
-            discoveries["polymarket"] = gamma
-            exchanges_map["polymarket"] = exchange
-
-            syncer = PositionSyncer(settings=s, db=db, exchange=exchange, paper=paper, pnl=pnl_tracker)
-            reconciler = PositionReconciler(exchange=exchange, db=db)
-            router = SmartOrderRouter(settings=s, exchange=exchange)
-            syncers.append(syncer)
-
-            poly_engine = TradingEngine(
-                settings=s, db=db, discovery=gamma, aggregator=aggregator,
-                analyzer=analyzer, cache=cache, risk_manager=risk_manager,
-                exchange=exchange, calibration=calibration,
-                flow_tracker=flow_tracker,
-                router=router, allocator=allocator,
-                technical_analyzer=technical,
-            )
-            poly_engine._components_pnl = pnl_tracker
-            poly_engine._components_syncer = syncer
-            poly_engine.strategic = strategic
-            poly_engine.exchange_name = "polymarket"
-            poly_engine._hybrid = self._hybrid
-
-            engines["polymarket"] = poly_engine
-
-        # Kalshi (optional, guarded import) — same first-class wiring as Polymarket
-        if s.kalshi.enabled and (self._exchange_filter is None or self._exchange_filter == "kalshi"):
-            try:
-                from auramaur.exchange.kalshi import KalshiClient
-                kalshi = KalshiClient(settings=s, paper_trader=paper)
-                discoveries["kalshi"] = kalshi
-                exchanges_map["kalshi"] = kalshi
-
-                kalshi_syncer = KalshiPositionSyncer(settings=s, db=db, exchange=kalshi, paper=paper)
-                kalshi_router = SmartOrderRouter(settings=s, exchange=kalshi)
-                syncers.append(kalshi_syncer)
-
-                kalshi_engine = TradingEngine(
-                    settings=s, db=db, discovery=kalshi, aggregator=aggregator,
-                    analyzer=analyzer, cache=cache, risk_manager=risk_manager,
-                    exchange=kalshi, calibration=calibration,
-                    flow_tracker=flow_tracker,
-                    router=kalshi_router, allocator=allocator,
-                    technical_analyzer=technical,
-                )
-                kalshi_engine._components_pnl = pnl_tracker
-                kalshi_engine._components_syncer = kalshi_syncer
-                kalshi_engine.strategic = strategic
-                kalshi_engine.exchange_name = "kalshi"
-                kalshi_engine._hybrid = self._hybrid
-                kalshi_engine._rebalance_cooldowns = self._rebalance_cooldowns
-                engines["kalshi"] = kalshi_engine
-            except ImportError:
-                log.warning("optional.missing", component="KalshiClient")
-
-        # Crypto.com (optional, works internationally)
-        if s.cryptodotcom.enabled and (self._exchange_filter is None or self._exchange_filter == "cryptodotcom"):
-            try:
-                from auramaur.exchange.cryptodotcom import CryptoComClient
-                cryptodotcom = CryptoComClient(settings=s, paper_trader=paper)
-                discoveries["cryptodotcom"] = cryptodotcom
-                cdc_engine = TradingEngine(
-                    settings=s, db=db, discovery=cryptodotcom, aggregator=aggregator,
-                    analyzer=analyzer, cache=cache, risk_manager=risk_manager,
-                    exchange=cryptodotcom, calibration=calibration,
-                    flow_tracker=flow_tracker,
-                    allocator=allocator,
-                    technical_analyzer=technical,
-                )
-                cdc_engine.strategic = strategic
-                cdc_engine.exchange_name = "cryptodotcom"
-                cdc_engine._hybrid = self._hybrid
-                engines["cryptodotcom"] = cdc_engine
-            except ImportError:
-                log.warning("optional.missing", component="CryptoComClient")
-
-        # Interactive Brokers options scanner (optional, guarded import). Gated
-        # by options_enabled so the equity book can run without waking the
-        # OPRA-less option scanner (which otherwise spams Error 200/10091).
-        if s.ibkr.enabled and s.ibkr.options_enabled and (self._exchange_filter is None or self._exchange_filter == "ibkr"):
-            try:
-                from auramaur.exchange.ibkr import IBKRClient
-                ibkr = IBKRClient(settings=s, paper_trader=paper)
-                discoveries["ibkr"] = ibkr
-                exchanges_map["ibkr"] = ibkr
-                engines["ibkr"] = TradingEngine(
-                    settings=s, db=db, discovery=ibkr, aggregator=aggregator,
-                    analyzer=analyzer, cache=cache, risk_manager=risk_manager,
-                    exchange=ibkr, calibration=calibration,
-                    flow_tracker=flow_tracker,
-                    technical_analyzer=technical,
-                )
-            except ImportError:
-                log.warning("optional.missing", component="IBKRClient")
+        # Per-venue service graph (composition root, auramaur/composition.py).
+        # Build the shared globals once, then ask each enabled venue builder for
+        # its slice (exchange/discovery/engine/syncer/...). Replaces ~110 lines of
+        # inline per-venue wiring; produces the same venue-keyed maps + scalars.
+        from auramaur.composition import GlobalServices, assemble_venues
+        _g = GlobalServices(
+            settings=s, db=db, paper=paper, aggregator=aggregator, analyzer=analyzer,
+            cache=cache, calibration=calibration, risk_manager=risk_manager,
+            flow_tracker=flow_tracker, pnl_tracker=pnl_tracker, allocator=allocator,
+            strategic=strategic, technical=technical, hybrid=self._hybrid,
+            rebalance_cooldowns=self._rebalance_cooldowns,
+        )
+        _venues = assemble_venues(_g, self._exchange_filter)
+        discoveries = _venues["discoveries"]
+        exchanges_map = _venues["exchanges_map"]
+        engines = _venues["engines"]
+        syncers = _venues["syncers"]
+        syncer = _venues["syncer"]
+        reconciler = _venues["reconciler"]
+        router = _venues["router"]
+        # Polymarket's exchange/discovery feed the primary_* picks + market maker.
+        gamma = discoveries.get("polymarket")
+        exchange = exchanges_map.get("polymarket")
 
         # Resolution tracker — auto-detects when markets resolve and feeds
         # outcomes into the calibration loop for Platt scaling updates.
