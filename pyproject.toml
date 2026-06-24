@@ -38,6 +38,10 @@ ibkr = ["ib_async>=1.0.0"]
 # Semantic evidence ranking. Optional: without it, relevance scoring falls back
 # to scikit-learn TF-IDF and then a no-dependency heuristic.
 embeddings = ["sentence-transformers>=3.0"]
+# Hermes agent-trader bridge: exposes Auramaur's read/paper plumbing as an MCP
+# server (auramaur.agentmcp.server) that the Hermes agent consumes over stdio.
+# Kept out of the live bot's runtime deps on purpose — the bot never imports it.
+agent = ["fastmcp>=2"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

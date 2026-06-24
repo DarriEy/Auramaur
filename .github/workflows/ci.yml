@@ -24,8 +24,10 @@ jobs:
       # Install the EXACT locked dependency set (uv.lock is committed) so CI
       # tests the same runtime the bot runs. --frozen fails if the lock drifts
       # from pyproject, which is the signal we want.
+      # --extra agent installs the Hermes-bridge dep (fastmcp) so the
+      # agentmcp bridge test runs for real here instead of importorskip-ing.
       - name: Install from locked dependencies
-        run: uv sync --frozen --extra dev
+        run: uv sync --frozen --extra dev --extra agent
 
       # Safety gates first, fail-fast, so a triple-gate/settings regression is
       # the headline even if something else also breaks.
