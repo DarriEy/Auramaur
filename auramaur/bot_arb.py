@@ -621,7 +621,7 @@ class ArbExecutionMixin:
         if position_size <= 0:
             return
 
-        exchange_client = engine._exchange  # type: ignore[attr-defined]
+        exchange_client = engine.exchange
 
         # YES leg
         yes_order = Order(
