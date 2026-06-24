@@ -27,6 +27,12 @@ _EXTRACTED = [
     "auramaur/bot_order_monitor.py",
     "auramaur/components.py",
     "auramaur/composition.py",
+    "auramaur/cli/run.py",
+    "auramaur/cli/diagnostics.py",
+    "auramaur/cli/kraken.py",
+    "auramaur/cli/reporting.py",
+    "auramaur/cli/maintenance.py",
+    "auramaur/cli/redeem.py",
 ]
 
 
