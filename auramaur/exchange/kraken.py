@@ -26,7 +26,6 @@ import hashlib
 import hmac
 import time
 import urllib.parse
-from pathlib import Path
 from auramaur.killswitch import kill_switch_present
 
 import aiohttp

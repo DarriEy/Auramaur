@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import statistics
 
 from auramaur.exchange.models import Confidence

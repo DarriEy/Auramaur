@@ -27,10 +27,8 @@ Safety:
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from auramaur.killswitch import kill_switch_present
 from typing import Any
 

@@ -294,7 +294,7 @@ class ExitExecutionMixin:
         SELL signal with ``exit_token`` set and let the exchange's
         ``prepare_order`` do the rest.
         """
-        from auramaur.exchange.models import Confidence, Market, Signal
+        from auramaur.exchange.models import Confidence, Signal
 
         market = await discovery.get_market(pos.market_id)
         if market is None:

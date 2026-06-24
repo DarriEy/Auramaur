@@ -26,10 +26,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
-import json
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from auramaur.killswitch import kill_switch_present
 
 import aiohttp

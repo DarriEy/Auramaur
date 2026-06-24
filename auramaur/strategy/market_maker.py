@@ -20,7 +20,6 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
 from auramaur.killswitch import kill_switch_present
 
 import structlog

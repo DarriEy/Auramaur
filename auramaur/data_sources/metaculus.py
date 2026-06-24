@@ -122,7 +122,6 @@ class MetaculusSource:
                 question_id = question.get("id", 0)
                 forecaster_count = question.get("number_of_forecasters", 0)
                 resolution_date = question.get("resolve_time", "")
-                created = question.get("created_time", "")
 
                 content = (
                     f"METACULUS COMMUNITY FORECAST: {title_text}\n"

@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from auramaur.exchange.models import (
-    Confidence, Market, Order, OrderSide, OrderType, Signal, TokenType,
+    Confidence, Market, Order, OrderSide, Signal, TokenType,
 )
 from auramaur.monitoring.display import console
 from auramaur.nlp.errors import BudgetExhausted
@@ -176,7 +176,7 @@ class ArbExecutionMixin:
         on markets where the strategic batch found potential edge but
         confidence was low or the market is high-value.
         """
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from auramaur.strategy.agent_analyzer import AgentAnalyzer
 
@@ -274,7 +274,6 @@ class ArbExecutionMixin:
                     candidate = await depth_agent.deep_research(market)
                     if candidate:
                         # Run through risk checks and execution
-                        from auramaur.strategy.protocols import TradeCandidate
                         results = await engine._execute_candidates([candidate])
                         trades = [r for r in results if r.get("order")]
                         if trades:
@@ -394,7 +393,7 @@ class ArbExecutionMixin:
         with the COMPLETE set, so if any leg fails risk checks the whole package
         is skipped, and a partial fill raises a critical alert for manual review.
         """
-        from auramaur.exchange.models import Confidence, Signal
+        from auramaur.exchange.models import Signal
 
         engine = engines.get(opp.exchange)
         if engine is None:
@@ -535,7 +534,7 @@ class ArbExecutionMixin:
 
         Both legs must pass risk checks independently before execution.
         """
-        from auramaur.exchange.models import Confidence, Signal
+        from auramaur.exchange.models import Signal
 
         market = opp.market_a  # Same market for both sides
         exchange_name = opp.exchange_a
@@ -698,7 +697,7 @@ class ArbExecutionMixin:
         concurrent; half-fills trigger a cancel with a critical alert if
         cancel can't confirm.
         """
-        from auramaur.exchange.models import Confidence, Signal
+        from auramaur.exchange.models import Signal
 
         # Identify which side is cheap (lower YES price)
         if opp.price_a <= opp.price_b:
@@ -914,7 +913,7 @@ class ArbExecutionMixin:
         sell contracts to bring it down to TARGET_EVENT_PCT.  This prevents
         concentration risk from locking up all capital in one bet.
         """
-        from auramaur.exchange.models import Confidence, Signal, TokenType as TT
+        from auramaur.exchange.models import Signal, TokenType as TT
 
         MAX_EVENT_PCT = 0.30   # trigger rebalance above 30%
         TARGET_EVENT_PCT = 0.20  # trim down to 20%
@@ -975,7 +974,7 @@ class ArbExecutionMixin:
                 target=round(target_exposure, 2),
                 excess=round(excess, 2),
             )
-            from datetime import datetime, timezone
+            from datetime import datetime
             ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
             console.print(
                 f"[dim]{ts}[/] [bold yellow]REBALANCE[/] {event_key} "

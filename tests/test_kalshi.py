@@ -469,7 +469,7 @@ class TestKalshiV2BookSideMapping:
 
 class TestKalshiCancelV2:
     def _client(self):
-        from unittest.mock import AsyncMock, MagicMock
+        from unittest.mock import MagicMock
         import asyncio as _asyncio
         c = KalshiClient.__new__(KalshiClient)
         c._init_api = MagicMock()

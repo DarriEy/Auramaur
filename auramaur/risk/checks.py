@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from auramaur.killswitch import kill_switch_present
 from typing import Any
 

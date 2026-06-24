@@ -5,7 +5,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from auramaur.risk.checks import (
-    CheckResult,
     check_kill_switch,
     check_max_drawdown,
     check_drawdown_heat,

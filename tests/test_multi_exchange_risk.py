@@ -1,6 +1,5 @@
 """Tests for multi-exchange risk enforcement."""
 
-import pytest
 
 from auramaur.exchange.models import Market, Order, OrderSide
 

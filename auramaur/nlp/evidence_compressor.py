@@ -15,8 +15,6 @@ into the principal components that carry the most predictive signal.
 
 from __future__ import annotations
 
-import asyncio
-import json
 import re
 
 import structlog
@@ -235,7 +233,6 @@ def _extract_temporal(evidence: list[NewsItem]) -> str:
         return ""
 
     newest = min(ages)
-    oldest = max(ages)
 
     if newest < 1:
         freshness = "Breaking — evidence from last hour"

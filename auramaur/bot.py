@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from pathlib import Path
 from auramaur.killswitch import kill_switch_present
 from typing import TYPE_CHECKING
 
@@ -25,27 +24,24 @@ from auramaur.data_sources.websearch import WebSearchSource
 from auramaur.db.database import Database
 from auramaur.exchange.client import PolymarketClient
 from auramaur.exchange.gamma import GammaClient
-from auramaur.exchange.models import Fill, Order, OrderSide, OrderType, TokenType
+from auramaur.exchange.models import OrderSide, TokenType
 
 if TYPE_CHECKING:
-    from auramaur.exchange.models import Market, Signal
+    pass
 from auramaur.exchange.protocols import ExchangeClient, MarketDiscovery
 from auramaur.exchange.paper import PaperTrader
 from auramaur.monitoring.alerts import AlertManager
 from auramaur.monitoring.display import (
-    console, show_banner, show_error, show_portfolio, show_source_error, show_startup,
+    console, show_banner, show_error, show_portfolio, show_startup,
 )
 from auramaur.monitoring.logger import setup_logging
 from auramaur.nlp.analyzer import ClaudeAnalyzer
 from auramaur.nlp.cache import NLPCache
 from auramaur.nlp.calibration import CalibrationTracker
-from auramaur.nlp.errors import BudgetExhausted
 from auramaur.risk.manager import RiskManager
 from auramaur.risk.portfolio import PortfolioTracker
 from auramaur.strategy.arbitrage_scanner import (
-    ArbOpportunity,
     ArbitrageScanner,
-    NegRiskArbOpportunity,
 )
 from auramaur.strategy.engine import TradingEngine
 from auramaur.strategy.market_maker import MarketMaker
@@ -878,7 +874,7 @@ class AuramaurBot(
                         # Gates closed — fall back to the manual-action banner.
                         console.print()
                         console.print(
-                            f"[bold green]╔══ REDEMPTION AVAILABLE ══╗[/]"
+                            "[bold green]╔══ REDEMPTION AVAILABLE ══╗[/]"
                         )
                         console.print(
                             f"[bold green]║[/] [green]${payout:.2f} USDC[/] ready to "
@@ -887,11 +883,11 @@ class AuramaurBot(
                             f"(net [green]${summary['net_pnl_now']:+.2f}[/])"
                         )
                         console.print(
-                            f"[bold green]║[/] [dim]→ https://polymarket.com/portfolio  "
-                            f"or run:[/] [cyan]auramaur redeem --submit[/]"
+                            "[bold green]║[/] [dim]→ https://polymarket.com/portfolio  "
+                            "or run:[/] [cyan]auramaur redeem --submit[/]"
                         )
                         console.print(
-                            f"[bold green]╚══════════════════════════╝[/]"
+                            "[bold green]╚══════════════════════════╝[/]"
                         )
                         console.print()
                         last_notified_payout = payout
@@ -1361,12 +1357,10 @@ class AuramaurBot(
     async def _task_position_sync(self) -> None:
         """Periodically sync positions from CLOB trade history (ground truth)."""
         from auramaur.broker.reconciler import PositionReconciler
-        from auramaur.broker.pnl import PnLTracker
         from auramaur.broker.sync import PositionSyncer
 
         reconciler: PositionReconciler = self._components["reconciler"]
         syncer: PositionSyncer = self._components["syncer"]
-        pnl: PnLTracker = self._components["pnl_tracker"]
         interval = self.settings.broker.sync_interval_seconds
 
         while self._running:

@@ -187,7 +187,6 @@ class GammaClient:
             # Extract prices from outcomes/tokens
             yes_price = 0.5
             no_price = 0.5
-            tokens = data.get("tokens", []) or data.get("clobTokenIds", [])
 
             if isinstance(data.get("outcomePrices"), str):
                 import json

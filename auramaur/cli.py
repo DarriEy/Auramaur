@@ -582,7 +582,7 @@ def health():
             console.print(f"  [{colour[r.severity]}]{r.severity:<5}[/] {r.name}: {r.detail}")
         if report.live_allowed:
             warns = len(report.warnings)
-            console.print(f"\n[bold green]LIVE ALLOWED[/]"
+            console.print("\n[bold green]LIVE ALLOWED[/]"
                           + (f" ([yellow]{warns} warning(s)[/])" if warns else ""))
             return 0
         console.print("\n[bold red]LIVE BLOCKED[/] — "

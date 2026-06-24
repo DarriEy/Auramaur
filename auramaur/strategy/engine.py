@@ -14,27 +14,26 @@ import time
 
 from auramaur.data_sources.aggregator import Aggregator
 from auramaur.db.database import Database
-from auramaur.exchange.models import Market, OrderResult, OrderSide, Signal
+from auramaur.exchange.models import Market, OrderResult, Signal
 from auramaur.exchange.protocols import ExchangeClient, MarketDiscovery
 
 # Shared directory for cross-instance market claim locks
 _CLAIM_DIR = os.path.join(tempfile.gettempdir(), "auramaur_claims")
 os.makedirs(_CLAIM_DIR, exist_ok=True)
 from auramaur.monitoring.display import (
-    show_analysis, show_analyzing, show_cycle_summary,
-    show_evidence, show_order, show_order_dropped, show_risk_decision, show_scan_results,
+    show_analysis, show_analyzing, show_evidence, show_risk_decision,
 )
 from auramaur.nlp.analyzer import ClaudeAnalyzer
 from auramaur.nlp.cache import NLPCache
 from auramaur.nlp.calibration import CalibrationTracker
-from auramaur.broker.allocator import CandidateTrade, CapitalAllocator
+from auramaur.broker.allocator import CapitalAllocator
 from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
-from auramaur.broker.router import SmartOrderRouter, UnmarketableSignal
+from auramaur.broker.router import SmartOrderRouter
 from auramaur.risk.manager import RiskManager
-from auramaur.strategy.classifier import blocked_category_hit, ensure_category
+from auramaur.strategy.classifier import ensure_category
 from auramaur.strategy.order_flow import OrderFlowTracker
-from auramaur.strategy.protocols import MarketAnalyzer, TradeCandidate
-from auramaur.strategy.signals import detect_edge, taker_fee_rate
+from auramaur.strategy.protocols import MarketAnalyzer
+from auramaur.strategy.signals import detect_edge
 from auramaur.strategy.engine_cycle import CycleOrchestrationMixin
 
 log = structlog.get_logger()

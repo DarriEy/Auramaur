@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import structlog
 from fredapi import Fred  # type: ignore[import-untyped]
 
-from auramaur.data_sources.base import DataSource, NewsItem
+from auramaur.data_sources.base import NewsItem
 
 logger = structlog.get_logger(__name__)
 

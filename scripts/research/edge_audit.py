@@ -14,7 +14,6 @@ Brier: mean((pred-actual)^2). 0 = perfect, 0.25 = coin flip. <0.25 = real edge.
 from __future__ import annotations
 
 import sqlite3
-import sys
 
 DB = "auramaur.db"
 

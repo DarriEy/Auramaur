@@ -1,7 +1,7 @@
 """Tests for paper trading simulator."""
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 from auramaur.exchange.models import Order, OrderSide
 from auramaur.exchange.paper import PaperTrader

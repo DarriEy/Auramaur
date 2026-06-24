@@ -52,6 +52,17 @@ auramaur = "auramaur.cli:main"
 target-version = "py311"
 line-length = 100
 
+[tool.ruff.lint.per-file-ignores]
+# The orchestrators use intentional late/in-function module imports to break
+# import cycles; E402 (import-not-at-top) there is by design, not a defect.
+"auramaur/bot.py" = ["E402"]
+"auramaur/strategy/engine.py" = ["E402"]
+"auramaur/cli.py" = ["E402"]
+# Tests and research scripts: inline semicolons (E702), local setup imports
+# (E402), and throwaway locals (F841) are idiomatic here and not worth churn.
+"tests/**" = ["E402", "E702", "F841"]
+"scripts/**" = ["E402", "E702", "F841"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

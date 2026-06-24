@@ -57,7 +57,8 @@ class ESPNSource:
                         teams = comp.get("competitors") or []
                         score_line = ""
                         if len(teams) == 2 and teams[0].get("score") is not None:
-                            a = teams[0]; b = teams[1]
+                            a = teams[0]
+                            b = teams[1]
                             score_line = f"{a.get('team', {}).get('displayName', '?')} {a.get('score', '?')} - {b.get('team', {}).get('displayName', '?')} {b.get('score', '?')}"
                         items.append(NewsItem(
                             id=hashlib.md5(f"espn:{event.get('id')}".encode()).hexdigest(),

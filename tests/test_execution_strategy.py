@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from auramaur.exchange.models import OrderBook, OrderBookLevel, OrderSide, OrderType
 from auramaur.strategy.execution import ExecutionStrategy

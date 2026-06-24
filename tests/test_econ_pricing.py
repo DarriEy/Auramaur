@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 
 from auramaur.strategy.econ_pricing import (
     ECON_SERIES,

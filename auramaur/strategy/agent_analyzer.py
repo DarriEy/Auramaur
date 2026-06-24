@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from datetime import date
 from pathlib import Path
 
 import structlog
