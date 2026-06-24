@@ -1489,6 +1489,8 @@ class AuramaurBot(
             level=self.settings.logging.level,
             json_format=False,  # Console-friendly output
             log_file=self.settings.logging.file,
+            rotate_max_mb=self.settings.logging.rotate_max_mb,
+            rotate_backups=self.settings.logging.rotate_backups,
         )
 
         mode = "LIVE" if self.settings.is_live else "PAPER"

@@ -889,6 +889,12 @@ class LoggingConfig(BaseModel):
     level: str = "INFO"
     json_format: bool = True
     file: str = "auramaur.log"
+    # Size-based rotation of the structlog file. Tighter than the old hardcoded
+    # 50MB×5 (≈300MB of mostly-noise): 10MB×3 keeps the on-disk log current and
+    # bounded at ~40MB so a noisy source can't bury the recent signal in a giant
+    # file. Tune up if you need deeper history.
+    rotate_max_mb: int = 10
+    rotate_backups: int = 3
 
 
 class Settings(BaseSettings):
