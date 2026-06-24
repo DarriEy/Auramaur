@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import random
 import uuid
-from datetime import datetime
 
 import structlog
 
 from auramaur.db.database import Database
-from auramaur.exchange.models import Order, OrderResult, OrderSide, OrderType, Position, TokenType
+from auramaur.exchange.models import Order, OrderResult, OrderSide, Position, TokenType
 
 log = structlog.get_logger()
 

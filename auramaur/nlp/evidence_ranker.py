@@ -12,7 +12,6 @@ so we feed the model the best N items, not the first N.
 
 from __future__ import annotations
 
-import math
 from datetime import datetime, timezone
 
 import structlog

@@ -14,7 +14,6 @@ The RSS feed has been stable for years and is the safest choice.
 from __future__ import annotations
 
 import hashlib
-import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 

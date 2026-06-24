@@ -1,7 +1,7 @@
 """Tests for signal/edge detection."""
 
 import pytest
-from auramaur.exchange.models import Market, Confidence
+from auramaur.exchange.models import Market
 from auramaur.nlp.analyzer import AnalysisResult
 from auramaur.strategy.signals import detect_edge
 

@@ -14,9 +14,7 @@ Safety: Same three-gate model as other exchanges.
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timezone
-from pathlib import Path
 from auramaur.killswitch import kill_switch_present
 
 import structlog
@@ -388,7 +386,6 @@ class IBKRClient:
             # Parse contract info from token_id
             parts = order.token_id.split(":")
             con_id = int(parts[0])
-            action_str = parts[1]
             right = parts[2]
             strike = float(parts[3])
             expiry = parts[4]

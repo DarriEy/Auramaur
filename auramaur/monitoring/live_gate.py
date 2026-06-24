@@ -14,7 +14,6 @@ state are untrustworthy.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from auramaur.killswitch import kill_switch_present
 from typing import Literal
 

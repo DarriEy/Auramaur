@@ -1,7 +1,6 @@
 """Strategy attribution now sums cost_basis.realized_pnl (not trades.pnl)."""
 
 import asyncio
-from types import SimpleNamespace
 
 from auramaur.db.database import Database
 from auramaur.monitoring.attribution import PerformanceAttributor

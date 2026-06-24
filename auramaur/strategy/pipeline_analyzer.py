@@ -161,7 +161,6 @@ class PipelineAnalyzer:
         price_history: dict[str, list[float]] | None = None,
     ) -> list[TradeCandidate]:
         """Analyze markets one at a time (legacy path)."""
-        from auramaur.nlp.query_decomposer import extract_search_queries
 
         candidates: list[TradeCandidate] = []
 

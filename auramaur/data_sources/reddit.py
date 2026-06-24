@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import asyncpraw  # type: ignore[import-untyped]
 import structlog
 
-from auramaur.data_sources.base import DataSource, NewsItem
+from auramaur.data_sources.base import NewsItem
 
 logger = structlog.get_logger(__name__)
 

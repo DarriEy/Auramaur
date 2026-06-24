@@ -7,7 +7,7 @@ import asyncio
 import pytest
 
 from auramaur.db.database import Database
-from auramaur.nlp.ensemble import EnsembleEstimator, ProbabilitySource
+from auramaur.nlp.ensemble import EnsembleEstimator
 
 
 class MockSource:

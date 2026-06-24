@@ -9,6 +9,9 @@ from datetime import datetime, timezone
 
 import logging
 import structlog
+
+from auramaur.data_sources.base import NewsItem
+
 try:
     from ddgs import DDGS  # type: ignore[import-untyped]
 except ImportError:
@@ -16,8 +19,6 @@ except ImportError:
 
 # Suppress noisy Yahoo News parser warnings from ddgs
 logging.getLogger("ddgs.engines.yahoo_news").setLevel(logging.ERROR)
-
-from auramaur.data_sources.base import NewsItem
 
 logger = structlog.get_logger(__name__)
 

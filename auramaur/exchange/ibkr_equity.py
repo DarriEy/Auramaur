@@ -13,7 +13,6 @@ backtested net-negative in every variant — pre-failed, never activated.
 from __future__ import annotations
 
 import time
-from pathlib import Path
 from auramaur.killswitch import kill_switch_present
 
 import structlog

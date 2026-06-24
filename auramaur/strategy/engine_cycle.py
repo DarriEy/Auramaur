@@ -10,14 +10,13 @@ execution gateway, the allocator). Method-local imports moved with the methods.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import structlog
 
 from auramaur.broker.allocator import CandidateTrade, CapitalAllocator
 from auramaur.killswitch import kill_switch_present
-from auramaur.exchange.models import Market, OrderResult, OrderSide, Signal
+from auramaur.exchange.models import Market, OrderSide, Signal
 from auramaur.monitoring.display import (
     show_cycle_summary,
     show_risk_decision,
@@ -485,7 +484,6 @@ class CycleOrchestrationMixin:
         markets = [m for m, _score in ranked_markets[:_MAX_STRATEGIC_BATCH]]
 
         # Gather evidence for all markets first
-        from auramaur.nlp.query_decomposer import extract_search_queries
 
         # Evidence gathering is the dominant cycle cost — each market fans out
         # to ~15 data sources. Running markets concurrently (instead of one at a

@@ -15,7 +15,6 @@ import time
 import pytest
 
 from auramaur.exchange.client import PolymarketClient
-from auramaur.exchange.paper import PaperTrader
 from unittest.mock import MagicMock
 
 

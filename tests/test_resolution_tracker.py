@@ -623,7 +623,6 @@ class TestSettlePosition:
     def test_detect_void(self):
         """closed + uma resolved + ~0.5 price = VOID (refund); pinned or
         still-open or non-poly is not a void."""
-        from auramaur.exchange.models import Market
 
         def mk(**kw):
             d = dict(active=True, closed=True, yes_price=0.5)

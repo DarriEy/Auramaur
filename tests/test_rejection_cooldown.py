@@ -10,10 +10,8 @@ bench until the cooldown expires, the market reprices, or news flags it.
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
 
 from auramaur.db.database import Database
 from auramaur.exchange.models import Market

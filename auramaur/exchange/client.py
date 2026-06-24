@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import math
-from pathlib import Path
 from auramaur.killswitch import kill_switch_present
 
 import structlog
@@ -748,7 +747,7 @@ class PolymarketClient:
 
     async def get_order_book(self, token_id: str) -> OrderBook:
         """Get order book for a token (public, no auth needed)."""
-        from auramaur.exchange.models import OrderBook, OrderBookLevel
+        from auramaur.exchange.models import OrderBook
         try:
             await self.clob_call(self._init_clob_client)
             raw = await self.clob_call(self._clob_client.get_order_book, token_id)

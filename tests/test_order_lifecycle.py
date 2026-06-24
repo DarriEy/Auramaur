@@ -273,7 +273,6 @@ async def test_poll_timeout_cancels(client):
     client.cancel_order = mock_cancel
     client._live_pending["order123"] = original_order
 
-    import time
     with patch("asyncio.sleep", new_callable=AsyncMock), \
          patch("time.monotonic", side_effect=[0, 0, 0.5, 1.0, 1.5, 999]):
         result = await client.poll_until_terminal("order123", timeout=1, poll_interval=0.1)

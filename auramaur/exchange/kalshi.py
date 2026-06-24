@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import datetime
-from pathlib import Path
 from auramaur.killswitch import kill_switch_present
 
 import structlog

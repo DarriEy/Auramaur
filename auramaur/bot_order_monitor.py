@@ -13,11 +13,10 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from auramaur.exchange.models import Fill, Order, OrderResult, OrderSide, TokenType
+from auramaur.exchange.models import Fill
 from auramaur.monitoring.display import console
 
 if TYPE_CHECKING:
-    from auramaur.db.database import Database
     from auramaur.exchange.client import PolymarketClient
     from auramaur.exchange.paper import PaperTrader
     from auramaur.exchange.protocols import ExchangeClient, MarketDiscovery
@@ -388,7 +387,6 @@ class OrderMonitorMixin:
                     # Also feed into attribution if available
                     attributor = self._components.get("attributor")
                     if attributor is not None:
-                        db: Database = self._components["db"]
                         # Attribution is handled inside _settle_position via
                         # daily_stats; log for visibility only.
                         log.info("resolution.attribution_notified", count=resolved)
