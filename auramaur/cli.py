@@ -1690,8 +1690,10 @@ def _render_readiness_table(report) -> None:
 @main.command()
 def kill():
     """Activate the kill switch."""
-    from pathlib import Path
-    Path("KILL_SWITCH").touch()
+    from auramaur.killswitch import KILL_SWITCH_PATH
+    # Arm at the canonical repo-root path so every check finds it regardless of
+    # the launch directory.
+    KILL_SWITCH_PATH.touch()
     console.print("[bold red]KILL SWITCH ACTIVATED[/]")
 
 
@@ -1699,9 +1701,14 @@ def kill():
 def unkill():
     """Deactivate the kill switch."""
     from pathlib import Path
-    ks = Path("KILL_SWITCH")
-    if ks.exists():
-        ks.unlink()
+    from auramaur.killswitch import KILL_SWITCH_PATH
+    # Remove both the canonical and any CWD-relative switch so disarm is total.
+    removed = False
+    for ks in (KILL_SWITCH_PATH, Path("KILL_SWITCH")):
+        if ks.exists():
+            ks.unlink()
+            removed = True
+    if removed:
         console.print("[bold green]Kill switch deactivated[/]")
     else:
         console.print("Kill switch was not active.")

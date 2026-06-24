@@ -27,6 +27,7 @@ import hmac
 import time
 import urllib.parse
 from pathlib import Path
+from auramaur.killswitch import kill_switch_present
 
 import aiohttp
 import structlog
@@ -226,7 +227,7 @@ class KrakenSpotClient:
         side_str = side_str.lower()
 
         # 1. Kill switch.
-        if Path("KILL_SWITCH").exists():
+        if kill_switch_present():
             log.critical("kill_switch.active", action="kraken_order_blocked")
             return OrderResult(order_id="BLOCKED", market_id=pair, status="rejected",
                                is_paper=True, error_message="kill switch")

@@ -31,6 +31,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from auramaur.killswitch import kill_switch_present
 from typing import Any
 
 import structlog
@@ -184,7 +185,7 @@ class OnChainRedeemer:
         is a separate opt-in because redemption is a distinct money-moving
         operation and shouldn't ride on the trading toggle.
         """
-        if Path("KILL_SWITCH").exists():
+        if kill_switch_present():
             return False
         if not self._settings.auramaur_live:
             return False
