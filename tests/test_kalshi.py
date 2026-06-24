@@ -353,6 +353,39 @@ class TestKalshiNoOrderIdSoftReject:
         # No ghost order tracked.
         assert client._live_pending == {}
 
+    @pytest.mark.asyncio
+    async def test_live_order_includes_client_order_id(self):
+        """Kalshi v2 create-order requires a client_order_id idempotency key;
+        omitting it routes to the removed v1 flow ('deprecated_v1_order_endpoint')
+        and silently fails every live order. The request must carry a UUID."""
+        import uuid as _uuid
+        from unittest.mock import AsyncMock, MagicMock
+
+        client = KalshiClient.__new__(KalshiClient)
+        client._init_api = MagicMock()
+        client._portfolio_api = MagicMock()
+        client._settings = MagicMock()
+        client._settings.is_live = True
+        client._live_pending = {}
+        client._call_raw = AsyncMock(side_effect=[
+            json.dumps({"orders": []}),                      # dup-check
+            json.dumps({"order": {"order_id": "ord-1", "status": "resting"}}),
+        ])
+
+        order = Order(
+            market_id="KXTEST", exchange="kalshi", side=OrderSide.SELL,
+            token=TokenType.NO, token_id="KXTEST", size=24, price=0.97,
+            dry_run=False,
+        )
+        result = await client.place_order(order)
+
+        assert result.status == "pending"
+        # The create_order call carried a valid UUID client_order_id.
+        create_call = client._call_raw.await_args_list[1]
+        req = create_call.kwargs["create_order_request"]
+        assert req.client_order_id
+        _uuid.UUID(req.client_order_id)  # raises if not a valid UUID
+
 
 class TestKalshiPrepareOrderDirectSell:
     def test_sell_signal_becomes_buy_no(self):

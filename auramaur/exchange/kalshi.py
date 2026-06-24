@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -388,8 +389,16 @@ class KalshiClient:
             else:
                 yes_price_cents = max(1, min(99, int(order.price * 100)))
 
+            # Kalshi's v2 create-order requires a client-generated idempotency
+            # key (client_order_id). Omitting it routes to the now-removed v1
+            # flow, which returns a 2xx "deprecated_v1_order_endpoint" body with
+            # no order object — so EVERY live order (entries and exits) silently
+            # failed. A fresh UUID per attempt satisfies v2 and is safe: orders
+            # are limit GTC and deduped upstream (the resting-order guard above),
+            # so per-attempt uniqueness won't double-place.
             req = CreateOrderRequest(
                 ticker=order.token_id,
+                client_order_id=str(uuid.uuid4()),
                 side=kalshi_side,
                 action=action,
                 count=int(order.size),
