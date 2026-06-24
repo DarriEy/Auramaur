@@ -28,3 +28,7 @@ data/risk_tolerance
 # DB backup blobs (never version runtime data)
 *.db.bak*
 *.bak-pre-*
+
+# Runtime trading logs (operational figures — never version; PUBLIC repo)
+logs/
+*.out
