@@ -39,12 +39,11 @@ jobs:
         run: uv run pytest -q
 
   lint:
-    name: Lint (ruff, non-blocking)
+    name: Lint (ruff)
     runs-on: ubuntu-latest
-    # Advisory only for now: the tree has known hygiene debt being paid down
-    # incrementally. Surfaces issues on every PR without gating merges. Flip
-    # continue-on-error to false once the backlog is clear to make it required.
-    continue-on-error: true
+    # Blocking: the backlog was cleared (214 -> 0) and the tree is ruff-clean, so
+    # lint is now a required gate — a new violation fails the PR instead of just
+    # being surfaced.
     steps:
       - uses: actions/checkout@v4
 
