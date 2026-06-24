@@ -59,7 +59,9 @@ class NewsAPISource:
                         return []
                     if resp.status == 429:
                         retry_after = int(resp.headers.get("Retry-After", delay))
-                        logger.warning("newsapi_rate_limited", retry_after=retry_after, attempt=attempt)
+                        # Expected rate-limit during backoff; the retry handles
+                        # it. Debug, not warn (it was ~6k warn lines of noise).
+                        logger.debug("newsapi_rate_limited", retry_after=retry_after, attempt=attempt)
                         await asyncio.sleep(retry_after)
                         continue
                     resp.raise_for_status()

@@ -139,11 +139,22 @@ class PositionSyncer:
                     token = TokenType.YES
                     direct_price = await self._price_held_token(token_id)
                     if direct_price is None:
-                        log.warning(
-                            "sync.unresolved_token_side",
-                            market_id=market_id,
-                            token_label=raw_token,
-                        )
+                        # These are a handful of persistent orphans (e.g. hex
+                        # condition-id stubs the reconciler can't map) that
+                        # re-logged every sync cycle — ~7k lines from ~8 markets,
+                        # drowning the real signal. Warn once per market_id per
+                        # process; the underlying position is still marked via
+                        # the avg_cost floor below.
+                        warned = getattr(self, "_warned_token_side", None)
+                        if warned is None:
+                            warned = self._warned_token_side = set()
+                        if market_id not in warned:
+                            warned.add(market_id)
+                            log.warning(
+                                "sync.unresolved_token_side",
+                                market_id=market_id,
+                                token_label=raw_token,
+                            )
 
                 # Use the correct price for the token we hold
                 if direct_price is not None:
