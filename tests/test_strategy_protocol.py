@@ -22,7 +22,7 @@ from auramaur.strategy.entailment_arb import EntailmentArbPillar
 from auramaur.strategy.market_maker import MarketMaker
 from auramaur.strategy.momentum_coupling import MomentumCouplingPillar
 from auramaur.strategy.oddlot_tender import OddLotTenderPillar
-from auramaur.strategy.protocols import ExecutionMode, GATEWAY_PURE_MODES
+from auramaur.strategy.protocols import ExecutionMode, NO_DIRECT_PLACE_MODES
 from auramaur.strategy.resolution_lens import ResolutionLensPillar
 from auramaur.strategy.arbitrage_scanner import ArbitrageScanner
 from auramaur.strategy.weather_temp import WeatherTempPillar
@@ -43,7 +43,7 @@ PILLARS = [
     (OddLotTenderPillar, "auramaur/strategy/oddlot_tender.py"),
 ]
 
-# GATEWAY_PURE_MODES (single source of truth in protocols.py): the pillar must
+# NO_DIRECT_PLACE_MODES (single source of truth in protocols.py): the pillar must
 # not call exchange.place_order at all. The other modes legitimately place
 # directly (MM quotes; concurrent arb legs that then record_external_fill;
 # equities) and are skipped with their declared reason below.
@@ -63,7 +63,7 @@ def test_gateway_pillars_do_not_place_orders_directly(cls, modfile):
     """A GATEWAY_SINGLE/PAIRED pillar must route through the ExecutionGateway —
     it must not call exchange.place_order in its own module. The direct-placement
     modes are skipped with their declared reason (this is the whitelist)."""
-    if cls.execution_mode not in GATEWAY_PURE_MODES:
+    if cls.execution_mode not in NO_DIRECT_PLACE_MODES:
         pytest.skip(
             f"{cls.name} is {cls.execution_mode.value}: direct placement is its "
             f"declared, intentional path (not a gateway bypass)")

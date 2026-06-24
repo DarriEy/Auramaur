@@ -90,10 +90,14 @@ class MarketMaker:
         settings,
         exchange: PolymarketClient,
         db,
+        gateway=None,
     ):
         self._settings = settings
         self._exchange = exchange
         self._db = db
+        # Placement runs through the ExecutionGateway (the single choke point);
+        # lazily built if not injected so existing callers/tests keep working.
+        self._gateway = gateway
 
         # MM configuration from settings
         mm_cfg = settings.market_maker
@@ -462,9 +466,16 @@ class MarketMaker:
             source="market_maker",
         )
 
-        # Place both legs
-        bid_result = await self._exchange.place_order(bid_order)
-        ask_result = await self._exchange.place_order(ask_order)
+        # Place both legs through the gateway's two-sided adapter (bid then ask,
+        # not both-or-nothing — the MM owns one-legged cleanup below). The gateway
+        # is the single placement choke point; no direct exchange.place_order here.
+        if self._gateway is None:
+            from auramaur.broker.execution_gateway import ExecutionGateway
+            self._gateway = ExecutionGateway(
+                router=None, exchange=self._exchange, exchange_name="polymarket",
+                settings=self._settings, db=self._db, pnl_tracker=None)
+        bid_result, ask_result = await self._gateway.place_quote_pair(
+            bid_order, ask_order, exchange=self._exchange)
 
         # Track order IDs
         quote.bid_order_id = bid_result.order_id
