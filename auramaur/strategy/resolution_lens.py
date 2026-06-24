@@ -66,6 +66,7 @@ LENS_PROMPT = """You are a resolution-criteria auditor for a prediction market. 
 Question: "{question}"
 Resolution criteria: {description}
 Current market price (YES): {market_prob:.2f}
+Today's date is {today}. Interpret EVERY date in the criteria relative to today, including 2-digit years (e.g. '26 = 2026). A resolution date that is today, imminent, or already past resolves on NEAR-TERM reality (current forecasts/observations) — it is NOT a distant-future climatological base-rate bet. Never invent a "distant year, revert to base rate" mechanism for a near-term or already-passed market; that is a misread of the current year, not a fine-print edge.
 
 Answer BOTH directions:
 1. How can YES resolve WITHOUT the headline event most people imagine actually happening?
@@ -87,8 +88,9 @@ Resolution criteria: {description}
 Market price (YES): {market_prob:.2f}
 Claimed strict-criteria fair P(YES): {fair:.2f}
 Claimed mechanism: "{mechanism}"
+Today's date is {today}. Interpret dates (incl. 2-digit years like '26 = 2026) relative to today.
 
-Check: does the cited clause ACTUALLY qualify/disqualify as claimed, or is the auditor over-reading or inventing a rule the criteria don't state? If you can't point to specific criteria text that supports the mechanism, it is REFUTED.
+Check: does the cited clause ACTUALLY qualify/disqualify as claimed, or is the auditor over-reading or inventing a rule the criteria don't state? If you can't point to specific criteria text that supports the mechanism, it is REFUTED. In particular, REFUTE any mechanism that treats a today/imminent/already-past resolution date as a "distant future" base-rate bet — that is a current-year misread, not a fine-print mechanism.
 
 Respond with ONLY this JSON:
 {{"verdict": "confirmed" | "refuted", "confidence": <float 0-1>, "why": "<one sentence citing the criteria>"}}"""
@@ -107,6 +109,7 @@ GROUND_PROMPT = """You are grounding a prediction market's STRICT resolution rea
 Question: "{question}"
 Resolution criteria: {description}
 Deadline / resolution window: {deadline}
+Today's date is {today} (interpret 2-digit years like '26 = 2026 relative to today).
 Identified fine-print mechanism: "{mechanism}"
 Strict-criteria fair P(YES) before evidence: {fair:.2f}
 
@@ -219,6 +222,7 @@ class ResolutionLensPillar:
                 question=m.question,
                 description=self._criteria_text(m.description),  # Phase 1: full criteria
                 market_prob=m.outcome_yes_price,
+                today=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             ))
             parsed = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
             fair = max(0.01, min(0.99, float(parsed.get("fair_prob", fair))))
@@ -247,6 +251,7 @@ class ResolutionLensPillar:
                 question=m.question,
                 description=self._criteria_text(m.description),
                 market_prob=m.outcome_yes_price, fair=fair, mechanism=mechanism,
+                today=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             ))
             parsed = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
             confirmed = (str(parsed.get("verdict", "refuted")).lower() == "confirmed"
@@ -310,6 +315,7 @@ class ResolutionLensPillar:
                 description=self._criteria_text(m.description),
                 deadline=deadline, mechanism=mech, fair=fair,
                 evidence="\n".join(ev_lines),
+                today=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             ))
             parsed = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
             g = max(0.01, min(0.99, float(parsed.get("grounded_prob", fair))))
@@ -494,6 +500,19 @@ class ResolutionLensPillar:
     async def _enter(self, m: Market, fair: float, score: float,
                      mech: str, edge: float) -> bool:
         cfg = self._settings.resolution_lens
+        # Favorite-discipline floor (BUY side only). Edge audit (2026-06-24):
+        # every lens×weather loss was a BUY of a narrow temperature bin entered
+        # in the near-coin-flip band — favorite-longshot variance, not a real
+        # fine-print read. Buying only YES sides already priced as favorites
+        # cut the cell to 100% win in-sample. SELL longshot plays (overpriced
+        # 'permanent'/'announce' YES) sit below this floor by construction and
+        # are deliberately exempt. edge > 0 ⇒ BUY YES at ~outcome_yes_price.
+        if (edge > 0 and cfg.min_entry_price > 0.0
+                and m.outcome_yes_price < cfg.min_entry_price):
+            log.info("lens.below_entry_floor", market_id=m.id,
+                     yes_price=round(m.outcome_yes_price, 3),
+                     floor=cfg.min_entry_price)
+            return False
         signal = Signal(
             market_id=m.id,
             market_question=m.question,

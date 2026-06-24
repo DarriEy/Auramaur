@@ -541,6 +541,16 @@ class ResolutionLensConfig(BaseModel):
     min_gap_score: float = 0.4
     high_conf_gap_score: float = 0.7
     min_edge: float = 0.08
+    # Favorite-discipline floor on BUY entries (0 = off). A 2026-06-24 edge
+    # audit of the lens×weather cell found every loss was a BUY of a narrow
+    # temperature bin entered in the near-coin-flip band (<~0.65 YES), where
+    # favorite-longshot variance dominates and the LLM's named mechanism is
+    # post-hoc — the position is identical regardless. Requiring the YES side
+    # we buy to already be a market favorite (>= this) cut the cell from 83%
+    # to 100% win in-sample. Gates BUYs ONLY: the lens's other documented
+    # edge is SELLing overpriced-YES longshots (permanence/announce bars),
+    # which by construction sit below this floor and must stay untouched.
+    min_entry_price: float = 0.0
     stake_usd: float = 10.0
     max_entries_per_cycle: int = 3
     max_llm_calls_per_cycle: int = 5

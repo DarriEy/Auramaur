@@ -308,6 +308,64 @@ def test_refuted_mechanism_blocks_entry():
 
 
 # ----------------------------------------------------------------------
+# Favorite-discipline entry-price floor (BUY side only)
+# ----------------------------------------------------------------------
+
+def test_buy_below_entry_floor_blocked():
+    """A BUY whose YES side is below min_entry_price (the near-coin-flip band
+    where the weather cell took every loss) does not trade."""
+    async def run():
+        db = Database(":memory:"); await db.connect()
+        try:
+            ex = _exchange()
+            # fair 0.90 vs market 0.55 -> BUY YES (edge +0.35), but 0.55 < 0.65.
+            analyzer = _analyzer(fair=0.90, gap=0.8, mech="modal bin favored")
+            pillar = _pillar(db, _settings(min_entry_price=0.65),
+                             [_market(yes=0.55)], exchange=ex, analyzer=analyzer)
+            assert await pillar.run_once() == 0
+            ex.place_order.assert_not_awaited()
+        finally:
+            await db.close()
+    asyncio.run(run())
+
+
+def test_buy_at_or_above_entry_floor_enters():
+    """The same BUY clears once the YES side is itself a market favorite."""
+    async def run():
+        db = Database(":memory:"); await db.connect()
+        try:
+            ex = _exchange()
+            analyzer = _analyzer(fair=0.90, gap=0.8, mech="modal bin favored")
+            pillar = _pillar(db, _settings(min_entry_price=0.65),
+                             [_market(yes=0.70)], exchange=ex, analyzer=analyzer)
+            assert await pillar.run_once() == 1
+            order = ex.place_order.await_args.args[0]
+            assert order.token == TokenType.YES
+        finally:
+            await db.close()
+    asyncio.run(run())
+
+
+def test_sell_longshot_exempt_from_entry_floor():
+    """The floor gates BUYs only: a SELL of an overpriced-YES longshot (the
+    permanence/announce shape) trades even though the NO side it buys is well
+    below the floor — that is the lens's other documented edge."""
+    async def run():
+        db = Database(":memory:"); await db.connect()
+        try:
+            ex = _exchange()
+            # Default analyzer: fair 0.10 vs market 0.30 -> SELL (buy NO).
+            pillar = _pillar(db, _settings(min_entry_price=0.65),
+                             [_market(yes=0.30)], exchange=ex)
+            assert await pillar.run_once() == 1
+            order = ex.place_order.await_args.args[0]
+            assert order.token == TokenType.NO
+        finally:
+            await db.close()
+    asyncio.run(run())
+
+
+# ----------------------------------------------------------------------
 # Lens pillar
 # ----------------------------------------------------------------------
 
