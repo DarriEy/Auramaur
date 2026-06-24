@@ -366,6 +366,12 @@ class ExitExecutionMixin:
             dry_run=not self.settings.is_live,
             source="exit",
         )
+        # DIRECT_EQUITY exception (the one named direct placement in the exit
+        # path): IBKR options are off the prediction-market ExecutionGateway and
+        # carry their own fill/position accounting, so this exit places directly
+        # rather than via submit_exit (poly/kalshi exits go through the gateway).
+        # test_exit_path_only_ibkr_places_directly locks this as the SOLE exit
+        # bypass — a direct place_order on any other exit method fails the guard.
         result = await exchange.place_order(order)
         from auramaur.monitoring.display import show_order
         show_order(

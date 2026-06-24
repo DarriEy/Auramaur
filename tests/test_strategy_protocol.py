@@ -81,3 +81,24 @@ def test_arb_mixin_does_not_place_orders_directly():
     assert ".place_order(" not in src, (
         "bot_arb.py must place through ExecutionGateway.place_legs, not call "
         "exchange.place_order directly")
+
+
+def test_exit_path_only_ibkr_places_directly():
+    """Exit-path perimeter: the poly/kalshi exits route through the gateway's
+    submit_exit; the ONLY direct exchange.place_order in bot_exits.py is the IBKR
+    equity/options exit (the DIRECT_EQUITY exception — IBKR is off the
+    prediction-market gateway, with its own accounting). This names that
+    exception so a new direct placement on the gateway-venue exits fails."""
+    import ast
+    src = (_ROOT / "auramaur/bot_exits.py").read_text()
+    tree = ast.parse(src)
+    ibkr = next(n for n in ast.walk(tree)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and n.name == "_execute_ibkr_exit")
+    bad = [node.lineno for node in ast.walk(tree)
+           if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+           and node.func.attr == "place_order"
+           and not (ibkr.lineno <= node.lineno <= ibkr.end_lineno)]
+    assert not bad, (
+        f"direct exchange.place_order in bot_exits.py outside the named IBKR "
+        f"equity exit (lines {bad}) — poly/kalshi exits must use gateway.submit_exit")
