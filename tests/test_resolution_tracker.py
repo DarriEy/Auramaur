@@ -827,19 +827,20 @@ async def test_venue_sweep_ignores_unmatched_and_no_proxy(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_venue_sweep_skips_already_settled_token(monkeypatch):
-    """A settled-but-unredeemed leg resurrected by the syncer must NOT
-    settle twice — only the ledger insert is idempotent; daily_stats and
-    cost_basis would double-count."""
+async def test_venue_sweep_drains_already_settled_token_without_double_book(monkeypatch):
+    """A settled-but-unredeemed leg whose cost_basis size never zeroed must be
+    DRAINED (size→0, market inactive) so it stops resurrecting every cycle — but
+    WITHOUT double-booking: the ledger insert and daily_stats stay untouched when
+    a matching prior already exists. (Previously the sweep skipped it entirely,
+    which left the cost_basis leg lingering forever — the resurrection bug.)"""
     row = {"market_id": "m1", "token": "NO", "token_id": "tok-no-1",
            "size": 20.0, "avg_price": 0.62, "side": "BUY", "is_paper": 0}
     db = _make_sweep_db([row])
 
     async def _fetchone(sql, params=None):
         if "pnl_ledger" in sql:
-            assert params == ("settle:m1:NO:0",)
-            # NO @ 0.62 won (is_winner) => (1.0-0.62)*20 = 7.6; a matching prior
-            # is consistent, so the leg is skipped (not re-settled/corrected).
+            # NO @ 0.62 won (is_winner) => (1.0-0.62)*20 = 7.6; the prior matches,
+            # so no correction and no re-book — only the drain proceeds.
             return {"pnl": (1.0 - 0.62) * 20.0}
         return row
     db.fetchone = AsyncMock(side_effect=_fetchone)
@@ -852,6 +853,15 @@ async def test_venue_sweep_skips_already_settled_token(monkeypatch):
     monkeypatch.setattr("auramaur.broker.redeemer.fetch_redeemable_positions",
                         _fake_fetch)
 
-    assert await tracker.settle_via_venue("0xproxy") == []
+    settled = await tracker.settle_via_venue("0xproxy")
+
+    # The leg is now processed (drained), not skipped — and not a correction.
+    assert len(settled) == 1
+    assert settled[0]["correction"] is False
     executed_sql = " ".join(str(c.args[0]) for c in db.execute.call_args_list)
-    assert "DELETE FROM portfolio" not in executed_sql
+    # Drain happened: cost_basis zeroed + the resurrected portfolio row removed.
+    assert "UPDATE cost_basis" in executed_sql and "size = 0" in executed_sql
+    assert "DELETE FROM portfolio" in executed_sql
+    # No double-book: the matching prior means no re-insert and no daily_stats.
+    assert "INSERT OR IGNORE INTO pnl_ledger" not in executed_sql
+    assert "daily_stats" not in executed_sql

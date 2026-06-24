@@ -205,21 +205,40 @@ class ResolutionTracker:
         if not venue_positions:
             return []
 
+        # Match on actual HOLDINGS (portfolio ∪ cost_basis), keyed by token_id.
+        # The portfolio row is dropped the moment a leg sells/settles, but
+        # cost_basis is the holdings source of truth and lingers until its size
+        # zeroes — which is exactly the set the venue still reports as
+        # redeemable. A portfolio-only match silently skipped every position
+        # whose portfolio row was already gone (by_token_id.get → None →
+        # continue), so the sweep could never settle or drain them and their
+        # cost_basis legs resurrected forever. Union in cost_basis (the same
+        # portfolio∪cost_basis holdings union check_resolutions() already uses)
+        # so the sweep reaches them. Portfolio rows are listed first and win the
+        # de-dup (they carry the live current_price/category context).
         rows = await self._db.fetchall(
-            """SELECT p.market_id, p.token, p.token_id, p.size, p.avg_price
-               FROM portfolio p WHERE p.is_paper = 0 AND p.size > 0""")
-        by_token_id = {r["token_id"]: dict(r) for r in (rows or [])
-                       if r["token_id"]}
+            """SELECT market_id, token, token_id, size, avg_price FROM (
+                   SELECT market_id, token, token_id, size, avg_price
+                   FROM portfolio WHERE is_paper = 0 AND size > 0
+                   UNION ALL
+                   SELECT market_id, token, token_id, size, avg_cost AS avg_price
+                   FROM cost_basis WHERE is_paper = 0 AND size > 0
+               )""")
+        by_token_id: dict[str, dict] = {}
+        for r in (rows or []):
+            tid = r["token_id"]
+            if tid and tid not in by_token_id:
+                by_token_id[tid] = dict(r)
 
         settlements: list[dict] = []
         for vp in venue_positions:
             row = by_token_id.get(vp.asset_id)
             if row is None:
+                # No OPEN holding for this token — portfolio row dropped AND
+                # cost_basis already zeroed. Nothing left to settle or drain,
+                # even though the wallet still holds the now-worthless token
+                # (loser tokens are never redeemed). Correctly skipped.
                 continue
-            # Already settled in a prior pass (the wallet still holds the
-            # tokens until redemption, so the syncer can resurrect the row).
-            # Only the ledger insert is idempotent — re-running settlement
-            # would re-add the P&L to daily_stats and cost_basis.
             held_token = row["token"] or "YES"
             # Match the canonical (side-keyed) source_ref used by _settle_position
             # so a side already booked under a different label ("YES" vs the
@@ -237,12 +256,18 @@ class ResolutionTracker:
             venue_pnl = (exit_price - row["avg_price"]) * row["size"]
             outcome_yes = vp.is_winner if canon == "YES" else (not vp.is_winner)
 
-            # An already-settled side whose booked value MATCHES the venue is
-            # done — skip (the syncer resurrects the row until redemption).
+            # The leg may already be booked in the ledger (settlement is
+            # idempotent on source_ref), but a non-zero cost_basis holding is
+            # precisely why the venue still reports it — so we must STILL run
+            # _settle_position to DRAIN that residual size, not skip. Skipping a
+            # value-matching prior here was the resurrection bug: the cost_basis
+            # leg never zeroed, so the position reappeared every cycle. Only the
+            # corrective re-book is conditional on the booked value disagreeing.
             prior = await self._db.fetchone(
                 "SELECT pnl FROM pnl_ledger WHERE source_ref = ?", (ref,))
-            if prior is not None and abs(prior["pnl"] - venue_pnl) <= 0.01:
-                continue
+            needs_correction = (
+                prior is not None and abs(prior["pnl"] - venue_pnl) > 0.01
+            )
 
             settlements.append({
                 "market_id": row["market_id"],
@@ -253,12 +278,12 @@ class ResolutionTracker:
                 "pnl": venue_pnl,
                 "status": vp.status,
                 "outcome_yes": outcome_yes,
-                "correction": prior is not None,
+                "correction": needs_correction,
             })
             if dry_run:
                 continue
 
-            if prior is not None:
+            if needs_correction:
                 # A STALE prior settlement disagrees with the authoritative venue
                 # outcome (e.g. it booked the winning side at $0). The venue wins:
                 # correct the booked value in place — one row per side with the
