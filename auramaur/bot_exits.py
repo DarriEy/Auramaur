@@ -53,8 +53,8 @@ class ExitExecutionMixin:
         exchange/router are unused for that path; db + pnl_tracker come from the
         wired components. Rebuilt if the pnl_tracker reference changes.
         """
-        db = self._components.get("db")
-        pnl = self._components.get("pnl_tracker")
+        db = self._components.db
+        pnl = self._components.pnl_tracker
         gw = self._exit_gateway_obj
         if gw is None or gw.db is not db or gw.pnl_tracker is not pnl:
             from auramaur.broker.execution_gateway import ExecutionGateway
@@ -80,7 +80,7 @@ class ExitExecutionMixin:
         """
         # Resolve the real token_id: reconciler → cost_basis → Gamma
         token_id = ""
-        reconciler_comp = self._components.get("reconciler")
+        reconciler_comp = self._components.reconciler
         if reconciler_comp and self.settings.is_live:
             try:
                 for rp in await reconciler_comp.reconcile():
@@ -96,7 +96,7 @@ class ExitExecutionMixin:
             try:
                 # _execute_poly_exit only fires for live positions; scope to
                 # is_paper=0 so we can't pick up a stale paper-mode token_id.
-                row = await self._components["db"].fetchone(
+                row = await self._components.db.fetchone(
                     "SELECT token_id FROM cost_basis WHERE market_id = ? AND size > 0 AND is_paper = 0",
                     (pos.market_id,),
                 )
@@ -256,7 +256,7 @@ class ExitExecutionMixin:
 
     async def _prune_zero_onchain_poly_position(self, market_id: str) -> None:
         """Remove stale live Polymarket rows after an on-chain zero balance check."""
-        db = self._components.get("db")
+        db = self._components.db
         if db is None:
             return
         try:

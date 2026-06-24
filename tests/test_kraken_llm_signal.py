@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from auramaur.components import Components
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -68,9 +69,9 @@ def test_llm_view_returns_and_throttles():
     analyzer.analyze = AsyncMock(return_value=analysis)
     calib = MagicMock()
     calib.record_prediction = AsyncMock()
-    bot = SimpleNamespace(_components={
+    bot = SimpleNamespace(_components=Components({
         "aggregator": agg, "analyzer": analyzer, "cache": None, "calibration": calib,
-    })
+    }))
     p = _pillar(bot=bot)
 
     async def run():
@@ -88,7 +89,7 @@ def test_llm_view_returns_and_throttles():
 
 
 def test_llm_view_unknown_pair_returns_none():
-    bot = SimpleNamespace(_components={})
+    bot = SimpleNamespace(_components=Components({}))
     p = _pillar(bot=bot)
 
     async def run():
@@ -103,9 +104,9 @@ def test_llm_view_skipped_analysis_returns_none():
     analysis = SimpleNamespace(probability=0.5, confidence="LOW", skipped_reason="thin evidence")
     analyzer = MagicMock()
     analyzer.analyze = AsyncMock(return_value=analysis)
-    bot = SimpleNamespace(_components={
+    bot = SimpleNamespace(_components=Components({
         "aggregator": agg, "analyzer": analyzer, "cache": None, "calibration": None,
-    })
+    }))
     p = _pillar(bot=bot)
 
     async def run():

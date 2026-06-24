@@ -1,5 +1,6 @@
 """Tests for the `dust-exit` CLI command."""
 
+from auramaur.components import Components
 import asyncio
 from unittest.mock import AsyncMock, patch
 
@@ -37,7 +38,7 @@ class _FakeBot:
     own event loop (so the aiosqlite connection is bound to the right loop)."""
 
     def __init__(self, *args, **kwargs):
-        self._components = {}
+        self._components = Components({})
 
     async def _init_components(self):
         db = Database(":memory:")
@@ -56,12 +57,12 @@ class _FakeBot:
                     (mid, "polymarket", "BUY", 10.0, 0.3, 0.2, "sports", "YES", f"tok-{mid}", is_paper),
                 )
         await db.commit()
-        self._components = {
+        self._components = Components({
             "db": db,
             "discoveries": {"polymarket": _FakeDiscovery()},
             "exchanges": {"polymarket": object()},
             "alerts": object(),
-        }
+        })
 
     async def shutdown(self):
         await self._components["db"].close()

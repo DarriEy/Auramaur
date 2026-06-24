@@ -13,11 +13,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from auramaur.bot import AuramaurBot
+from auramaur.components import Components
 
 
 def _bot_with(components: dict) -> AuramaurBot:
     bot = AuramaurBot(settings=MagicMock())
-    bot._components = components
+    bot._components = Components(components)
     bot._lock_file = None
     return bot
 

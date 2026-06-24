@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from auramaur.components import Components
 import pytest
 
 from auramaur.bot import AuramaurBot
@@ -53,13 +54,13 @@ async def test_order_monitor_records_live_fill_once():
     db.execute = AsyncMock(return_value=db_cursor)
     db.commit = AsyncMock()
 
-    bot._components = {
+    bot._components = Components({
         "paper": paper,
         "exchange": exchange,
         "discovery": AsyncMock(),
         "pnl_tracker": pnl_tracker,
         "db": db,
-    }
+    })
 
     async def stop_after_loop(_seconds):
         bot._running = False
@@ -118,13 +119,13 @@ async def test_order_monitor_ttl_cancels_stale_live_order():
         check_fills=AsyncMock(return_value=[]),
         cancel_expired=AsyncMock(return_value=0),
     )
-    bot._components = {
+    bot._components = Components({
         "paper": paper,
         "exchange": exchange,
         "discovery": AsyncMock(),
         "pnl_tracker": AsyncMock(),
         "db": AsyncMock(),
-    }
+    })
 
     async def stop_after_loop(_seconds):
         bot._running = False
@@ -164,10 +165,10 @@ async def test_order_monitor_keeps_fresh_live_order():
         check_fills=AsyncMock(return_value=[]),
         cancel_expired=AsyncMock(return_value=0),
     )
-    bot._components = {
+    bot._components = Components({
         "paper": paper, "exchange": exchange, "discovery": AsyncMock(),
         "pnl_tracker": AsyncMock(), "db": AsyncMock(),
-    }
+    })
 
     async def stop_after_loop(_seconds):
         bot._running = False
@@ -242,14 +243,14 @@ async def test_order_monitor_polls_all_live_exchanges():
     db.execute = AsyncMock(return_value=db_cursor)
     db.commit = AsyncMock()
 
-    bot._components = {
+    bot._components = Components({
         "paper": paper,
         "exchange": poly,
         "exchanges": {"polymarket": poly, "kalshi": kalshi},
         "discovery": AsyncMock(),
         "pnl_tracker": pnl_tracker,
         "db": db,
-    }
+    })
 
     async def stop_after_loop(_seconds):
         bot._running = False
@@ -304,13 +305,13 @@ async def test_ttl_cancel_writes_cancelled_status_to_db():
         cancel_expired=AsyncMock(return_value=0),
     )
     db = AsyncMock()
-    bot._components = {
+    bot._components = Components({
         "paper": paper,
         "exchange": exchange,
         "discovery": AsyncMock(),
         "pnl_tracker": AsyncMock(),
         "db": db,
-    }
+    })
 
     async def stop_after_loop(_seconds):
         bot._running = False
@@ -364,13 +365,13 @@ async def test_ttl_cancel_failure_keeps_order_tracked():
         cancel_expired=AsyncMock(return_value=0),
     )
     db = AsyncMock()
-    bot._components = {
+    bot._components = Components({
         "paper": paper,
         "exchange": exchange,
         "discovery": AsyncMock(),
         "pnl_tracker": AsyncMock(),
         "db": db,
-    }
+    })
 
     async def stop_after_loop(_seconds):
         bot._running = False
@@ -406,7 +407,7 @@ async def test_reconcile_orphaned_pending_trades():
         {"order_id": "PAPER-abc123", "exchange": "polymarket"},
         {"order_id": "orphan-1", "exchange": "polymarket"},
     ])
-    bot._components = {"db": db}
+    bot._components = Components({"db": db})
 
     await bot._reconcile_orphaned_pending_trades([("polymarket", exchange)])
 
@@ -443,12 +444,12 @@ async def test_order_monitor_reconciles_orphans_periodically():
         check_fills=AsyncMock(return_value=[]),
         cancel_expired=AsyncMock(return_value=0),
     )
-    bot._components = {
+    bot._components = Components({
         "paper": paper,
         "exchange": exchange,
         "discovery": AsyncMock(),
         "db": AsyncMock(),
-    }
+    })
 
     calls = {"n": 0}
 

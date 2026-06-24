@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from auramaur.components import Components
 import asyncio
 
 import pytest
@@ -183,7 +184,7 @@ async def test_internal_arb_uses_engine_exchange_attribute():
     db.fetchone = AsyncMock(return_value=None)  # pairing guard: not already held
     alerts = MagicMock()
     alerts.send = AsyncMock()
-    mixin._components = {"db": db, "alerts": alerts}
+    mixin._components = Components({"db": db, "alerts": alerts})
 
     market = Market(
         id="m1", exchange="polymarket", question="Will X?",
