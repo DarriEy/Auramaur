@@ -21,6 +21,7 @@ per-leg ``submit`` could not.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Literal
 
@@ -294,6 +295,64 @@ class ExecutionGateway:
         return await self._record_result(
             order, result, strategy_source=strategy_source,
             signal_id=None, exchange_name=exchange_name)
+
+    async def place_legs(
+        self,
+        legs: list[tuple[Order, ExchangeClient, str]],
+        *,
+        strategy_source: str,
+        concurrent: bool = True,
+        show: bool = False,
+    ) -> list[tuple[OrderResult, ExecutionResult]]:
+        """Place multiple already-built legs through the gateway, then record each.
+
+        The single owned entry point for multi-leg flows that must place directly
+        rather than via ``submit_paired``'s A-then-B atomicity: arb legs placed
+        CONCURRENTLY (asyncio.gather, to minimize the leg-risk window) or
+        SEQUENTIALLY for same-exchange pairs. Each placed leg is recorded with the
+        same invariant as ``record_external_fill`` (slippage, record_fill, the
+        pending trades-mirror the monitor finalizes for live fills). Returns the
+        raw ``OrderResult`` alongside the ``ExecutionResult`` per leg so the caller
+        keeps its own half-fill / rollback / inventory logic. ``legs`` items are
+        ``(order, exchange_client, exchange_name)``.
+        """
+        if concurrent:
+            results = await asyncio.gather(
+                *(client.place_order(order) for order, client, _ in legs))
+        else:
+            results = [await client.place_order(order) for order, client, _ in legs]
+        out: list[tuple[OrderResult, ExecutionResult]] = []
+        for (order, _client, exchange_name), result in zip(legs, results):
+            if show:
+                show_order(result.status, result.order_id, order.side.value,
+                           order.size, order.price, result.is_paper,
+                           exchange=exchange_name,
+                           error_message=result.error_message,
+                           market_id=order.market_id)
+            exec_res = await self.record_external_fill(
+                order, result, strategy_source=strategy_source,
+                exchange_name=exchange_name)
+            out.append((result, exec_res))
+        return out
+
+    async def place_quote_pair(
+        self, bid_order: Order, ask_order: Order, *,
+        exchange: ExchangeClient,
+    ) -> tuple[OrderResult, OrderResult]:
+        """Place a two-sided maker quote (bid then ask) through the gateway.
+
+        The market maker's owned placement entry point. The MM has already built
+        fully-priced ``post_only`` orders (source stamped) and needs BOTH raw
+        ``OrderResult``s back to run its own inventory / pending-order /
+        partial-leg-cancel bookkeeping, so this places SEQUENTIALLY (matching the
+        MM's order, NOT both-or-nothing — the MM owns one-legged cleanup) and
+        returns the pair. Recording stays with the order monitor (orders carry
+        ``source="market_maker"``); the gateway owns the placement so no strategy
+        calls ``exchange.place_order`` directly.
+        """
+        bid_result = await exchange.place_order(bid_order)
+        ask_result = await exchange.place_order(ask_order)
+        return bid_result, ask_result
 
     async def _record_result(
         self, order: Order, result: OrderResult, *,
