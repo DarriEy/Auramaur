@@ -318,6 +318,42 @@ class TestKalshiPaperGate:
         paper.execute.assert_called_once()
 
 
+class TestKalshiNoOrderIdSoftReject:
+    @pytest.mark.asyncio
+    async def test_live_order_without_order_id_rejects_not_pending(self):
+        """A 2xx create_order response with no `order` object (Kalshi's soft
+        rejection — no exception raised) must REJECT, not return a phantom
+        'pending' with order_id='unknown' that the monitor flips to 'error' and
+        the exit retries forever. The raw body is surfaced for diagnosis."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        client = KalshiClient.__new__(KalshiClient)
+        client._init_api = MagicMock()
+        client._portfolio_api = MagicMock()
+        client._settings = MagicMock()
+        client._settings.is_live = True
+        client._live_pending = {}
+        # dup-check call returns no resting orders; the create_order call returns
+        # a body with an error and NO 'order' object (the observed shape).
+        client._call_raw = AsyncMock(side_effect=[
+            json.dumps({"orders": []}),
+            json.dumps({"error": "too_few_contracts"}),
+        ])
+
+        order = Order(
+            market_id="KXTEST", exchange="kalshi", side=OrderSide.SELL,
+            token=TokenType.YES, token_id="KXTEST", size=16, price=0.04,
+            dry_run=False,
+        )
+        result = await client.place_order(order)
+
+        assert result.status == "rejected"
+        assert result.order_id == "KALSHI_NO_ORDER"
+        assert "too_few_contracts" in result.error_message
+        # No ghost order tracked.
+        assert client._live_pending == {}
+
+
 class TestKalshiPrepareOrderDirectSell:
     def test_sell_signal_becomes_buy_no(self):
         """Kalshi SELL signal should become BUY NO (can't sell what you don't own)."""

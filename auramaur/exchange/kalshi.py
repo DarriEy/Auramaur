@@ -413,7 +413,38 @@ class KalshiClient:
             )
             data = json.loads(raw)
             order_data = data.get("order", {})
-            order_id = str(order_data.get("order_id", "unknown"))
+            order_id = str(order_data.get("order_id", "")) if order_data else ""
+
+            # A 2xx response with NO order object is a soft rejection Kalshi
+            # returns without raising (so it never hit the except below): the
+            # SDK only raises on 4xx/5xx. The old code defaulted order_id to
+            # 'unknown' and returned status='pending', which (a) discarded the
+            # response body that names the actual reason, and (b) wrote a phantom
+            # pending trade the monitor later flipped to 'error' — so a failing
+            # exit retried every cycle forever with the cause invisible. Surface
+            # the raw body and reject so the caller stops (and doesn't mirror a
+            # ghost fill).
+            if not order_id:
+                err = ""
+                if isinstance(data, dict):
+                    err = str(data.get("error") or data.get("message") or "")
+                log.error(
+                    "order.live_no_order_id",
+                    exchange="kalshi",
+                    ticker=order.token_id,
+                    side=kalshi_side,
+                    action=action,
+                    yes_price=yes_price_cents,
+                    error=err[:300] or "no 'order' in response",
+                    raw=str(raw)[:500],
+                )
+                return OrderResult(
+                    order_id="KALSHI_NO_ORDER",
+                    market_id=order.market_id,
+                    status="rejected",
+                    is_paper=False,
+                    error_message=(err[:200] or "kalshi returned no order id"),
+                )
 
             log.info(
                 "order.live_placed",
@@ -425,8 +456,7 @@ class KalshiClient:
             # Track the live order so the order monitor can poll it for fills,
             # reconcile trades.status, and TTL-cancel it if it rests unfilled.
             # Without this the row inserted at placement stays 'pending' forever.
-            if order_id and order_id != "unknown":
-                self._live_pending[order_id] = order
+            self._live_pending[order_id] = order
 
             return OrderResult(
                 order_id=order_id,
