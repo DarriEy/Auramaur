@@ -32,6 +32,8 @@ which the graduation ladder scores like any other cell.
 
 from __future__ import annotations
 
+from auramaur.strategy.protocols import ExecutionMode
+
 import json
 import re
 from datetime import datetime, timezone
@@ -221,6 +223,10 @@ Respond with ONLY this JSON:
 # ----------------------------------------------------------------------
 
 class EntailmentArbPillar:
+
+    # Uniform Strategy contract (see strategy/protocols.py).
+    name = "entailment_arb"
+    execution_mode = ExecutionMode.GATEWAY_PAIRED
     def __init__(self, db, settings, discovery, exchange, risk_manager,
                  pnl_tracker, analyzer=None, kalshi_discovery=None,
                  exchanges=None) -> None:

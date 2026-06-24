@@ -29,6 +29,8 @@ row (exchange='ibkr', category='ibkr_equity'), signals/trades
 
 from __future__ import annotations
 
+from auramaur.strategy.protocols import ExecutionMode
+
 import json
 
 import structlog
@@ -56,6 +58,10 @@ Respond with ONLY this JSON:
 
 
 class OddLotTenderPillar:
+
+    # Uniform Strategy contract (see strategy/protocols.py).
+    name = "oddlot_tender"
+    execution_mode = ExecutionMode.DIRECT_EQUITY
     def __init__(self, db, settings, edgar, analyzer, alerts=None,
                  equity_client=None, pnl_tracker=None) -> None:
         self._db = db

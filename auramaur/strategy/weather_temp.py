@@ -9,6 +9,8 @@ artifact, not edge) until the paper record validates the model.
 
 from __future__ import annotations
 
+from auramaur.strategy.protocols import ExecutionMode
+
 from datetime import timezone
 
 import structlog
@@ -25,6 +27,10 @@ log = structlog.get_logger()
 
 
 class WeatherTempPillar:
+
+    # Uniform Strategy contract (see strategy/protocols.py).
+    name = "weather_temp"
+    execution_mode = ExecutionMode.GATEWAY_SINGLE
     def __init__(self, db, settings, discovery, exchange, risk_manager,
                  pnl_tracker, calibration, weather) -> None:
         self._db = db
