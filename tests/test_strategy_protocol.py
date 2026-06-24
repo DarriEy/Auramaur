@@ -20,6 +20,7 @@ from auramaur.strategy.cross_venue_arb import CrossVenueArbPillar
 from auramaur.strategy.econ_indicator import EconIndicatorPillar
 from auramaur.strategy.entailment_arb import EntailmentArbPillar
 from auramaur.strategy.market_maker import MarketMaker
+from auramaur.strategy.momentum_coupling import MomentumCouplingPillar
 from auramaur.strategy.oddlot_tender import OddLotTenderPillar
 from auramaur.strategy.protocols import ExecutionMode
 from auramaur.strategy.resolution_lens import ResolutionLensPillar
@@ -36,6 +37,7 @@ PILLARS = [
     (EconIndicatorPillar, "auramaur/strategy/econ_indicator.py"),
     (EntailmentArbPillar, "auramaur/strategy/entailment_arb.py"),
     (CrossVenueArbPillar, "auramaur/strategy/cross_venue_arb.py"),
+    (MomentumCouplingPillar, "auramaur/strategy/momentum_coupling.py"),
     (MarketMaker, "auramaur/strategy/market_maker.py"),
     (ArbitrageScanner, "auramaur/strategy/arbitrage_scanner.py"),
     (OddLotTenderPillar, "auramaur/strategy/oddlot_tender.py"),
