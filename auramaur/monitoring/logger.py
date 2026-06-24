@@ -46,12 +46,14 @@ class _RotatingWriter:
         self._file = open(self._path, "a", encoding="utf-8")
 
 
-def setup_logging(level: str = "INFO", json_format: bool = True, log_file: str | None = None):
+def setup_logging(level: str = "INFO", json_format: bool = True, log_file: str | None = None,
+                  rotate_max_mb: int = 10, rotate_backups: int = 3):
     """Configure structlog for the application.
 
     When json_format=False (interactive terminal), structlog output goes to the
     log file only so it doesn't clutter the Rich console output.  The console
-    receives only the curated Rich display calls.
+    receives only the curated Rich display calls. The file is size-rotated at
+    ``rotate_max_mb`` keeping ``rotate_backups`` older files.
     """
 
     log_level = getattr(logging, level, logging.INFO)
@@ -84,7 +86,8 @@ def setup_logging(level: str = "INFO", json_format: bool = True, log_file: str |
                 processors=[*shared_processors, structlog.processors.JSONRenderer()],
                 wrapper_class=structlog.make_filtering_bound_logger(log_level),
                 context_class=dict,
-                logger_factory=structlog.WriteLoggerFactory(file=_RotatingWriter(log_file)),
+                logger_factory=structlog.WriteLoggerFactory(file=_RotatingWriter(
+                    log_file, max_bytes=rotate_max_mb * 1024 * 1024, backups=rotate_backups)),
                 cache_logger_on_first_use=True,
             )
         else:

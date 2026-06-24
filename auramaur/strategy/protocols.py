@@ -21,19 +21,25 @@ class ExecutionMode(str, Enum):
     """
 
     # Route through the single ExecutionGateway money path:
+    # Gateway-submitted — the pillar never calls exchange.place_order itself;
+    # the gateway places AND records (this is what the conformance guard asserts):
     GATEWAY_SINGLE = "gateway_single"      # gateway.submit() — directional pillars
     GATEWAY_PAIRED = "gateway_paired"      # gateway.submit_paired() — both-or-nothing arb
-    GATEWAY_EXTERNAL = "gateway_external"  # gateway.record_external_fill() — concurrently-placed legs
-    # Documented, justified gateway bypasses:
+    # Places directly for timing/atomicity reasons, but still RECORDS through the
+    # gateway (record_external_fill) — so it does call place_order and is NOT a
+    # gateway-pure mode:
+    GATEWAY_EXTERNAL = "gateway_external"  # concurrently-placed arb legs, then record_external_fill()
+    # Fully direct, justified bypasses (own accounting):
     DIRECT_QUOTING = "direct_quoting"      # market maker — resting two-sided quotes (no Signal/risk)
     DIRECT_EQUITY = "direct_equity"        # oddlot tender — IBKR equities, outside the PM gateway
 
 
-# Modes that MUST run through the ExecutionGateway (no direct exchange.place_order).
-GATEWAY_MODES = frozenset({
+# Gateway-PURE modes: the pillar must not call exchange.place_order at all (the
+# gateway submits on its behalf). GATEWAY_EXTERNAL is deliberately excluded — it
+# places directly then records — matching the conformance guard's skip set.
+GATEWAY_PURE_MODES = frozenset({
     ExecutionMode.GATEWAY_SINGLE,
     ExecutionMode.GATEWAY_PAIRED,
-    ExecutionMode.GATEWAY_EXTERNAL,
 })
 
 
