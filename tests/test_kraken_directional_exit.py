@@ -8,6 +8,7 @@ Two gaps were fixed:
   stop-loss (directional_stop_loss_pct) now exits regardless of momentum.
 """
 
+from auramaur.components import Components
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -186,7 +187,7 @@ def _live_pillar(db, query_fills):
     settings = SimpleNamespace(kraken=_kcfg(), is_live=True)
     k = _client(1.0)
     k.query_fill = AsyncMock(side_effect=query_fills)
-    bot = SimpleNamespace(_components={"db": db})
+    bot = SimpleNamespace(_components=Components({"db": db}))
     return KrakenPillar(settings, k, bot=bot)
 
 
@@ -224,7 +225,7 @@ def test_paper_mode_records_nothing():
         db = Database(":memory:")
         await db.connect()
         settings = SimpleNamespace(kraken=_kcfg(), is_live=False)
-        bot = SimpleNamespace(_components={"db": db})
+        bot = SimpleNamespace(_components=Components({"db": db}))
         p = KrakenPillar(settings, _client(1.0), bot=bot)
 
         out = await p._record_directional_fill(

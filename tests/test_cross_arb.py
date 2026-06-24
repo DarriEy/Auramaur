@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+from auramaur.components import Components
 import pytest
 
 from auramaur.bot import AuramaurBot
@@ -157,7 +158,7 @@ class TestFeeAwareProfit:
         settings.is_live = True
         settings.arbitrage.max_arb_size = 25.0
         bot = AuramaurBot(settings=settings)
-        bot._components = {"alerts": SimpleNamespace(send=AsyncMock())}
+        bot._components = Components({"alerts": SimpleNamespace(send=AsyncMock())})
 
         risk = FakeRisk()
         engines = {

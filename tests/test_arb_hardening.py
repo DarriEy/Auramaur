@@ -14,6 +14,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from auramaur.components import Components
 import pytest
 
 from auramaur.bot import AuramaurBot
@@ -24,7 +25,7 @@ def _bare_bot(*, held_row, is_live=True):
     bot = AuramaurBot.__new__(AuramaurBot)
     db = AsyncMock()
     db.fetchone = AsyncMock(return_value=held_row)
-    bot._components = {"db": db, "alerts": AsyncMock()}
+    bot._components = Components({"db": db, "alerts": AsyncMock()})
     bot.settings = SimpleNamespace(is_live=is_live)
     return bot, db
 

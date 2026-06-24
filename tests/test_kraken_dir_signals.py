@@ -7,6 +7,7 @@
   shrink the crypto ceiling (hold more USDC), never grow it.
 """
 
+from auramaur.components import Components
 import asyncio
 import time
 from types import SimpleNamespace
@@ -28,7 +29,7 @@ def _conv_kcfg(*, enabled=True, min_mult=0.34):
 def _pillar(db, calib, kcfg, price):
     settings = SimpleNamespace(kraken=kcfg, is_live=False)
     k = SimpleNamespace(get_price=AsyncMock(return_value=price))
-    bot = SimpleNamespace(_components={"db": db, "calibration": calib})
+    bot = SimpleNamespace(_components=Components({"db": db, "calibration": calib}))
     return KrakenPillar(settings, k, bot=bot)
 
 

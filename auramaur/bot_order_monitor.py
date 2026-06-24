@@ -32,10 +32,10 @@ class OrderMonitorMixin:
         """Monitor pending limit orders for fills and expiry."""
         from datetime import datetime, timezone
 
-        paper: PaperTrader = self._components["paper"]
-        primary_exchange: PolymarketClient = self._components["exchange"]
+        paper: PaperTrader = self._components.paper
+        primary_exchange: PolymarketClient = self._components.exchange
         exchanges: dict[str, ExchangeClient] = self._components.get("exchanges", {})
-        discovery: MarketDiscovery = self._components["discovery"]
+        discovery: MarketDiscovery = self._components.discovery
         ttl = self.settings.execution.limit_order_ttl_seconds
 
         # Reconcile orphaned live orders into _live_pending so the TTL-cancel
@@ -119,7 +119,7 @@ class OrderMonitorMixin:
                                             price=result.filled_price if result.filled_price > 0 else order.price,
                                             is_paper=False,
                                         )
-                                        pnl_tracker = self._components.get("pnl_tracker")
+                                        pnl_tracker = self._components.pnl_tracker
                                         if pnl_tracker:
                                             await pnl_tracker.record_fill(fill)
                                     except Exception as e:
@@ -130,7 +130,7 @@ class OrderMonitorMixin:
                                             error=str(e),
                                         )
 
-                                db = self._components.get("db")
+                                db = self._components.db
                                 if db and order is not None:
                                     try:
                                         price = result.filled_price if result.filled_price > 0 else order.price
@@ -209,7 +209,7 @@ class OrderMonitorMixin:
                                     # Without this status write the trades row
                                     # stays 'pending' forever even though the
                                     # collateral was released (#94).
-                                    db = self._components.get("db")
+                                    db = self._components.db
                                     if db is not None:
                                         try:
                                             await db.execute(
@@ -289,7 +289,7 @@ class OrderMonitorMixin:
         ``get_order_status`` maps unknown/aged-out orders to 'cancelled', so
         rows whose orders the CLOB no longer indexes resolve too.
         """
-        db = self._components.get("db")
+        db = self._components.db
         if db is None or not live_clients:
             return
 
@@ -348,7 +348,7 @@ class OrderMonitorMixin:
         Delegates to ResolutionTracker which handles multi-exchange
         resolution detection, calibration updates, and position settlement.
         """
-        tracker: ResolutionTracker = self._components["resolution_tracker"]
+        tracker: ResolutionTracker = self._components.resolution_tracker
 
         while self._running:
             if await self._check_kill_switch():
@@ -361,14 +361,14 @@ class OrderMonitorMixin:
                 # settled positions from `portfolio` before the Gamma-style
                 # detection path can see them, which is how Kalshi realized
                 # P&L went entirely unrecorded until 2026-06-12.
-                kalshi = (self._components.get("exchanges") or {}).get("kalshi")
+                kalshi = (self._components.exchanges or {}).get("kalshi")
                 if kalshi is not None:
                     try:
                         from auramaur.broker.kalshi_settlements import (
                             sweep_kalshi_settlements,
                         )
                         booked = await sweep_kalshi_settlements(
-                            self._components["db"], kalshi)
+                            self._components.db, kalshi)
                         booked_ok = [b for b in booked if b.get("booked")]
                         if booked_ok:
                             resolved += len(booked_ok)
@@ -385,7 +385,7 @@ class OrderMonitorMixin:
                         f"  [dim]{now_str}[/] [bold green]RESOLVED[/] {resolved} market(s) — calibration updated"
                     )
                     # Also feed into attribution if available
-                    attributor = self._components.get("attributor")
+                    attributor = self._components.attributor
                     if attributor is not None:
                         # Attribution is handled inside _settle_position via
                         # daily_stats; log for visibility only.

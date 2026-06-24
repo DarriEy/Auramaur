@@ -66,7 +66,7 @@ class ArbExecutionMixin:
             log.debug("arbitrage.no_engine", buy=buy_exchange, sell=sell_exchange)
             return
 
-        alerts: AlertManager = self._components["alerts"]
+        alerts: AlertManager = self._components.alerts
 
         # Risk checks on both legs using exchange-local cash for sizing.
         buy_cash = await buy_engine._get_available_cash()
@@ -180,9 +180,9 @@ class ArbExecutionMixin:
 
         from auramaur.strategy.agent_analyzer import AgentAnalyzer
 
-        depth_agent: AgentAnalyzer = self._components["depth_agent"]
-        db: Database = self._components["db"]
-        engines: dict[str, TradingEngine] = self._components["engines"]
+        depth_agent: AgentAnalyzer = self._components.depth_agent
+        db: Database = self._components.db
+        engines: dict[str, TradingEngine] = self._components.engines
         engine = engines.get("polymarket")
         if engine is None:
             return
@@ -253,7 +253,7 @@ class ArbExecutionMixin:
                         pass
                     # Enrich with Gamma data for CLOB tokens
                     try:
-                        discovery = self._components["discovery"]
+                        discovery = self._components.discovery
                         full_market = await discovery.get_market(market.id)
                         if full_market:
                             market.clob_token_yes = full_market.clob_token_yes
@@ -282,7 +282,7 @@ class ArbExecutionMixin:
                                 market_id=market.id,
                                 edge=round(candidate.signal.edge, 1),
                             )
-                            alerts: AlertManager = self._components["alerts"]
+                            alerts: AlertManager = self._components.alerts
                             await alerts.send(
                                 f"Depth research trade: {market.question[:40]} "
                                 f"edge={candidate.signal.edge:.1f}%",
@@ -298,10 +298,10 @@ class ArbExecutionMixin:
 
     async def _task_arb_scanner(self) -> None:
         """Periodically scan all exchanges for arbitrage opportunities."""
-        scanner: ArbitrageScanner = self._components["arb_scanner"]
-        alerts: AlertManager = self._components["alerts"]
-        risk_manager: RiskManager = self._components["risk_manager"]
-        engines: dict[str, TradingEngine] = self._components["engines"]
+        scanner: ArbitrageScanner = self._components.arb_scanner
+        alerts: AlertManager = self._components.alerts
+        risk_manager: RiskManager = self._components.risk_manager
+        engines: dict[str, TradingEngine] = self._components.engines
 
         while self._running:
             if await self._check_kill_switch():
@@ -406,7 +406,7 @@ class ArbExecutionMixin:
             log.debug("arb_scanner.negrisk_unpriced_or_no_token", group=opp.neg_risk_market_id)
             return
 
-        alerts: AlertManager = self._components["alerts"]
+        alerts: AlertManager = self._components.alerts
 
         # Dedup: 1-hour cooldown per NegRisk event, set before placement.
         import time as _time
@@ -549,7 +549,7 @@ class ArbExecutionMixin:
         # against a $1.00 payout. If we already hold either token of this
         # market, skip: the one-sided leg is the exit machinery's problem,
         # not a fresh "arb".
-        db: Database = self._components["db"]
+        db: Database = self._components.db
         is_paper_flag = 0 if self.settings.is_live else 1
         held = await db.fetchone(
             "SELECT 1 FROM portfolio WHERE market_id = ? AND is_paper = ? "
@@ -560,7 +560,7 @@ class ArbExecutionMixin:
             log.info("arb_scanner.skip_partial_inventory", market_id=market.id)
             return
 
-        alerts: AlertManager = self._components["alerts"]
+        alerts: AlertManager = self._components.alerts
 
         # Build synthetic signals for risk checks.  expected_profit_pct is the
         # net package return; halving it per leg makes valid package arbs fail
@@ -717,7 +717,7 @@ class ArbExecutionMixin:
             )
             return
 
-        alerts: AlertManager = self._components["alerts"]
+        alerts: AlertManager = self._components.alerts
         max_size = self.settings.arbitrage.max_arb_size
 
         # Synthetic signals for risk checks and prepare_order.  The scanner's
@@ -1067,7 +1067,7 @@ class ArbExecutionMixin:
                         f"[dim](blocked 24h)[/]"
                     )
 
-                    alerts = self._components.get("alerts")
+                    alerts = self._components.alerts
                     if alerts:
                         await alerts.send(
                             f"Rebalance: trimmed {pos['mid']} "

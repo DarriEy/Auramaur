@@ -14,6 +14,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+from auramaur.components import Components
 import pytest
 
 from auramaur.bot import AuramaurBot
@@ -41,7 +42,9 @@ def _setup(book: OrderBook, current_price: float = 0.90, max_slip_cents: int = 1
     bot = AuramaurBot(settings=settings)
     db = AsyncMock()
     db.fetchone = AsyncMock(return_value={"token_id": "tok-1"})
-    bot._components = {"db": db}
+    # pnl_tracker present-but-None preserves the prior `.get()` → None behavior
+    # now that the exit reads it via the typed accessor.
+    bot._components = Components({"db": db, "pnl_tracker": None})
 
     exchange = SimpleNamespace(
         get_order_book=AsyncMock(return_value=book),

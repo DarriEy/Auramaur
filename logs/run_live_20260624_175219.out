@@ -1,0 +1,183 @@
+HYBRID MODE — LIVE TRADING
+  Pillars: arb + news speed + LLM + market making + bias_harvest + 
+entailment_arb + resolution_lens
+Starting Auramaur bot...
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ AURAMAUR v0.1.0  |  Mode: LIVE  |  2026-06-24 17:52 UTC                      │
+╰──────────────────────────────────────────────────────────────────────────────╯
+  Build: 0b85ad795b05
+  Kalshi balance: $97.47
+  Cash: $120.12 | Positions: $1399.60 (180 markets)
+  Kraken: $1.00 USDC + $0 CAD + AVAX,POL,TON,XXRP | spec WIND-DOWN (exits only)
+  Data sources: NewsAPI, FRED, Web, RSS, Markets, PolyCtx, Metaculus, Manifold, 
+USGS, CoinGecko, HN, ESPN, GDELT, Trends, Bluesky
+  Balance: $1,519.72
+
+╭─────────────────────────────── strategy books ───────────────────────────────╮
+│ llm               LIVE        gates: divergence + name-the-gap               │
+│ bias_harvest      PAPER       band 0.90-0.97, $10/mkt                        │
+│ entailment_arb    PAPER       min gap 4c, both-or-nothing legs               │
+│ resolution_lens   PAPER       gap>=0.4, edge>=8c                             │
+│ market_maker      LIVE        graduation-exempt                              │
+│ oddlot_tender     PAPER       EDGAR scan, 99-sh entries, manual tender       │
+│ arbitrage         LIVE        graduation-exempt                              │
+│ kraken spec       WIND-DOWN   exits only, no re-entry                        │
+│ graduation        enforce     >= 20 events / 90d to earn live                │
+│ ledger            $-169.46    lifetime live realized (auramaur pnl)          │
+╰──────────────────────────────────────────────────────────────────────────────╯
+  preflight OK, 1 warning(s)
+kraken $1.00 USDC + 0 CAD | spec: AVAX,POL,TON,XXRP
+         ORDER FAILED PAPER polymarket BUY $10.00 (14.5 tokens @ $0.690)
+                             Portfolio Allocation                              
+┏━━━━━━━━━━━━━━━━┳━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━┳━━━━━━━┓
+┃ Category       ┃ Pos ┃  Exposure ┃ Alloc           ┃     PnL ┃  Acc ┃ Kelly ┃
+┡━━━━━━━━━━━━━━━━╇━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━╇━━━━━━━┩
+│ politics_intl  │  54 │   $674.00 │ ████        41% │ $+51.22 │  69% │ 0.20x │
+│ other          │  76 │   $406.89 │ ██▍         25% │  $+7.83 │  64% │ 0.29x │
+│ crypto         │  22 │   $180.97 │ █           11% │  $-1.39 │  77% │ 0.46x │
+│ tech           │  19 │   $142.30 │ ▊            9% │  $+9.12 │  88% │ 0.59x │
+│ science        │  10 │    $67.66 │ ▍            4% │  $+0.33 │ 100% │ 1.00x │
+│ sports         │  17 │    $63.62 │ ▍            4% │  $+8.11 │  12% │ 0.20x │
+│ entertainment  │   9 │    $40.65 │ ▏            2% │  $+3.26 │    — │ 0.75x │
+│ politics_us    │   6 │    $30.30 │ ▏            2% │  $+0.08 │  72% │ 0.77x │
+│ esports        │   4 │    $27.66 │ ▏            2% │  $+0.72 │   0% │ 1.00x │
+│ economics      │   5 │    $17.28 │              1% │  $+1.25 │  71% │ 1.00x │
+│ legal          │   2 │     $3.93 │              0% │  $-0.10 │ 100% │ 1.00x │
+├────────────────┼─────┼───────────┼─────────────────┼─────────┼──────┼───────┤
+│ Total          │ 224 │ $1,655.26 │                 │ $+80.42 │      │       │
+└────────────────┴─────┴───────────┴─────────────────┴─────────┴──────┴───────┘
+                     Strategy Books (realized = pnl_ledger)                     
+┏━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━┓
+┃             ┃              ┃        open ┃         live ┃       paper ┃      ┃
+┃ book        ┃  open (live) ┃     (paper) ┃     realized ┃    realized ┃ win% ┃
+┡━━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━┩
+│ (none)      │            — │           — │         19 / │         2 / │  48% │
+│             │              │             │      $+15.55 │      $-5.60 │      │
+│ bias_harve… │            — │          31 │            — │        82 / │  88% │
+│             │              │             │              │     $-10.04 │      │
+│ exit        │            — │           — │   1 / $-1.00 │           — │   0% │
+│ kraken_dir… │            — │           — │         26 / │           — │   0% │
+│             │              │             │      $-36.53 │             │      │
+│ llm         │ 154 / $1,256 │           5 │        110 / │        56 / │  25% │
+│             │              │             │     $-151.17 │    $-121.81 │      │
+│ news_speed  │    10 / $130 │           2 │  32 / $-1.41 │        11 / │   9% │
+│             │              │             │              │    $-121.86 │      │
+│ order_moni… │            — │           — │   4 / $+8.11 │           — │  50% │
+│ resolution… │            — │          10 │            — │        20 / │  75% │
+│             │              │             │              │     $+12.92 │      │
+│ technical_… │            — │           — │   6 / $-3.00 │         1 / │   0% │
+│             │              │             │              │      $-2.79 │      │
+│ technical_… │            — │           — │            — │         1 / │   0% │
+│             │              │             │              │      $-5.90 │      │
+│ weather_te… │            — │           9 │            — │        48 / │  58% │
+│             │              │             │              │     $-57.31 │      │
+└─────────────┴──────────────┴─────────────┴──────────────┴─────────────┴──────┘
+17:53:41 | cash $15.35 free (+$19.80 in orders) | P&L -93.53 | 224 pos | PEAK
+17:54:20 >>> Strait of Hormuz traffic returns to normal by December 31?
+17:55:47 | cash $22.65 free (+$9.90 in orders) | P&L -107.48 | 224 pos | PEAK
+17:56:46 polymarket Scanned 100 markets, 1 candidates, 17 filtered
+  17:57:16 RESOLVED 67 market(s) — calibration updated
+17:57:40 | cash $32.55 | P&L -93.48 | 224 pos | PEAK
+17:57:47 >>> Will Daryl Parks win the Tallahassee mayoral election?
+         >> Claude: 13% vs Market: 23%  Edge: +8.6%  LOW
+         REJECTED (17/18) news_speed 2420481 grad:unproven category 
+'politics_us' is blocked
+18:01:34 polymarket Scanned 100 markets, 1 candidates, 18 filtered
+18:05:46 polymarket Scanned 100 markets, 1 candidates, 18 filtered
+18:09:58 polymarket Scanned 100 markets, 1 candidates, 18 filtered
+18:11:16 >>> US-Iran Final Nuclear Deal by August 31, 2026?
+18:12:09 kalshi Scanned 300 markets, 2 candidates, 47 filtered
+         > Claude: 22% vs Market: 24%  Edge: +1.0%  MEDIUM
+         REJECTED (17/18) news_speed 2633430 grad:unproven Edge 0.97% below 
+minimum 2.33%
+18:13:16 | cash $22.65 free (+$9.90 in orders) | P&L -93.59 | 224 pos | PEAK
+18:14:09 polymarket Scanned 100 markets, 1 candidates, 18 filtered
+18:16:24 kalshi Scanned 300 markets, 2 candidates, 47 filtered
+kraken $1.00 USDC + 0 CAD | spec: AVAX,POL,TON,XXRP
+18:18:20 polymarket Scanned 100 markets, 1 candidates, 19 filtered
+18:20:39 kalshi Scanned 300 markets, 2 candidates, 47 filtered
+kraken $1.00 USDC + 0 CAD | spec: AVAX,POL,TON,XXRP
+18:23:40 >>> Strait of Hormuz traffic returns to normal by July 31?
+18:24:53 kalshi Scanned 300 markets, 2 candidates, 47 filtered
+         >> Claude: 55% vs Market: 46%  Edge: +8.5%  MEDIUM
+         APPROVED (18/18) $5.37 news_speed 2176262 grad:unproven
+         ORDER FAILED PAPER polymarket BUY $5.49 (11.7 tokens @ $0.470)
+18:26:15 >>> Zcash's Orchard pool confirmed exploited?
+kraken $1.00 USDC + 0 CAD | spec: AVAX,POL,TON,XXRP
+  18:28:47 RESOLVED 68 market(s) — calibration updated
+18:28:51 >>> Will the Democratic Party control the Senate after the 2026 Midterm
+el...
+18:29:07 kalshi Scanned 300 markets, 2 candidates, 47 filtered
+18:29:21 | cash $32.55 | P&L -93.73 | 224 pos | PEAK
+         > Claude: 10% vs Market: 9%  Edge: +0.6%  HIGH
+         REJECTED (17/18) llm KXGDPYEAR-30-B0. grad:unproven Edge 0.63% below 
+minimum 2.32%
+         > Claude: 12% vs Market: 15%  Edge: +1.7%  HIGH
+         REJECTED (17/18) llm KXGDPYEAR-30-B2. grad:unproven Edge 1.75% below 
+minimum 2.32%
+18:30:34 kalshi Cycle: 2 signals, 0 trades (87s)
+
+18:31:09 >>> ICC T20 World Cup, Women: England vs West Indies
+kraken $1.00 USDC + 0 CAD | spec: AVAX,POL,TON,XXRP
+18:34:04 >>> Will the Edmonton Oilers be named the 2026-27 NHL Stanley Cup 
+Champion...
+         > Claude: 6% vs Market: 6%  Edge: +0.7%  MEDIUM
+         REJECTED (16/18) news_speed 2520291 grad:unproven Edge 0.69% below 
+minimum 2.33%
+kraken $1.00 USDC + 0 CAD | spec: AVAX,POL,TON,XXRP
+18:41:45 >>> Zohran Mamdani out as mayor of NYC before 2027?
+kraken $1.00 USDC + 0 CAD | spec: AVAX,POL,TON,XXRP
+18:43:55 polymarket Scanned 100 markets, 1 candidates, 14 filtered
+18:45:01 | cash $22.75 free (+$9.80 in orders) | P&L -93.70 | 224 pos | PEAK
+18:48:05 polymarket Scanned 100 markets, 2 candidates, 13 filtered
+kraken $1.00 USDC + 0 CAD | spec: AVAX,POL,TON,XXRP
+18:52:31 polymarket Scanned 100 markets, 1 candidates, 13 filtered
+18:52:41 ─ last hour: 28 claude calls | 9 evidence pulls | 35 scans | 8 mm 
+expiries
+                             Portfolio Allocation                              
+┏━━━━━━━━━━━━━━━━┳━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━┳━━━━━━━┓
+┃ Category       ┃ Pos ┃  Exposure ┃ Alloc           ┃     PnL ┃  Acc ┃ Kelly ┃
+┡━━━━━━━━━━━━━━━━╇━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━╇━━━━━━━┩
+│ politics_intl  │  76 │   $964.32 │ ███▉        39% │ $+59.12 │  69% │ 1.23x │
+│ other          │ 123 │   $803.08 │ ███▏        32% │ $-20.05 │  64% │ 0.95x │
+│ tech           │  28 │   $293.38 │ █▏          12% │ $+56.13 │  88% │ 0.50x │
+│ crypto         │  26 │   $200.81 │ ▊            8% │  $-7.85 │  77% │ 1.17x │
+│ science        │   9 │    $86.07 │ ▎            3% │  $+2.17 │ 100% │ 1.00x │
+│ politics_us    │  12 │    $64.67 │ ▎            3% │  $-1.20 │  72% │ 0.85x │
+│ esports        │   7 │    $25.52 │              1% │  $+0.47 │   0% │ 1.00x │
+│ economics      │   6 │    $20.68 │              1% │  $+1.24 │  71% │ 1.00x │
+│ entertainment  │   2 │    $17.71 │              1% │  $-0.72 │    — │ 0.75x │
+│ legal          │   6 │    $12.23 │              0% │ $-11.10 │ 100% │ 1.00x │
+│ sports         │   0 │     $0.00 │              0% │  $+0.00 │  12% │ 0.38x │
+├────────────────┼─────┼───────────┼─────────────────┼─────────┼──────┼───────┤
+│ Total          │ 295 │ $2,488.46 │                 │ $+78.20 │      │       │
+└────────────────┴─────┴───────────┴─────────────────┴─────────┴──────┴───────┘
+
+--- Hybrid Strategy Report ---
+  news_speed      trades= 19  P&L=$-38.23  win=32%
+  technical_mean_reversion trades=  6  P&L=$-3.48  win=17%
+  exit            trades=  1  P&L=$-1.00  win=0%
+  order_monitor   trades=  2  P&L=$+5.53  win=50%
+  llm             trades=110  P&L=$+110.78  win=31%
+kraken $1.00 USDC + 0 CAD | spec: AVAX,POL,TON,XXRP
+18:56:42 polymarket Scanned 100 markets, 2 candidates, 14 filtered
+kraken $1.00 USDC + 0 CAD | spec: AVAX,POL,TON,XXRP
+19:00:57 polymarket Scanned 100 markets, 2 candidates, 15 filtered
+  19:01:18 RESOLVED 68 market(s) — calibration updated
+19:01:24 | cash $22.65 free (+$9.90 in orders) | P&L -93.20 | 224 pos | PEAK
+         > Claude: 7% vs Market: 5%  Edge: +1.6%  LOW
+         REJECTED (17/18) llm 2431245 grad:unproven Edge 1.65% below minimum 
+2.33%
+         < Claude: 8% vs Market: 8%  Edge: -0.3%  MEDIUM
+         REJECTED (17/18) llm 2468461 grad:unproven Edge -0.29% below minimum 
+2.33%
+19:02:30 polymarket Cycle: 2 signals, 0 trades (93s)
+
+19:02:45 | cash $22.65 free (+$9.90 in orders) | P&L -88.40 | 224 pos | PEAK
+         ORDER FAILED PAPER polymarket BUY $10.00 (10.5 tokens @ $0.950)
+kraken $1.00 USDC + 0 CAD | spec: AVAX,POL,TON,XXRP
+19:04:14 | cash $22.65 free (+$9.90 in orders) | P&L -93.20 | 224 pos | PEAK
+⚠ STALE BUILD: running build 0b85ad795b05 but the checkout is now at 
+ff4af05bce17 — restart the bot to pick up merged fixes
+/Users/darri.eythorsson/.local/share/uv/python/cpython-3.12.12-macos-aarch64-none/lib/python3.12/multiprocessing/resource_tracker.py:279: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '

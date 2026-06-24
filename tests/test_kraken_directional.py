@@ -1,5 +1,6 @@
 """Tests for the Kraken directional spot pillar — asymmetric long bias."""
 
+from auramaur.components import Components
 import contextlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -160,7 +161,7 @@ async def test_mirror_to_portfolio_upserts_held_and_deletes_closed():
     db.fetchall = AsyncMock(return_value=[{"market_id": "ETHUSDC"},
                                           {"market_id": "XBTUSDC"}])
     bot = MagicMock()
-    bot._components = {"db": db}
+    bot._components = Components({"db": db})
     p = KrakenPillar(settings=s, kraken_client=MagicMock(), bot=bot)
 
     await p._mirror_to_portfolio({"XBTUSDC": (90.0, 100.0, 0.5)}, ["ETHUSDC"])
@@ -219,7 +220,7 @@ async def test_mirror_removes_stale_rows_from_prior_sessions():
     await db.commit()
 
     bot = MagicMock()
-    bot._components = {"db": db}
+    bot._components = Components({"db": db})
     p = KrakenPillar(settings=s, kraken_client=MagicMock(), bot=bot)
     # Fresh process: _dir_long empty, closed empty — only XBT actually held.
     await p._mirror_to_portfolio({"XBTUSDC": (90.0, 100.0, 0.5)}, [])

@@ -25,13 +25,13 @@ class StrategyTaskMixin:
         from auramaur.strategy.bias_harvest import BiasHarvestPillar
 
         pillar = BiasHarvestPillar(
-            db=self._components["db"],
+            db=self._components.db,
             settings=self.settings,
-            discovery=self._components["discovery"],
-            exchange=self._components["exchange"],
-            risk_manager=self._components["risk_manager"],
-            pnl_tracker=self._components["pnl_tracker"],
-            calibration=self._components["calibration"],
+            discovery=self._components.discovery,
+            exchange=self._components.exchange,
+            risk_manager=self._components.risk_manager,
+            pnl_tracker=self._components.pnl_tracker,
+            calibration=self._components.calibration,
         )
         interval = max(60, self.settings.bias_harvest.interval_seconds)
         while self._running:
@@ -48,17 +48,17 @@ class StrategyTaskMixin:
         from auramaur.strategy.entailment_arb import EntailmentArbPillar
 
         pillar = EntailmentArbPillar(
-            db=self._components["db"],
+            db=self._components.db,
             settings=self.settings,
-            discovery=self._components["discovery"],
-            exchange=(self._components.get("exchanges") or {}).get("polymarket"),
-            risk_manager=self._components["risk_manager"],
-            pnl_tracker=self._components["pnl_tracker"],
-            analyzer=self._components.get("analyzer"),
+            discovery=self._components.discovery,
+            exchange=(self._components.exchanges or {}).get("polymarket"),
+            risk_manager=self._components.risk_manager,
+            pnl_tracker=self._components.pnl_tracker,
+            analyzer=self._components.analyzer,
             # Kalshi econ-bin ladder arb fetches its own series; pass the Kalshi
             # discovery if present (no-op when Kalshi isn't configured).
-            kalshi_discovery=(self._components.get("discoveries") or {}).get("kalshi"),
-            exchanges=self._components.get("exchanges") or {},
+            kalshi_discovery=(self._components.discoveries or {}).get("kalshi"),
+            exchanges=self._components.exchanges or {},
         )
         interval = max(60, self.settings.entailment_arb.interval_seconds)
         while self._running:
@@ -76,15 +76,15 @@ class StrategyTaskMixin:
         from auramaur.strategy.cross_venue_arb import CrossVenueArbPillar
 
         pillar = CrossVenueArbPillar(
-            db=self._components["db"],
+            db=self._components.db,
             settings=self.settings,
-            discovery=(self._components.get("discoveries") or {}).get("polymarket"),
-            exchange=(self._components.get("exchanges") or {}).get("polymarket"),
-            risk_manager=self._components["risk_manager"],
-            pnl_tracker=self._components["pnl_tracker"],
-            analyzer=self._components.get("analyzer"),
-            kalshi_discovery=(self._components.get("discoveries") or {}).get("kalshi"),
-            exchanges=self._components.get("exchanges") or {},
+            discovery=(self._components.discoveries or {}).get("polymarket"),
+            exchange=(self._components.exchanges or {}).get("polymarket"),
+            risk_manager=self._components.risk_manager,
+            pnl_tracker=self._components.pnl_tracker,
+            analyzer=self._components.analyzer,
+            kalshi_discovery=(self._components.discoveries or {}).get("kalshi"),
+            exchanges=self._components.exchanges or {},
         )
         interval = max(60, self.settings.cross_venue_arb.interval_seconds)
         while self._running:
@@ -101,20 +101,20 @@ class StrategyTaskMixin:
         from auramaur.data_sources.fred import FREDSource
         from auramaur.strategy.econ_indicator import EconIndicatorPillar
 
-        kalshi_discovery = (self._components.get("discoveries") or {}).get("kalshi")
-        kalshi_exchange = (self._components.get("exchanges") or {}).get("kalshi")
+        kalshi_discovery = (self._components.discoveries or {}).get("kalshi")
+        kalshi_exchange = (self._components.exchanges or {}).get("kalshi")
         if kalshi_discovery is None or kalshi_exchange is None or not self.settings.fred_api_key:
             log.info("econ_indicator.disabled", reason="missing kalshi or FRED key")
             return
         pillar = EconIndicatorPillar(
-            db=self._components["db"],
+            db=self._components.db,
             settings=self.settings,
             kalshi_discovery=kalshi_discovery,
             fred_source=FREDSource(api_key=self.settings.fred_api_key),
             exchange=kalshi_exchange,
-            risk_manager=self._components["risk_manager"],
-            pnl_tracker=self._components["pnl_tracker"],
-            calibration=self._components["calibration"],
+            risk_manager=self._components.risk_manager,
+            pnl_tracker=self._components.pnl_tracker,
+            calibration=self._components.calibration,
         )
         interval = max(60, self.settings.econ_indicator.interval_seconds)
         while self._running:
@@ -132,9 +132,9 @@ class StrategyTaskMixin:
         from auramaur.monitoring.intraday_drift import IntradayDriftTracker
 
         tracker = IntradayDriftTracker(
-            db=self._components["db"],
+            db=self._components.db,
             settings=self.settings,
-            discovery=self._components["discovery"],
+            discovery=self._components.discovery,
         )
         interval = max(60, self.settings.intraday_drift.interval_seconds)
         while self._running:
@@ -151,10 +151,10 @@ class StrategyTaskMixin:
         from auramaur.monitoring.hydro_market_watch import HydroMarketWatcher
 
         watcher = HydroMarketWatcher(
-            db=self._components["db"],
+            db=self._components.db,
             settings=self.settings,
-            discoveries=self._components.get("discoveries") or {},
-            alerts=self._components.get("alerts"),
+            discoveries=self._components.discoveries or {},
+            alerts=self._components.alerts,
         )
         interval = max(300, self.settings.hydro_watch.interval_seconds)
         while self._running:
@@ -172,13 +172,13 @@ class StrategyTaskMixin:
         from auramaur.strategy.weather_temp import WeatherTempPillar
 
         pillar = WeatherTempPillar(
-            db=self._components["db"],
+            db=self._components.db,
             settings=self.settings,
-            discovery=self._components["discovery"],
-            exchange=self._components["exchange"],
-            risk_manager=self._components["risk_manager"],
-            pnl_tracker=self._components["pnl_tracker"],
-            calibration=self._components["calibration"],
+            discovery=self._components.discovery,
+            exchange=self._components.exchange,
+            risk_manager=self._components.risk_manager,
+            pnl_tracker=self._components.pnl_tracker,
+            calibration=self._components.calibration,
             weather=OpenMeteoSource(),
         )
         interval = max(60, self.settings.weather_temp.interval_seconds)
@@ -196,16 +196,16 @@ class StrategyTaskMixin:
         from auramaur.strategy.resolution_lens import ResolutionLensPillar
 
         pillar = ResolutionLensPillar(
-            db=self._components["db"],
+            db=self._components.db,
             settings=self.settings,
-            discovery=self._components["discovery"],
-            exchange=self._components["exchange"],
-            risk_manager=self._components["risk_manager"],
-            pnl_tracker=self._components["pnl_tracker"],
-            calibration=self._components["calibration"],
-            analyzer=self._components.get("analyzer"),
+            discovery=self._components.discovery,
+            exchange=self._components.exchange,
+            risk_manager=self._components.risk_manager,
+            pnl_tracker=self._components.pnl_tracker,
+            calibration=self._components.calibration,
+            analyzer=self._components.analyzer,
             # Phase 3: evidence-grounded comprehension taps the shared aggregator.
-            aggregator=self._components.get("aggregator"),
+            aggregator=self._components.aggregator,
         )
         interval = max(60, self.settings.resolution_lens.interval_seconds)
         while self._running:
@@ -228,13 +228,13 @@ class StrategyTaskMixin:
             from auramaur.exchange.ibkr_equity import IBKREquityClient
             equity = IBKREquityClient(self.settings)
         pillar = OddLotTenderPillar(
-            db=self._components["db"],
+            db=self._components.db,
             settings=self.settings,
             edgar=edgar,
-            analyzer=self._components.get("analyzer"),
-            alerts=self._components.get("alerts"),
+            analyzer=self._components.analyzer,
+            alerts=self._components.alerts,
             equity_client=equity,
-            pnl_tracker=self._components["pnl_tracker"],
+            pnl_tracker=self._components.pnl_tracker,
         )
         interval = max(600, self.settings.oddlot_tender.interval_seconds)
         try:
