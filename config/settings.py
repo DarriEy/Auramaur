@@ -1019,12 +1019,10 @@ class Settings(BaseSettings):
 
     @property
     def kill_switch_active(self) -> bool:
-        # Anchor the kill switch to the repo root (two levels up from this
-        # file: config/ -> repo root), not the caller's CWD. A bare
-        # Path("KILL_SWITCH") would be CWD-relative and could miss the switch
-        # when the bot is launched from the inner package directory.
-        repo_root = Path(__file__).resolve().parent.parent
-        return (repo_root / "KILL_SWITCH").exists() or Path("KILL_SWITCH").exists()
+        # Delegate to the shared root-aware helper so this and every bare call
+        # site agree on one definition (repo root OR CWD) and can't drift.
+        from auramaur.killswitch import kill_switch_present
+        return kill_switch_present()
 
     @property
     def is_live(self) -> bool:

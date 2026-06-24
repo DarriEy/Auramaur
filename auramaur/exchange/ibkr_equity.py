@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from auramaur.killswitch import kill_switch_present
 
 import structlog
 
@@ -100,7 +101,7 @@ class IBKREquityClient:
         Gated + capped. To exit a position use close_position()."""
         side_str = (side.value if isinstance(side, OrderSide) else str(side)).upper()
 
-        if Path("KILL_SWITCH").exists():
+        if kill_switch_present():
             log.critical("kill_switch.active", action="ibkr_equity_order_blocked")
             return OrderResult(order_id="BLOCKED", market_id=symbol, status="rejected",
                                is_paper=True, error_message="kill switch")
@@ -140,7 +141,7 @@ class IBKREquityClient:
         CAVEAT: a cashQty close is only as exact as the quote, so it may leave
         sub-cent dust — verify live that positions flatten cleanly before trusting
         this for hands-off exits."""
-        if Path("KILL_SWITCH").exists():
+        if kill_switch_present():
             log.critical("kill_switch.active", action="ibkr_equity_close_blocked")
             return OrderResult(order_id="BLOCKED", market_id=symbol, status="rejected",
                                is_paper=True, error_message="kill switch")
@@ -209,7 +210,7 @@ class IBKREquityClient:
             return OrderResult(order_id="ERROR", market_id=symbol, status="rejected",
                                is_paper=True, error_message="qty must be positive")
 
-        if Path("KILL_SWITCH").exists():
+        if kill_switch_present():
             log.critical("kill_switch.active", action="ibkr_equity_order_blocked")
             return OrderResult(order_id="BLOCKED", market_id=symbol, status="rejected",
                                is_paper=True, error_message="kill switch")
@@ -305,7 +306,7 @@ class IBKREquityClient:
         if dry_run is None:
             dry_run = not self._settings.is_live
 
-        if Path("KILL_SWITCH").exists():
+        if kill_switch_present():
             log.critical("kill_switch.active", action="ibkr_fx_convert_blocked")
             return OrderResult(order_id="BLOCKED", market_id=f"USD{source_ccy}",
                                status="rejected", is_paper=True,

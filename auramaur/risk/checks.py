@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from auramaur.killswitch import kill_switch_present
 from typing import Any
 
 from pydantic import BaseModel
@@ -23,7 +24,7 @@ class CheckResult(BaseModel):
 
 async def check_kill_switch() -> CheckResult:
     """Fail if KILL_SWITCH file exists on disk."""
-    active = Path("KILL_SWITCH").exists()
+    active = kill_switch_present()
     return CheckResult(
         name="kill_switch",
         passed=not active,

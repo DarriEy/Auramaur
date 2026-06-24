@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
+from auramaur.killswitch import kill_switch_present
 
 import structlog
 
@@ -338,7 +339,7 @@ class IBKRClient:
     async def place_order(self, order: Order) -> OrderResult:
         """Place an option order via IB."""
         # Kill switch
-        if Path("KILL_SWITCH").exists():
+        if kill_switch_present():
             log.critical("kill_switch.active", action="order_blocked")
             return OrderResult(
                 order_id="BLOCKED",

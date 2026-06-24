@@ -21,6 +21,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from auramaur.killswitch import kill_switch_present
 
 import structlog
 
@@ -115,7 +116,7 @@ class MarketMaker:
         Returns list of cycle results (one per market acted on).
         """
         # Kill switch check
-        if Path("KILL_SWITCH").exists():
+        if kill_switch_present():
             log.critical("market_maker.kill_switch_active")
             return []
 

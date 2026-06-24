@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
+from auramaur.killswitch import kill_switch_present
 from typing import TYPE_CHECKING
 
 import structlog
@@ -534,7 +535,7 @@ class AuramaurBot(
         return cash < 5.0
 
     async def _check_kill_switch(self) -> bool:
-        if Path("KILL_SWITCH").exists():
+        if kill_switch_present():
             show_error("KILL SWITCH ACTIVE — halting all trading")
             self._running = False
             alerts = self._components.get("alerts")

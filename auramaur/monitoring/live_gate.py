@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from auramaur.killswitch import kill_switch_present
 from typing import Literal
 
 from auramaur.db.database import Database
@@ -55,7 +56,7 @@ async def preflight(settings, db: Database) -> PreflightReport:
         report.results.append(GateResult(name, severity, detail))
 
     # 1. Kill switch — halts ALL trading by design.
-    if Path("KILL_SWITCH").exists():
+    if kill_switch_present():
         add("kill_switch", "BLOCK", "KILL_SWITCH file present")
     else:
         add("kill_switch", "OK", "absent")

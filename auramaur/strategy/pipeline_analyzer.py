@@ -10,6 +10,7 @@ import time
 import structlog
 
 from auramaur.data_sources.aggregator import Aggregator
+from auramaur.killswitch import kill_switch_present
 from auramaur.db.database import Database
 from auramaur.exchange.models import Confidence, Market, OrderSide, Signal
 from auramaur.exchange.protocols import ExchangeClient
@@ -76,10 +77,9 @@ class PipelineAnalyzer:
         price_history: dict[str, list[float]] | None = None,
     ) -> list[TradeCandidate]:
         """Batch analysis with persistent world model."""
-        from pathlib import Path
         from auramaur.nlp.query_decomposer import extract_search_queries
 
-        if Path("KILL_SWITCH").exists():
+        if kill_switch_present():
             log.warning("pipeline.kill_switch_active")
             return []
 

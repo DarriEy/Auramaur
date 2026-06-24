@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from auramaur.broker.allocator import CandidateTrade, CapitalAllocator
+from auramaur.killswitch import kill_switch_present
 from auramaur.exchange.models import Market, OrderResult, OrderSide, Signal
 from auramaur.monitoring.display import (
     show_cycle_summary,
@@ -469,13 +470,12 @@ class CycleOrchestrationMixin:
         price_history: dict[str, list[float]] | None = None,
     ) -> list[dict]:
         """Strategic cycle: batch analysis with persistent world model."""
-        from pathlib import Path
         from auramaur.nlp.strategic import StrategicAnalyzer
         from auramaur.exchange.models import Confidence
         exchange_fees = self.settings.arbitrage.exchange_fees
 
         # Kill switch check — halt immediately if active
-        if Path("KILL_SWITCH").exists():
+        if kill_switch_present():
             log.warning("engine.kill_switch_active", method="strategic")
             return []
 

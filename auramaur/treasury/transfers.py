@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from auramaur.killswitch import kill_switch_present
 from typing import Callable
 
 import structlog
@@ -107,7 +108,7 @@ class TransferManager:
                                   amount=amount_usd, dest_key=dest_key)
 
         # 1. Kill switch.
-        if Path("KILL_SWITCH").exists():
+        if kill_switch_present():
             return blocked("kill switch active")
 
         # 2. Whitelist (config side). Kraken UI is the second, independent gate.

@@ -30,6 +30,7 @@ import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from auramaur.killswitch import kill_switch_present
 
 import aiohttp
 import structlog
@@ -313,7 +314,7 @@ class CryptoComClient:
     async def place_order(self, order: Order) -> OrderResult:
         """Place an order. Paper trades by default."""
         # Kill switch
-        if Path("KILL_SWITCH").exists():
+        if kill_switch_present():
             log.critical("kill_switch.active", action="order_blocked")
             return OrderResult(
                 order_id="BLOCKED",
