@@ -334,14 +334,25 @@ class PortfolioTracker:
                         pass
                     else:
                         pos.current_price = new_mark
+                        # Scope the write to THIS token. The portfolio key is
+                        # (market_id, is_paper, token); without the token clause
+                        # a market we hold on both sides (NO and YES rows) has
+                        # BOTH rows overwritten with whichever leg was marked —
+                        # so the NO row gets stamped the YES price (and vice
+                        # versa), inverting a winner into a phantom loser in the
+                        # persisted mark (corrupting display, drawdown, Kelly,
+                        # and category exposure, which read the stored value).
                         update_sql = (
                             """UPDATE portfolio
                                SET current_price = ?,
                                    unrealized_pnl = (? - avg_price) * size,
                                    updated_at = datetime('now')
-                               WHERE market_id = ?"""
+                               WHERE market_id = ? AND token = ?"""
                         )
-                        update_params: list[object] = [pos.current_price, pos.current_price, pos.market_id]
+                        update_params: list[object] = [
+                            pos.current_price, pos.current_price,
+                            pos.market_id, pos.token.value,
+                        ]
                         if exchange:
                             update_sql += " AND exchange = ?"
                             update_params.append(exchange)
