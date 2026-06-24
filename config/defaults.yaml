@@ -496,6 +496,11 @@ resolution_lens:
   min_gap_score: 0.4       # lens-judged headline/criteria divergence floor
   high_conf_gap_score: 0.7 # >= this -> HIGH confidence (clears divergence filter)
   min_edge: 0.08           # |strict fair - market| floor
+  # Favorite-discipline floor on BUY entries. Edge audit: every lens×weather
+  # loss was a BUY entered in the near-coin-flip band; gating BUYs to YES-side
+  # favorites (>= this) cut the cell from 83% -> 100% win in-sample. SELL
+  # (overpriced-YES longshot) plays are exempt by construction.
+  min_entry_price: 0.65
   stake_usd: 10.0
   max_entries_per_cycle: 3
   max_llm_calls_per_cycle: 5

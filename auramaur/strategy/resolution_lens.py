@@ -500,6 +500,19 @@ class ResolutionLensPillar:
     async def _enter(self, m: Market, fair: float, score: float,
                      mech: str, edge: float) -> bool:
         cfg = self._settings.resolution_lens
+        # Favorite-discipline floor (BUY side only). Edge audit (2026-06-24):
+        # every lens×weather loss was a BUY of a narrow temperature bin entered
+        # in the near-coin-flip band — favorite-longshot variance, not a real
+        # fine-print read. Buying only YES sides already priced as favorites
+        # cut the cell to 100% win in-sample. SELL longshot plays (overpriced
+        # 'permanent'/'announce' YES) sit below this floor by construction and
+        # are deliberately exempt. edge > 0 ⇒ BUY YES at ~outcome_yes_price.
+        if (edge > 0 and cfg.min_entry_price > 0.0
+                and m.outcome_yes_price < cfg.min_entry_price):
+            log.info("lens.below_entry_floor", market_id=m.id,
+                     yes_price=round(m.outcome_yes_price, 3),
+                     floor=cfg.min_entry_price)
+            return False
         signal = Signal(
             market_id=m.id,
             market_question=m.question,
