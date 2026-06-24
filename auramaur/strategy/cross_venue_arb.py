@@ -26,6 +26,8 @@ Rides the standard rails as strategy_source='cross_venue_arb'.
 
 from __future__ import annotations
 
+from auramaur.strategy.protocols import ExecutionMode
+
 import json
 from datetime import datetime, timezone
 
@@ -56,6 +58,10 @@ Respond with ONLY this JSON:
 
 
 class CrossVenueArbPillar:
+
+    # Uniform Strategy contract (see strategy/protocols.py).
+    name = "cross_venue_arb"
+    execution_mode = ExecutionMode.GATEWAY_PAIRED
     def __init__(self, db, settings, discovery, exchange, risk_manager,
                  pnl_tracker, analyzer=None, kalshi_discovery=None,
                  exchanges=None) -> None:

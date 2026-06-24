@@ -17,6 +17,8 @@ and calibration prove or kill the edge before any live capital.
 
 from __future__ import annotations
 
+from auramaur.strategy.protocols import ExecutionMode
+
 from datetime import datetime, timezone
 
 import structlog
@@ -37,6 +39,10 @@ log = structlog.get_logger()
 
 class EconIndicatorPillar:
     """Periodic data-driven scanner for Kalshi economic-indicator bins."""
+
+    # Uniform Strategy contract (see strategy/protocols.py).
+    name = "econ_indicator"
+    execution_mode = ExecutionMode.GATEWAY_SINGLE
 
     def __init__(self, db, settings, kalshi_discovery, fred_source, exchange,
                  risk_manager, pnl_tracker, calibration) -> None:

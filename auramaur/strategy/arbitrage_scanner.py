@@ -6,6 +6,8 @@ markets, and checks within-exchange invariants (YES + NO should sum to ~1.0).
 
 from __future__ import annotations
 
+from auramaur.strategy.protocols import ExecutionMode
+
 import asyncio
 import re
 from dataclasses import dataclass
@@ -132,6 +134,10 @@ class ArbitrageScanner:
        ~1.0.  If the sum is < 0.97, buying both YES and NO guarantees a
        profit on resolution (one side pays $1.00, total cost < $0.97).
     """
+
+    # Uniform Strategy contract (see strategy/protocols.py).
+    name = "arb_scanner"
+    execution_mode = ExecutionMode.GATEWAY_EXTERNAL
 
     def __init__(
         self,

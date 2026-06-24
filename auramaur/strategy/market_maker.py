@@ -17,6 +17,8 @@ capping max inventory per market.
 
 from __future__ import annotations
 
+from auramaur.strategy.protocols import ExecutionMode
+
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -78,6 +80,10 @@ class MarketMaker:
     The user has 0% maker fees on Polymarket, so all spread captured
     is pure profit when both legs fill.
     """
+
+    # Uniform Strategy contract (see strategy/protocols.py).
+    name = "market_maker"
+    execution_mode = ExecutionMode.DIRECT_QUOTING
 
     def __init__(
         self,

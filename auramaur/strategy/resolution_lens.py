@@ -27,6 +27,8 @@ strategy_source='resolution_lens', scored by the graduation ladder.
 
 from __future__ import annotations
 
+from auramaur.strategy.protocols import ExecutionMode
+
 import json
 import re
 from datetime import datetime, timezone
@@ -123,6 +125,10 @@ Respond with ONLY this JSON:
 
 
 class ResolutionLensPillar:
+
+    # Uniform Strategy contract (see strategy/protocols.py).
+    name = "resolution_lens"
+    execution_mode = ExecutionMode.GATEWAY_SINGLE
     def __init__(self, db, settings, discovery, exchange, risk_manager,
                  pnl_tracker, calibration, analyzer, aggregator=None) -> None:
         self._db = db
