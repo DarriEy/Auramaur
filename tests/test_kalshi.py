@@ -318,14 +318,13 @@ class TestKalshiPaperGate:
         paper.execute.assert_called_once()
 
 
-class TestKalshiNoOrderIdSoftReject:
-    @pytest.mark.asyncio
-    async def test_live_order_without_order_id_rejects_not_pending(self):
-        """A 2xx create_order response with no `order` object (Kalshi's soft
-        rejection — no exception raised) must REJECT, not return a phantom
-        'pending' with order_id='unknown' that the monitor flips to 'error' and
-        the exit retries forever. The raw body is surfaced for diagnosis."""
+class TestKalshiV2CreateOrder:
+    """The v2 single-book create-order endpoint (/portfolio/events/orders)."""
+
+    def _client(self, create_response: dict | None, *, raise_exc=None):
+        """A KalshiClient wired so the live path hits a mocked call_api."""
         from unittest.mock import AsyncMock, MagicMock
+        import asyncio as _asyncio
 
         client = KalshiClient.__new__(KalshiClient)
         client._init_api = MagicMock()
@@ -333,58 +332,99 @@ class TestKalshiNoOrderIdSoftReject:
         client._settings = MagicMock()
         client._settings.is_live = True
         client._live_pending = {}
-        # dup-check call returns no resting orders; the create_order call returns
-        # a body with an error and NO 'order' object (the observed shape).
-        client._call_raw = AsyncMock(side_effect=[
-            json.dumps({"orders": []}),
-            json.dumps({"error": "too_few_contracts"}),
-        ])
+        client._api_base = "https://api.elections.kalshi.com/trade-api/v2"
+        client._semaphore = _asyncio.Semaphore(1)
+        # dup-check (get_orders) → no resting orders.
+        client._call_raw = AsyncMock(return_value=json.dumps({"orders": []}))
+        # The v2 create goes through self._client.call_api(...).read().
+        sdk = MagicMock()
+        resp = MagicMock()
+        if raise_exc is not None:
+            sdk.call_api = MagicMock(side_effect=raise_exc)
+        else:
+            resp.read = MagicMock(return_value=json.dumps(create_response).encode())
+            sdk.call_api = MagicMock(return_value=resp)
+        client._client = sdk
+        return client
 
-        order = Order(
-            market_id="KXTEST", exchange="kalshi", side=OrderSide.SELL,
-            token=TokenType.YES, token_id="KXTEST", size=16, price=0.04,
-            dry_run=False,
-        )
+    def _body_sent(self, client):
+        return client._client.call_api.call_args.kwargs["body"]
+
+    @pytest.mark.asyncio
+    async def test_yes_sell_maps_to_ask_at_price(self):
+        """Exit of a YES position (sell YES) → side 'ask' at the YES price."""
+        client = self._client({"order_id": "ord-1", "remaining_count": "16.00"})
+        order = Order(market_id="KXT", exchange="kalshi", side=OrderSide.SELL,
+                      token=TokenType.YES, token_id="KXT", size=16, price=0.04,
+                      dry_run=False)
         result = await client.place_order(order)
+        assert result.status == "pending" and result.order_id == "ord-1"
+        body = self._body_sent(client)
+        assert body["side"] == "ask"
+        assert body["price"] == "0.0400"
+        assert body["count"] == "16.00"
+        assert body["time_in_force"] == "good_till_canceled"
 
+    @pytest.mark.asyncio
+    async def test_no_sell_maps_to_bid_at_one_minus_price(self):
+        """Exit of a NO position (sell NO at 0.97) is economically buy YES at
+        0.03 → side 'bid' at (1 - price)."""
+        client = self._client({"order_id": "ord-2", "remaining_count": "24.00"})
+        order = Order(market_id="KXT", exchange="kalshi", side=OrderSide.SELL,
+                      token=TokenType.NO, token_id="KXT", size=24, price=0.97,
+                      dry_run=False)
+        await client.place_order(order)
+        body = self._body_sent(client)
+        assert body["side"] == "bid"
+        assert body["price"] == "0.0300"
+
+    @pytest.mark.asyncio
+    async def test_yes_buy_maps_to_bid(self):
+        client = self._client({"order_id": "ord-3"})
+        order = Order(market_id="KXT", exchange="kalshi", side=OrderSide.BUY,
+                      token=TokenType.YES, token_id="KXT", size=10, price=0.40,
+                      dry_run=False)
+        await client.place_order(order)
+        body = self._body_sent(client)
+        assert body["side"] == "bid" and body["price"] == "0.4000"
+
+    @pytest.mark.asyncio
+    async def test_no_buy_maps_to_ask_at_one_minus_price(self):
+        client = self._client({"order_id": "ord-4"})
+        order = Order(market_id="KXT", exchange="kalshi", side=OrderSide.BUY,
+                      token=TokenType.NO, token_id="KXT", size=10, price=0.30,
+                      dry_run=False)
+        await client.place_order(order)
+        body = self._body_sent(client)
+        assert body["side"] == "ask" and body["price"] == "0.7000"
+
+    @pytest.mark.asyncio
+    async def test_request_carries_uuid_client_order_id_and_v2_fields(self):
+        import uuid as _uuid
+        client = self._client({"order_id": "ord-5"})
+        order = Order(market_id="KXT", exchange="kalshi", side=OrderSide.SELL,
+                      token=TokenType.YES, token_id="KXT", size=16, price=0.04,
+                      dry_run=False)
+        await client.place_order(order)
+        body = self._body_sent(client)
+        _uuid.UUID(body["client_order_id"])  # raises if not a valid UUID
+        assert body["self_trade_prevention_type"] == "taker_at_cross"
+        # Posted to the v2 events/orders path.
+        assert client._client.call_api.call_args.args[1].endswith(
+            "/portfolio/events/orders")
+
+    @pytest.mark.asyncio
+    async def test_response_without_order_id_rejects(self):
+        """A body lacking order_id (soft rejection) → rejected, no ghost order."""
+        client = self._client({"error": "too_few_contracts"})
+        order = Order(market_id="KXT", exchange="kalshi", side=OrderSide.SELL,
+                      token=TokenType.YES, token_id="KXT", size=16, price=0.04,
+                      dry_run=False)
+        result = await client.place_order(order)
         assert result.status == "rejected"
         assert result.order_id == "KALSHI_NO_ORDER"
         assert "too_few_contracts" in result.error_message
-        # No ghost order tracked.
         assert client._live_pending == {}
-
-    @pytest.mark.asyncio
-    async def test_live_order_includes_client_order_id(self):
-        """Kalshi v2 create-order requires a client_order_id idempotency key;
-        omitting it routes to the removed v1 flow ('deprecated_v1_order_endpoint')
-        and silently fails every live order. The request must carry a UUID."""
-        import uuid as _uuid
-        from unittest.mock import AsyncMock, MagicMock
-
-        client = KalshiClient.__new__(KalshiClient)
-        client._init_api = MagicMock()
-        client._portfolio_api = MagicMock()
-        client._settings = MagicMock()
-        client._settings.is_live = True
-        client._live_pending = {}
-        client._call_raw = AsyncMock(side_effect=[
-            json.dumps({"orders": []}),                      # dup-check
-            json.dumps({"order": {"order_id": "ord-1", "status": "resting"}}),
-        ])
-
-        order = Order(
-            market_id="KXTEST", exchange="kalshi", side=OrderSide.SELL,
-            token=TokenType.NO, token_id="KXTEST", size=24, price=0.97,
-            dry_run=False,
-        )
-        result = await client.place_order(order)
-
-        assert result.status == "pending"
-        # The create_order call carried a valid UUID client_order_id.
-        create_call = client._call_raw.await_args_list[1]
-        req = create_call.kwargs["create_order_request"]
-        assert req.client_order_id
-        _uuid.UUID(req.client_order_id)  # raises if not a valid UUID
 
 
 class TestKalshiPrepareOrderDirectSell:
