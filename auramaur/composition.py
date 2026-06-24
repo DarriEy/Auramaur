@@ -231,3 +231,296 @@ def assemble_venues(g: GlobalServices, exchange_filter: str | None) -> dict:
         "engines": engines, "syncers": syncers,
         "syncer": syncer, "reconciler": reconciler, "router": router,
     }
+
+
+async def assemble_components(
+    *, settings, db_path: str, hybrid: bool, exchange_filter: str | None,
+    rebalance_cooldowns: dict,
+):
+    """Build the full runtime Components registry: global services, the per-venue
+    graph (assemble_venues), and the post-loop globals that read the assembled
+    maps. Returns a Components dict identical to the original inline assembly;
+    AuramaurBot._init_components is now a thin shim over this.
+    """
+    from auramaur.components import Components
+    from auramaur.data_sources.aggregator import Aggregator
+    from auramaur.data_sources.fred import FREDSource
+    from auramaur.data_sources.newsapi import NewsAPISource
+    from auramaur.data_sources.reddit import RedditSource
+    from auramaur.data_sources.rss import RSSSource
+    from auramaur.data_sources.twitter import TwitterSource
+    from auramaur.data_sources.websearch import WebSearchSource
+    from auramaur.db.database import Database
+    from auramaur.exchange.paper import PaperTrader
+    from auramaur.monitoring.alerts import AlertManager
+    from auramaur.nlp.analyzer import ClaudeAnalyzer
+    from auramaur.nlp.cache import NLPCache
+    from auramaur.nlp.calibration import CalibrationTracker
+    from auramaur.risk.manager import RiskManager
+    from auramaur.strategy.arbitrage_scanner import ArbitrageScanner
+    from auramaur.strategy.market_maker import MarketMaker
+    from auramaur.strategy.news_reactor import NewsReactor
+    from auramaur.strategy.resolution_tracker import ResolutionTracker
+    from auramaur.strategy.technical import TechnicalAnalyzer
+
+    s = settings
+
+    # Database — auto-detect available slot
+    db = Database(db_path)
+    await db.connect()
+
+    # Data sources
+    sources = []
+    source_names = []
+    if s.newsapi_key:
+        sources.append(NewsAPISource(api_key=s.newsapi_key))
+        source_names.append("NewsAPI")
+    if s.reddit_client_id:
+        sources.append(RedditSource(
+            client_id=s.reddit_client_id,
+            client_secret=s.reddit_client_secret,
+            user_agent=s.reddit_user_agent,
+        ))
+        source_names.append("Reddit")
+    if s.twitter_bearer_token:
+        sources.append(TwitterSource(bearer_token=s.twitter_bearer_token))
+        source_names.append("Twitter")
+    if s.fred_api_key:
+        sources.append(FREDSource(api_key=s.fred_api_key))
+        source_names.append("FRED")
+    sources.append(WebSearchSource())
+    source_names.append("Web")
+    sources.append(RSSSource())
+    source_names.append("RSS")
+
+    # Structured data sources (no API keys needed)
+    from auramaur.data_sources.market_data import MarketDataSource
+    from auramaur.data_sources.polymarket_context import PolymarketContextSource
+    sources.append(MarketDataSource())
+    source_names.append("Markets")
+    sources.append(PolymarketContextSource())
+    source_names.append("PolyCtx")
+    from auramaur.data_sources.metaculus import MetaculusSource
+    sources.append(MetaculusSource())
+    source_names.append("Metaculus")
+    from auramaur.data_sources.manifold import ManifoldSource
+    sources.append(ManifoldSource())
+    source_names.append("Manifold")
+
+    # Domain-specific sources — category-gated so they only fire on
+    # relevant markets (see DataSource.categories in data_sources/base.py).
+    from auramaur.data_sources.usgs import USGSSource
+    from auramaur.data_sources.coingecko import CoinGeckoSource
+    from auramaur.data_sources.hackernews import HackerNewsSource
+    from auramaur.data_sources.espn import ESPNSource
+    sources.append(USGSSource())
+    source_names.append("USGS")
+    sources.append(CoinGeckoSource())
+    source_names.append("CoinGecko")
+    sources.append(HackerNewsSource())
+    source_names.append("HN")
+    sources.append(ESPNSource())
+    source_names.append("ESPN")
+
+    # Category-agnostic broad news (fires on every query).
+    from auramaur.data_sources.gdelt import GDELTSource
+    from auramaur.data_sources.google_trends import GoogleTrendsSource
+    sources.append(GDELTSource())
+    source_names.append("GDELT")
+    sources.append(GoogleTrendsSource())
+    source_names.append("Trends")
+    from auramaur.data_sources.bluesky import BlueskySource
+    sources.append(BlueskySource())
+    source_names.append("Bluesky")
+
+    aggregator = Aggregator(sources=sources)
+
+    # Exchange
+    paper = PaperTrader(db=db, initial_balance=s.execution.paper_initial_balance)
+    await paper.load_state()
+
+    # NLP
+    analyzer = ClaudeAnalyzer(settings=s)
+    cache = NLPCache(db=db)
+    calibration = CalibrationTracker(
+        db=db, min_samples=s.calibration.min_samples
+    )
+
+    # Risk
+    risk_manager = RiskManager(settings=s, db=db)
+
+    # Order flow (optional)
+    flow_tracker = None
+    try:
+        from auramaur.strategy.order_flow import OrderFlowTracker
+        flow_tracker = OrderFlowTracker()
+    except ImportError:
+        log.warning("optional.missing", component="OrderFlowTracker")
+
+    # Broker layer
+    from auramaur.broker.pnl import PnLTracker
+    from auramaur.broker.allocator import CapitalAllocator
+
+    pnl_tracker = PnLTracker(db=db, settings=s)
+    allocator = CapitalAllocator(settings=s)
+
+    # Strategic analyzer for breadth (batch analysis with world model)
+    from auramaur.nlp.strategic import StrategicAnalyzer
+    strategic = StrategicAnalyzer(settings=s, db=db)
+    technical = TechnicalAnalyzer(settings=s)
+
+    # Depth agent for deep research on high-potential markets
+    from auramaur.strategy.agent_analyzer import AgentAnalyzer
+    depth_agent = AgentAnalyzer(settings=s, db=db, calibration=calibration)
+
+    log.info("bot.analyzer_mode", mode="strategic+depth_agent+technical")
+
+    # Per-venue service graph (composition root, auramaur/composition.py).
+    # Build the shared globals once, then ask each enabled venue builder for
+    # its slice (exchange/discovery/engine/syncer/...). Replaces ~110 lines of
+    # inline per-venue wiring; produces the same venue-keyed maps + scalars.
+    _g = GlobalServices(
+        settings=s, db=db, paper=paper, aggregator=aggregator, analyzer=analyzer,
+        cache=cache, calibration=calibration, risk_manager=risk_manager,
+        flow_tracker=flow_tracker, pnl_tracker=pnl_tracker, allocator=allocator,
+        strategic=strategic, technical=technical, hybrid=hybrid,
+        rebalance_cooldowns=rebalance_cooldowns,
+    )
+    _venues = assemble_venues(_g, exchange_filter)
+    discoveries = _venues["discoveries"]
+    exchanges_map = _venues["exchanges_map"]
+    engines = _venues["engines"]
+    syncers = _venues["syncers"]
+    syncer = _venues["syncer"]
+    reconciler = _venues["reconciler"]
+    router = _venues["router"]
+    # Polymarket's exchange/discovery feed the primary_* picks + market maker.
+    gamma = discoveries.get("polymarket")
+    exchange = exchanges_map.get("polymarket")
+
+    # Resolution tracker — auto-detects when markets resolve and feeds
+    # outcomes into the calibration loop for Platt scaling updates.
+    resolution_tracker = ResolutionTracker(
+        db=db,
+        calibration=calibration,
+        discoveries=discoveries,
+        # Enables the venue-truth sweep: settles positions whose markets
+        # vanished from the Gamma API (the -100% phantom-mark legs).
+        proxy_address=s.polymarket_proxy_address or "",
+    )
+
+    # Cross-platform arbitrage scanner (fee-aware)
+    arb_scanner = ArbitrageScanner(
+        discoveries=discoveries,
+        analyzer=analyzer,
+        exchange_fees=s.arbitrage.exchange_fees,
+        min_profit_after_fees_pct=s.arbitrage.min_profit_after_fees_pct,
+        # An arb is hedged only when BOTH legs fill — a single-leg fill
+        # is directional inventory in a banned market (caught quoting
+        # KBO baseball live 2026-06-12). Same gates as the MM.
+        blocked_categories=s.risk.blocked_categories,
+        allowed_categories_live=(s.risk.allowed_categories_live
+                                 if s.is_live else None),
+    )
+
+    # News reactor — monitors RSS for breaking news, triggers fast analysis
+    # on every configured exchange (Polymarket + Kalshi).
+    news_reactor = None
+    if engines and discoveries:
+        rss_source = next((s for s in sources if isinstance(s, RSSSource)), RSSSource())
+        news_reactor = NewsReactor(
+            rss_source=rss_source,
+            discoveries=discoveries,
+            engines=engines,
+            db=db,
+            fast_analysis=hybrid and settings.hybrid.news_fast_analysis,
+        )
+
+    # Attribution (optional)
+    attributor = None
+    try:
+        from auramaur.monitoring.attribution import PerformanceAttributor
+        attributor = PerformanceAttributor(db=db)
+    except ImportError:
+        log.warning("optional.missing", component="PerformanceAttributor")
+
+    # Performance feedback loop
+    feedback = None
+    try:
+        from auramaur.broker.feedback import PerformanceFeedback
+        feedback = PerformanceFeedback(db=db)
+    except ImportError:
+        log.warning("optional.missing", component="PerformanceFeedback")
+
+    # Correlation & Arbitrage (optional)
+    correlator = None
+    arb_executor = None
+    try:
+        from auramaur.strategy.correlation import CorrelationDetector
+        from auramaur.strategy.arbitrage import ArbitrageExecutor
+        correlator = CorrelationDetector(db=db, model=s.nlp.model)
+        arb_executor = ArbitrageExecutor(db=db, correlator=correlator)
+    except ImportError:
+        log.warning("optional.missing", component="CorrelationDetector/ArbitrageExecutor")
+
+    # WebSocket & Ensemble (optional — only if ensemble enabled)
+    ws = None
+    ensemble = None
+    if s.ensemble.enabled:
+        try:
+            from auramaur.exchange.websocket import PolymarketWebSocket
+            ws = PolymarketWebSocket()
+        except ImportError:
+            log.warning("optional.missing", component="PolymarketWebSocket")
+        try:
+            from auramaur.nlp.ensemble import EnsembleEstimator
+            ensemble = EnsembleEstimator(db=db)
+        except ImportError:
+            log.warning("optional.missing", component="EnsembleEstimator")
+
+    # Market maker (optional, enabled by config — Polymarket only).
+    # Intentionally not wired for Kalshi: the 7% fee on winnings eats
+    # the maker spread, thin top-of-book liquidity makes adverse
+    # selection worse, and Kalshi has no maker-rebate program
+    # equivalent to Polymarket's. Revisit if Kalshi fees drop or a
+    # rebate tier is introduced.
+    market_maker = None
+    if s.market_maker.enabled and exchange is not None:
+        market_maker = MarketMaker(settings=s, exchange=exchange, db=db)
+
+    # Alerts
+    alerts = AlertManager(
+        telegram_bot_token=s.telegram_bot_token,
+        telegram_chat_id=s.telegram_chat_id,
+        discord_webhook_url=s.discord_webhook_url,
+    )
+
+    # Use first available discovery/exchange as primary (for portfolio monitor etc.)
+    primary_discovery = gamma if gamma else next(iter(discoveries.values()), None)
+    primary_exchange = exchange if exchange else next(
+        (engines[k].exchange for k in engines if getattr(engines[k], 'exchange', None) is not None), None
+    )
+
+    return Components({
+        "db": db, "aggregator": aggregator, "discovery": primary_discovery,
+        "discoveries": discoveries,
+        "paper": paper, "exchange": primary_exchange, "analyzer": analyzer,
+        "exchanges": exchanges_map,
+        "cache": cache, "calibration": calibration,
+        "risk_manager": risk_manager, "flow_tracker": flow_tracker,
+        "engines": engines, "news_reactor": news_reactor,
+        "pnl_tracker": pnl_tracker, "syncer": syncer, "syncers": syncers,
+        "reconciler": reconciler,
+        "router": router, "allocator": allocator,
+        "attributor": attributor, "feedback": feedback,
+        "correlator": correlator, "arb_executor": arb_executor,
+        "arb_scanner": arb_scanner,
+        "resolution_tracker": resolution_tracker,
+        "depth_agent": depth_agent,
+        "market_maker": market_maker,
+        "alerts": alerts,
+        "websocket": ws, "ensemble": ensemble,
+        "source_names": source_names,
+        "exchange_filter": exchange_filter,
+    })
+
