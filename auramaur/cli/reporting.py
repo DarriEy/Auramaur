@@ -87,6 +87,28 @@ def pnl(paper: bool, backfill: bool):
 
     asyncio.run(_run())
 
+@main.command("agent-compare")
+@click.option("--agent-db", default="agent.db",
+              help="The Hermes agent-trader's isolated ledger.")
+@click.option("--auramaur-db", default="auramaur.db",
+              help="The bot's ledger (the opponent).")
+def agent_compare(agent_db: str, auramaur_db: str):
+    """Head-to-head scorecard: the Hermes agent-trader vs Auramaur.
+
+    Agent (paper) vs Bot (paper) is the fair A/B — both simulated on the same
+    universe, and the bot's paper book is the strategy ensemble the agent is
+    trying to beat. The bot's live book is shown for context. Realized P&L comes
+    from each database's pnl_ledger.
+    """
+
+    async def _run():
+        from auramaur.agentmcp.compare import build_comparison, render_comparison
+
+        data = await build_comparison(agent_db, auramaur_db)
+        console.print(render_comparison(data))
+
+    asyncio.run(_run())
+
 @main.command("graduation")
 def graduation():
     """Graduation ladder — which (strategy x category) cells have earned live
