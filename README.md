@@ -24,8 +24,13 @@ and trades when there's edge after fees.
 
 1. Paper trading is the default. Live orders require **all three gates**:
    `AURAMAUR_LIVE=true`, `execution.live=true`, and per-order `dry_run=False`.
-2. A `KILL_SWITCH` file in the working directory halts all trading.
-3. Every order passes through 15 risk checks. None can be bypassed.
+2. A `KILL_SWITCH` file (at the repo root or the working directory) halts all trading.
+3. **Directional entries** pass the 15 risk checks via the single `ExecutionGateway`.
+   The market maker (resting two-sided quotes) and concurrent arb legs run
+   *declared, test-enforced* direct-execution contracts — see `ExecutionMode` in
+   `auramaur/strategy/protocols.py` and the conformance guard
+   `tests/test_strategy_protocol.py` — not the directional risk path. Exits have
+   their own contract. The bypasses are intentional and checked, not implicit.
 4. No API keys in code — all secrets come from environment variables.
 
 ## Quickstart
