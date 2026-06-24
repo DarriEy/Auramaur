@@ -538,35 +538,64 @@ class KalshiClient:
             return OrderBook()
 
     async def get_order_status(self, order_id: str) -> OrderResult:
-        """Query order status from Kalshi."""
+        """Query order status from Kalshi.
+
+        Reads the RAW order JSON because v2 orders use a different field set than
+        the SDK's Order model exposes: ``fill_count_fp`` / ``remaining_count_fp``
+        (fixed-point decimal strings, e.g. "16.00") and ``yes_price_dollars`` /
+        ``no_price_dollars`` (dollar strings) instead of the legacy
+        ``count`` / ``remaining_count`` / ``yes_price`` (cents). With the old
+        getattr parse those came back 0, so a fully-filled v2 order reported
+        filled_size=0 and the monitor skipped record_fill — the realized P&L of
+        every v2 fill went unbooked. Fall back to the legacy fields for safety.
+        """
+        import json
         self._init_api()
         try:
-            response = await self._call(self._portfolio_api.get_order, order_id)
-            order_data = response.order
+            raw = await self._call_raw(
+                self._portfolio_api.get_order_without_preload_content, order_id)
+            od = (json.loads(raw) or {}).get("order", {}) or {}
 
             status_map = {
-                "resting": "pending",
-                "canceled": "cancelled",
-                "executed": "filled",
-                "pending": "pending",
+                "resting": "pending", "canceled": "cancelled",
+                "executed": "filled", "pending": "pending",
             }
-            raw_status = str(getattr(order_data, "status", "pending")).lower()
-            status = status_map.get(raw_status, "pending")
+            status = status_map.get(str(od.get("status", "pending")).lower(), "pending")
 
-            # Terminal/historical orders come back with count, remaining_count
-            # and yes_price all None — coerce to 0 so the arithmetic below
-            # doesn't raise (which previously made every status query on an old
-            # order fail).
-            count = getattr(order_data, "count", 0) or 0
-            remaining = getattr(order_data, "remaining_count", 0) or 0
-            yes_price = getattr(order_data, "yes_price", 0) or 0
+            def _num(*keys):
+                for k in keys:
+                    v = od.get(k)
+                    if v not in (None, ""):
+                        try:
+                            return float(v)
+                        except (TypeError, ValueError):
+                            pass
+                return 0.0
+
+            # Filled size: prefer the explicit v2 fill_count, else initial-minus-
+            # remaining; tolerate the legacy integer fields on old responses.
+            filled = _num("fill_count_fp", "fill_count")
+            if filled <= 0:
+                initial = _num("initial_count_fp", "count")
+                remaining = _num("remaining_count_fp", "remaining_count")
+                filled = max(0.0, initial - remaining)
+
+            # Price in terms of the outcome leg we hold (v2 prices are dollars;
+            # legacy yes_price is cents → /100).
+            outcome = str(od.get("side") or od.get("outcome_side") or "yes").lower()
+            if outcome == "no":
+                price = _num("no_price_dollars")
+            else:
+                price = _num("yes_price_dollars")
+            if price <= 0:  # legacy cents fallback
+                price = _num("yes_price") / 100.0
 
             return OrderResult(
                 order_id=order_id,
-                market_id=getattr(order_data, "ticker", "") or "",
+                market_id=str(od.get("ticker", "") or ""),
                 status=status,  # type: ignore[arg-type]
-                filled_size=float(count - remaining),
-                filled_price=float(yes_price) / 100,
+                filled_size=filled,
+                filled_price=price,
                 is_paper=False,
             )
         except Exception as e:

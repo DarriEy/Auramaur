@@ -136,29 +136,60 @@ def test_reconcile_leaves_transient_errors_pending():
 
 @pytest.mark.asyncio
 async def test_get_order_status_handles_none_fields():
-    """Terminal/historical orders return None count/price — must not crash.
+    """Terminal/historical orders return no count/price fields — must not crash.
 
     This was the bug that made every reconcile query on an old order fail with
     'unsupported operand type(s) for -: NoneType and NoneType'.
     """
+    import json
     client = _client(is_live=True)
     client._init_api = MagicMock()
     client._portfolio_api = MagicMock()  # normally set by _init_api
-
-    order_data = MagicMock()
-    order_data.status = "executed"
-    order_data.ticker = "KXFOO-1"
-    order_data.count = None
-    order_data.remaining_count = None
-    order_data.yes_price = None
-    response = MagicMock()
-    response.order = order_data
-    client._call = AsyncMock(return_value=response)
+    client._call_raw = AsyncMock(return_value=json.dumps(
+        {"order": {"status": "executed", "ticker": "KXFOO-1"}}))
 
     result = await client.get_order_status("o1")
     assert result.status == "filled"
     assert result.filled_size == 0
     assert result.filled_price == 0
+
+
+@pytest.mark.asyncio
+async def test_get_order_status_parses_v2_fixed_point_fields():
+    """v2 orders carry fill_count_fp / *_price_dollars (not the legacy
+    count / yes_price). A fully-filled v2 order must report the real filled_size
+    and dollar price — else the monitor skips record_fill and the P&L is lost."""
+    import json
+    client = _client(is_live=True)
+    client._init_api = MagicMock()
+    client._portfolio_api = MagicMock()
+    client._call_raw = AsyncMock(return_value=json.dumps({"order": {
+        "status": "executed", "ticker": "KXACT", "side": "yes",
+        "fill_count_fp": "16.00", "initial_count_fp": "16.00",
+        "remaining_count_fp": "0.00",
+        "yes_price_dollars": "0.0400", "no_price_dollars": "0.9600",
+    }}))
+    result = await client.get_order_status("o2")
+    assert result.status == "filled"
+    assert result.filled_size == 16.0
+    assert result.filled_price == 0.04
+
+
+@pytest.mark.asyncio
+async def test_get_order_status_no_leg_uses_no_price():
+    """A NO-leg order is priced off no_price_dollars."""
+    import json
+    client = _client(is_live=True)
+    client._init_api = MagicMock()
+    client._portfolio_api = MagicMock()
+    client._call_raw = AsyncMock(return_value=json.dumps({"order": {
+        "status": "executed", "ticker": "KXNO", "side": "no",
+        "fill_count_fp": "24.00", "remaining_count_fp": "0.00",
+        "yes_price_dollars": "0.0300", "no_price_dollars": "0.9700",
+    }}))
+    result = await client.get_order_status("o3")
+    assert result.filled_size == 24.0
+    assert result.filled_price == 0.97
 
 
 def test_reconcile_pending_orders_updates_terminal_only():
