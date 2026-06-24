@@ -119,7 +119,7 @@ class CoinGeckoSource:
             # smaller coin we can't resolve.
             matched_ids = ["bitcoin", "ethereum"]
 
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
             prices = await self._fetch_prices(session, matched_ids[:5])
             trending = await self._fetch_trending(session)
 

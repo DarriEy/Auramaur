@@ -40,7 +40,7 @@ class BlueskySource:
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
                 async with session.get(_SEARCH, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     if resp.status != 200:
                         logger.debug("bluesky.bad_status", status=resp.status)

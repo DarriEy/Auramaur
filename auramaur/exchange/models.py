@@ -22,6 +22,19 @@ class Confidence(str, Enum):
     MEDIUM_HIGH = "MEDIUM_HIGH"
     HIGH = "HIGH"
 
+    @classmethod
+    def _missing_(cls, value):
+        """Case-insensitive lookup so an LLM returning e.g. ``'medium'`` (Gemini
+        does) resolves to ``MEDIUM`` instead of crashing the cycle with
+        ``'medium' is not a valid Confidence``. Truly-unknown values still raise.
+        """
+        if isinstance(value, str):
+            norm = value.strip().upper().replace("-", "_").replace(" ", "_")
+            for member in cls:
+                if member.value == norm:
+                    return member
+        return None
+
 
 class Market(BaseModel):
     id: str

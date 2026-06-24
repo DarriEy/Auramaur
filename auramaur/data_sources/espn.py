@@ -108,7 +108,7 @@ class ESPNSource:
     async def fetch(self, query: str, limit: int = 20) -> list[NewsItem]:
         q_tokens = [t for t in (query or "").lower().split() if len(t) > 2]
 
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
             batches = await asyncio.gather(
                 *(self._fetch_one(session, path, short) for path, short in _LEAGUES.items())
             )
