@@ -22,5 +22,35 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev]"
 
+      # Safety gates first, fail-fast, so a triple-gate/settings regression is
+      # the headline even if something else also breaks.
       - name: Run triple-gate and settings tests
         run: pytest tests/test_triple_gate.py tests/test_settings.py -v
+
+      # Then the FULL suite — CI previously ran only the two files above, so
+      # every other regression guard (risk checks, execution gateway, exchange
+      # adapters, strategy logic) was invisible to CI and could land on main.
+      - name: Run full test suite
+        run: pytest -q
+
+  lint:
+    name: Lint (ruff, non-blocking)
+    runs-on: ubuntu-latest
+    # Advisory only for now: the tree has known hygiene debt being paid down
+    # incrementally. Surfaces issues on every PR without gating merges. Flip
+    # continue-on-error to false once the backlog is clear to make it required.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Run ruff
+        run: ruff check .
