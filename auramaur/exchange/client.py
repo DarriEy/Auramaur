@@ -582,6 +582,15 @@ class PolymarketClient:
                     order_type=OrderType.LIMIT,
                     dry_run=False,
                     created_at=created,
+                    # The CLOB API doesn't echo our `source`, so a prior-session
+                    # orphan would otherwise reach the monitor's fallback INSERT
+                    # sourceless and get tagged 'order_monitor', masking the real
+                    # book. A live *resting GTC limit* can only come from the
+                    # market maker in the current regime — directional books are
+                    # paper-forced, arb is both-or-nothing immediate, exits cross
+                    # the spread (taker). So attribute reconciled orphans to the
+                    # MM. NOTE: revisit if any other live book ever rests limits.
+                    source="market_maker",
                 )
                 count += 1
             except (TypeError, ValueError) as e:

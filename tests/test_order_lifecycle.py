@@ -159,6 +159,11 @@ async def test_reconcile_open_orders_imports_orphans(client):
     assert buy.token_id == "tokA"
     # created_at parsed from the order's unix timestamp (not "now")
     assert buy.created_at.year == 1970
+    # Reconciled orphans are attributed to the market maker (the only live book
+    # that leaves resting GTC limits) so the monitor's fill INSERT doesn't mask
+    # them as the generic 'order_monitor' fallback.
+    assert buy.source == "market_maker"
+    assert client._live_pending["orphan-2"].source == "market_maker"
 
 
 @pytest.mark.asyncio
