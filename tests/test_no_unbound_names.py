@@ -20,6 +20,8 @@ _ROOT = Path(__file__).resolve().parent.parent
 _EXTRACTED = [
     "auramaur/strategy/engine_cycle.py",
     "auramaur/bot_arb.py",
+    "auramaur/bot_arb_execute.py",
+    "auramaur/bot_arb_scan.py",
     "auramaur/bot_exits.py",
     "auramaur/bot_strategy_tasks.py",
     "auramaur/bot_order_monitor.py",
