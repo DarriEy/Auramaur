@@ -71,3 +71,13 @@ def test_gateway_pillars_do_not_place_orders_directly(cls, modfile):
     assert ".place_order(" not in src, (
         f"{cls.name} ({cls.execution_mode.value}) must submit through the "
         f"ExecutionGateway, not call place_order directly")
+
+
+def test_arb_mixin_does_not_place_orders_directly():
+    """The arb execution mixin (bot_arb.py) places legs via the gateway's
+    place_legs adapter, never exchange.place_order directly — extending the
+    'only the gateway places' perimeter beyond the pillar modules."""
+    src = (_ROOT / "auramaur/bot_arb.py").read_text()
+    assert ".place_order(" not in src, (
+        "bot_arb.py must place through ExecutionGateway.place_legs, not call "
+        "exchange.place_order directly")
