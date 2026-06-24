@@ -289,3 +289,37 @@ async def test_partial_quote_cancels_surviving_leg():
     assert result and not result.get("success")   # partial => not a live quote
     assert cancelled == ["live-1"]                 # surviving bid leg cancelled
     assert "m1" not in mm._active_quotes           # nothing orphaned/tracked
+
+
+@pytest.mark.asyncio
+async def test_mm_orders_self_stamp_market_maker_source():
+    """Invariant for the documented direct-placement exception: the market maker
+    places orders straight through the exchange (bypassing ExecutionGateway), so
+    it MUST self-stamp source='market_maker' and post_only — that source is what
+    lets the order monitor write a correctly-attributed trades-mirror for the
+    fill (preserving fill<->trades parity), and post_only keeps it maker-only."""
+    from types import SimpleNamespace
+
+    from auramaur.exchange.models import TokenType
+    from auramaur.strategy.market_maker import MMQuote
+
+    mm = _maker()
+    placed = []
+
+    async def place_order(order):
+        placed.append(order)
+        return SimpleNamespace(order_id=f"oid-{len(placed)}", status="pending",
+                               is_paper=False, filled_size=0.0)
+
+    mm._exchange = SimpleNamespace(place_order=place_order)
+
+    quote = MMQuote(market_id="m1", token_yes_id="yes", token_no_id="no",
+                    bid_price=0.40, ask_price=0.46, size=20, spread_bps=600)
+    await mm._place_two_sided(quote, is_live=True)
+
+    assert len(placed) == 2
+    assert all(o.source == "market_maker" for o in placed)   # monitor attribution
+    assert all(o.post_only for o in placed)                  # maker-only
+    assert all(o.dry_run is False for o in placed)           # is_live=True
+    # Bid leg buys YES, ask leg buys NO (synthetic sell-YES).
+    assert {o.token for o in placed} == {TokenType.YES, TokenType.NO}
