@@ -79,7 +79,11 @@ class MetaculusSource:
                 await self._rate_limit()
                 async with session.get(f"{_API_BASE}/questions/", params=params) as resp:
                     if resp.status in (429, 403):
-                        logger.warning(
+                        # Expected external rate-limit/forbidden during backoff —
+                        # the retry handles it and metaculus is supplementary
+                        # evidence (failure degrades to []). Debug, not warn:
+                        # it was ~6k warn lines drowning real signal.
+                        logger.debug(
                             "metaculus.api_error",
                             status=resp.status,
                             query=search_query,
@@ -88,7 +92,7 @@ class MetaculusSource:
                         await asyncio.sleep(delay)
                         continue
                     if resp.status != 200:
-                        logger.warning(
+                        logger.debug(
                             "metaculus.api_error",
                             status=resp.status,
                             query=search_query,
