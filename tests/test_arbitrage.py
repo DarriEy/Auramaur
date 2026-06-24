@@ -147,3 +147,61 @@ def test_arb_category_gate_filters_blocked_and_non_allowlisted():
         allowed_categories_live=None)
     assert [m.id for m in [kbo, labeled, unknown, crypto]
             if paper._category_ok(m)] == ["unk", "cry"]
+
+
+@pytest.mark.asyncio
+async def test_internal_arb_uses_engine_exchange_attribute():
+    """Regression: _execute_internal_arb must read engine.exchange, not the
+    non-existent engine._exchange (which AttributeError'd the live internal-arb
+    branch). The fake engine deliberately exposes ONLY .exchange, so the old
+    code would raise — a MagicMock engine would mask the bug by auto-creating
+    ._exchange."""
+    from unittest.mock import AsyncMock, MagicMock
+    from types import SimpleNamespace
+
+    from auramaur.bot_arb import ArbExecutionMixin
+    from auramaur.exchange.models import Market, OrderResult
+    from auramaur.strategy.arbitrage_scanner import ArbOpportunity
+
+    class _FakeEngine:
+        def __init__(self, exchange):
+            self.exchange = exchange  # NOTE: no `_exchange`
+        async def _get_available_cash(self):
+            return 1000.0
+
+    exchange = MagicMock()
+    exchange.place_order = AsyncMock(side_effect=lambda o: OrderResult(
+        order_id=f"ord-{o.token_id}", market_id=o.market_id, status="paper",
+        filled_size=o.size, filled_price=o.price, is_paper=True))
+
+    mixin = ArbExecutionMixin.__new__(ArbExecutionMixin)
+    mixin.settings = MagicMock()
+    mixin.settings.is_live = False
+    mixin._exit_gateway = MagicMock()
+    mixin._exit_gateway.record_external_fill = AsyncMock()
+    db = MagicMock()
+    db.fetchone = AsyncMock(return_value=None)  # pairing guard: not already held
+    alerts = MagicMock()
+    alerts.send = AsyncMock()
+    mixin._components = {"db": db, "alerts": alerts}
+
+    market = Market(
+        id="m1", exchange="polymarket", question="Will X?",
+        outcome_yes_price=0.40, outcome_no_price=0.50,
+        clob_token_yes="tyes", clob_token_no="tno",
+    )
+    opp = ArbOpportunity(
+        market_a=market, market_b=market, exchange_a="polymarket",
+        exchange_b="polymarket", price_a=0.40, price_b=0.50, spread=0.10,
+        expected_profit_pct=10.0, question="Will X?", arb_type="internal",
+    )
+    decision = SimpleNamespace(approved=True, position_size=20.0, reason="")
+    risk = MagicMock()
+    risk.evaluate = AsyncMock(return_value=decision)
+    engines = {"polymarket": _FakeEngine(exchange)}
+
+    await mixin._execute_internal_arb(opp, risk, engines)
+
+    # Both legs placed through engine.exchange — proves the attribute resolves.
+    assert exchange.place_order.await_count == 2
+    assert mixin._exit_gateway.record_external_fill.await_count == 2
