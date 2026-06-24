@@ -77,6 +77,8 @@ class KalshiClient:
         )
 
         configuration = Configuration(host=host)
+        self._api_base = host  # full base incl. /trade-api/v2; used for the
+        # hand-rolled v2 create-order endpoint the SDK doesn't expose yet.
         self._client = _KalshiSDK(configuration=configuration)
         self._client.set_kalshi_auth(
             key_id=cfg.api_key or self._settings.kalshi_api_key,
@@ -377,94 +379,93 @@ class KalshiClient:
 
         try:
             import json
-            from kalshi_python import CreateOrderRequest
 
-            # Map token type to Kalshi side, and order side to action
-            kalshi_side = "yes" if order.token == TokenType.YES else "no"
-            action = "buy" if order.side == OrderSide.BUY else "sell"
-            # Kalshi API always takes yes_price in cents (1-99)
-            # When buying NO, convert: yes_price = 100 - no_price
-            if order.token == TokenType.NO:
-                yes_price_cents = max(1, min(99, 100 - int(order.price * 100)))
+            # --- Kalshi v2 single-book create-order ---
+            # The legacy POST /portfolio/orders create path was cut off (Kalshi
+            # returns a 2xx "deprecated_v1_order_endpoint" body with no order),
+            # and the installed SDK only knows that path. v2 lives at
+            # POST /portfolio/events/orders with a SINGLE-BOOK model: `side` is
+            # bid/ask on the YES leg, `price` is the YES price in fixed-point
+            # dollars, `count` a decimal string. Translate the bot's
+            # (token, side, price) into YES terms — bid = buy YES, ask = sell
+            # YES; selling YES is economically buying NO at (1 - price):
+            #   YES BUY  -> bid @ price          YES SELL -> ask @ price
+            #   NO  BUY  -> ask @ (1 - price)    NO  SELL -> bid @ (1 - price)
+            # (a NO order carries the NO price, so 1 - price is the YES price.)
+            if order.token == TokenType.YES:
+                v2_side = "bid" if order.side == OrderSide.BUY else "ask"
+                yes_price = order.price
             else:
-                yes_price_cents = max(1, min(99, int(order.price * 100)))
+                v2_side = "ask" if order.side == OrderSide.BUY else "bid"
+                yes_price = 1.0 - order.price
+            yes_price = max(0.01, min(0.99, yes_price))
+            count = int(order.size)
+            if count < 1:
+                return OrderResult(
+                    order_id="SKIP_ZERO", market_id=order.market_id,
+                    status="rejected", is_paper=False,
+                    error_message="order size < 1 contract")
 
-            # Kalshi's v2 create-order requires a client-generated idempotency
-            # key (client_order_id). Omitting it routes to the now-removed v1
-            # flow, which returns a 2xx "deprecated_v1_order_endpoint" body with
-            # no order object — so EVERY live order (entries and exits) silently
-            # failed. A fresh UUID per attempt satisfies v2 and is safe: orders
-            # are limit GTC and deduped upstream (the resting-order guard above),
-            # so per-attempt uniqueness won't double-place.
-            req = CreateOrderRequest(
-                ticker=order.token_id,
-                client_order_id=str(uuid.uuid4()),
-                side=kalshi_side,
-                action=action,
-                count=int(order.size),
-                type="limit",
-                yes_price=yes_price_cents,
-            )
+            body = {
+                "ticker": order.token_id,
+                # Idempotency key — v2 accepts it; a fresh UUID per attempt is
+                # safe since orders are GTC and deduped by the resting guard.
+                "client_order_id": str(uuid.uuid4()),
+                "side": v2_side,
+                "count": f"{count:.2f}",
+                "price": f"{yes_price:.4f}",
+                "time_in_force": "good_till_canceled",
+                "self_trade_prevention_type": "taker_at_cross",
+            }
+            url = self._api_base + "/portfolio/events/orders"
 
             log.info(
-                "order.live_request",
-                exchange="kalshi",
-                ticker=order.token_id,
-                side=kalshi_side,
-                action=action,
-                count=int(order.size),
-                yes_price=yes_price_cents,
+                "order.live_request", exchange="kalshi", ticker=order.token_id,
+                v2_side=v2_side, count=count, yes_price=round(yes_price, 4),
+                bot_token=order.token.value, bot_side=order.side.value,
             )
 
-            raw = await self._call_raw(
-                self._portfolio_api.create_order_without_preload_content,
-                create_order_request=req,
-            )
-            data = json.loads(raw)
-            order_data = data.get("order", {})
-            order_id = str(order_data.get("order_id", "")) if order_data else ""
+            # call_api auto-injects the Kalshi request signature for this path;
+            # read the body inside the worker thread (blocking SSL read off-loop).
+            def _post():
+                resp = self._client.call_api(
+                    "POST", url,
+                    header_params={"Content-Type": "application/json",
+                                   "Accept": "application/json"},
+                    body=body, _request_timeout=_REQUEST_TIMEOUT,
+                )
+                return resp.read()
 
-            # A 2xx response with NO order object is a soft rejection Kalshi
-            # returns without raising (so it never hit the except below): the
-            # SDK only raises on 4xx/5xx. The old code defaulted order_id to
-            # 'unknown' and returned status='pending', which (a) discarded the
-            # response body that names the actual reason, and (b) wrote a phantom
-            # pending trade the monitor later flipped to 'error' — so a failing
-            # exit retried every cycle forever with the cause invisible. Surface
-            # the raw body and reject so the caller stops (and doesn't mirror a
-            # ghost fill).
+            async with self._semaphore:
+                raw = await asyncio.to_thread(_post)
+            data = json.loads(raw) if raw else {}
+            # v2 returns order_id at the TOP level (not nested under "order").
+            order_id = str(data.get("order_id", "")) if isinstance(data, dict) else ""
+
             if not order_id:
                 err = ""
                 if isinstance(data, dict):
                     err = str(data.get("error") or data.get("message") or "")
                 log.error(
-                    "order.live_no_order_id",
-                    exchange="kalshi",
-                    ticker=order.token_id,
-                    side=kalshi_side,
-                    action=action,
-                    yes_price=yes_price_cents,
-                    error=err[:300] or "no 'order' in response",
+                    "order.live_no_order_id", exchange="kalshi",
+                    ticker=order.token_id, v2_side=v2_side,
+                    yes_price=round(yes_price, 4),
+                    error=err[:300] or "no order_id in response",
                     raw=str(raw)[:500],
                 )
                 return OrderResult(
-                    order_id="KALSHI_NO_ORDER",
-                    market_id=order.market_id,
-                    status="rejected",
-                    is_paper=False,
-                    error_message=(err[:200] or "kalshi returned no order id"),
-                )
+                    order_id="KALSHI_NO_ORDER", market_id=order.market_id,
+                    status="rejected", is_paper=False,
+                    error_message=(err[:200] or "kalshi returned no order id"))
 
             log.info(
-                "order.live_placed",
-                exchange="kalshi",
-                order_id=order_id,
-                status=order_data.get("status"),
+                "order.live_placed", exchange="kalshi", order_id=order_id,
+                fill_count=data.get("fill_count"),
+                remaining=data.get("remaining_count"),
             )
 
             # Track the live order so the order monitor can poll it for fills,
             # reconcile trades.status, and TTL-cancel it if it rests unfilled.
-            # Without this the row inserted at placement stays 'pending' forever.
             self._live_pending[order_id] = order
 
             return OrderResult(
@@ -476,7 +477,10 @@ class KalshiClient:
                 is_paper=False,
             )
         except Exception as e:
-            log.error("order.live_error", exchange="kalshi", error=str(e), ticker=order.token_id)
+            # ApiException (4xx/5xx) carries the actual Kalshi reason in .body.
+            body = getattr(e, "body", None)
+            log.error("order.live_error", exchange="kalshi", error=str(e)[:300],
+                      kalshi_body=str(body)[:400] if body else "", ticker=order.token_id)
             return OrderResult(
                 order_id="ERROR",
                 market_id=order.market_id,
