@@ -308,6 +308,19 @@ class KalshiClient:
             dry_run=not is_live,
         )
 
+    @staticmethod
+    def _v2_book_side(token: TokenType, side: OrderSide) -> str:
+        """The v2 single-book side (bid/ask) for an order.
+
+        v2 is a single YES book: bid = buy YES, ask = sell YES. A NO order flips
+        (buy NO == sell YES == ask; sell NO == buy YES == bid). Shared by
+        place_order (what we send) and the dup-check (what we compare against
+        resting orders' ``book_side``), so the two can't drift.
+        """
+        if token == TokenType.YES:
+            return "bid" if side == OrderSide.BUY else "ask"
+        return "ask" if side == OrderSide.BUY else "bid"
+
     async def place_order(self, order: Order) -> OrderResult:
         """Place an order. Paper trades by default."""
         # Kill switch
@@ -336,28 +349,30 @@ class KalshiClient:
         # === LIVE ORDER PATH ===
         self._init_api()
 
-        # Guard: skip if we already have a resting order on the same market + side
+        # Guard: skip if we already have a resting order on the same book side.
+        # v2 is single-book — every resting order reports side='yes' with the
+        # real direction in `book_side` (bid/ask). The old yes/no + action
+        # compare never matched a v2 resting order, so the guard silently went
+        # dark (a NO order, recorded as a YES bid/ask, could stack duplicates).
+        # Compare the v2 book_side we'd post against each resting order's.
         try:
             import json as _json
             existing_raw = await self._call_raw(
                 self._portfolio_api.get_orders_without_preload_content,
             )
             existing_data = _json.loads(existing_raw)
-            kalshi_side = "yes" if order.token == TokenType.YES else "no"
-            kalshi_action = "buy" if order.side == OrderSide.BUY else "sell"
+            want_book_side = self._v2_book_side(order.token, order.side)
             ticker = order.token_id
             for o in existing_data.get("orders", []):
                 if (o.get("status") == "resting"
                         and o.get("ticker") == ticker
-                        and o.get("side") == kalshi_side
-                        and o.get("action") == kalshi_action):
+                        and o.get("book_side") == want_book_side):
                     log.info(
                         "order.skip_duplicate",
                         exchange="kalshi",
                         ticker=ticker,
-                        side=kalshi_side,
-                        action=kalshi_action,
-                        reason="resting order already exists on same side",
+                        book_side=want_book_side,
+                        reason="resting order already exists on same book side",
                     )
                     return OrderResult(
                         order_id="SKIP_DUP",
@@ -392,12 +407,8 @@ class KalshiClient:
             #   YES BUY  -> bid @ price          YES SELL -> ask @ price
             #   NO  BUY  -> ask @ (1 - price)    NO  SELL -> bid @ (1 - price)
             # (a NO order carries the NO price, so 1 - price is the YES price.)
-            if order.token == TokenType.YES:
-                v2_side = "bid" if order.side == OrderSide.BUY else "ask"
-                yes_price = order.price
-            else:
-                v2_side = "ask" if order.side == OrderSide.BUY else "bid"
-                yes_price = 1.0 - order.price
+            v2_side = self._v2_book_side(order.token, order.side)
+            yes_price = order.price if order.token == TokenType.YES else 1.0 - order.price
             yes_price = max(0.01, min(0.99, yes_price))
             count = int(order.size)
             if count < 1:
@@ -603,15 +614,38 @@ class KalshiClient:
             raise
 
     async def cancel_order(self, order_id: str) -> bool:
-        """Cancel a Kalshi order."""
+        """Cancel a Kalshi order.
+
+        Prefer the v2 endpoint (DELETE /portfolio/events/orders/{id}) so we don't
+        get silently cut off the way create-order was; fall back to the legacy
+        SDK cancel (still working) if the v2 call errors, so future-proofing
+        can't break a currently-working path.
+        """
         self._init_api()
+        url = f"{self._api_base}/portfolio/events/orders/{order_id}"
+
+        def _delete():
+            return self._client.call_api(
+                "DELETE", url,
+                header_params={"Accept": "application/json"},
+                _request_timeout=_REQUEST_TIMEOUT,
+            )
+
         try:
-            await self._call(self._portfolio_api.cancel_order, order_id)
-            log.info("order.cancelled", exchange="kalshi", order_id=order_id)
+            async with self._semaphore:
+                await asyncio.to_thread(_delete)
+            log.info("order.cancelled", exchange="kalshi", order_id=order_id, via="v2")
             return True
         except Exception as e:
-            log.error("kalshi.cancel_error", order_id=order_id, error=str(e))
-            return False
+            log.warning("kalshi.cancel_v2_error", order_id=order_id, error=str(e)[:200])
+            # Fall back to the legacy SDK cancel (DELETE /portfolio/orders/{id}).
+            try:
+                await self._call(self._portfolio_api.cancel_order, order_id)
+                log.info("order.cancelled", exchange="kalshi", order_id=order_id, via="legacy")
+                return True
+            except Exception as e2:
+                log.error("kalshi.cancel_error", order_id=order_id, error=str(e2)[:200])
+                return False
 
     async def reconcile_open_orders(self) -> int:
         """Pull resting Kalshi orders into ``_live_pending`` at startup.

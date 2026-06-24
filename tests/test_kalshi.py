@@ -426,6 +426,78 @@ class TestKalshiV2CreateOrder:
         assert "too_few_contracts" in result.error_message
         assert client._live_pending == {}
 
+    @pytest.mark.asyncio
+    async def test_dup_check_skips_on_matching_book_side(self):
+        """A resting order on the same v2 book side (YES SELL → ask) blocks the
+        new order. The legacy yes/no compare never matched v2 resting orders."""
+        from unittest.mock import AsyncMock
+        client = self._client({"order_id": "ord"})
+        client._call_raw = AsyncMock(return_value=json.dumps({"orders": [
+            {"status": "resting", "ticker": "KXT", "side": "yes",
+             "book_side": "ask"}]}))
+        order = Order(market_id="KXT", exchange="kalshi", side=OrderSide.SELL,
+                      token=TokenType.YES, token_id="KXT", size=16, price=0.04,
+                      dry_run=False)
+        result = await client.place_order(order)
+        assert result.order_id == "SKIP_DUP" and result.status == "rejected"
+        client._client.call_api.assert_not_called()  # never reached placement
+
+    @pytest.mark.asyncio
+    async def test_dup_check_allows_different_book_side(self):
+        """A resting order on the OTHER book side does not block (bid vs ask)."""
+        from unittest.mock import AsyncMock
+        client = self._client({"order_id": "ord"})
+        client._call_raw = AsyncMock(return_value=json.dumps({"orders": [
+            {"status": "resting", "ticker": "KXT", "side": "yes",
+             "book_side": "bid"}]}))
+        order = Order(market_id="KXT", exchange="kalshi", side=OrderSide.SELL,
+                      token=TokenType.YES, token_id="KXT", size=16, price=0.04,
+                      dry_run=False)
+        result = await client.place_order(order)
+        assert result.status == "pending"  # ask != bid → proceeded
+
+
+class TestKalshiV2BookSideMapping:
+    def test_all_four_cases(self):
+        from auramaur.exchange.models import TokenType as T, OrderSide as S
+        f = KalshiClient._v2_book_side
+        assert f(T.YES, S.BUY) == "bid"
+        assert f(T.YES, S.SELL) == "ask"
+        assert f(T.NO, S.BUY) == "ask"   # buy NO == sell YES
+        assert f(T.NO, S.SELL) == "bid"  # sell NO == buy YES
+
+
+class TestKalshiCancelV2:
+    def _client(self):
+        from unittest.mock import AsyncMock, MagicMock
+        import asyncio as _asyncio
+        c = KalshiClient.__new__(KalshiClient)
+        c._init_api = MagicMock()
+        c._api_base = "https://api.elections.kalshi.com/trade-api/v2"
+        c._semaphore = _asyncio.Semaphore(1)
+        c._client = MagicMock()
+        c._portfolio_api = MagicMock()
+        return c
+
+    @pytest.mark.asyncio
+    async def test_cancel_uses_v2_delete_endpoint(self):
+        c = self._client()
+        ok = await c.cancel_order("oid-1")
+        assert ok is True
+        method, url = c._client.call_api.call_args.args[0], c._client.call_api.call_args.args[1]
+        assert method == "DELETE"
+        assert url.endswith("/portfolio/events/orders/oid-1")
+        c._portfolio_api.cancel_order.assert_not_called()  # legacy not needed
+
+    @pytest.mark.asyncio
+    async def test_cancel_falls_back_to_legacy_on_v2_error(self):
+        from unittest.mock import MagicMock
+        c = self._client()
+        c._client.call_api = MagicMock(side_effect=Exception("v2 boom"))
+        ok = await c.cancel_order("oid-2")
+        assert ok is True
+        c._portfolio_api.cancel_order.assert_called_once()  # legacy fallback used
+
 
 class TestKalshiPrepareOrderDirectSell:
     def test_sell_signal_becomes_buy_no(self):
