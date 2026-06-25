@@ -81,6 +81,77 @@ def test_submit_records_fill_cost_basis_and_trade():
     asyncio.run(run())
 
 
+def test_submit_blocks_buy_that_exceeds_aggregate_market_cap():
+    """A BUY that would push TOTAL (held + new) exposure on a (market, token)
+    past the $25 ceiling is skipped — even though the single order is sub-cap.
+    Guards against stacking sub-cap entries into an over-cap position."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        # Seed the mode the gateway will actually query (is_live depends on the
+        # ambient .env; CI has none -> paper). Keeps the test deterministic.
+        flag = 0 if Settings().is_live else 1
+        await db.execute(
+            "INSERT INTO cost_basis (market_id, token, size, avg_cost, total_cost, is_paper)"
+            " VALUES ('m1', 'YES', 48.0, 0.50, 24.0, ?)", (flag,)
+        )
+        await db.commit()
+
+        order = Order(market_id="m1", exchange="polymarket", token_id="tok",
+                      side=OrderSide.BUY, token=TokenType.YES, size=20.0, price=0.50)
+        result = OrderResult(order_id="p1", market_id="m1", status="paper",
+                             filled_size=20.0, filled_price=0.50, is_paper=True)
+        ex = _paper_exchange(order, result)
+        gw = _gateway(db, ex)
+
+        # 24 held + 10 new = 34 > 25 -> skipped.
+        res = await gw.submit(TradeIntent(signal=_signal(), market=Market(id="m1", question="Q?"),
+                                          size_dollars=10.0))
+
+        assert res.status == "skipped"
+        assert "market_cap" in (res.reason or "")
+        ex.place_order.assert_not_awaited()             # never placed
+        fills = await db.fetchall("SELECT * FROM fills WHERE market_id='m1'")
+        assert fills == []                              # nothing recorded
+
+    asyncio.run(run())
+
+
+def test_submit_market_cap_does_not_block_opposite_token_leg():
+    """Internal arb holds YES and NO of one market. A large existing YES holding
+    must NOT block a NO buy — the cap is scoped per (market, token)."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        await db.execute(
+            "INSERT INTO markets (id, exchange, question, category, active, last_updated)"
+            " VALUES ('m1', 'polymarket', 'Q?', 'tech', 1, datetime('now'))"
+        )
+        # $24 of YES held; the NO leg should still be allowed.
+        flag = 0 if Settings().is_live else 1
+        await db.execute(
+            "INSERT INTO cost_basis (market_id, token, size, avg_cost, total_cost, is_paper)"
+            " VALUES ('m1', 'YES', 48.0, 0.50, 24.0, ?)", (flag,)
+        )
+        await db.commit()
+
+        order = Order(market_id="m1", exchange="polymarket", token_id="tok_no",
+                      side=OrderSide.BUY, token=TokenType.NO, size=20.0, price=0.50)
+        result = OrderResult(order_id="p1", market_id="m1", status="paper",
+                             filled_size=20.0, filled_price=0.50, is_paper=True)
+        gw = _gateway(db, _paper_exchange(order, result))
+
+        res = await gw.submit(TradeIntent(signal=_signal(), market=Market(id="m1", question="Q?"),
+                                          size_dollars=10.0))
+
+        assert res.status == "paper"          # NO leg placed normally
+        no_cb = await db.fetchall(
+            "SELECT size FROM cost_basis WHERE market_id='m1' AND token='NO'")
+        assert len(no_cb) == 1
+
+    asyncio.run(run())
+
+
 def test_submit_skips_on_build_failure_without_recording():
     async def run():
         db = Database(":memory:")

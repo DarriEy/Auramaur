@@ -110,10 +110,64 @@ class ExecutionGateway:
         )
         if order is None:
             return ExecutionResult(status="skipped", reason="not submitted")
+        capped = await self._exceeds_market_cap(order, is_live=is_live)
+        if capped is not None:
+            return ExecutionResult(status="skipped", reason=capped)
         return await self._place_and_record(
             order, strategy_source=intent.signal.strategy_source,
             signal_id=getattr(intent.signal, "id", None),
             exchange=self.exchange, exchange_name=self.exchange_name)
+
+    async def _exceeds_market_cap(self, order: Order, *, is_live: bool) -> str | None:
+        """Aggregate per-(market, token) stake cap. Returns a skip-reason string
+        when this BUY would push TOTAL exposure to a market SIDE past the
+        documented ceiling, else None.
+
+        The risk manager's max_stake check only sees a single order, so the bot
+        could STACK sub-cap entries into an over-cap position (legacy directional
+        favorites reached ~$90 across stacked orders, each individually under the
+        limit). This guard runs at the layer where the YES/NO token is finally
+        known, so it scopes by (market, token): a side's existing holdings plus
+        this order can't exceed the cap. Scoping by token, not market, is
+        deliberate — internal arb legitimately holds YES *and* NO of one market,
+        so a market-wide sum would false-block the opposite leg.
+
+        Only BUY entries are bounded (a SELL reduces exposure). Scoped to the
+        order's own mode (paper vs live) so a paper add isn't blocked by a live
+        holding and vice-versa.
+        """
+        if order.side != OrderSide.BUY:
+            return None
+        cap = getattr(self.settings.risk, "max_stake_abs_ceiling", 25.0)
+        is_paper_flag = 0 if is_live else 1
+        try:
+            row = await self.db.fetchone(
+                "SELECT COALESCE(SUM(size * avg_cost), 0) AS held "
+                "FROM cost_basis WHERE market_id = ? AND UPPER(token) = UPPER(?) "
+                "AND is_paper = ? AND size > 0",
+                (order.market_id, order.token.value, is_paper_flag),
+            )
+        except Exception:
+            # A read failure must not block trading — fail open (the per-order
+            # risk-manager cap still applies).
+            return None
+        held = float(row["held"]) if row else 0.0
+        proposed = order.size * order.price
+        if held + proposed > cap + 1e-9:
+            reason = (
+                f"market_cap: ${held:.2f} held + ${proposed:.2f} new on "
+                f"{order.market_id}/{order.token.value} exceeds ${cap:.2f}"
+            )
+            log.info(
+                "gateway.market_cap_block",
+                market_id=order.market_id,
+                token=order.token.value,
+                held=round(held, 2),
+                proposed=round(proposed, 2),
+                cap=cap,
+            )
+            return reason
+        return None
 
     async def submit_exit(
         self,
