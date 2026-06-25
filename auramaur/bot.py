@@ -1381,6 +1381,11 @@ class AuramaurBot(
         # Resolution-language lens (paper-forced until proven)
         if self.settings.resolution_lens.enabled:
             tasks.append(asyncio.create_task(self._task_resolution_lens(), name="resolution_lens"))
+            # Kalshi measurement spike — a second lens instance, paper-forced,
+            # attributed separately. Default off; flip resolution_lens.kalshi_enabled.
+            if self.settings.resolution_lens.kalshi_enabled:
+                tasks.append(asyncio.create_task(
+                    self._task_resolution_lens_kalshi(), name="resolution_lens_kalshi"))
 
         # Odd-lot tender harvester (detection always; entries paper-forced)
         if self.settings.oddlot_tender.enabled:
