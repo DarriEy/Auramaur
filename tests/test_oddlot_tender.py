@@ -230,3 +230,18 @@ def test_ledger_bare_ticker_fallback():
         await db.close()
 
     asyncio.run(run())
+
+
+def test_safe_float_tolerates_non_numeric_tender_prices():
+    """Regression: a NAV-linked tender returns a non-numeric price ('NAV') for
+    the price field. _safe_float must coerce it to 0.0 (downstream rejects as
+    'no usable fixed premium') instead of raising — a single bad field used to
+    discard the entire filing audit, including a well-parsed odd_lot_priority."""
+    from auramaur.strategy.oddlot_tender import _safe_float
+    assert _safe_float("NAV") == 0.0
+    assert _safe_float("N/A") == 0.0
+    assert _safe_float(None) == 0.0
+    assert _safe_float("") == 0.0
+    assert _safe_float("12.50") == 12.5
+    assert _safe_float(12.5) == 12.5
+    assert _safe_float("bad", default=-1.0) == -1.0
