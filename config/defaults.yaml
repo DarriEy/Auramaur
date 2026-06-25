@@ -497,6 +497,13 @@ resolution_lens:
   # without a second audit call. PAPER-FORCED until the ledger proves it.
   enabled: true
   paper: true
+  # Kalshi measurement spike (default OFF). Flip true to run a SECOND, paper-
+  # forced lens instance over Kalshi's CFTC-legalistic markets, attributed to
+  # 'resolution_lens_kalshi' (its own graduation cells; can't dilute the proven
+  # Poly lens). Pre-registered kill: <5 signals in 2wk or negative paper
+  # realized -> flip back to false.
+  kalshi_enabled: false
+  kalshi_min_liquidity: 300.0
   min_gap_score: 0.4       # lens-judged headline/criteria divergence floor
   high_conf_gap_score: 0.7 # >= this -> HIGH confidence (clears divergence filter)
   min_edge: 0.08           # |strict fair - market| floor

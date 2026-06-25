@@ -595,6 +595,13 @@ class ResolutionLensConfig(BaseModel):
     # flipped to graduate the cell to live.
     paper_min_hours_to_resolution: float = 1.0
     paper_min_liquidity: float = 250.0
+    # Kalshi measurement spike (default OFF). When true, a SECOND lens instance
+    # scans Kalshi — paper-forced, attributed to 'resolution_lens_kalshi' so it
+    # gets its own graduation cells and can't dilute the proven Poly lens. Tests
+    # the hypothesis that Kalshi's CFTC-legalistic resolution criteria carry
+    # fine-print mispricing. Kalshi's book is thinner, so it gets its own floor.
+    kalshi_enabled: bool = False
+    kalshi_min_liquidity: float = 300.0
 
 
 class GraduationConfig(BaseModel):

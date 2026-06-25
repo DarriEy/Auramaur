@@ -130,7 +130,9 @@ class ResolutionLensPillar:
     name = "resolution_lens"
     execution_mode = ExecutionMode.GATEWAY_SINGLE
     def __init__(self, db, settings, discovery, exchange, risk_manager,
-                 pnl_tracker, calibration, analyzer, aggregator=None) -> None:
+                 pnl_tracker, calibration, analyzer, aggregator=None,
+                 exchange_name: str = "polymarket",
+                 source_tag: str = "resolution_lens") -> None:
         self._db = db
         self._settings = settings
         self._discovery = discovery
@@ -138,9 +140,15 @@ class ResolutionLensPillar:
         self._risk = risk_manager
         self._pnl = pnl_tracker
         self._calibration = calibration
+        # The venue this instance scans. Default Polymarket (the proven lens);
+        # a second instance can bind Kalshi for the paper measurement spike.
+        self._exchange_name = exchange_name
+        # Attribution tag — the Kalshi spike uses a DISTINCT source so it gets
+        # its own graduation cells and can't dilute the proven Poly lens record.
+        self._source_tag = source_tag
         # Shared execution tail; no router (passive entry at the observed price).
         self._gateway = ExecutionGateway(
-            router=None, exchange=exchange, exchange_name="polymarket",
+            router=None, exchange=exchange, exchange_name=exchange_name,
             settings=settings, db=db, pnl_tracker=pnl_tracker,
         )
         self._analyzer = analyzer
@@ -159,11 +167,15 @@ class ResolutionLensPillar:
         # paper thresholds; they revert to strict automatically if paper is
         # flipped to graduate the cell to live.
         min_liq = cfg.paper_min_liquidity if cfg.paper else cfg.min_liquidity
+        # Kalshi's book is thinner than Polymarket's — its own (lower) floor so
+        # the spike isn't starved of candidates by the Poly-tuned threshold.
+        if self._exchange_name == "kalshi":
+            min_liq = min(min_liq, cfg.kalshi_min_liquidity)
         min_hours = (cfg.paper_min_hours_to_resolution if cfg.paper
                      else cfg.min_hours_to_resolution)
         if not m.active or not (0.0 < m.outcome_yes_price < 1.0):
             return False
-        if (m.exchange or "polymarket") != "polymarket":
+        if (m.exchange or self._exchange_name) != self._exchange_name:
             return False
         if m.liquidity < min_liq:
             return False
@@ -384,7 +396,7 @@ class ResolutionLensPillar:
                       outcome_yes_price, outcome_no_price, liquidity,
                       clob_token_yes, clob_token_no
                FROM markets
-               WHERE active = 1 AND exchange = 'polymarket'
+               WHERE active = 1 AND exchange = ?
                  -- Only future-dated markets: the table is ~87% stale rows
                  -- (resolved markets keep active=1 with a past end_date), and the
                  -- lens can't trade a resolved market. Without this the scan loads
@@ -398,6 +410,7 @@ class ResolutionLensPillar:
                       OR question LIKE '%declare%' OR question LIKE '%ranked%'
                       OR question LIKE '%lasting%' OR question LIKE '%between %'
                       OR question LIKE '%state%' OR question LIKE '% #%')""",
+            (self._exchange_name,),
         )
         out: list[Market] = []
         for r in rows or []:
@@ -410,7 +423,7 @@ class ResolutionLensPillar:
                 except (ValueError, AttributeError):
                     pass
             out.append(Market(
-                id=r["id"], exchange="polymarket",
+                id=r["id"], exchange=self._exchange_name,
                 question=r["question"] or "", description=r["description"] or "",
                 category=r["category"] or "",
                 outcome_yes_price=r["outcome_yes_price"] or 0.0,
@@ -533,7 +546,7 @@ class ResolutionLensPillar:
             edge=abs(edge) * 100.0,
             evidence_summary=f"Resolution lens (gap {score:.2f}): {mech}",
             recommended_side=OrderSide.BUY if edge > 0 else OrderSide.SELL,
-            strategy_source="resolution_lens",
+            strategy_source=self._source_tag,
             mispricing_reason=f"behavioral: {mech}",
         )
         decision = await self._risk.evaluate(signal, m)
@@ -564,8 +577,8 @@ class ResolutionLensPillar:
             """INSERT OR IGNORE INTO markets (id, exchange, question, description,
                category, active, outcome_yes_price, outcome_no_price, volume,
                liquidity, last_updated)
-               VALUES (?, 'polymarket', ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))""",
-            (market.id, market.question, (market.description or "")[:500],
+               VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))""",
+            (market.id, self._exchange_name, market.question, (market.description or "")[:500],
              ensure_category(market.question, market.description, market.category),
              market.outcome_yes_price,
              market.outcome_no_price, market.volume, market.liquidity),
@@ -573,21 +586,21 @@ class ResolutionLensPillar:
         await self._db.execute(
             """INSERT INTO signals (market_id, claude_prob, claude_confidence,
                market_prob, edge, evidence_summary, action, strategy_source)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'resolution_lens')""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (signal.market_id, signal.claude_prob, signal.claude_confidence.value,
              signal.market_prob, signal.edge, signal.evidence_summary,
-             signal.recommended_side.value),
+             signal.recommended_side.value, self._source_tag),
         )
         await self._db.execute(
             """INSERT INTO portfolio (market_id, exchange, side, size, avg_price,
                current_price, unrealized_pnl, category, token, token_id,
                is_paper, updated_at)
-               VALUES (?, 'polymarket', 'BUY', ?, ?, ?, 0, ?, ?, ?, ?, datetime('now'))
+               VALUES (?, ?, 'BUY', ?, ?, ?, 0, ?, ?, ?, ?, datetime('now'))
                ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
                    size = excluded.size, avg_price = excluded.avg_price,
                    current_price = excluded.current_price,
                    updated_at = excluded.updated_at""",
-            (order.market_id, fill_size, fill_price, fill_price,
+            (order.market_id, self._exchange_name, fill_size, fill_price, fill_price,
              market.category or "", order.token.value, order.token_id,
              1 if is_paper else 0),
         )

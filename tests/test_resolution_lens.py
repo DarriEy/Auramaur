@@ -596,3 +596,43 @@ def test_lexical_candidates_scan_whole_table_not_volume_top():
             await db.close()
 
     asyncio.run(run())
+
+
+def test_kalshi_spike_instance_is_parametrized_and_isolated():
+    """The Kalshi measurement-spike instance binds the Kalshi venue, uses the
+    distinct 'resolution_lens_kalshi' source (own graduation cells), applies the
+    thinner Kalshi liquidity floor, and rejects Polymarket markets — while the
+    default Poly instance is unchanged."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        settings = _settings()
+
+        # Kalshi-bound instance.
+        kalshi = _pillar(db, settings, [])
+        # rebuild with explicit kalshi params (the _pillar helper defaults Poly)
+        from auramaur.strategy.resolution_lens import ResolutionLensPillar
+        kalshi = ResolutionLensPillar(
+            db=db, settings=settings, discovery=MagicMock(),
+            exchange=_exchange(), risk_manager=_risk(),
+            pnl_tracker=PnLTracker(db, settings), calibration=MagicMock(),
+            analyzer=_analyzer(), exchange_name="kalshi",
+            source_tag="resolution_lens_kalshi",
+        )
+        assert kalshi._exchange_name == "kalshi"
+        assert kalshi._source_tag == "resolution_lens_kalshi"
+
+        # A Kalshi market passes the exchange filter; a Poly one is rejected.
+        k_mkt = _market(mid="k1", liquidity=350.0)
+        k_mkt.exchange = "kalshi"
+        assert kalshi._eligible(k_mkt) is True          # thin book OK on Kalshi floor
+        poly_mkt = _market(mid="p1", liquidity=5000.0)  # wrong venue for this instance
+        assert kalshi._eligible(poly_mkt) is False
+
+        # The default Poly instance still rejects Kalshi markets (isolation).
+        poly = _pillar(db, settings, [])
+        assert poly._exchange_name == "polymarket"
+        assert poly._source_tag == "resolution_lens"
+        assert poly._eligible(k_mkt) is False
+
+    asyncio.run(run())

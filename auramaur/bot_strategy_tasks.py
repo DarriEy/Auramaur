@@ -217,6 +217,46 @@ class StrategyTaskMixin:
                 log.error("lens.cycle_error", error=str(e))
             await asyncio.sleep(interval)
 
+    async def _task_resolution_lens_kalshi(self) -> None:
+        """Kalshi resolution-lens measurement spike (paper-forced, default off).
+
+        A SECOND lens instance bound to the Kalshi discovery/exchange, attributed
+        to 'resolution_lens_kalshi' so it earns its own graduation cells and
+        cannot dilute the proven Polymarket lens. Tests whether Kalshi's
+        CFTC-legalistic resolution criteria carry fine-print mispricing. No-ops
+        cleanly if the Kalshi venue isn't composed.
+        """
+        from auramaur.strategy.resolution_lens import ResolutionLensPillar
+
+        discovery = self._components.discoveries.get("kalshi")
+        exchange = self._components.exchanges.get("kalshi")
+        if discovery is None or exchange is None:
+            log.info("lens.kalshi_spike_skipped", reason="kalshi venue not composed")
+            return
+
+        pillar = ResolutionLensPillar(
+            db=self._components.db,
+            settings=self.settings,
+            discovery=discovery,
+            exchange=exchange,
+            risk_manager=self._components.risk_manager,
+            pnl_tracker=self._components.pnl_tracker,
+            calibration=self._components.calibration,
+            analyzer=self._components.analyzer,
+            aggregator=self._components.aggregator,
+            exchange_name="kalshi",
+            source_tag="resolution_lens_kalshi",
+        )
+        interval = max(60, self.settings.resolution_lens.interval_seconds)
+        while self._running:
+            if await self._check_kill_switch():
+                return
+            try:
+                await pillar.run_once()
+            except Exception as e:
+                log.error("lens.kalshi_cycle_error", error=str(e))
+            await asyncio.sleep(interval)
+
     async def _task_oddlot_tender(self) -> None:
         """EDGAR odd-lot tender scan (detection always; entries paper-forced)."""
         from auramaur.data_sources.edgar import EdgarClient
