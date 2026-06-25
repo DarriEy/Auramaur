@@ -69,6 +69,14 @@ class NewsReactor:
     advantage — we can trade before the broader market adjusts to the news.
     """
 
+    # Categories news-reaction structurally cannot price: a breaking headline
+    # ("Team X beats Team Y") doesn't predict a LIVE MATCH OUTCOME the way it
+    # predicts a policy/geopolitical event, yet the keyword search readily
+    # matches team/player names. The news_speed paper book lost ~$65 over 3
+    # esports events (Counter-Strike, Dota) doing exactly this. Block the
+    # live-event-outcome categories so the reactor never flags them.
+    BLOCKED_CATEGORIES = frozenset({"esports", "sports"})
+
     def __init__(
         self,
         rss_source: RSSSource,
@@ -141,6 +149,18 @@ class NewsReactor:
                     if engine is None:
                         continue
                     for market in markets:
+                        # Skip live-event-outcome categories news-reaction can't
+                        # price (esports/sports). Classify off the stored label
+                        # when present, else the question text — the loser
+                        # esports markets carried the category, but match-ups can
+                        # also be caught structurally.
+                        if self._is_blocked_category(market):
+                            log.info(
+                                "news_reactor.category_skip",
+                                market_id=market.id,
+                                category=getattr(market, "category", "") or "",
+                            )
+                            continue
                         engine.flag_market_from_news(market.id)
                         flagged.append({
                             "exchange": exchange_name,
@@ -196,6 +216,15 @@ class NewsReactor:
     def _get_market_liquidity(flagged_entry: dict) -> float:
         """Extract liquidity from a flagged entry for ranking."""
         return flagged_entry.get("liquidity", 0.0)
+
+    @classmethod
+    def _is_blocked_category(cls, market: Market) -> bool:
+        """True if the market is a live-event-outcome (esports/sports) the
+        reactor must not trade. Category-only on purpose: the proven loser
+        markets all carried the label, and a fuzzy ``A vs B`` text fallback
+        would false-block legitimate political head-to-heads (Trump vs Biden)."""
+        category = (getattr(market, "category", "") or "").strip().lower()
+        return category in cls.BLOCKED_CATEGORIES
 
     def _filter_new(self, items: list[NewsItem]) -> list[NewsItem]:
         """Return only items we haven't processed yet."""
