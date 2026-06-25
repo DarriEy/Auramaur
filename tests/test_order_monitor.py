@@ -80,6 +80,80 @@ async def test_order_monitor_records_live_fill_once():
 
 
 @pytest.mark.asyncio
+async def test_order_monitor_cancelled_order_writes_no_phantom_trade():
+    """A cancelled live order with no pre-written trades row (rowcount==0, i.e.
+    placed outside the gateway) must NOT insert a fallback trades row — it never
+    executed. Regression: the market maker cancels/expires the bulk of its
+    post-only quotes, and the unconditional fallback INSERT was fabricating a
+    phantom 'BUY' at the full quoted size for each one (~1.6k/week), corrupting
+    strategy attribution. Only an actual fill may insert a fallback row."""
+    settings = MagicMock()
+    settings.execution.limit_order_ttl_seconds = 60
+
+    bot = AuramaurBot(settings=settings)
+    bot._running = True
+
+    order = Order(
+        market_id="m1",
+        exchange="polymarket",
+        token_id="tok_yes",
+        token=TokenType.YES,
+        side=OrderSide.BUY,
+        size=10,
+        price=0.50,
+        dry_run=False,
+    )
+    exchange = SimpleNamespace(
+        _live_pending={"live-1": order},
+        get_order_status=AsyncMock(
+            return_value=OrderResult(
+                order_id="live-1",
+                market_id="m1",
+                status="cancelled",   # terminal, but NOT a fill
+                filled_size=0,
+                filled_price=0.0,
+                is_paper=False,
+            )
+        ),
+    )
+    paper = SimpleNamespace(
+        pending_orders=[],
+        check_fills=AsyncMock(return_value=[]),
+        cancel_expired=AsyncMock(return_value=0),
+    )
+    pnl_tracker = AsyncMock()
+    db_cursor = MagicMock()
+    db_cursor.rowcount = 0   # no pre-existing gateway row to UPDATE
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=db_cursor)
+    db.commit = AsyncMock()
+
+    bot._components = Components({
+        "paper": paper,
+        "exchange": exchange,
+        "discovery": AsyncMock(),
+        "pnl_tracker": pnl_tracker,
+        "db": db,
+    })
+
+    async def stop_after_loop(_seconds):
+        bot._running = False
+
+    with patch("asyncio.sleep", new=AsyncMock(side_effect=stop_after_loop)):
+        await bot._task_order_monitor()
+
+    # No fill recorded (it didn't execute) ...
+    pnl_tracker.record_fill.assert_not_awaited()
+    # ... and crucially, NO INSERT INTO trades for the cancelled order.
+    inserts = [
+        c for c in db.execute.await_args_list
+        if "INSERT INTO trades" in str(c.args[0])
+    ]
+    assert inserts == []
+    assert "live-1" not in exchange._live_pending  # still cleaned up
+
+
+@pytest.mark.asyncio
 async def test_order_monitor_ttl_cancels_stale_live_order():
     """A live limit order still resting past the TTL is cancelled to free balance.
 

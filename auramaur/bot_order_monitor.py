@@ -141,7 +141,25 @@ class OrderMonitorMixin:
                                                WHERE order_id = ?""",
                                             (result.status, size, price, order_id),
                                         )
-                                        if getattr(cur, "rowcount", 0) == 0:
+                                        # Only INSERT a fallback row for an actual
+                                        # EXECUTION. The UPDATE above already marks a
+                                        # gateway-placed order's pre-written row with
+                                        # its terminal status (cancelled/expired/...).
+                                        # When rowcount==0 the order had no pre-written
+                                        # row (placed outside the gateway) — but a
+                                        # cancelled/expired/rejected order never traded,
+                                        # so inserting a row would fabricate a phantom
+                                        # "BUY" at the full quoted size that never
+                                        # filled. The market maker cancels/expires the
+                                        # vast majority of its post-only quotes, so this
+                                        # was flooding the trades table (~1.6k/wk) and
+                                        # corrupting strategy attribution. A non-fill
+                                        # terminal status with no pre-existing row has
+                                        # nothing to record.
+                                        if (
+                                            getattr(cur, "rowcount", 0) == 0
+                                            and result.status == "filled"
+                                        ):
                                             await db.execute(
                                                 """INSERT INTO trades
                                                    (market_id, side, size, price, is_paper,
