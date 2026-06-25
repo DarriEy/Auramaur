@@ -3,7 +3,9 @@
 An autonomous trading bot for prediction markets (Polymarket and Kalshi),
 built in six days by a hydrologist using Claude Code.
 
-It makes (small) money.
+It is an experiment, not a money machine — paper-trading is the default, live
+capital is gated behind a graduation ladder, and most strategies stay on
+probation. Treat realized performance as a research result, not a promise.
 
 ## What it does
 
