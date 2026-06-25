@@ -442,9 +442,13 @@ econ_indicator:
 
 weather_temp:
   # Open-Meteo ensemble pricing of Polymarket daily city-temperature bins.
-  # Measurement spike: PAPER-FORCED, logs model-vs-market every cycle; edge must
-  # clear the poly taker fee + min_edge, max_divergence skips artifact-scale gaps.
-  enabled: true
+  # WOUND DOWN 2026-06-25: the measurement spike concluded NEGATIVE. In the SAME
+  # weather category, resolution_lens (fine-print criteria reading) is paper-
+  # positive while this ensemble-pricing book stayed net-negative and kept
+  # deteriorating — the edge is in reading the resolution criteria, not pricing
+  # the temperature distribution. Disabled so the lens owns weather; flip back to
+  # true only with a revised pricing thesis. paper:true retained as a safety floor.
+  enabled: false
   paper: true
   min_edge: 0.10
   max_divergence: 0.40
