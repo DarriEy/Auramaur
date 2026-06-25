@@ -88,6 +88,32 @@ async def _seed_trades(
     await db.commit()
 
 
+async def _seed_ledger(
+    db: Database,
+    *,
+    pnls: list[float],
+    fees: float = 0.0,
+    venue: str = "kalshi",
+    is_paper: int = 1,
+    timestamp_offset_days: float = 0.0,
+) -> None:
+    """Seed realization events into pnl_ledger — the authoritative source the
+    win-rate / pnl-after-fees readiness criteria now read (the legacy
+    trades.pnl column is never populated)."""
+    ts = (
+        datetime.now(timezone.utc) - timedelta(days=timestamp_offset_days)
+    ).isoformat()
+    for i, pnl in enumerate(pnls):
+        await db.execute(
+            "INSERT INTO pnl_ledger (market_id, venue, kind, token, qty, pnl, "
+            "fees, is_paper, source_ref, realized_at) "
+            "VALUES (?, ?, 'sell', 'YES', 10.0, ?, ?, ?, ?, ?)",
+            (f"led-mkt-{i}", venue, pnl, fees, is_paper,
+             f"ledtest:{venue}:{i}:{ts}", ts),
+        )
+    await db.commit()
+
+
 async def _seed_calibration(
     db: Database,
     *,
@@ -307,7 +333,7 @@ async def test_brier_vs_market_fail_when_market_better(db: Database):
 @pytest.mark.asyncio
 async def test_win_rate_pass_above_52(db: Database):
     pnls = [1.0] * 16 + [-1.0] * 14
-    await _seed_trades(db, pnls=pnls)
+    await _seed_ledger(db, pnls=pnls)
     now = datetime.now(timezone.utc)
     result = await check_win_rate(db, since=now - timedelta(days=7), exchange="kalshi")
     assert result.status == "PASS"
@@ -316,7 +342,7 @@ async def test_win_rate_pass_above_52(db: Database):
 @pytest.mark.asyncio
 async def test_win_rate_fail_at_50(db: Database):
     pnls = [1.0] * 15 + [-1.0] * 15
-    await _seed_trades(db, pnls=pnls)
+    await _seed_ledger(db, pnls=pnls)
     now = datetime.now(timezone.utc)
     result = await check_win_rate(db, since=now - timedelta(days=7), exchange="kalshi")
     assert result.status == "FAIL"
@@ -330,12 +356,41 @@ async def test_win_rate_fail_at_50(db: Database):
 @pytest.mark.asyncio
 async def test_pnl_after_fees_pass_when_net_positive(db: Database):
     pnls = [5.0] * 20 + [-1.0] * 10
-    await _seed_trades(db, pnls=pnls)
+    await _seed_ledger(db, pnls=pnls)
     now = datetime.now(timezone.utc)
     result = await check_pnl_after_fees(
         db, since=now - timedelta(days=7), exchange="kalshi", fee_rate=0.07
     )
     assert result.status == "PASS"
+
+
+@pytest.mark.asyncio
+async def test_pnl_after_fees_uses_ledger_net_not_double_counted(db: Database):
+    """pnl_ledger.pnl is ALREADY net of fees — the criterion must SUM it, not
+    re-apply a fee estimate. Seed fees and assert net == sum(pnl) (gross adds
+    the fees back for display)."""
+    await _seed_ledger(db, pnls=[2.0] * 30, fees=0.10)
+    now = datetime.now(timezone.utc)
+    result = await check_pnl_after_fees(
+        db, since=now - timedelta(days=7), exchange="kalshi", fee_rate=0.07
+    )
+    assert result.status == "PASS"
+    assert "$+60.00" in result.value          # net = 30 * 2.0, not re-discounted
+    assert "fees $3.00" in result.value       # 30 * 0.10, reported from ledger
+
+
+@pytest.mark.asyncio
+async def test_readiness_ignores_legacy_trades_pnl(db: Database):
+    """Regression: the win-rate/pnl criteria must read pnl_ledger, NOT the legacy
+    trades.pnl column (never populated in the current path). Seeding only the
+    trades table must leave both criteria INSUFFICIENT_DATA."""
+    await _seed_trades(db, pnls=[1.0] * 40)   # legacy table only, no ledger rows
+    now = datetime.now(timezone.utc)
+    wr = await check_win_rate(db, since=now - timedelta(days=7), exchange="kalshi")
+    pf = await check_pnl_after_fees(
+        db, since=now - timedelta(days=7), exchange="kalshi", fee_rate=0.07)
+    assert wr.status == "INSUFFICIENT_DATA"
+    assert pf.status == "INSUFFICIENT_DATA"
 
 
 # ---------------------------------------------------------------------------

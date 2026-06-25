@@ -364,14 +364,21 @@ async def check_win_rate(
     threshold_pct: float = 52.0,
     min_samples: int = 30,
 ) -> CriterionResult:
+    # Source: pnl_ledger, the authoritative realized-P&L store (one row per
+    # sell/settlement). The legacy `trades.pnl` column is never populated in the
+    # current path — the gateway co-writes a trades-mirror but realized P&L lives
+    # only in the ledger — so reading `trades.pnl` always returned 0 rows and
+    # this criterion was permanently INSUFFICIENT_DATA despite hundreds of
+    # realization events. `venue` is the ledger's exchange column; `realized_at`
+    # is the realization time.
     clause = ""
     params: list = [since.isoformat()]
     if exchange:
-        clause = " AND exchange = ?"
+        clause = " AND venue = ?"
         params.append(exchange)
     rows = await db.fetchall(
-        f"SELECT pnl FROM trades "
-        f"WHERE timestamp >= ? AND is_paper = 1 AND pnl IS NOT NULL{clause}",
+        f"SELECT pnl FROM pnl_ledger "
+        f"WHERE realized_at >= ? AND is_paper = 1{clause}",
         tuple(params),
     )
     if len(rows) < min_samples:
@@ -407,14 +414,20 @@ async def check_pnl_after_fees(
     fee_rate: float,
     min_samples: int = 30,
 ) -> CriterionResult:
+    # Source: pnl_ledger (see check_win_rate). IMPORTANT — the ledger's `pnl` is
+    # ALREADY NET OF FEES (record_fill books `(price-avg_cost)*size - fee`), so
+    # the net-after-fees figure is simply SUM(pnl); re-applying the fee_rate
+    # estimate the legacy path used would DOUBLE-COUNT fees. The actual fees are
+    # summed from the ledger's `fees` column for display. `fee_rate` is retained
+    # in the signature for caller compatibility but no longer estimates drag.
     clause = ""
     params: list = [since.isoformat()]
     if exchange:
-        clause = " AND exchange = ?"
+        clause = " AND venue = ?"
         params.append(exchange)
     rows = await db.fetchall(
-        f"SELECT pnl FROM trades "
-        f"WHERE timestamp >= ? AND is_paper = 1 AND pnl IS NOT NULL{clause}",
+        f"SELECT pnl, fees FROM pnl_ledger "
+        f"WHERE realized_at >= ? AND is_paper = 1{clause}",
         tuple(params),
     )
     if len(rows) < min_samples:
@@ -425,15 +438,14 @@ async def check_pnl_after_fees(
             threshold=f"≥{min_samples} resolved; net PnL ≥ $0",
             n_samples=len(rows),
         )
-    gross = sum(r["pnl"] or 0 for r in rows)
-    winning_profit = sum(r["pnl"] for r in rows if (r["pnl"] or 0) > 0)
-    fee_drag = winning_profit * fee_rate
-    net = gross - fee_drag
+    net = sum(r["pnl"] or 0 for r in rows)          # already net of fees
+    fees = sum(r["fees"] or 0 for r in rows)
+    gross = net + fees
     status: Status = "PASS" if net >= 0 else "FAIL"
     return CriterionResult(
         name="pnl_after_fees",
         status=status,
-        value=f"${net:+.2f} (gross ${gross:+.2f}, fee drag ${fee_drag:.2f})",
+        value=f"${net:+.2f} (gross ${gross:+.2f}, fees ${fees:.2f})",
         threshold="≥ $0",
         n_samples=len(rows),
     )
