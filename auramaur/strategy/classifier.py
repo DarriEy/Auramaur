@@ -40,13 +40,32 @@ SPORTS_WEAK_KEYWORDS: list[str] = [
 # 2026-03-26?". A plain keyword can't express the year, so it's a pattern.
 # "vs" without the period ("Linette vs Pohankova") is a word-boundary pattern
 # so it can't match inside words.
-SPORTS_PATTERNS: list[str] = [r"win on 20\d\d", r"\bolympics?\b", r"\bf1\b",
-                              r"\bvs\b"]
+# Note: a bare "vs" is intentionally NOT a priority sports marker. It fired
+# eagerly on every "A vs B" question and stole edge match-ups (Trump vs Biden ->
+# sports, Bitcoin vs Ethereum -> sports) before they could score politics/crypto.
+# An unclassified match-up is instead caught in the fallthrough (see
+# _MATCHUP_RE in classify_market), AFTER edge categories get their chance.
+SPORTS_PATTERNS: list[str] = [r"win on 20\d\d", r"\bolympics?\b", r"\bf1\b"]
 
 # Checked BEFORE sports so award-show markets ("Eurovision ... Jury Winner",
 # "win the Oscar") aren't stolen by the sports "winner"/"win" markers.
 ENTERTAINMENT_PRIORITY: list[str] = [
     "eurovision", "song contest", "oscar", "grammy", "academy award",
+    # Added 2026-06-25 after a live-gate audit found these stored as 'other'
+    # (so they dodged the entertainment block): celebrity weddings, movie/TV
+    # casting, album/box-office, TV season releases. Entertainment is a BLOCKED
+    # no-edge category, so a classifier gap = live exposure.
+    "emmy", "golden globe", "box office", "bridesmaid", "groomsman",
+    "album", "wedding", "james bond",
+]
+# Regex markers for entertainment patterns a literal keyword can't express.
+# Conservative on purpose (word boundaries; "Season 3" not "season 2026") to
+# avoid stealing weather ("hurricane season") or election ("cast a vote").
+ENTERTAINMENT_PATTERNS: list[str] = [
+    r"\bcast(ed)? in\b",          # "casted in the next Pirates...", "cast in"
+    r"\bseason \d{1,2}\b",        # "The Last of Us Season 3 ... released"
+    r"perform .*\bsong\b",        # "perform the next James Bond Song"
+    r"\bbox office\b",
 ]
 
 WEATHER_KEYWORDS: list[str] = [
@@ -167,7 +186,7 @@ def _compile_many(keywords: list[str], extra_patterns: list[str] | None = None) 
 
 _ESPORTS_RE = _compile_many(ESPORTS_KEYWORDS, ESPORTS_PATTERNS)
 _ESPORTS_STRONG_RE = _compile_many(ESPORTS_STRONG_KEYWORDS)
-_ENTERTAINMENT_PRIORITY_RE = _compile_many(ENTERTAINMENT_PRIORITY)
+_ENTERTAINMENT_PRIORITY_RE = _compile_many(ENTERTAINMENT_PRIORITY, ENTERTAINMENT_PATTERNS)
 _SPORTS_STRONG_RE = _compile_many(SPORTS_STRONG_KEYWORDS)
 _SPORTS_RE = _compile_many(SPORTS_STRONG_KEYWORDS + SPORTS_WEAK_KEYWORDS,
                            SPORTS_PATTERNS)
@@ -186,6 +205,11 @@ _PRIORITY_CATEGORIES: list[tuple[str, list[re.Pattern]]] = [
 _CATEGORY_RES: dict[str, list[re.Pattern]] = {
     cat: _compile_many(kws) for cat, kws in CATEGORY_KEYWORDS.items()
 }
+
+# Head-to-head match-up: "<word> vs <word>" / "<word> vs. <word>". Used as the
+# last-resort live-event-outcome detector (see classify_market). Word boundary
+# on both sides so it can't fire inside other words.
+_MATCHUP_RE = re.compile(r"\b[\w.'-]+ vs\.? [\w.'-]+", re.IGNORECASE)
 
 _POLITICS_US_RE = _compile_many(POLITICS_US_KEYWORDS, POLITICS_US_PATTERNS)
 _POLITICS_INTL_RE = _compile_many(POLITICS_INTL_KEYWORDS)
@@ -323,6 +347,17 @@ def classify_market(question: str, description: str = "") -> str:
         scores["politics_us"] = gov
 
     if not scores:
+        # Structural fail-safe for live-event-outcome markets. A head-to-head
+        # match-up ("Team A vs Team B") that reached here carries NO edge-category
+        # signal — it's almost always a sport/esports fixture, the exact thing
+        # we block. Rather than enumerate every game, league and roster
+        # (unsustainable whack-a-mole), default an unclassified match-up to the
+        # blocked 'sports' bucket. Real "X vs Y" markets with edge signal
+        # (Trump vs Biden -> politics, BTC vs ETH -> crypto) scored above and
+        # never reach here. The authoritative path is still the venue tag
+        # (classify_tags); this only catches markets whose tag wasn't captured.
+        if _MATCHUP_RE.search(question):
+            return "sports"
         return "other"
 
     return max(scores, key=scores.get)

@@ -249,3 +249,56 @@ def test_classify_tags_inconclusive():
 
 def test_classify_tags_esports_beats_sports():
     assert classify_tags(["Sports", "Esports", "CS2"]) == "esports"
+
+
+def test_entertainment_structural_patterns_2026_06_25_audit():
+    """Live-gate audit (2026-06-25): celebrity weddings, movie/TV casting,
+    album/box-office and TV-season markets were stored as 'other' and dodged the
+    entertainment block. The classifier must now catch them."""
+    cases = [
+        "Will Brittany Mahomes be a Bridesmaid for the wedding of Travis Kelce and Taylor Swift?",
+        "Who will perform the next James Bond Song?",
+        "When will The Last of Us Season 3 be released?",
+        "Will Johnny Depp be casted in the next Pirates of the Caribbean?",
+        "Will Glen Powell be casted in the next Miami Vice?",
+        "New Playboi Carti Album before GTA VI?",
+    ]
+    for q in cases:
+        assert classify_market(q) == "entertainment", q
+
+
+def test_unclassified_matchups_default_to_blocked_without_enumeration():
+    """The sustainable fix: a head-to-head match-up with no edge-category signal
+    is a live-event outcome and defaults to the blocked 'sports' bucket — we do
+    NOT enumerate every game/league/roster. Call of Duty, an invented sport, and
+    a tennis fixture all land in a BLOCKED category (sports or esports) with no
+    game name in the keyword lists."""
+    blocked = {"sports", "esports"}
+    assert classify_market(
+        "Call of Duty: Los Angeles Thieves vs Carolina Royal Ravens") in blocked
+    assert classify_market("Madeupball: Team Alpha vs Team Beta") in blocked
+    assert classify_market("Perugia: Pablo Llamas Ruiz vs Michele Ribecai") in blocked
+
+
+def test_vs_no_longer_steals_edge_matchups():
+    """Moving 'vs' out of the eager priority check: edge match-ups now score
+    their real category instead of being stolen into sports."""
+    assert classify_market("Trump vs Biden 2028 election?") == "politics_us"
+    assert classify_market("Bitcoin vs Ethereum market cap by 2027?") == "crypto"
+
+
+def test_cricket_caught_via_venue_tag():
+    """The authoritative path is the VENUE TAG, not question keywords. A bare
+    'Will New Zealand win?' is unclassifiable from text, but Polymarket tags it
+    'Cricket' -> classify_tags maps that to sports (blocked)."""
+    from auramaur.strategy.classifier import classify_tags
+    assert classify_tags(["Cricket", "International", "Sports"]) == "sports"
+
+
+def test_new_patterns_dont_false_block_legit_categories():
+    """The new entertainment/sports markers must not steal weather/politics/
+    econ/crypto markets."""
+    assert classify_market("Will a Category 5 hurricane make landfall this season?") != "entertainment"
+    assert classify_market("Will Trump win the 2028 election?") not in ("entertainment", "sports")
+    assert classify_market("Will the Fed cut rates in Q3?") == "economics"
+    assert classify_market("Will Bitcoin hit $200k?") == "crypto"
