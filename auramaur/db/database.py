@@ -29,8 +29,14 @@ class Database:
         await self._db.execute("PRAGMA foreign_keys=OFF")
         # CLI commands share the file with the running bot; without a busy
         # timeout a writer collision fails instantly ("database is locked" —
-        # bit the ledger backfill 2026-06-10). 5s covers any sane write txn.
-        await self._db.execute("PRAGMA busy_timeout=5000")
+        # bit the ledger backfill 2026-06-10). The writer WAITS up to this long
+        # for the lock instead of erroring. Raised 5s -> 30s on 2026-06-25 after
+        # a restart write-burst exceeded 5s and DROPPED 3 LIVE polymarket fills
+        # in order_monitor.record_fill (logged, then skipped — record_fill is
+        # not idempotent mid-transaction, so a retry could double-book; making
+        # the lock WAIT is the safe fix). 30s covers transient bursts; a lock
+        # beyond it would signal sustained write saturation, a capacity problem.
+        await self._db.execute("PRAGMA busy_timeout=30000")
         await self._init_schema()
         log.info("database.connected", path=self.db_path)
 
