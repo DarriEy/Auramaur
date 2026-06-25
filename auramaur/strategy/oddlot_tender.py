@@ -39,6 +39,18 @@ from auramaur.exchange.models import Fill, OrderSide
 
 log = structlog.get_logger()
 
+
+def _safe_float(value, default: float = 0.0) -> float:
+    """Coerce an LLM-returned value to float, tolerating non-numeric strings
+    (e.g. 'NAV', 'N/A', 'TBD' for NAV-linked or undetermined tenders). Returns
+    *default* rather than raising, so one unparseable field can't discard a
+    whole filing audit."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 ODDLOT_PROMPT = """You are auditing an SEC issuer tender-offer filing for the odd-lot arbitrage trade. Be adversarial: the default answer is that there is NO usable odd-lot priority.
 
 Company: {company} ({ticker})
@@ -115,16 +127,23 @@ class OddLotTenderPillar:
                     filed_at=f.filed_at, text=text[:40000],
                 ))
                 parsed = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
+                # Coerce per-field with a tolerant float: the LLM sometimes
+                # returns a non-numeric price for NAV-linked tenders (a closed-
+                # end fund tendering "at NAV" has no fixed price). float('NAV')
+                # used to raise inside verdict.update(), which evaluates all args
+                # before applying — so ONE bad field discarded the entire read,
+                # including a perfectly-parsed odd_lot_priority. A non-numeric
+                # price -> 0.0, which the downstream logic rejects as "no usable
+                # fixed premium" — the correct outcome, reached gracefully.
                 verdict.update(
                     odd_lot_priority=bool(parsed.get("odd_lot_priority", False)),
                     requires_record_date_holding=bool(
                         parsed.get("requires_record_date_holding", False)),
-                    tender_price=float(parsed.get("tender_price", 0.0) or 0.0),
-                    tender_price_high=float(
-                        parsed.get("tender_price_high", 0.0) or 0.0),
+                    tender_price=_safe_float(parsed.get("tender_price")),
+                    tender_price_high=_safe_float(parsed.get("tender_price_high")),
                     expiration=str(parsed.get("expiration", ""))[:10],
                     conditions=str(parsed.get("conditions", ""))[:300],
-                    confidence=float(parsed.get("confidence", 0.0) or 0.0),
+                    confidence=_safe_float(parsed.get("confidence")),
                 )
             except Exception as e:
                 log.warning("oddlot.llm_parse_error", accession=f.accession,
