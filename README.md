@@ -3,7 +3,9 @@
 An autonomous trading bot for prediction markets (Polymarket and Kalshi),
 built in six days by a hydrologist using Claude Code.
 
-It makes (small) money.
+It is an experiment, not a money machine — paper-trading is the default, live
+capital is gated behind a graduation ladder, and most strategies stay on
+probation. Treat realized performance as a research result, not a promise.
 
 ## What it does
 
@@ -42,8 +44,10 @@ uv sync
 # Configure (copy and fill in)
 cp .env.example .env
 
-# Run in paper mode (default)
-auramaur run --agent
+# Run in paper mode (default). --hybrid runs the full multi-strategy set
+# (arb + news-speed + LLM + market-making + bias-harvest + resolution-lens …);
+# --agent uses the single agentic analyzer instead.
+auramaur run --hybrid
 
 # Run tests
 uv run pytest
@@ -58,24 +62,30 @@ running on the same handful of foundation models as yours.
 
 ```
 auramaur/
-├── exchange/         Polymarket CLOB, Kalshi, Crypto.com, paper trader
+├── exchange/         Polymarket CLOB, Kalshi, IBKR, paper trader
 ├── data_sources/     News, RSS, Reddit, FRED, Manifold, Metaculus
 ├── nlp/              Claude analyzer, calibration, prompts
-├── risk/             15-check pipeline, Kelly sizer, portfolio model
-├── strategy/         Engine, signal detection, market selector, resolution
-├── broker/           Allocator, syncer, reconciler, redeemer, PnL tracker
-├── monitoring/       Display, attribution
+├── risk/             15-check pipeline, Kelly sizer, graduation ladder
+├── strategy/         Engine, the strategy pillars, signal detection, resolution
+├── broker/           Execution gateway, allocator, syncer, reconciler, PnL ledger
+├── treasury/         Cross-venue capital and transfers
+├── agentmcp/         MCP bridge exposing the plumbing to an external agent
+├── monitoring/       Display, readiness, attribution
 └── db/               SQLite schema
 ```
 
-The single gateway for all orders is `exchange/client.py`. Paper trading
+The CLOB API is touched for orders in one place, `exchange/client.py`; all
+placements funnel through the `ExecutionGateway` in `broker/`. Paper-trading
 interception happens in `exchange/paper.py`. The risk manager in
-`risk/manager.py` is the only path through which trades can be approved.
+`risk/manager.py` is the single path through which directional trades are
+approved.
 
 ## Status
 
-Trades real money on Polymarket and Kalshi as of April 2026. P&L is
-modest. Calibration is live and learning from each market resolution.
+Runs live on Polymarket and Kalshi with a paper-default posture: most
+strategies trade on paper and earn live capital only by clearing the graduation
+ladder. Calibration learns from every market resolution. Ongoing research, not a
+finished product.
 
 ## License
 
