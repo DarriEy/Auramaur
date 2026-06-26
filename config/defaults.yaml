@@ -448,7 +448,7 @@ settlement_arb:
   # the market hasn't repriced (the lag is the edge). No forecasting; the LLM only
   # extracts the predicate (adversarially verified, cached). PAPER-FORCED, own
   # graduation cell. DEFAULT OFF — flip enabled:true to start the 2-week spike.
-  enabled: false
+  enabled: true      # spike STARTED 2026-06-26 — 2wk paper measurement
   paper: true
   stake_usd: 10.0
   min_edge: 0.05
