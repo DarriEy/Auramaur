@@ -126,6 +126,35 @@ class StrategyTaskMixin:
                 log.error("econ_indicator.cycle_error", error=str(e))
             await asyncio.sleep(interval)
 
+    async def _task_settlement_arb(self) -> None:
+        """Settlement-lag / known-outcome arb over Polymarket econ markets,
+        resolved deterministically against FRED (paper-forced, default off)."""
+        from auramaur.data_sources.fred import FREDSource
+        from auramaur.strategy.settlement_arb import SettlementArbPillar
+
+        if not self.settings.fred_api_key:
+            log.info("settlement_arb.disabled", reason="missing FRED key")
+            return
+        pillar = SettlementArbPillar(
+            db=self._components.db,
+            settings=self.settings,
+            discovery=self._components.discovery,
+            exchange=self._components.exchange,
+            risk_manager=self._components.risk_manager,
+            pnl_tracker=self._components.pnl_tracker,
+            fred_source=FREDSource(api_key=self.settings.fred_api_key),
+            analyzer=self._components.analyzer,
+        )
+        interval = max(60, self.settings.settlement_arb.interval_seconds)
+        while self._running:
+            if await self._check_kill_switch():
+                return
+            try:
+                await pillar.run_once()
+            except Exception as e:
+                log.error("settlement_arb.cycle_error", error=str(e))
+            await asyncio.sleep(interval)
+
     async def _task_intraday_drift(self) -> None:
         """Measurement spike: track post-signal price drift toward the LLM estimate
         (no trading). Gates the intraday-convergence strategy on real evidence."""

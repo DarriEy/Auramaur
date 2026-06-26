@@ -1366,6 +1366,10 @@ class AuramaurBot(
         if self.settings.econ_indicator.enabled:
             tasks.append(asyncio.create_task(self._task_econ_indicator(), name="econ_indicator"))
 
+        # Settlement-lag / known-outcome arb (FRED-first). Paper-forced; default off.
+        if self.settings.settlement_arb.enabled:
+            tasks.append(asyncio.create_task(self._task_settlement_arb(), name="settlement_arb"))
+
         # Open-Meteo ensemble city-temperature pricing (paper-forced spike)
         if self.settings.weather_temp.enabled:
             tasks.append(asyncio.create_task(self._task_weather_temp(), name="weather_temp"))

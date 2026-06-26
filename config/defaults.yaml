@@ -440,6 +440,25 @@ econ_indicator:
   history_n: 60
   interval_seconds: 1800
 
+settlement_arb:
+  # Settlement-lag / known-outcome arb (FRED-first) — the structural generalization
+  # of the graduated resolution_lens x weather edge. Trades a Polymarket econ
+  # market ONLY when the referenced FRED indicator's print for the reference period
+  # is ALREADY PUBLISHED and deterministically satisfies/fails the criterion, and
+  # the market hasn't repriced (the lag is the edge). No forecasting; the LLM only
+  # extracts the predicate (adversarially verified, cached). PAPER-FORCED, own
+  # graduation cell. DEFAULT OFF — flip enabled:true to start the 2-week spike.
+  enabled: false
+  paper: true
+  stake_usd: 10.0
+  min_edge: 0.05
+  min_liquidity: 1000.0
+  min_extract_confidence: 0.8
+  verify_min_confidence: 0.8
+  max_entries_per_cycle: 5
+  history_n: 60
+  interval_seconds: 1800
+
 weather_temp:
   # Open-Meteo ensemble pricing of Polymarket daily city-temperature bins.
   # WOUND DOWN 2026-06-25: the measurement spike concluded NEGATIVE. In the SAME
