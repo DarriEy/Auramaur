@@ -399,6 +399,32 @@ class EconIndicatorConfig(BaseModel):
     interval_seconds: int = 1800
 
 
+class SettlementArbConfig(BaseModel):
+    """Settlement-lag / known-outcome arb, FRED-first (strategy/settlement_arb.py).
+
+    The structural generalization of the graduated resolution_lens × weather edge:
+    trade a Polymarket econ market ONLY when the referenced FRED indicator's print
+    for the reference period is ALREADY PUBLISHED and deterministically
+    satisfies/fails the criterion, and the market hasn't repriced (the lag is the
+    edge). No forecasting — undetermined prints are skipped. PAPER-FORCED, its own
+    graduation cell. Default OFF; flip enabled:true to start the measurement.
+    """
+
+    enabled: bool = False
+    paper: bool = True
+    stake_usd: float = 10.0
+    # Required gap between the locked outcome (0/1) and the market price — the
+    # un-converged distance the lag leaves on the table.
+    min_edge: float = 0.05
+    min_liquidity: float = 1000.0
+    # The LLM only extracts the predicate; both gates default conservative.
+    min_extract_confidence: float = 0.8
+    verify_min_confidence: float = 0.8
+    max_entries_per_cycle: int = 5
+    history_n: int = 60
+    interval_seconds: int = 1800
+
+
 class IntradayDriftConfig(BaseModel):
     """Intraday-drift measurement spike (monitoring/intraday_drift.py). NO
     trading — reuses the signals table + snapshots mids to test whether price
@@ -995,6 +1021,7 @@ class Settings(BaseSettings):
     entailment_arb: EntailmentArbConfig = Field(default_factory=lambda: EntailmentArbConfig(**_DEFAULTS.get("entailment_arb", {})))
     cross_venue_arb: CrossVenueArbConfig = Field(default_factory=lambda: CrossVenueArbConfig(**_DEFAULTS.get("cross_venue_arb", {})))
     econ_indicator: EconIndicatorConfig = Field(default_factory=lambda: EconIndicatorConfig(**_DEFAULTS.get("econ_indicator", {})))
+    settlement_arb: SettlementArbConfig = Field(default_factory=lambda: SettlementArbConfig(**_DEFAULTS.get("settlement_arb", {})))
     weather_temp: WeatherTempConfig = Field(default_factory=lambda: WeatherTempConfig(**_DEFAULTS.get("weather_temp", {})))
     hydro_watch: HydroWatchConfig = Field(default_factory=lambda: HydroWatchConfig(**_DEFAULTS.get("hydro_watch", {})))
     intraday_drift: IntradayDriftConfig = Field(default_factory=lambda: IntradayDriftConfig(**_DEFAULTS.get("intraday_drift", {})))
