@@ -370,6 +370,21 @@ class BiasHarvestConfig(BaseModel):
     # risk.blocked_categories, against the CLASSIFIED category (not the raw label
     # that an unclassified market would slip through). See [[bias-harvest-strategy]].
     exclude_categories: list[str] = ["weather", "sports", "politics_us"]
+    # Maker entry (research: GWU WP 2026-001 / Whelan — the favorite-longshot edge
+    # accrues to MAKERS (~-9.6% avg return) not TAKERS (~-31.5%); the prior entry
+    # paid the observed price = taker economics, which the paper ledger surfaced as
+    # the strategy being "slippage-bled" despite 88% win). When true, post the BUY
+    # at the favored-side BID (capture the spread) instead of the last price, and
+    # only when there is a real spread to capture (>= maker_min_spread).
+    maker_entry: bool = True
+    maker_min_spread: float = 0.02
+    # Paper realism: maker posts do NOT always get hit. Without modelling this the
+    # paper book would assume 100% maker fills and read far too rosy — dangerous
+    # because the graduation ladder auto-promotes at 20 positive events. So in
+    # paper, deterministically (stable market-id hash) admit only this fraction of
+    # otherwise-eligible markets, modelling a realistic maker CAPTURE rate. The
+    # real fill rate is THE risk to validate before any live-arm. 1.0 disables.
+    paper_maker_fill_rate: float = 0.5
 
 
 class EconIndicatorConfig(BaseModel):

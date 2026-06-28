@@ -569,6 +569,15 @@ bias_harvest:
   min_hours_to_resolution: 6.0
   max_days_to_resolution: 45.0   # cap capital lock-up (backtest avg hold ~15d)
   interval_seconds: 600
+  # Maker entry — the favorite-longshot edge accrues to makers, not takers
+  # (GWU WP 2026-001 / Whelan: maker ~-9.6% vs taker ~-31.5%). Post the BUY at the
+  # favored-side BID to capture the spread instead of paying the observed price.
+  # Only fires when there is >= maker_min_spread to capture; paper admits only
+  # paper_maker_fill_rate of eligible markets (deterministic) so the paper book
+  # isn't a 100%-fill fantasy. Real maker fill rate is the live-validation risk.
+  maker_entry: true
+  maker_min_spread: 0.02
+  paper_maker_fill_rate: 0.5
 
 analysis:
   mode: "strategic"   # "pipeline", "strategic", or "agent"
