@@ -8,8 +8,14 @@ won 99.3% of 151 markets vs a 95.5% breakeven. The mirror control (buying
 the longshot side at the same moments) lost -87% per $1 in the deep band —
 the classic favorite-longshot bias, measured on the bot's own universe. The
 edge survives removing the Iran cluster and sports/junk (improves to +4.9%)
-but DIES at 4.4c slippage, so entries are passive limit orders at the
-observed price, never crossed.
+but DIES at 4.4c slippage. Live-microstructure research (GWU WP 2026-001 /
+Whelan: maker avg ~-9.6% vs taker ~-31.5%) confirms the bias accrues to
+MAKERS, not takers — so entries post the BUY at the favored-side BID to
+capture the spread (``maker_entry``), and only where a real spread exists
+(>= ``maker_min_spread``); never crossed. In paper, ``paper_maker_fill_rate``
+deterministically haircuts entries so the book reflects a realistic maker
+capture rate rather than assuming 100% fills (the real fill rate is the key
+live-validation risk).
 
 Design constraints:
   * PAPER-FORCED by default (``bias_harvest.paper: true``): orders carry
@@ -34,6 +40,7 @@ from __future__ import annotations
 
 from auramaur.strategy.protocols import ExecutionMode
 
+import hashlib
 from datetime import datetime, timezone
 
 import structlog
@@ -158,6 +165,59 @@ class BiasHarvestPillar:
             return False  # capital lock-up cap
         return True
 
+    async def _maker_price(self, market: Market, fav_is_yes: bool) -> float | None:
+        """The favored-side BID to post a maker BUY at, or None if there is no
+        capturable spread / no book.
+
+        The favorite-longshot edge accrues to makers (capture the spread), not
+        takers (pay it). We only harvest where we can actually be a maker: there
+        must be at least ``maker_min_spread`` between bid and ask, else posting at
+        the bid is ~ taking and the edge dies in slippage (the backtest's 4.4c
+        cliff). Execution-only — the risk/divergence accounting stays on the
+        observed price (see ``_try_enter``)."""
+        cfg = self._settings.bias_harvest
+        token_id = market.clob_token_yes if fav_is_yes else market.clob_token_no
+        if not token_id:
+            return None
+        try:
+            book = await self._exchange.get_order_book(token_id)
+        except Exception as e:
+            log.debug("bias_harvest.book_fetch_failed", market_id=market.id, error=str(e))
+            return None
+        best_bid, best_ask = book.best_bid, book.best_ask
+        if best_bid is None or best_ask is None:
+            return None
+        if (best_ask - best_bid) < cfg.maker_min_spread:
+            return None  # nothing to capture — posting at the bid ~= crossing
+        maker_price = round(best_bid, 2)
+        if not (0.01 <= maker_price <= 0.99):
+            return None
+        return maker_price
+
+    def _paper_admits(self, market_id: str) -> bool:
+        """Deterministic maker-capture gate for the PAPER book: admit only
+        ``paper_maker_fill_rate`` of markets (stable hash), modelling that not
+        every posted maker bid gets hit. Without it the paper ledger would assume
+        100% maker fills and read far too rosy — risky because the graduation
+        ladder auto-promotes at 20 positive events. Stable (sha1, not the
+        salted built-in hash) so the admitted set is reproducible across runs and
+        tests. Live fills are governed by the real book, never this gate."""
+        rate = self._settings.bias_harvest.paper_maker_fill_rate
+        if rate >= 1.0:
+            return True
+        if rate <= 0.0:
+            return False
+        h = int(hashlib.sha1(market_id.encode("utf-8")).hexdigest(), 16) % 1000
+        return h < int(rate * 1000)
+
+    def _with_favored_price(self, market: Market, fav_is_yes: bool,
+                            maker_price: float) -> Market:
+        """A copy of the market with the favored side repriced to the maker bid,
+        so ``prepare_order`` builds the order at that price. Execution-only: the
+        signal keeps the observed price for the risk/divergence gate."""
+        field = "outcome_yes_price" if fav_is_yes else "outcome_no_price"
+        return market.model_copy(update={field: maker_price})
+
     async def _already_entered_or_held(self, market_id: str) -> bool:
         row = await self._db.fetchone(
             "SELECT 1 FROM signals WHERE market_id = ? AND strategy_source = 'bias_harvest' LIMIT 1",
@@ -213,6 +273,25 @@ class BiasHarvestPillar:
             return False
         p_fav, fav_is_yes = band
 
+        # Maker entry: post the BUY at the favored-side bid (capture the spread)
+        # instead of paying the observed price. The signal/divergence accounting
+        # stays on the observed price (so the divergence filter still passes at
+        # edge_uplift); only the ORDER is built at the maker bid, so the captured
+        # spread lands in the fill -> cost_basis -> pnl_ledger where graduation
+        # reads it. order_market carries the maker price for prepare_order only.
+        order_market = market
+        if cfg.maker_entry:
+            maker_price = await self._maker_price(market, fav_is_yes)
+            if maker_price is None:
+                return False  # no capturable spread -> don't harvest as a taker
+            # Paper realism: not every posted maker bid is hit. Admit only a
+            # deterministic fraction so the paper book reflects a real capture
+            # rate. Gate BEFORE persisting the signal so an un-admitted market
+            # stays retryable instead of burning its one-shot.
+            if cfg.paper and not self._paper_admits(market.id):
+                return False
+            order_market = self._with_favored_price(market, fav_is_yes, maker_price)
+
         signal = self._build_signal(market, p_fav, fav_is_yes)
         await self._persist_signal(signal, market)
 
@@ -233,7 +312,8 @@ class BiasHarvestPillar:
         # portfolio + calibration writes below.
         force_paper = cfg.paper or getattr(decision, "force_paper", False)
         res = await self._gateway.submit(TradeIntent(
-            signal=signal, market=market, size_dollars=size, force_paper=force_paper))
+            signal=signal, market=order_market, size_dollars=size,
+            force_paper=force_paper))
         if res.status not in ("filled", "paper", "partial", "pending"):
             log.warning("bias_harvest.order_rejected", market_id=market.id,
                         status=res.status, error=res.reason)

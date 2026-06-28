@@ -23,6 +23,8 @@ from auramaur.db.database import Database
 from auramaur.exchange.models import (
     Market,
     Order,
+    OrderBook,
+    OrderBookLevel,
     OrderResult,
     OrderSide,
     OrderType,
@@ -57,13 +59,25 @@ def _settings(**overrides) -> Settings:
     s.bias_harvest.band_lo = 0.80
     s.bias_harvest.band_hi = 0.97
     s.bias_harvest.stake_usd = 10.0
+    # Default the maker fill-rate haircut OFF in tests (admit every market) so
+    # entries are deterministic; the haircut has its own focused test.
+    s.bias_harvest.paper_maker_fill_rate = 1.0
     for k, v in overrides.items():
         setattr(s.bias_harvest, k, v)
     return s
 
 
-def _exchange(filled=True):
+def _book(best_bid=0.84, best_ask=0.86) -> OrderBook:
+    """A book with a capturable spread on the favored side (default 2c)."""
+    return OrderBook(
+        bids=[OrderBookLevel(price=best_bid, size=200.0)],
+        asks=[OrderBookLevel(price=best_ask, size=200.0)],
+    )
+
+
+def _exchange(filled=True, book=None):
     ex = MagicMock()
+    ex.get_order_book = AsyncMock(return_value=book if book is not None else _book())
 
     def prepare_order(signal, market, size, is_live):
         token = TokenType.NO if signal.recommended_side == OrderSide.SELL else TokenType.YES
@@ -317,5 +331,99 @@ def test_stake_cap_applies():
         size_arg = ex.prepare_order.call_args[0][2]
         assert abs(size_arg - 10.0) < 1e-9
         await db.close()
+
+    asyncio.run(run())
+
+
+# ----------------------------------------------------------------------
+# Maker entry (GWU WP 2026-001 / Whelan: the edge accrues to makers, not takers)
+# ----------------------------------------------------------------------
+
+
+def test_maker_entry_builds_order_at_the_bid_not_the_observed_price():
+    """The ORDER is built at the favored-side bid (capture the spread), while the
+    SIGNAL keeps the observed price (so the divergence filter still passes)."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        ex = _exchange(book=_book(best_bid=0.90, best_ask=0.93))
+        pillar, _ = _pillar(db, _settings(), [_market(yes=0.92)], exchange=ex)
+        assert await pillar.run_once() == 1
+
+        # prepare_order saw the maker bid (0.90), NOT the observed 0.92.
+        order_market = ex.prepare_order.call_args[0][1]
+        assert abs(order_market.outcome_yes_price - 0.90) < 1e-9
+
+        # Signal accounting is unchanged: claude_prob = observed 0.92 + 0.04.
+        sig = await db.fetchone(
+            "SELECT * FROM signals WHERE strategy_source='bias_harvest'")
+        assert abs(sig["claude_prob"] - 0.96) < 1e-9
+        assert abs(sig["market_prob"] - 0.92) < 1e-9
+        await db.close()
+
+    asyncio.run(run())
+
+
+def test_maker_entry_skips_when_spread_too_thin_to_capture():
+    """With a sub-maker_min_spread book, posting at the bid ~= crossing — so we
+    skip rather than harvest as a taker (the 4.4c-slippage cliff)."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        ex = _exchange(book=_book(best_bid=0.85, best_ask=0.86))  # 1c < 2c floor
+        pillar, _ = _pillar(db, _settings(), [_market(yes=0.85)], exchange=ex)
+        assert await pillar.run_once() == 0
+        ex.prepare_order.assert_not_called()
+        await db.close()
+
+    asyncio.run(run())
+
+
+def test_maker_entry_disabled_falls_back_to_observed_price():
+    """maker_entry=false keeps the old taker behaviour (enter at observed price,
+    no book lookup) — preserves the prior contract for an explicit opt-out."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        ex = _exchange()
+        pillar, _ = _pillar(db, _settings(maker_entry=False), [_market(yes=0.85)],
+                            exchange=ex)
+        assert await pillar.run_once() == 1
+        order_market = ex.prepare_order.call_args[0][1]
+        assert abs(order_market.outcome_yes_price - 0.85) < 1e-9  # observed
+        ex.get_order_book.assert_not_called()
+        await db.close()
+
+    asyncio.run(run())
+
+
+def test_paper_maker_fill_rate_haircut_gates_entries():
+    """In paper, the deterministic fill-rate haircut blocks entries so the book
+    reflects a realistic maker capture rate. rate=0 -> nothing fills; rate=1 ->
+    eligible market fills. The gate is stable (same id -> same verdict)."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        # rate 0.0: an otherwise-perfect in-band market is gated out.
+        pillar0, _ = _pillar(db, _settings(paper_maker_fill_rate=0.0),
+                             [_market(yes=0.90)])
+        assert await pillar0.run_once() == 0
+
+        # rate 1.0: it enters.
+        db2 = Database(":memory:")
+        await db2.connect()
+        pillar1, _ = _pillar(db2, _settings(paper_maker_fill_rate=1.0),
+                             [_market(yes=0.90)])
+        assert await pillar1.run_once() == 1
+
+        # Stability + partition: same id is deterministic; ~half a sample admits.
+        assert pillar1._paper_admits("x") == pillar1._paper_admits("x")
+        sample = [f"m{i}" for i in range(400)]
+        half = _settings(paper_maker_fill_rate=0.5)
+        p, _ = _pillar(db2, half, [])
+        admitted = sum(p._paper_admits(mid) for mid in sample)
+        assert 120 < admitted < 280  # not all, not none — a real partition
+        await db.close()
+        await db2.close()
 
     asyncio.run(run())
