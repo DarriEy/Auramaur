@@ -115,8 +115,9 @@ def status():
                             api_passphrase=settings.polymarket_passphrase,
                         ),
                     )
-                    orders = client.get_orders()
-                    console.print(f"Polymarket: [green]connected[/] — {len(orders)} open orders")
+                    orders = client.get_open_orders()
+                    n = len(orders) if isinstance(orders, list) else 0
+                    console.print(f"Polymarket: [green]connected[/] — {n} open orders")
                 except Exception as e:
                     console.print(f"Polymarket: [red]error[/] — {str(e)[:60]}")
         finally:
