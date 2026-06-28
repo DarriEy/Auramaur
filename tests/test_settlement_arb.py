@@ -177,3 +177,40 @@ async def test_print_not_published_never_trades():
     entered = await p._maybe_enter(market, pred)
     assert entered is False
     p._risk.evaluate.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Candidate scan — admit illiquid tail bins (NBER w34702), reject only dust
+# ---------------------------------------------------------------------------
+
+def _row(mid, question, yes=0.7, liquidity=150.0):
+    return {
+        "id": mid, "question": question, "description": "",
+        "outcome_yes_price": yes, "outcome_no_price": round(1 - yes, 2),
+        "liquidity": liquidity, "category": "economics",
+        "clob_token_yes": "ty", "clob_token_no": "tn", "end_date": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_candidates_admit_tail_bins_reject_dust_and_noneon():
+    """The low liquidity floor admits an illiquid tail-bin econ market (where the
+    settlement lag lives) but still rejects untradeable dust below the floor and
+    non-econ markets."""
+    rows = [
+        _row("tail", "CPI YoY above 3.0% in June?", liquidity=150.0),  # admit
+        _row("dust", "Unemployment above 4% in June?", liquidity=20.0),  # < floor
+        _row("noneon", "Will Bitcoin hit $200k?", liquidity=5000.0),     # no trigger
+        _row("converged", "Payrolls above 150k in June?", yes=1.0),      # price out of (0,1)
+    ]
+    settings = SimpleNamespace(settlement_arb=SimpleNamespace(min_liquidity=100.0))
+    db = MagicMock()
+    db.fetchall = AsyncMock(return_value=rows)
+    p = SettlementArbPillar(
+        db=db, settings=settings, discovery=MagicMock(), exchange=MagicMock(),
+        risk_manager=MagicMock(), pnl_tracker=MagicMock(), fred_source=MagicMock(),
+        analyzer=None)
+
+    cands = await p._candidates()
+    ids = {m.id for m in cands}
+    assert ids == {"tail"}

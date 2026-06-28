@@ -431,7 +431,16 @@ class SettlementArbConfig(BaseModel):
     # Required gap between the locked outcome (0/1) and the market price — the
     # un-converged distance the lag leaves on the table.
     min_edge: float = 0.05
-    min_liquidity: float = 1000.0
+    # Liquidity floor is a DUST guard, not a quality filter. NBER w34702 (2026):
+    # liquid macro contracts reprice intraday and are well-calibrated — the
+    # settlement LAG survives mostly in illiquid, low-volume TAIL/bin contracts
+    # with stale prices. This pillar holds to resolution (known-outcome
+    # convergence, no exit), so illiquidity does NOT block the exit the way it
+    # would for a round-trip strategy. So the floor is set low — just high enough
+    # to exclude untradeable dust — to ADMIT the tail bins where the edge lives,
+    # not to demand the liquid headline contracts where it doesn't. (Live
+    # execution against a single stale quote is the key validation risk.)
+    min_liquidity: float = 100.0
     # The LLM only extracts the predicate; both gates default conservative.
     min_extract_confidence: float = 0.8
     verify_min_confidence: float = 0.8
