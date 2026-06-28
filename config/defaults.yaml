@@ -452,7 +452,13 @@ settlement_arb:
   paper: true
   stake_usd: 10.0
   min_edge: 0.05
-  min_liquidity: 1000.0
+  # Dust guard, not a quality filter — lowered 1000 -> 100 so the scan ADMITS the
+  # illiquid tail/bin contracts where the settlement lag actually survives (NBER
+  # w34702: liquid macro reprices intraday; the lag lives in low-volume stale
+  # bins). Safe here because the pillar holds to resolution — illiquidity doesn't
+  # block an exit. Kalshi macro-bin coverage is the natural next step (the NBER
+  # evidence is Kalshi-specific) but needs the Kalshi gateway wired in.
+  min_liquidity: 100.0
   min_extract_confidence: 0.8
   verify_min_confidence: 0.8
   max_entries_per_cycle: 5

@@ -17,6 +17,15 @@ No forecasting: if the print isn't out yet, or the criterion is compound /
 ambiguous, it SKIPS. The LLM only EXTRACTS the predicate (indicator, operator,
 threshold, period) — once, cached, adversarially verified; the RESOLVE step is a
 pure deterministic compare against FRED. PAPER-FORCED, its own graduation cell.
+
+WHERE THE EDGE LIVES (NBER w34702, 2026): liquid macro contracts reprice
+intraday and are well-calibrated — so the settlement LAG survives mostly in
+ILLIQUID, low-volume tail/bin contracts with stale prices. Because this pillar
+holds to resolution (known-outcome convergence, no exit), illiquidity does not
+block an exit, so the candidate scan keeps only a low DUST floor (min_liquidity)
+to admit those tail bins rather than demanding liquid headline contracts. The
+min_edge gate still drops anything that has already converged, so a liquid
+un-repriced market (the easy fill) is never wrongly excluded.
 """
 
 from __future__ import annotations
