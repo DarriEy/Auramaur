@@ -336,6 +336,13 @@ class RiskManager:
         # trade.
         if all_passed and cell.size_multiplier != 1.0:
             position_size = position_size * cell.size_multiplier
+            # A zero multiplier (e.g. the unproven-spray cap) is a HARD SKIP:
+            # reject the entry outright. Leaving approved=True with size 0 would
+            # be unsafe — prepare_order bumps sub-minimum sizes back up to the
+            # order floor, which would defeat the cap.
+            if position_size <= 0:
+                all_passed = False
+                reason = cell.reason
 
         decision = RiskDecision(
             approved=all_passed,

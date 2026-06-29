@@ -747,6 +747,14 @@ class GraduationConfig(BaseModel):
     probation_multiplier: float = 0.5
     cache_seconds: int = 300
     exempt_strategies: list[str] = ["arbitrage", "market_maker", "order_monitor"]
+    # Restrict unproven SPRAY (2026-06-29 winner reverse-engineering: winners are
+    # FEW + LARGE + SELECTIVE; the loser profile is high-frequency tiny-size spray
+    # across hundreds of low-conviction cells). When the open PAPER/exploratory
+    # book is already this wide, "unproven" cells stop opening NEW positions
+    # (size x0) so exploration concentrates rather than sprays. A RESTRICTION
+    # only — it never upsizes, never touches proven/probation/exempt cells, and
+    # never affects exits. 0 disables.
+    max_unproven_positions: int = 100
 
 
 class BrokerConfig(BaseModel):

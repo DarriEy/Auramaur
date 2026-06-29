@@ -58,6 +58,7 @@ class GraduationLadder:
         self._db = db
         self._settings = settings
         self._cache: dict[tuple[str, str], tuple[float, CellDecision]] = {}
+        self._breadth: tuple[float, int] | None = None  # (monotonic_ts, count)
 
     # ------------------------------------------------------------------
 
@@ -108,6 +109,21 @@ class GraduationLadder:
             "paper_pnl": float(row["paper_pnl"] or 0.0) if row else 0.0,
         }
 
+    async def _paper_breadth(self) -> int:
+        """Concurrent open PAPER/exploratory positions — the spray breadth. Cached
+        for cache_seconds (a soft cap doesn't need an exact live count)."""
+        now = time.monotonic()
+        if self._breadth and now - self._breadth[0] < self._settings.graduation.cache_seconds:
+            return self._breadth[1]
+        try:
+            row = await self._db.fetchone(
+                "SELECT COUNT(*) AS n FROM portfolio WHERE is_paper = 1 AND size > 0")
+            n = int(row["n"] or 0) if row else 0
+        except Exception:
+            n = 0  # fail-open: a count failure must not block trading
+        self._breadth = (now, n)
+        return n
+
     async def _compute(self, strategy: str, category: str) -> CellDecision:
         cfg = self._settings.graduation
         s = await self._cell_stats(strategy, category)
@@ -126,6 +142,16 @@ class GraduationLadder:
             return CellDecision(
                 True, 1.0, "paper_negative",
                 f"paper record negative (${s['paper_pnl']:+.2f} over {s['paper_n']} events)")
+        # Unproven (still exploring). Restrict the spray: if the open paper book is
+        # already at the breadth cap, skip NEW unproven entries (size x0) so
+        # exploration concentrates instead of spraying. Restriction only — proven/
+        # probation/exempt cells and exits are never affected.
+        cap = cfg.max_unproven_positions
+        if cap > 0 and await self._paper_breadth() >= cap:
+            return CellDecision(
+                True, 0.0, "unproven_capped",
+                f"unproven spray cap hit (>= {cap} open paper positions) — "
+                f"concentrating; skip new unproven entry")
         return CellDecision(
             True, 1.0, "unproven",
             f"insufficient record (live {s['live_n']}, paper {s['paper_n']} "
