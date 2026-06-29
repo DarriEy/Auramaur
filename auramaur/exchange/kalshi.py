@@ -146,6 +146,24 @@ class KalshiClient:
         data = json.loads(raw)
         return data.get("market")
 
+    async def get_trades(self, ticker: str, limit: int = 200) -> list[dict]:
+        """Recent PUBLIC trades for a market (v2 GET /markets/trades). Each trade
+        carries ``count`` (contracts) and ``taker_side`` ('yes'/'no') — the data
+        layer for abnormal-trade-size / informed-flow detection
+        (strategy/informed_flow.py). Returns [] on error (fail-soft: a missing
+        tape must not break a scan)."""
+        self._init_api()
+        try:
+            import json
+            raw = await self._call_raw(
+                self._markets_api.get_trades_without_preload_content,
+                ticker=ticker, limit=min(limit, 1000),
+            )
+            return json.loads(raw).get("trades", [])
+        except Exception as e:
+            log.error("kalshi.trades_fetch_error", ticker=ticker, error=str(e))
+            return []
+
     async def get_markets_by_series(self, series_ticker: str,
                                     limit: int = 200) -> list[Market]:
         """Fetch open markets for ONE series — i.e. all bins of a threshold
