@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import math
 import sqlite3
-from collections import defaultdict
 
 DB = "auramaur.db"
 POLITICS = ("politics_us", "politics_intl")
@@ -111,7 +110,7 @@ def report(entries):
         print(f"{label:<8} {len(grp):>4} {imp:>8.3f} {rea:>9.3f} {gap:>+7.3f}  {flag}")
 
     print("\n=== Best-fit calibration slope (>1 = underconfident, paper says ~1.31) ===")
-    for label, lo, hi in [("all", 0, 1e9)] + [(l, a, b) for l, a, b in HORIZON_BUCKETS]:
+    for label, lo, hi in [("all", 0, 1e9)] + list(HORIZON_BUCKETS):
         grp = [e for e in entries if lo <= e["horizon"] < hi]
         slope, nb = fit_slope(grp)
         s = f"{slope:.2f}" if slope is not None else "n/a"
