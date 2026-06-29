@@ -16,6 +16,7 @@ import pathlib
 import pytest
 
 from auramaur.strategy.bias_harvest import BiasHarvestPillar
+from auramaur.strategy.informed_flow_pillar import InformedFlowPillar
 from auramaur.strategy.long_horizon import LongHorizonPillar
 from auramaur.strategy.cross_venue_arb import CrossVenueArbPillar
 from auramaur.strategy.econ_indicator import EconIndicatorPillar
@@ -34,6 +35,7 @@ _ROOT = pathlib.Path(__file__).resolve().parent.parent
 PILLARS = [
     (BiasHarvestPillar, "auramaur/strategy/bias_harvest.py"),
     (LongHorizonPillar, "auramaur/strategy/long_horizon.py"),
+    (InformedFlowPillar, "auramaur/strategy/informed_flow_pillar.py"),
     (ResolutionLensPillar, "auramaur/strategy/resolution_lens.py"),
     (WeatherTempPillar, "auramaur/strategy/weather_temp.py"),
     (EconIndicatorPillar, "auramaur/strategy/econ_indicator.py"),

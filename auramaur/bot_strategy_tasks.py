@@ -66,6 +66,35 @@ class StrategyTaskMixin:
                 log.error("long_horizon.cycle_error", error=str(e))
             await asyncio.sleep(interval)
 
+    async def _task_informed_flow(self) -> None:
+        """Periodic Kalshi informed-flow follower (abnormal-trade-size). Paper-
+        forced; no-ops cleanly when the Kalshi venue isn't composed."""
+        from auramaur.strategy.informed_flow_pillar import InformedFlowPillar
+
+        kalshi_discovery = (self._components.discoveries or {}).get("kalshi")
+        kalshi_exchange = (self._components.exchanges or {}).get("kalshi")
+        if kalshi_discovery is None or kalshi_exchange is None:
+            log.info("informed_flow.disabled", reason="kalshi venue not composed")
+            return
+        pillar = InformedFlowPillar(
+            db=self._components.db,
+            settings=self.settings,
+            kalshi_discovery=kalshi_discovery,
+            exchange=kalshi_exchange,
+            risk_manager=self._components.risk_manager,
+            pnl_tracker=self._components.pnl_tracker,
+            calibration=self._components.calibration,
+        )
+        interval = max(60, self.settings.informed_flow.interval_seconds)
+        while self._running:
+            if await self._check_kill_switch():
+                return
+            try:
+                await pillar.run_once()
+            except Exception as e:
+                log.error("informed_flow.cycle_error", error=str(e))
+            await asyncio.sleep(interval)
+
     async def _task_entailment_arb(self) -> None:
         """Periodic entailment-arbitrage scan (paper-forced by config)."""
         from auramaur.strategy.entailment_arb import EntailmentArbPillar

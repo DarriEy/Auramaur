@@ -387,6 +387,42 @@ class BiasHarvestConfig(BaseModel):
     paper_maker_fill_rate: float = 0.5
 
 
+class InformedFlowConfig(BaseModel):
+    """Informed-flow follower over Kalshi (strategy/informed_flow_pillar.py).
+
+    Mimics the side of abnormally-large (informed) order flow — abnormal trade
+    size (ATS) proxies non-liquidity-motivated trading that predicts resolution
+    (Delvecchio CMC thesis #4166; Bartlett & O'Hara). Forecast-free: we don't
+    estimate a probability, we follow the informed side with a small uplift.
+
+    MEDIUM confidence (single in-sample thesis) + adverse-selection risk (the edge
+    needs us on the informed, not picked-off, side) -> PAPER-FORCED, own cell.
+    No-ops cleanly when the Kalshi venue isn't composed.
+    """
+
+    enabled: bool = False
+    paper: bool = True
+    # Detector params (see strategy/informed_flow.detect_informed_flow).
+    min_abnormal_sample: int = 20    # min sized trades for a stable baseline
+    size_mult: float = 3.0           # abnormal = size >= this x median size
+    min_dominance: float = 0.6       # informed side must carry this abnormal share
+    trades_limit: int = 200          # tape depth pulled per market
+    # Follow with a small uplift; MUST stay < 0.05 (divergence filter floor) so
+    # the forecast-free entry isn't blocked at MEDIUM confidence (as bias_harvest).
+    uplift: float = 0.04
+    # Skip extremes: near 0/1 the ATS signal is noise / already-resolved.
+    band_lo: float = 0.10
+    band_hi: float = 0.90
+    stake_usd: float = 10.0
+    min_liquidity: float = 1000.0
+    min_hours_to_resolution: float = 6.0
+    max_days_to_resolution: float = 30.0
+    max_open: int = 30
+    max_entries_per_cycle: int = 5
+    scan_limit: int = 60             # bounded — we fetch a tape per eligible market
+    interval_seconds: int = 1800
+
+
 class LongHorizonConfig(BaseModel):
     """Long-horizon favorite underpricing (strategy/long_horizon.py).
 
@@ -1087,6 +1123,7 @@ class Settings(BaseSettings):
     cross_venue_arb: CrossVenueArbConfig = Field(default_factory=lambda: CrossVenueArbConfig(**_DEFAULTS.get("cross_venue_arb", {})))
     econ_indicator: EconIndicatorConfig = Field(default_factory=lambda: EconIndicatorConfig(**_DEFAULTS.get("econ_indicator", {})))
     long_horizon: LongHorizonConfig = Field(default_factory=lambda: LongHorizonConfig(**_DEFAULTS.get("long_horizon", {})))
+    informed_flow: InformedFlowConfig = Field(default_factory=lambda: InformedFlowConfig(**_DEFAULTS.get("informed_flow", {})))
     settlement_arb: SettlementArbConfig = Field(default_factory=lambda: SettlementArbConfig(**_DEFAULTS.get("settlement_arb", {})))
     weather_temp: WeatherTempConfig = Field(default_factory=lambda: WeatherTempConfig(**_DEFAULTS.get("weather_temp", {})))
     hydro_watch: HydroWatchConfig = Field(default_factory=lambda: HydroWatchConfig(**_DEFAULTS.get("hydro_watch", {})))

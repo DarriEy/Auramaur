@@ -468,6 +468,33 @@ long_horizon:
   interval_seconds: 1800
   exclude_categories: ["politics_us", "politics_intl"]
 
+informed_flow:
+  # Informed-flow follower over Kalshi — mimic the side of abnormally-large
+  # (informed) order flow. Abnormal trade size (ATS) proxies non-liquidity trading
+  # that predicts resolution (Delvecchio CMC thesis #4166; Bartlett & O'Hara). The
+  # data layer is strategy/informed_flow.py (Kalshi trade tape + pure detector);
+  # this pillar follows the detected informed side with a small uplift (forecast-
+  # free). MEDIUM confidence (single in-sample thesis) + adverse-selection risk ->
+  # PAPER-FORCED, own graduation cell. No-ops when the Kalshi venue isn't composed.
+  # scan_limit is bounded because we pull a trade tape per eligible market.
+  enabled: true       # paper measurement spike
+  paper: true
+  min_abnormal_sample: 20
+  size_mult: 3.0
+  min_dominance: 0.6
+  trades_limit: 200
+  uplift: 0.04
+  band_lo: 0.10
+  band_hi: 0.90
+  stake_usd: 10.0
+  min_liquidity: 1000.0
+  min_hours_to_resolution: 6.0
+  max_days_to_resolution: 30.0
+  max_open: 30
+  max_entries_per_cycle: 5
+  scan_limit: 60
+  interval_seconds: 1800
+
 settlement_arb:
   # Settlement-lag / known-outcome arb (FRED-first) — the structural generalization
   # of the graduated resolution_lens x weather edge. Trades a Polymarket econ

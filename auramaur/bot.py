@@ -1360,6 +1360,10 @@ class AuramaurBot(
         if self.settings.long_horizon.enabled:
             tasks.append(asyncio.create_task(self._task_long_horizon(), name="long_horizon"))
 
+        # Informed-flow follower over Kalshi (paper-forced; abnormal-trade-size)
+        if self.settings.informed_flow.enabled:
+            tasks.append(asyncio.create_task(self._task_informed_flow(), name="informed_flow"))
+
         # Entailment arbitrage (paper-forced until proven)
         if self.settings.entailment_arb.enabled:
             tasks.append(asyncio.create_task(self._task_entailment_arb(), name="entailment_arb"))
