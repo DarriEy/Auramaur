@@ -205,3 +205,56 @@ def test_bias_harvest_honors_force_paper():
         await db.close()
 
     asyncio.run(run())
+
+
+async def _seed_paper_positions(db, n, offset=0):
+    for i in range(offset, offset + n):
+        await db.execute(
+            "INSERT INTO portfolio (market_id, exchange, side, size, avg_price, "
+            "current_price, is_paper) VALUES (?, 'polymarket', 'BUY', 5, 0.5, 0.5, 1)",
+            (f"pp-{i}",),
+        )
+    await db.commit()
+
+
+def test_unproven_spray_cap():
+    """When the open paper book is already at the breadth cap, an UNPROVEN cell
+    returns size x0 (skip) so exploration concentrates instead of spraying.
+    Proven/probation/exempt cells are unaffected."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        ladder = GraduationLadder(db, _settings(max_unproven_positions=10))
+
+        # Under the cap: a fresh (unproven) cell still explores at full paper size.
+        await _seed_paper_positions(db, 5)
+        d = await ladder.decide("s_new", "tech")
+        assert (d.force_paper, d.size_multiplier, d.status) == (True, 1.0, "unproven")
+
+        # Cross the cap -> new unproven entries are skipped (x0).
+        ladder2 = GraduationLadder(db, _settings(max_unproven_positions=10))
+        await _seed_paper_positions(db, 8, offset=5)   # now 13 >= 10
+        d2 = await ladder2.decide("s_new2", "tech")
+        assert d2.size_multiplier == 0.0 and d2.status == "unproven_capped"
+
+        # A PROVEN (live-positive) cell is NOT capped — restriction targets spray.
+        await _seed(db, "s_live", "tech", n=5, pnl_each=1.0, is_paper=0)
+        ladder3 = GraduationLadder(db, _settings(max_unproven_positions=10))
+        d3 = await ladder3.decide("s_live", "tech")
+        assert (d3.force_paper, d3.size_multiplier, d3.status) == (False, 1.0, "live")
+        await db.close()
+
+    asyncio.run(run())
+
+
+def test_unproven_spray_cap_disabled_when_zero():
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        ladder = GraduationLadder(db, _settings(max_unproven_positions=0))
+        await _seed_paper_positions(db, 50)
+        d = await ladder.decide("s_new", "tech")
+        assert d.status == "unproven" and d.size_multiplier == 1.0  # cap off
+        await db.close()
+
+    asyncio.run(run())
