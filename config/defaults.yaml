@@ -440,6 +440,34 @@ econ_indicator:
   history_n: 60
   interval_seconds: 1800
 
+long_horizon:
+  # Long-horizon favorite underpricing — structural underconfidence at long tenor.
+  # arXiv 2602.19520 (292M trades, Kalshi+Polymarket): the calibration slope rises
+  # from ~0.99 near resolution to ~1.32 beyond a month, so long-dated favorites are
+  # underpriced (a 70c contract resolves YES ~75%). We apply `slope` to the
+  # market's OWN price (logit space) to get a fair and trade only the favored
+  # side's underpricing — no forecast. Distinct from bias_harvest (near-resolution
+  # deep band). POLITICS EXCLUDED: the effect is strongest there but politics is
+  # the bot's no-edge zone, so this cell tests whether it GENERALIZES to
+  # tech/crypto/macro net of cost. PAPER-FORCED, own graduation cell. slope is
+  # conservative vs the paper's 1.32 (single preprint). v1 enters at the observed
+  # price; maker entry (see bias_harvest) is the obvious follow-up.
+  enabled: true       # paper measurement spike
+  paper: true
+  slope: 1.25
+  band_lo: 0.55
+  band_hi: 0.92
+  min_edge: 0.03
+  stake_usd: 10.0
+  max_open: 30
+  max_entries_per_cycle: 5
+  scan_limit: 300
+  min_liquidity: 1000.0
+  min_days_to_resolution: 30.0
+  max_days_to_resolution: 180.0
+  interval_seconds: 1800
+  exclude_categories: ["politics_us", "politics_intl"]
+
 settlement_arb:
   # Settlement-lag / known-outcome arb (FRED-first) — the structural generalization
   # of the graduated resolution_lens x weather edge. Trades a Polymarket econ

@@ -43,6 +43,29 @@ class StrategyTaskMixin:
                 log.error("bias_harvest.cycle_error", error=str(e))
             await asyncio.sleep(interval)
 
+    async def _task_long_horizon(self) -> None:
+        """Periodic long-horizon favorite-underpricing scan (paper-forced)."""
+        from auramaur.strategy.long_horizon import LongHorizonPillar
+
+        pillar = LongHorizonPillar(
+            db=self._components.db,
+            settings=self.settings,
+            discovery=self._components.discovery,
+            exchange=self._components.exchange,
+            risk_manager=self._components.risk_manager,
+            pnl_tracker=self._components.pnl_tracker,
+            calibration=self._components.calibration,
+        )
+        interval = max(60, self.settings.long_horizon.interval_seconds)
+        while self._running:
+            if await self._check_kill_switch():
+                return
+            try:
+                await pillar.run_once()
+            except Exception as e:
+                log.error("long_horizon.cycle_error", error=str(e))
+            await asyncio.sleep(interval)
+
     async def _task_entailment_arb(self) -> None:
         """Periodic entailment-arbitrage scan (paper-forced by config)."""
         from auramaur.strategy.entailment_arb import EntailmentArbPillar

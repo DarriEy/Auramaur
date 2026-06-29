@@ -16,6 +16,7 @@ import pathlib
 import pytest
 
 from auramaur.strategy.bias_harvest import BiasHarvestPillar
+from auramaur.strategy.long_horizon import LongHorizonPillar
 from auramaur.strategy.cross_venue_arb import CrossVenueArbPillar
 from auramaur.strategy.econ_indicator import EconIndicatorPillar
 from auramaur.strategy.entailment_arb import EntailmentArbPillar
@@ -32,6 +33,7 @@ _ROOT = pathlib.Path(__file__).resolve().parent.parent
 # (pillar class, source module) — every pillar the bot drives.
 PILLARS = [
     (BiasHarvestPillar, "auramaur/strategy/bias_harvest.py"),
+    (LongHorizonPillar, "auramaur/strategy/long_horizon.py"),
     (ResolutionLensPillar, "auramaur/strategy/resolution_lens.py"),
     (WeatherTempPillar, "auramaur/strategy/weather_temp.py"),
     (EconIndicatorPillar, "auramaur/strategy/econ_indicator.py"),
