@@ -11,7 +11,9 @@ from auramaur.exchange.paper import PaperTrader
 def mock_db():
     db = AsyncMock()
     db.fetchall = AsyncMock(return_value=[])
-    db.fetchone = AsyncMock(return_value={"net": 0})
+    # _compute_balance reads pnl_ledger ("p") + cost_basis ("c"); both empty here
+    # so spendable == initial_balance, keeping the incremental-arithmetic tests valid.
+    db.fetchone = AsyncMock(return_value={"p": 0, "c": 0})
     db.execute = AsyncMock()
     db.commit = AsyncMock()
     return db
@@ -59,3 +61,53 @@ async def test_position_closed_on_full_sell(paper):
     await paper.execute(Order(market_id="m1", side=OrderSide.BUY, size=10, price=0.5))
     await paper.execute(Order(market_id="m1", side=OrderSide.SELL, size=10, price=0.6))
     assert "m1" not in paper.positions
+
+
+# ---------------------------------------------------------------------------
+# Spendable balance from authoritative state (the drain-bug fix)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_compute_balance_from_ledger_and_open_cost():
+    """Spendable = initial + realized paper P&L - cost tied up in OPEN paper
+    positions — NOT the old SUM(trades) that drained to ~0."""
+    from auramaur.db.database import Database
+    db = Database(":memory:")
+    await db.connect()
+    # $300 tied up in open paper positions; +$50 realized paper P&L.
+    await db.execute("INSERT INTO cost_basis (market_id, token, size, avg_cost, "
+                     "total_cost, is_paper) VALUES ('a','YES',100,2.0,200,1)")
+    await db.execute("INSERT INTO cost_basis (market_id, token, size, avg_cost, "
+                     "total_cost, is_paper) VALUES ('b','YES',100,1.0,100,1)")
+    await db.execute("INSERT INTO pnl_ledger (market_id, venue, category, "
+                     "strategy_source, kind, token, qty, pnl, fees, is_paper, "
+                     "source_ref) VALUES ('c','polymarket','x','llm','sell','YES',1,50,0,1,'r1')")
+    # LIVE rows must NOT count.
+    await db.execute("INSERT INTO cost_basis (market_id, token, size, avg_cost, "
+                     "total_cost, is_paper) VALUES ('live','YES',100,5.0,500,0)")
+    await db.commit()
+
+    pt = PaperTrader(db=db, initial_balance=1000.0)
+    bal = await pt._compute_balance()
+    assert bal == pytest.approx(1000 + 50 - 300)  # 750
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_resolved_position_does_not_drain_balance():
+    """The OLD bug: a BUY debited forever and resolution never credited, so the
+    wallet drained. Now a resolved position (gone from open cost_basis, its P&L
+    in the ledger) leaves the balance healthy — no drain."""
+    from auramaur.db.database import Database
+    db = Database(":memory:")
+    await db.connect()
+    # A position that was bought for $100 and resolved to a $30 loss: it is NOT
+    # in open cost_basis (closed), and its -30 sits in the ledger.
+    await db.execute("INSERT INTO pnl_ledger (market_id, venue, category, "
+                     "strategy_source, kind, token, qty, pnl, fees, is_paper, "
+                     "source_ref) VALUES ('done','polymarket','x','llm','sell','YES',1,-30,0,1,'r1')")
+    await db.commit()
+    pt = PaperTrader(db=db, initial_balance=1000.0)
+    # Spendable = 1000 - 30 = 970 (NOT 1000 - 100 the BUY cost): cash recovered.
+    assert await pt._compute_balance() == pytest.approx(970)
+    await db.close()

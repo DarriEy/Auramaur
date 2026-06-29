@@ -43,27 +43,42 @@ class PaperTrader:
                 token_id=token_id or "",
             )
 
-        # Calculate balance from trade history
-        row = await self.db.fetchone(
-            "SELECT COALESCE(SUM(CASE WHEN side='BUY' THEN -size*price ELSE size*price END), 0) as net FROM trades WHERE is_paper=1"
-        )
-        if row:
-            self.balance = self.initial_balance + float(row["net"])
-
+        self.balance = await self._compute_balance()
         log.info("paper.state_loaded", balance=self.balance, positions=len(self.positions))
+
+    async def _compute_balance(self) -> float:
+        """Spendable paper cash from AUTHORITATIVE state — NOT the old
+        ``SUM(trades)`` (which debits every BUY but is never credited on
+        resolution, so it drained to ~$0 over months and blocked all paper
+        entries). Spendable = initial + realized paper P&L (pnl_ledger) - cost
+        tied up in OPEN paper positions (cost_basis). This SELF-HEALS: when a
+        position resolves, its cost leaves `open cost` and its payout lands in
+        realized P&L, so the cash returns automatically — no resolution-path
+        coupling, no `trades` pollution."""
+        pnl_row = await self.db.fetchone(
+            "SELECT COALESCE(SUM(pnl), 0) AS p FROM pnl_ledger WHERE is_paper = 1")
+        cost_row = await self.db.fetchone(
+            "SELECT COALESCE(SUM(size * avg_cost), 0) AS c FROM cost_basis "
+            "WHERE is_paper = 1 AND size > 0")
+        realized = float(pnl_row["p"]) if pnl_row else 0.0
+        open_cost = float(cost_row["c"]) if cost_row else 0.0
+        return self.initial_balance + realized - open_cost
 
     async def execute(self, order: Order) -> OrderResult:
         """Simulate order execution."""
         order_id = f"PAPER-{uuid.uuid4().hex[:12]}"
         cost = order.size * order.price
 
-        if order.side == OrderSide.BUY and cost > self.balance:
+        # Gate on the freshly-computed spendable balance (self-healing), not the
+        # stale incrementally-mutated cache.
+        spendable = await self._compute_balance()
+        if order.side == OrderSide.BUY and cost > spendable:
             log.warning(
                 "paper.insufficient_balance",
                 market_id=order.market_id,
                 cost=round(cost, 2),
-                balance=round(self.balance, 2),
-                shortfall=round(cost - self.balance, 2),
+                balance=round(spendable, 2),
+                shortfall=round(cost - spendable, 2),
             )
             return OrderResult(
                 order_id=order_id,
@@ -72,7 +87,8 @@ class PaperTrader:
                 is_paper=True,
             )
 
-        # Update balance
+        # In-memory display balance (the authoritative gate above is
+        # _compute_balance; this cache self-corrects on the next load_state).
         if order.side == OrderSide.BUY:
             self.balance -= cost
         else:
