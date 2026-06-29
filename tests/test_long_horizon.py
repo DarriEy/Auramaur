@@ -229,3 +229,16 @@ def test_risk_rejection_places_no_order():
         await db.close()
 
     asyncio.run(run())
+
+
+def test_medium_horizon_now_enters_after_widening():
+    """A ~20-day favorite now enters (min_days widened 30->14 to accrue data);
+    it would have been skipped under the old >30d floor."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        pillar, _ = _pillar(db, _settings(slope=1.32), [_market(yes=0.70, days_out=20.0)])
+        assert await pillar.run_once() == 1
+        await db.close()
+
+    asyncio.run(run())
