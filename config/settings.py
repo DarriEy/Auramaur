@@ -414,7 +414,13 @@ class InformedFlowConfig(BaseModel):
     band_lo: float = 0.10
     band_hi: float = 0.90
     stake_usd: float = 10.0
-    min_liquidity: float = 1000.0
+    # Kalshi-SCALE liquidity floor. Kalshi's liquidity values run ~40x smaller
+    # than Polymarket's (active-market MEDIAN ~26, only ~9/589 clear 1000): the
+    # original Poly-scale 1000 left informed_flow with ZERO eligible markets — it
+    # never even pulled a trade tape (found 2026-06-29). 50 admits a real candidate
+    # pool; the detector's min_abnormal_sample (>=20 trades) is the true activity
+    # gate. (Matches the kalshi_min_liquidity=50 used elsewhere in config.)
+    min_liquidity: float = 50.0
     min_hours_to_resolution: float = 6.0
     max_days_to_resolution: float = 30.0
     max_open: int = 30

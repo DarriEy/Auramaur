@@ -211,3 +211,19 @@ def test_disabled_or_no_kalshi_noops():
         await db.close()
 
     asyncio.run(run())
+
+
+def test_kalshi_scale_liquidity_is_eligible():
+    """A Kalshi-realistic market (liquidity ~60, far below the old 1000 Poly-scale
+    floor) is now eligible — the floor that left informed_flow with zero markets
+    is fixed."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        ex = _exchange(trades=_trades(yes_big=4))
+        pillar, _ = _pillar(db, _settings(), [_market(yes=0.50, liquidity=60.0)], ex)
+        assert await pillar.run_once() == 1     # would have been 0 at min_liquidity=1000
+        ex.get_trades.assert_awaited_once()
+        await db.close()
+
+    asyncio.run(run())

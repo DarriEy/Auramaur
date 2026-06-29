@@ -487,7 +487,11 @@ informed_flow:
   band_lo: 0.10
   band_hi: 0.90
   stake_usd: 10.0
-  min_liquidity: 1000.0
+  # Kalshi-scale floor — Kalshi liquidity runs ~40x smaller than Polymarket
+  # (active median ~26); the old Poly-scale 1000 gave informed_flow ZERO eligible
+  # markets (it never pulled a tape). 50 admits a real pool; the detector's
+  # >=20-trade min_abnormal_sample is the true activity gate.
+  min_liquidity: 50.0
   min_hours_to_resolution: 6.0
   max_days_to_resolution: 30.0
   max_open: 30
