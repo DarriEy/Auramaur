@@ -100,7 +100,8 @@ class RiskManager:
         daily_pnl = await self.portfolio.get_daily_pnl()
         positions = await self.portfolio.get_positions()
         category_exposure = await self.portfolio.get_category_exposure()
-        correlated = await self.portfolio.get_correlated_markets(signal.market_id)
+        # correlated is computed below, AFTER is_paper_entry is known, so it can be
+        # mode-scoped (a paper entry carries no real exposure — see that call site).
 
         # Cash = what we can actually deploy right now.
         # Equity = cash + position notional — drives regime switching so
@@ -176,6 +177,16 @@ class RiskManager:
             or self._paper_forced_strategy(signal.strategy_source)
             or cell.force_paper
         )
+
+        # Correlation, MODE-SCOPED. A paper entry adds NO real exposure, so it must
+        # only correlate against the PAPER book — counting the live book would let
+        # live concentration crowd out paper exploration (e.g. choking long_horizon
+        # in categories with a big live book). A live entry correlates against the
+        # live book. This matches the mode-scoping the per-market stake cap already
+        # uses (_exceeds_market_cap), and only ever loosens paper — live behavior is
+        # unchanged (live concentration still measured against live positions).
+        correlated = await self.portfolio.get_correlated_markets(
+            signal.market_id, is_paper=is_paper_entry)
 
         # ----------------------------------------------------------------
         # Run pre-sizing checks (max_stake validated after sizing)
