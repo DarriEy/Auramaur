@@ -1356,6 +1356,10 @@ class AuramaurBot(
         if self.settings.bias_harvest.enabled:
             tasks.append(asyncio.create_task(self._task_bias_harvest(), name="bias_harvest"))
 
+        # Long-horizon favorite underpricing (paper-forced; structural slope edge)
+        if self.settings.long_horizon.enabled:
+            tasks.append(asyncio.create_task(self._task_long_horizon(), name="long_horizon"))
+
         # Entailment arbitrage (paper-forced until proven)
         if self.settings.entailment_arb.enabled:
             tasks.append(asyncio.create_task(self._task_entailment_arb(), name="entailment_arb"))

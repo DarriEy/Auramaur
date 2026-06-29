@@ -387,6 +387,47 @@ class BiasHarvestConfig(BaseModel):
     paper_maker_fill_rate: float = 0.5
 
 
+class LongHorizonConfig(BaseModel):
+    """Long-horizon favorite underpricing (strategy/long_horizon.py).
+
+    Research basis (arXiv 2602.19520, 292M trades): prices are systematically
+    UNDERCONFIDENT at long horizons — the calibration slope rises from ~0.99 near
+    resolution to ~1.32 beyond a month, so long-dated favorites are underpriced. We
+    apply ``slope`` to the market's OWN price (logit space) to get a fair and trade
+    only the favored side's underpricing — never a forecast of our own.
+
+    PAPER-FORCED. Politics is EXCLUDED (the paper's effect is strongest there, but
+    politics is the bot's documented no-edge zone) so this cell tests whether the
+    effect GENERALIZES to tech/crypto/macro net of cost. ``slope`` defaults below
+    the paper's 1.32 — it rests on a single non-peer-reviewed preprint, so we size
+    the correction conservatively.
+    """
+
+    enabled: bool = False
+    paper: bool = True
+    # Calibration slope applied in logit space. Conservative vs the paper's 1.32
+    # (one preprint); raise toward 1.32 only once the paper ledger shows edge.
+    slope: float = 1.25
+    # Moderate-favorite band. Below ~0.55 the slope correction is negligible;
+    # 0.90+ overlaps bias_harvest's near-resolution deep band and locks capital.
+    band_lo: float = 0.55
+    band_hi: float = 0.92
+    min_edge: float = 0.03
+    stake_usd: float = 10.0
+    max_open: int = 30
+    max_entries_per_cycle: int = 5
+    scan_limit: int = 300
+    min_liquidity: float = 1000.0
+    # LONG horizon only — the underconfidence is a "beyond one month" effect.
+    min_days_to_resolution: float = 30.0
+    max_days_to_resolution: float = 180.0   # cap capital lock-up
+    interval_seconds: int = 1800
+    # Politics excluded: that's where the effect is strongest in the paper but
+    # where the bot has no edge — so we test generalization elsewhere. Checked on
+    # top of risk.blocked_categories, against the CLASSIFIED category.
+    exclude_categories: list[str] = ["politics_us", "politics_intl"]
+
+
 class EconIndicatorConfig(BaseModel):
     """Data-driven Kalshi economic-indicator bin pricing (strategy/econ_indicator.py).
 
@@ -1045,6 +1086,7 @@ class Settings(BaseSettings):
     entailment_arb: EntailmentArbConfig = Field(default_factory=lambda: EntailmentArbConfig(**_DEFAULTS.get("entailment_arb", {})))
     cross_venue_arb: CrossVenueArbConfig = Field(default_factory=lambda: CrossVenueArbConfig(**_DEFAULTS.get("cross_venue_arb", {})))
     econ_indicator: EconIndicatorConfig = Field(default_factory=lambda: EconIndicatorConfig(**_DEFAULTS.get("econ_indicator", {})))
+    long_horizon: LongHorizonConfig = Field(default_factory=lambda: LongHorizonConfig(**_DEFAULTS.get("long_horizon", {})))
     settlement_arb: SettlementArbConfig = Field(default_factory=lambda: SettlementArbConfig(**_DEFAULTS.get("settlement_arb", {})))
     weather_temp: WeatherTempConfig = Field(default_factory=lambda: WeatherTempConfig(**_DEFAULTS.get("weather_temp", {})))
     hydro_watch: HydroWatchConfig = Field(default_factory=lambda: HydroWatchConfig(**_DEFAULTS.get("hydro_watch", {})))
