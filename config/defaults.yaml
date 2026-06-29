@@ -455,15 +455,20 @@ long_horizon:
   enabled: true       # paper measurement spike
   paper: true
   slope: 1.25
-  band_lo: 0.55
+  # Widened 2026-06-29 to accrue a record (was starved: ~1 candidate in 6h).
+  # band_lo 0.55->0.52; scan_limit 300->500 (binding constraint was the scan
+  # universe — discovery skews short-dated, so long-dated favorites missed the
+  # top-300); min_days 30->14 (long-dated favorites are rare on Poly; slope still
+  # >1 at 14-30d, weaker than >30d — a thesis-for-data tradeoff, isolated cell).
+  band_lo: 0.52
   band_hi: 0.92
   min_edge: 0.03
   stake_usd: 10.0
   max_open: 30
   max_entries_per_cycle: 5
-  scan_limit: 300
+  scan_limit: 500
   min_liquidity: 1000.0
-  min_days_to_resolution: 30.0
+  min_days_to_resolution: 14.0
   max_days_to_resolution: 180.0
   interval_seconds: 1800
   exclude_categories: ["politics_us", "politics_intl"]

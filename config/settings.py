@@ -450,18 +450,28 @@ class LongHorizonConfig(BaseModel):
     # Calibration slope applied in logit space. Conservative vs the paper's 1.32
     # (one preprint); raise toward 1.32 only once the paper ledger shows edge.
     slope: float = 1.25
-    # Moderate-favorite band. Below ~0.55 the slope correction is negligible;
+    # Moderate-favorite band. Below ~0.52 the slope correction is negligible;
     # 0.90+ overlaps bias_harvest's near-resolution deep band and locks capital.
-    band_lo: float = 0.55
+    # band_lo widened 0.55->0.52 (2026-06-29) to surface more candidates.
+    band_lo: float = 0.52
     band_hi: float = 0.92
     min_edge: float = 0.03
     stake_usd: float = 10.0
     max_open: int = 30
     max_entries_per_cycle: int = 5
-    scan_limit: int = 300
+    # Raised 300->500 (2026-06-29): the binding constraint on data collection was
+    # the scan universe — discovery returns markets by recency/volume, which skews
+    # SHORT-dated, so long-dated favorites rarely made the top-300. A wider scan
+    # surfaces more of them. (Deeper fix — a dedicated long-dated scan — is a
+    # follow-up.)
+    scan_limit: int = 500
     min_liquidity: float = 1000.0
-    # LONG horizon only — the underconfidence is a "beyond one month" effect.
-    min_days_to_resolution: float = 30.0
+    # Horizon floor lowered 30->14 (2026-06-29) to accrue a graduation record:
+    # long-dated (>30d) favorites are RARE in Poly's live universe, so the pillar
+    # was starved (1 candidate in 6h). The underconfidence slope is continuous and
+    # still >1 at 14-30d (weaker than >30d) — a thesis-purity-for-data tradeoff;
+    # the isolated graduation cell will reveal if even this diluted version has edge.
+    min_days_to_resolution: float = 14.0
     max_days_to_resolution: float = 180.0   # cap capital lock-up
     interval_seconds: int = 1800
     # Politics excluded: that's where the effect is strongest in the paper but
