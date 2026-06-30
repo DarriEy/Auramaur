@@ -62,7 +62,19 @@ class InformedFlowPillar:
         if open_count >= cfg.max_open:
             log.debug("informed_flow.book_full", open=open_count, cap=cfg.max_open)
             return 0
-        markets = await self._kalshi.get_markets(limit=cfg.scan_limit)
+        # Scan the NEAR-DATED slice by close-time window, not get_markets() — the
+        # /events scan get_markets() uses surfaces only ~18-yr novelty markets
+        # (median horizon ~18 years), so every market failed the horizon gate and
+        # the tape was never pulled. /markets honors the close window and returns
+        # the actually-tradeable near-dated markets (econ ladders, MVE, events).
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        min_close_ts = now_ts + int(cfg.min_hours_to_resolution * 3600)
+        max_close_ts = now_ts + int(cfg.max_days_to_resolution * 86400)
+        if hasattr(self._kalshi, "get_markets_by_close_window"):
+            markets = await self._kalshi.get_markets_by_close_window(
+                min_close_ts, max_close_ts, limit=cfg.scan_limit)
+        else:  # fallback (e.g. a discovery without the windowed fetch / tests)
+            markets = await self._kalshi.get_markets(limit=cfg.scan_limit)
         entered = 0
         for market in markets:
             if entered >= cfg.max_entries_per_cycle:

@@ -164,6 +164,36 @@ class KalshiClient:
             log.error("kalshi.trades_fetch_error", ticker=ticker, error=str(e))
             return []
 
+    async def get_markets_by_close_window(self, min_close_ts: int,
+                                          max_close_ts: int,
+                                          limit: int = 200) -> list[Market]:
+        """Open markets CLOSING within [min_close_ts, max_close_ts] (unix secs).
+
+        The generic get_markets() scans the /events endpoint in default order,
+        which surfaces only ultra-long-dated novelty markets (Elon-to-Mars etc.;
+        median horizon ~18 years) and IGNORES close-time filters — so a
+        near-dated scanner (informed_flow) finds nothing. The /markets endpoint
+        DOES honor min/max_close_ts, returning the actually-tradeable near-dated
+        slice (econ ladders, MVE, event markets). Returns [] on error."""
+        self._init_api()
+        try:
+            import json
+            raw = await self._call_raw(
+                self._markets_api.get_markets_without_preload_content,
+                status="open", min_close_ts=min_close_ts,
+                max_close_ts=max_close_ts, limit=min(limit, 1000),
+            )
+            rows = json.loads(raw).get("markets", [])
+            out: list[Market] = []
+            for m in rows:
+                parsed = self._parse_market(m)
+                if parsed is not None:
+                    out.append(parsed)
+            return out
+        except Exception as e:
+            log.error("kalshi.close_window_fetch_error", error=str(e))
+            return []
+
     async def get_markets_by_series(self, series_ticker: str,
                                     limit: int = 200) -> list[Market]:
         """Fetch open markets for ONE series — i.e. all bins of a threshold

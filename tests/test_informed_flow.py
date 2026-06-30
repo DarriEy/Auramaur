@@ -15,7 +15,17 @@ from auramaur.strategy.informed_flow import (
 
 
 def _t(count, side):
-    return {"count": count, "taker_side": side}
+    # Kalshi emits the per-trade size as count_fp (a fixed-point STRING), e.g.
+    # "60.00" — mirror that so the detector tests exercise the real field.
+    return {"count_fp": f"{count}", "taker_side": side}
+
+
+def test_reads_count_fp_string_and_legacy_count():
+    """_size handles the live count_fp string AND the legacy count field."""
+    from auramaur.strategy.informed_flow import _size
+    assert abs(_size({"count_fp": "225.25"}) - 225.25) < 1e-9
+    assert _size({"count": 50}) == 50.0           # legacy fallback
+    assert _size({"count_fp": "nope"}) == 0.0      # malformed -> 0, no raise
 
 
 def _normal(n, size, side="yes"):

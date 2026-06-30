@@ -41,8 +41,13 @@ _NO_SIGNAL = InformedFlowSignal(False, None, 0, 0.0, 0.0, 0)
 
 
 def _size(t: dict) -> float:
+    # Kalshi migrated the per-trade contract count `count` -> `count_fp` (a
+    # fixed-point string, e.g. "225.25"), the same *_fp migration that hit market
+    # parsing. Reading the dead `count` made every trade size 0, so the detector
+    # ALWAYS returned no-signal — informed_flow could never fire. Prefer count_fp,
+    # fall back to the legacy field.
     try:
-        return float(t.get("count", 0) or 0)
+        return float(t.get("count_fp", t.get("count", 0)) or 0)
     except (TypeError, ValueError):
         return 0.0
 
