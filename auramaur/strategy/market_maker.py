@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from auramaur.strategy.protocols import ExecutionMode
 
+import asyncio
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -107,6 +108,7 @@ class MarketMaker:
         self._max_inventory: float = mm_cfg.max_inventory
         self._max_markets: int = mm_cfg.max_markets
         self._refresh_seconds: int = mm_cfg.refresh_seconds
+        self._op_timeout: float = mm_cfg.op_timeout_seconds
 
         # State
         self._active_quotes: dict[str, MMQuote] = {}  # market_id -> active quote
@@ -137,20 +139,35 @@ class MarketMaker:
             log.debug("market_maker.no_suitable_markets")
             return results
 
+        # Per-operation watchdog: a stuck Polymarket call (no timeout) would hang
+        # the whole loop indefinitely. Bound each op so a stalled request is
+        # abandoned and the cycle continues.
+        timeout = self._op_timeout
+
         # Step 2: Cancel stale quotes
-        cancelled = await self._cancel_stale_quotes()
-        if cancelled:
-            log.info("market_maker.cancelled_stale", count=cancelled)
+        try:
+            cancelled = await asyncio.wait_for(
+                self._cancel_stale_quotes(), timeout=timeout)
+            if cancelled:
+                log.info("market_maker.cancelled_stale", count=cancelled)
+        except asyncio.TimeoutError:
+            log.warning("market_maker.op_timeout", op="cancel_stale", timeout=timeout)
 
         # Step 3 & 4: Compute and place quotes for each market
         skip_reasons: dict[str, int] = {}
         for market in candidates[: self._max_markets]:
             try:
-                result, skip_reason = await self._quote_market(market)
+                result, skip_reason = await asyncio.wait_for(
+                    self._quote_market(market), timeout=timeout)
                 if result:
                     results.append(result)
                 elif skip_reason:
                     skip_reasons[skip_reason] = skip_reasons.get(skip_reason, 0) + 1
+            except asyncio.TimeoutError:
+                # A stuck call on THIS market must not stall the rest of the cycle.
+                log.warning("market_maker.op_timeout", op="quote_market",
+                            market_id=market.id, timeout=timeout)
+                skip_reasons["timeout"] = skip_reasons.get("timeout", 0) + 1
             except Exception as e:
                 log.error(
                     "market_maker.quote_error",

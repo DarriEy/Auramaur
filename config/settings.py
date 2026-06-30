@@ -315,6 +315,12 @@ class MarketMakerConfig(BaseModel):
     max_inventory: float = 50.0  # max directional exposure per market
     max_markets: int = 5  # max simultaneous MM markets
     refresh_seconds: int = 30  # re-quote frequency
+    # Per-operation watchdog: a single Polymarket call (orderbook fetch, quote
+    # placement) that stalls without a timeout will hang the WHOLE MM loop
+    # indefinitely — observed twice 2026-06-30 (the loop went silent for 12-24
+    # min on a stuck request). Bound each per-market quote op and the stale-cancel
+    # with this timeout so a stuck call is abandoned and the cycle continues.
+    op_timeout_seconds: float = 15.0
 
 
 class TechnicalConfig(BaseModel):

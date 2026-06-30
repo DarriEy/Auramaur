@@ -379,6 +379,10 @@ market_maker:
   max_inventory: 50.0       # max directional exposure per market
   max_markets: 5            # max simultaneous MM markets
   refresh_seconds: 30       # re-quote frequency
+  # Per-op watchdog: a stuck Polymarket call (no timeout) hung the whole MM loop
+  # twice on 2026-06-30 (silent 12-24 min). Bound each quote op so a stuck call is
+  # abandoned and the cycle continues.
+  op_timeout_seconds: 15.0
 
 arbitrage:
   enabled: true
