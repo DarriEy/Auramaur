@@ -70,6 +70,15 @@ class Market(BaseModel):
     # settled into the ledger. Empty for venues that don't report these.
     status: str = ""
     result: str = ""
+    # Kalshi structured strike fields — the authoritative bin definition. A
+    # threshold market carries strike_type ("greater"/"greater_or_equal"/
+    # "less"/"less_or_equal") with floor_strike as the strike; a range/point bin
+    # is strike_type "between" with floor_strike/cap_strike. settlement_arb reads
+    # these to build the resolve predicate deterministically (no LLM). Empty for
+    # non-Kalshi venues.
+    strike_type: str = ""
+    floor_strike: float | None = None
+    cap_strike: float | None = None
     # Polymarket UMA optimistic-oracle resolution state, surfaced by Gamma.
     # `uma_status` is the current stage ("" → no proposal yet, "proposed" →
     # outcome proposed and in the liveness window, "disputed" → actively

@@ -3,16 +3,72 @@
 from __future__ import annotations
 
 
+from dataclasses import dataclass
+
 from auramaur.strategy.econ_pricing import (
     ECON_SERIES,
     EconSpec,
     bin_edge,
     estimate_distribution,
     indicator_series,
+    kalshi_macro_predicate,
     normal_cdf,
+    parse_kalshi_period,
     prob_above,
     spec_for_series,
 )
+
+
+@dataclass
+class _FakeKalshiMarket:
+    ticker: str = ""
+    exchange: str = "kalshi"
+    strike_type: str = ""
+    floor_strike: float | None = None
+    cap_strike: float | None = None
+
+
+def test_parse_kalshi_period():
+    assert parse_kalshi_period("26NOV") == "2026-11"
+    assert parse_kalshi_period("26jun") == "2026-06"
+    assert parse_kalshi_period("26Q4") is None      # not a monthly code
+    assert parse_kalshi_period("") is None
+
+
+def test_kalshi_macro_predicate_greater_threshold():
+    m = _FakeKalshiMarket(ticker="KXCPIYOY-26NOV-T4.5", strike_type="greater",
+                          floor_strike=4.5)
+    assert kalshi_macro_predicate(m) == {
+        "indicator": "KXCPIYOY", "operator": ">",
+        "threshold": 4.5, "reference_period": "2026-11"}
+
+
+def test_kalshi_macro_predicate_payrolls_absolute_threshold():
+    m = _FakeKalshiMarket(ticker="KXPAYROLLS-26JUN-T175000",
+                          strike_type="greater", floor_strike=175000.0)
+    p = kalshi_macro_predicate(m)
+    assert p["indicator"] == "KXPAYROLLS" and p["threshold"] == 175000.0
+    assert p["reference_period"] == "2026-06" and p["operator"] == ">"
+
+
+def test_kalshi_macro_predicate_rejects_unknown_or_compound():
+    # unknown series prefix
+    assert kalshi_macro_predicate(
+        _FakeKalshiMarket(ticker="KXNFL-26NOV-T4.5", strike_type="greater",
+                          floor_strike=4.5)) is None
+    # 'between' / structured bin -> no single-threshold predicate
+    assert kalshi_macro_predicate(
+        _FakeKalshiMarket(ticker="KXCPIYOY-26NOV-B4.5", strike_type="between",
+                          floor_strike=4.4, cap_strike=4.5)) is None
+    # non-monthly period
+    assert kalshi_macro_predicate(
+        _FakeKalshiMarket(ticker="KXU3-26Q4-T4.5", strike_type="greater",
+                          floor_strike=4.5)) is None
+
+
+def test_cpi_series_carry_report_rounding():
+    assert ECON_SERIES["KXCPIYOY"].report_round_to == 0.1
+    assert ECON_SERIES["KXPAYROLLS"].report_round_to == 1000.0
 
 
 def test_normal_cdf_basics():

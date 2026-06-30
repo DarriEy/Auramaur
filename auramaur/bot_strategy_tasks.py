@@ -196,6 +196,10 @@ class StrategyTaskMixin:
             pnl_tracker=self._components.pnl_tracker,
             fred_source=FREDSource(api_key=self.settings.fred_api_key),
             analyzer=self._components.analyzer,
+            # Kalshi monthly macro bins are where the settlement lag lives; pass
+            # the Kalshi venue when composed so the pillar scans + trades them.
+            kalshi_discovery=(self._components.discoveries or {}).get("kalshi"),
+            kalshi_exchange=(self._components.exchanges or {}).get("kalshi"),
         )
         interval = max(60, self.settings.settlement_arb.interval_seconds)
         while self._running:

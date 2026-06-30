@@ -18,6 +18,7 @@ calibration prove it.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 
 
@@ -35,6 +36,12 @@ class EconSpec:
     transform: str
     periods_per_year: int = 12  # 12 monthly, 4 quarterly — for YoY/horizon
     scale: float = 1.0          # mom_change unit fix (PAYEMS is in thousands)
+    # Precision the official agency REPORTS the figure to (CPI YoY & U3 to 0.1pp,
+    # payrolls to the nearest 1,000 jobs). A FRED-derived indicator is computed
+    # continuously (e.g. CPI YoY 4.4997%), but Kalshi/Poly bins resolve on the
+    # ROUNDED published figure — so round to this grid before the threshold test,
+    # else a value a hair off a strike boundary resolves the wrong side.
+    report_round_to: float = 0.0  # 0 => no rounding
 
 
 # Conservative starter registry — only series with an unambiguous transform.
@@ -45,10 +52,67 @@ ECON_SERIES: dict[str, EconSpec] = {
     # NOT-seasonally-adjusted index (CPIAUCNS). CPIAUCSL is the seasonally
     # adjusted series — its YoY can differ by a tenth or more, exactly the
     # margin a point-bin turns on, so the SA series would mis-resolve bins.
-    "KXCPIYOY": EconSpec("CPIAUCNS", "yoy", periods_per_year=12),
-    "KXU3": EconSpec("UNRATE", "level", periods_per_year=12),
-    "KXPAYROLLS": EconSpec("PAYEMS", "mom_change", periods_per_year=12, scale=1000.0),
+    "KXCPIYOY": EconSpec("CPIAUCNS", "yoy", periods_per_year=12, report_round_to=0.1),
+    "KXU3": EconSpec("UNRATE", "level", periods_per_year=12, report_round_to=0.1),
+    "KXPAYROLLS": EconSpec("PAYEMS", "mom_change", periods_per_year=12,
+                           scale=1000.0, report_round_to=1000.0),
 }
+
+# Kalshi monthly-period date codes: "26NOV" -> ("2026", 11).
+_KALSHI_MONTHS = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
+_KALSHI_PERIOD_RE = re.compile(r"^(\d{2})([A-Z]{3})$")
+# strike_type -> comparison operator for the YES outcome.
+_STRIKE_OPERATORS = {
+    "greater": ">", "greater_or_equal": ">=",
+    "less": "<", "less_or_equal": "<=",
+}
+
+
+def parse_kalshi_period(code: str) -> str | None:
+    """'26NOV' -> '2026-11'. None if the code isn't a YY-MON monthly period."""
+    m = _KALSHI_PERIOD_RE.match((code or "").strip().upper())
+    if not m:
+        return None
+    yy, mon = m.groups()
+    month = _KALSHI_MONTHS.get(mon)
+    if month is None:
+        return None
+    return f"20{yy}-{month:02d}"
+
+
+def kalshi_macro_predicate(market) -> dict | None:
+    """Build a settlement_arb predicate DETERMINISTICALLY from a Kalshi macro-bin
+    market's ticker + structured strike fields — no LLM extraction.
+
+    Returns {indicator, operator, threshold, reference_period} for a recognized
+    monthly econ-series threshold bin (e.g. KXCPIYOY-26NOV-T4.5, strike_type
+    'greater', floor 4.5 -> '> 4.5' on KXCPIYOY for 2026-11), else None
+    (unknown series, non-monthly period, or a 'between'/structured bin we don't
+    resolve with a single threshold).
+    """
+    ticker = (getattr(market, "ticker", "") or "")
+    parts = ticker.split("-")
+    if len(parts) < 3:
+        return None
+    series = parts[0].upper()
+    if series not in ECON_SERIES:
+        return None
+    period = parse_kalshi_period(parts[1])
+    if period is None:
+        return None
+    op = _STRIKE_OPERATORS.get((getattr(market, "strike_type", "") or "").lower())
+    if op is None:
+        return None  # 'between'/structured/unknown -> not a single-threshold bin
+    floor = getattr(market, "floor_strike", None)
+    cap = getattr(market, "cap_strike", None)
+    threshold = floor if op in (">", ">=") else (cap if cap is not None else floor)
+    if threshold is None:
+        return None
+    return {"indicator": series, "operator": op,
+            "threshold": float(threshold), "reference_period": period}
 
 
 def spec_for_series(series_ticker: str) -> EconSpec | None:
