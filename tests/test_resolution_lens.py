@@ -400,6 +400,45 @@ def test_lens_enters_on_strong_verdict_with_named_reason():
     asyncio.run(run())
 
 
+def test_known_cached_gap_is_prioritized_over_fresh_under_tight_budget():
+    """The 2026-06-24 silence fix. A qualifying gap the lens already found (cached,
+    not yet verified) must be processed BEFORE fresh candidates, so its verify
+    call lands inside a tight per-cycle LLM budget. Placed LAST behind two fresh
+    candidates with a 1-call budget, the cached gap still enters — without
+    prioritization the fresh verdicts would eat the budget and starve it (the
+    failure mode that left the proven cell silent for six days)."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            ex = _exchange()
+            settings = _settings(max_llm_calls_per_cycle=1, max_entries_per_cycle=5)
+            fresh1 = _market(mid="fresh1", yes=0.30)
+            fresh2 = _market(mid="fresh2", yes=0.30)
+            cached = _market(mid="cached", yes=0.30)   # priced for a SELL (fair 0.10)
+            # cached LAST in scan order; fresh ones would otherwise consume budget
+            pillar = _pillar(db, settings, [fresh1, fresh2, cached], exchange=ex)
+            await pillar._ensure_schema()
+            # Pre-seed the cached qualifying gap, unverified (-1) so it needs a
+            # verify call — exactly the state that was being starved.
+            await db.execute(
+                "INSERT INTO lens_verdicts (market_id, fair_prob, gap_score, "
+                "mechanism, verified) VALUES ('cached', 0.10, 0.8, 'permanence bar', -1)")
+            await db.commit()
+
+            entered = await pillar.run_once()
+            assert entered == 1                       # the cached gap, not starved
+            # it is specifically the cached market that traded
+            assert await db.fetchone(
+                "SELECT 1 FROM portfolio WHERE market_id='cached'") is not None
+            assert await db.fetchone(
+                "SELECT 1 FROM portfolio WHERE market_id='fresh1'") is None
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_lens_skips_weak_verdicts_and_caches():
     async def run():
         db = Database(":memory:")

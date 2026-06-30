@@ -437,6 +437,32 @@ class ResolutionLensPillar:
 
     # -- main cycle --------------------------------------------------------
 
+    async def _prioritize_known_gaps(self, markets: list[Market], cfg) -> list[Market]:
+        """Front-load candidates that ALREADY carry a qualifying cached verdict.
+
+        Entering a gap costs up to three LLM calls (verdict -> verify -> ground),
+        but the per-cycle budget (max_llm_calls_per_cycle) is small. Processing
+        the raw scan order spent that budget computing NEW verdicts every cycle,
+        so gaps the lens had already found never advanced to verify/enter — the
+        cell went silent 2026-06-24 while live SELL gaps (overpriced bins, the
+        floor-exempt side) sat unacted on the book. Sorting known qualifying gaps
+        to the front (highest first) spends the budget advancing them to entry;
+        fresh discovery still runs with whatever budget remains. Stable sort, so
+        order within each group is preserved.
+        """
+        if not markets:
+            return markets
+        rows = await self._db.fetchall(
+            "SELECT market_id, gap_score FROM lens_verdicts WHERE gap_score >= ?",
+            (float(cfg.min_gap_score),))
+        known = {r["market_id"]: (r["gap_score"] or 0.0) for r in (rows or [])}
+        if not known:
+            return markets
+        markets.sort(key=lambda m: known.get(m.id, -1.0), reverse=True)
+        log.info("lens.prioritized_known_gaps",
+                 known_gaps=len(known), scanned=len(markets))
+        return markets
+
     async def run_once(self) -> int:
         cfg = self._settings.resolution_lens
         if not cfg.enabled:
@@ -449,6 +475,7 @@ class ResolutionLensPillar:
             log.info("lens.candidates", lexical=len(markets))
         else:
             markets = await self._discovery.get_markets(limit=cfg.scan_limit)
+        markets = await self._prioritize_known_gaps(markets, cfg)
         calls = 0
         entered = 0
         for m in markets:
