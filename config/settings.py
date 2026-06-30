@@ -431,7 +431,7 @@ class InformedFlowConfig(BaseModel):
     max_days_to_resolution: float = 30.0
     max_open: int = 30
     max_entries_per_cycle: int = 5
-    scan_limit: int = 60             # bounded — we fetch a tape per eligible market
+    scan_limit: int = 200            # near-dated /markets window; tape pulled per eligible
     interval_seconds: int = 1800
 
 

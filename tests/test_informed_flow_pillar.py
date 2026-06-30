@@ -90,6 +90,8 @@ def _risk(approved=True, size=8.0):
 def _pillar(db, settings, markets, exchange, risk=None):
     disc = MagicMock()
     disc.get_markets = AsyncMock(return_value=markets)
+    # The pillar scans the near-dated close-time window via this method.
+    disc.get_markets_by_close_window = AsyncMock(return_value=markets)
     cal = MagicMock()
     cal.record_prediction = AsyncMock()
     return InformedFlowPillar(
