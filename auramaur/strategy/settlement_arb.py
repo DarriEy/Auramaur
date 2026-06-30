@@ -225,6 +225,11 @@ class SettlementArbPillar:
         if not cfg.enabled or self._fred is None:
             return 0
         await self._ensure_schema()
+        # Per-cycle FRED observation cache. Kalshi scanning yields ~250 candidate
+        # bins but only ~3 distinct FRED series (CPIAUCNS/UNRATE/PAYEMS); without
+        # this each candidate re-fetches in _maybe_enter, bursting ~250 calls/cycle
+        # past FRED's rate limit (fred_observations_failed spike). Keyed by series.
+        self._fred_cycle_cache = {}
         markets = await self._candidates()
         entered = 0
         with_pred = 0
@@ -377,13 +382,24 @@ class SettlementArbPillar:
                 and float(v.get("confidence", 0.0) or 0.0)
                 >= self._settings.settlement_arb.verify_min_confidence)
 
+    async def _fred_observations(self, series: str, history_n: int):
+        """FRED observations for a series, memoized for the current cycle so a
+        fan-out of same-series candidate bins makes ONE API call, not hundreds
+        (the cache is reset at the top of each run_once)."""
+        cache = getattr(self, "_fred_cycle_cache", None)
+        if cache is None:
+            return await self._fred.get_observations(series, n=history_n)
+        if series not in cache:
+            cache[series] = await self._fred.get_observations(series, n=history_n)
+        return cache[series]
+
     async def _maybe_enter(self, m, pred: dict) -> bool:
         """Deterministic resolve + settlement-lag gate."""
         cfg = self._settings.settlement_arb
         spec = spec_for_series(pred["indicator"])
         if spec is None:
             return False
-        obs = await self._fred.get_observations(spec.fred_series, n=cfg.history_n)
+        obs = await self._fred_observations(spec.fred_series, cfg.history_n)
         if not obs:
             return False
         value = indicator_at_period(obs, spec, pred["reference_period"])
