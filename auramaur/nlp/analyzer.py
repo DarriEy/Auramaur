@@ -40,8 +40,40 @@ class AnalysisResult(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _parse_claude_json(text: str) -> dict:
-    """Robustly parse JSON from Claude's response."""
+def _extract_json_span(text: str) -> str | None:
+    """Return the first COMPLETE JSON array or object in ``text`` — the leading
+    value followed by balanced brackets — or None. Tracks nesting and quoted
+    strings so brackets inside string literals don't fool it. This recovers the
+    common LLM shape of a valid JSON value followed by explanatory prose, e.g.
+    ``[]\\n\\nNo matches found...`` (which the old object-only regex missed
+    because it never looked for arrays)."""
+    start = next((i for i, ch in enumerate(text) if ch in "[{"), None)
+    if start is None:
+        return None
+    depth = 0
+    in_str = esc = False
+    for j in range(start, len(text)):
+        ch = text[j]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch in "[{":
+            depth += 1
+        elif ch in "]}":
+            depth -= 1
+            if depth == 0:
+                return text[start:j + 1]
+    return None
+
+
+def _parse_claude_json(text: str) -> dict | list:
+    """Robustly parse JSON (object OR array) from Claude's response."""
     # Strip markdown code fences if present
     fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
     if fenced:
@@ -53,11 +85,12 @@ def _parse_claude_json(text: str) -> dict:
     except json.JSONDecodeError:
         pass
 
-    # Extract first JSON object
-    match = re.search(r"\{[\s\S]*\}", text)
-    if match:
+    # The model often emits a valid JSON value then trails off into prose —
+    # extract the leading balanced array/object and parse that.
+    span = _extract_json_span(text)
+    if span is not None:
         try:
-            return json.loads(match.group(0))
+            return json.loads(span)
         except json.JSONDecodeError:
             pass
 

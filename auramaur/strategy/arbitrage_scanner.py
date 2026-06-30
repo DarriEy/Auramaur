@@ -387,7 +387,9 @@ class ArbitrageScanner:
                 # below still matches pairs without an LLM call.
                 log.debug("arb_scanner.llm_budget_skipped", error=str(e))
             except Exception as e:
-                log.error("arb_scanner.llm_match_failed", error=str(e))
+                # Fail-soft: the word-overlap fallback below still matches pairs
+                # without the LLM, so this is a warning, not an error.
+                log.warning("arb_scanner.llm_match_failed", error=str(e))
                 # Fall through to word-overlap fallback
 
         # Strategy B: Word-Overlap Fallback
