@@ -9,6 +9,7 @@ from auramaur.strategy.market_maker import MarketMaker
 
 
 def _maker(*, quote_size=10.0, max_inventory=50.0, is_live=False,
+           op_timeout_seconds=15.0,
            blocked_categories=("sports", "politics_us"),
            allowed_categories_live=("crypto", "tech", "politics_intl")) -> MarketMaker:
     settings = SimpleNamespace(
@@ -20,6 +21,7 @@ def _maker(*, quote_size=10.0, max_inventory=50.0, is_live=False,
             max_inventory=max_inventory,
             max_markets=5,
             refresh_seconds=30,
+            op_timeout_seconds=op_timeout_seconds,
         ),
         risk=SimpleNamespace(
             blocked_categories=list(blocked_categories),
@@ -323,3 +325,36 @@ async def test_mm_orders_self_stamp_market_maker_source():
     assert all(o.dry_run is False for o in placed)           # is_live=True
     # Bid leg buys YES, ask leg buys NO (synthetic sell-YES).
     assert {o.token for o in placed} == {TokenType.YES, TokenType.NO}
+
+
+def test_run_cycle_times_out_a_hung_quote_and_continues():
+    """A stuck per-market quote op (e.g. a Polymarket call with no timeout) must
+    NOT hang the whole MM loop — the watchdog abandons it after op_timeout and the
+    cycle completes. Regression for the 2026-06-30 MM hangs."""
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+
+    mm = _maker(op_timeout_seconds=0.05)
+    mkt = Market(id="m1", exchange="polymarket", question="q", category="crypto",
+                 active=True, outcome_yes_price=0.5, outcome_no_price=0.5,
+                 liquidity=5000.0, volume=5000.0,
+                 end_date=datetime.now(timezone.utc) + timedelta(days=5),
+                 clob_token_yes="ty", clob_token_no="tn")
+
+    mm._select_mm_markets = lambda markets: [mkt]
+
+    async def _no_stale():
+        return 0
+    mm._cancel_stale_quotes = _no_stale
+
+    async def _hang(market):
+        await asyncio.sleep(10)  # simulate a stuck Polymarket call
+        return {}, None
+    mm._quote_market = _hang
+
+    async def run():
+        # Must return promptly (~op_timeout), NOT hang for 10s.
+        return await asyncio.wait_for(mm.run_cycle([mkt]), timeout=3.0)
+
+    results = asyncio.run(run())
+    assert results == []  # the hung market produced no quote, loop survived
