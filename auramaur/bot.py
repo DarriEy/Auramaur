@@ -892,14 +892,35 @@ class AuramaurBot(
             if await self._check_kill_switch():
                 return
             try:
+                # Watchdog: the per-op timeout inside run_cycle only covers the
+                # quote ops — the OUTER-loop Polymarket calls (market discovery,
+                # fill polling) were still unbounded and hung the loop (2026-06-30,
+                # silent ~16 min with NO op_timeout firing). Bound them too so no
+                # single stuck request can stall the MM task.
+                op_timeout = self.settings.market_maker.op_timeout_seconds
+
                 # Fetch liquid markets sorted by volume
-                markets = await discovery.get_markets(limit=50, order="liquidity")
+                try:
+                    markets = await asyncio.wait_for(
+                        discovery.get_markets(limit=50, order="liquidity"),
+                        timeout=op_timeout)
+                except asyncio.TimeoutError:
+                    log.warning("market_maker.op_timeout", op="get_markets",
+                                timeout=op_timeout)
+                    await asyncio.sleep(interval)
+                    continue
 
                 # Run the MM cycle
                 results = await mm.run_cycle(markets)
 
                 # Check for fills on pending live orders
-                fills = await mm.check_fills()
+                try:
+                    fills = await asyncio.wait_for(
+                        mm.check_fills(), timeout=op_timeout)
+                except asyncio.TimeoutError:
+                    log.warning("market_maker.op_timeout", op="check_fills",
+                                timeout=op_timeout)
+                    fills = []
 
                 if results:
                     total_profit = sum(r.get("expected_profit", 0) for r in results)
