@@ -38,6 +38,24 @@ def test_is_satisfied_operators():
     assert is_satisfied(3.0, "??", 3.0) is False   # unknown operator -> not satisfied
 
 
+def test_point_bin_uses_grid_tolerance_not_exact_equality():
+    """A CPI YoY point-bin '== 3.8' must resolve YES for any continuous indicator
+    that ROUNDS into the [3.75, 3.85) bin — exact float equality never matched,
+    so every point-bin priced fair=0 and the pillar entered nothing."""
+    assert is_satisfied(3.7841, "==", 3.8) is True    # rounds to 3.8 -> in bin
+    assert is_satisfied(3.84, "==", 3.8) is True       # still in [3.75, 3.85)
+    assert is_satisfied(3.86, "==", 3.8) is False      # rounds to 3.9 -> out
+    assert is_satisfied(3.74, "==", 3.8) is False      # rounds to 3.7 -> out
+    # precision follows the threshold: an integer bin is one whole unit wide
+    assert is_satisfied(3.4, "==", 3.0) is True
+    assert is_satisfied(3.6, "==", 3.0) is False
+
+
+def test_cpi_yoy_resolves_on_non_seasonally_adjusted_series():
+    """Kalshi CPI-YoY markets settle on the NSA headline index (CPIAUCNS)."""
+    assert ECON_SERIES["KXCPIYOY"].fred_series == "CPIAUCNS"
+
+
 # ---------------------------------------------------------------------------
 # indicator_at_period — the deterministic resolve
 # ---------------------------------------------------------------------------
@@ -56,7 +74,7 @@ def test_level_period_not_published_yet_is_none():
 
 
 def test_yoy_indicator_computes_against_prior_year():
-    spec = ECON_SERIES["KXCPIYOY"]   # CPIAUCSL, yoy
+    spec = ECON_SERIES["KXCPIYOY"]   # CPIAUCNS, yoy
     # June 2025 = 100, June 2026 = 103 -> +3.0% YoY
     obs = _obs(("2025-06", 100.0), ("2026-05", 102.5), ("2026-06", 103.0))
     assert indicator_at_period(obs, spec, "2026-06") == pytest.approx(3.0)

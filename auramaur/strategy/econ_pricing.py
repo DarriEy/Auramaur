@@ -41,7 +41,11 @@ class EconSpec:
 # (GDP annualization / Fed-decision categoricals are intentionally omitted
 # until each is validated against a real print.)
 ECON_SERIES: dict[str, EconSpec] = {
-    "KXCPIYOY": EconSpec("CPIAUCSL", "yoy", periods_per_year=12),
+    # Kalshi CPI-YoY markets resolve on the headline BLS number, which is the
+    # NOT-seasonally-adjusted index (CPIAUCNS). CPIAUCSL is the seasonally
+    # adjusted series — its YoY can differ by a tenth or more, exactly the
+    # margin a point-bin turns on, so the SA series would mis-resolve bins.
+    "KXCPIYOY": EconSpec("CPIAUCNS", "yoy", periods_per_year=12),
     "KXU3": EconSpec("UNRATE", "level", periods_per_year=12),
     "KXPAYROLLS": EconSpec("PAYEMS", "mom_change", periods_per_year=12, scale=1000.0),
 }
