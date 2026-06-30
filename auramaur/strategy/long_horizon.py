@@ -86,7 +86,7 @@ class LongHorizonPillar:
         if open_count >= cfg.max_open:
             log.debug("long_horizon.book_full", open=open_count, cap=cfg.max_open)
             return 0
-        markets = await self._discovery.get_markets(limit=cfg.scan_limit)
+        markets = await self._scan_long_dated(cfg)
         entered = 0
         for market in markets:
             if entered >= cfg.max_entries_per_cycle:
@@ -101,6 +101,32 @@ class LongHorizonPillar:
         if entered:
             log.info("long_horizon.cycle_done", entered=entered)
         return entered
+
+    async def _scan_long_dated(self, cfg) -> list[Market]:
+        """Fetch the LONG-DATED slice directly via Gamma's resolution-date window,
+        paginated. The old single get_markets(limit=scan_limit) call was a no-op:
+        Gamma caps a page at 100 and orders by VOLUME, and the top-100-by-volume is
+        bimodal (near-term or year-out) — it contains ZERO 14-365d moderate
+        favorites, so scan_limit>100 never helped. Querying the [min_days, max_days]
+        end-date window ordered by liquidity puts the real candidates in front."""
+        from datetime import timedelta
+        now = datetime.now(timezone.utc)
+        emin = (now + timedelta(days=cfg.min_days_to_resolution)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        emax = (now + timedelta(days=cfg.max_days_to_resolution)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        out: list[Market] = []
+        try:
+            for off in range(0, max(int(cfg.scan_limit), 1), 100):
+                page = await self._discovery.get_markets(
+                    limit=100, offset=off, order="liquidity",
+                    end_date_min=emin, end_date_max=emax)
+                if not page:
+                    break
+                out.extend(page)
+        except TypeError:
+            # A discovery without the date-window kwargs (older client / test stub):
+            # fall back to the plain scan so the pillar still runs.
+            out = await self._discovery.get_markets(limit=cfg.scan_limit)
+        return out
 
     # ------------------------------------------------------------------
     # Entry pipeline

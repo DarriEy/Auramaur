@@ -65,8 +65,16 @@ class GammaClient:
         offset: int = 0,
         order: str = "volume",
         ascending: bool = False,
+        end_date_min: str | None = None,
+        end_date_max: str | None = None,
     ) -> list[Market]:
-        """Fetch markets from Gamma API."""
+        """Fetch markets from Gamma API.
+
+        ``end_date_min``/``end_date_max`` (ISO 8601) restrict to a resolution-date
+        window — Gamma honors these, so a horizon-targeted scan (e.g. long_horizon's
+        14-365d favorites) can fetch the right markets directly instead of the
+        default top-100-by-volume page, which never contains them.
+        """
         session = await self._ensure_session()
         params = {
             "limit": limit,
@@ -76,6 +84,10 @@ class GammaClient:
             "active": str(active).lower(),
             "closed": "false",
         }
+        if end_date_min is not None:
+            params["end_date_min"] = end_date_min
+        if end_date_max is not None:
+            params["end_date_max"] = end_date_max
 
         try:
             async with session.get(f"{GAMMA_API_BASE}/markets", params=params) as resp:
