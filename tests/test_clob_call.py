@@ -87,6 +87,25 @@ async def test_timeout_releases_lock_for_next_call():
 
 
 @pytest.mark.asyncio
+async def test_lock_acquisition_is_bounded_when_stuck_held():
+    """A worker thread that never returns leaves the lock held; a NEW call must
+    time out on acquisition (logged clob.lock_timeout), not block forever — the
+    silent MM-dormancy failure mode from 2026-06-30."""
+    client = _client()
+    client._call_timeout = 0.1
+    await client._clob_lock.acquire()          # simulate a wedged prior call
+    try:
+        # wait_for guard: if acquisition regressed to unbounded, this fails fast
+        # instead of hanging the suite.
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(client.clob_call(lambda: "never"), timeout=1.0)
+    finally:
+        client._clob_lock.release()
+    # Lock is healthy again once the stuck holder releases.
+    assert await client.clob_call(lambda: "ok") == "ok"
+
+
+@pytest.mark.asyncio
 async def test_get_order_book_survives_hanging_sdk():
     """A hung book fetch degrades to an empty book, not a frozen bot."""
     client = _client()

@@ -67,14 +67,29 @@ class PolymarketClient:
         stalled get_market call froze the live bot for 84 minutes until ^C).
         Worker thread + wait_for means a stall costs one abandoned thread and
         a TimeoutError instead. The SDK is not thread-safe, so calls
-        serialize behind one lock; a timed-out call releases the lock and
-        abandons its thread.
+        serialize behind one lock.
+
+        Acquire the lock WITH the same deadline, not unconditionally: a worker
+        thread that never returns (asyncio can't truly cancel to_thread) leaves
+        the wait_for below hung AND still holding the lock, so every later CLOB
+        call would block on acquisition forever — with no timeout firing. That is
+        a silent wedge (2026-06-30: the market_maker task went dormant ~16 min
+        with no op_timeout logged, while the rest of the bot stayed healthy).
+        Bounding acquisition turns that into a logged, recoverable clob.lock_timeout
+        the callers' existing timeout handling already copes with.
         """
-        async with self._clob_lock:
+        deadline = timeout if timeout is not None else self._call_timeout
+        try:
+            await asyncio.wait_for(self._clob_lock.acquire(), timeout=deadline)
+        except asyncio.TimeoutError:
+            log.warning("clob.lock_timeout",
+                        fn=getattr(fn, "__name__", str(fn)), timeout=deadline)
+            raise
+        try:
             return await asyncio.wait_for(
-                asyncio.to_thread(fn, *args, **kwargs),
-                timeout if timeout is not None else self._call_timeout,
-            )
+                asyncio.to_thread(fn, *args, **kwargs), deadline)
+        finally:
+            self._clob_lock.release()
 
     def _load_real_positions(self) -> None:
         """Load actual on-chain positions from CLOB trade history."""

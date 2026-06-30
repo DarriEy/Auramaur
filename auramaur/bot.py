@@ -891,6 +891,13 @@ class AuramaurBot(
         while self._running:
             if await self._check_kill_switch():
                 return
+            # Heartbeat at INFO every iteration. run_cycle logs only at debug when
+            # there are no quotable markets, so an idle MM looked identical to a
+            # dead one to the health monitor (false STALE) — and when it DID wedge
+            # (2026-06-30, ~16 min), the last log before silence didn't pinpoint
+            # where. This line makes "alive but idle" distinguishable from "hung",
+            # and the first missing op after it localizes any future stall.
+            log.info("market_maker.cycle_start")
             try:
                 # Watchdog: the per-op timeout inside run_cycle only covers the
                 # quote ops — the OUTER-loop Polymarket calls (market discovery,
