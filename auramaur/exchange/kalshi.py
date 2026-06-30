@@ -24,6 +24,17 @@ from auramaur.exchange.paper import PaperTrader
 
 log = structlog.get_logger()
 
+
+def _opt_float(v) -> float | None:
+    """Parse an optional numeric strike field; None when absent/unparseable."""
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 # Kalshi basic tier: 20 reads/sec
 _RATE_LIMIT = 20
 
@@ -1081,6 +1092,9 @@ class KalshiClient:
                 # into the ledger.
                 status=status,
                 result=str(_get("result", "") or "").lower(),
+                strike_type=str(_get("strike_type", "") or "").lower(),
+                floor_strike=_opt_float(_get("floor_strike")),
+                cap_strike=_opt_float(_get("cap_strike")),
             )
         except Exception as e:
             log.warning("kalshi.parse_error", error=str(e))

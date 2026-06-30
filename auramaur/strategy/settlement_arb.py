@@ -39,7 +39,12 @@ import structlog
 
 from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
 from auramaur.exchange.models import Confidence, OrderSide, Signal
-from auramaur.strategy.econ_pricing import ECON_SERIES, EconSpec, spec_for_series
+from auramaur.strategy.econ_pricing import (
+    ECON_SERIES,
+    EconSpec,
+    kalshi_macro_predicate,
+    spec_for_series,
+)
 
 log = structlog.get_logger()
 
@@ -170,7 +175,8 @@ class SettlementArbPillar:
     execution_mode = ExecutionMode.GATEWAY_SINGLE
 
     def __init__(self, db, settings, discovery, exchange, risk_manager,
-                 pnl_tracker, fred_source, analyzer) -> None:
+                 pnl_tracker, fred_source, analyzer,
+                 kalshi_discovery=None, kalshi_exchange=None) -> None:
         self._db = db
         self._settings = settings
         self._discovery = discovery
@@ -182,6 +188,19 @@ class SettlementArbPillar:
         self._gateway = ExecutionGateway(
             router=None, exchange=exchange, exchange_name="polymarket",
             settings=settings, db=db, pnl_tracker=pnl_tracker,
+        )
+        # Kalshi monthly macro bins (KXCPIYOY/KXU3/KXPAYROLLS) are where the
+        # settlement lag actually lives — the Poly econ universe is all annual /
+        # compound markets. Wired when the Kalshi venue is composed; its
+        # predicate comes from structured strike fields (no LLM) and execution
+        # routes through a Kalshi-named gateway.
+        self._kalshi = kalshi_discovery
+        self._kalshi_gateway = (
+            ExecutionGateway(
+                router=None, exchange=kalshi_exchange, exchange_name="kalshi",
+                settings=settings, db=db, pnl_tracker=pnl_tracker,
+            )
+            if kalshi_exchange is not None else None
         )
         self._schema_ready = False
 
@@ -258,11 +277,42 @@ class SettlementArbPillar:
                 clob_token_yes=r["clob_token_yes"] or "",
                 clob_token_no=r["clob_token_no"] or "",
             ))
+        out.extend(await self._kalshi_candidates())
+        return out
+
+    async def _kalshi_candidates(self) -> list:
+        """Kalshi monthly macro-bin markets for the registered econ series.
+
+        Fetched live per-series (the bins aren't in the local market cache) and
+        kept only when they carry a real two-sided price — a no-bid far-dated bin
+        (yes_price collapses to 0/1) has no lag to capture and nothing to fill.
+        No min_liquidity gate: the thesis is that the lag survives in the thin,
+        low-volume bins, and the pillar holds to resolution so illiquidity never
+        strands an exit. Predicate/operator come from strike fields downstream.
+        """
+        if self._kalshi is None or not hasattr(self._kalshi, "get_markets_by_series"):
+            return []
+        out: list = []
+        for series in ECON_SERIES:
+            try:
+                markets = await self._kalshi.get_markets_by_series(series, limit=200)
+            except Exception as e:
+                log.debug("settlement_arb.kalshi_fetch_error", series=series, error=str(e))
+                continue
+            for km in markets or []:
+                if 0.0 < (km.outcome_yes_price or 0.0) < 1.0:
+                    out.append(km)
         return out
 
     async def _predicate(self, m) -> dict | None:
-        """Extracted+verified predicate for a market (cached forever — the
-        criterion is static)."""
+        """Resolve predicate for a market.
+
+        Kalshi macro bins carry the predicate in structured strike fields, so it
+        is parsed DETERMINISTICALLY (no LLM extract/verify, no cost, no parse
+        error). Polymarket markets fall back to the cached LLM extract+verify.
+        """
+        if (getattr(m, "exchange", "") or "") == "kalshi":
+            return kalshi_macro_predicate(m)
         row = await self._db.fetchone(
             "SELECT indicator, operator, threshold, reference_period, verified "
             "FROM settlement_extractions WHERE market_id = ?", (m.id,))
@@ -339,6 +389,12 @@ class SettlementArbPillar:
         value = indicator_at_period(obs, spec, pred["reference_period"])
         if value is None:
             return False  # print not out yet -> undetermined, never forecast
+        # Resolve on the figure as the agency REPORTS it (CPI YoY/U3 to 0.1pp,
+        # payrolls to 1,000) — the bins settle on the rounded print, not the
+        # continuous FRED-derived value, so a hair-off-boundary value would
+        # otherwise resolve the wrong side of a strike.
+        if spec.report_round_to:
+            value = round(value / spec.report_round_to) * spec.report_round_to
 
         yes_locked = is_satisfied(value, pred["operator"], pred["threshold"])
         yes_price = m.outcome_yes_price
@@ -370,7 +426,11 @@ class SettlementArbPillar:
             return False
         size = min(decision.position_size, cfg.stake_usd)
         force_paper = cfg.paper or getattr(decision, "force_paper", False)
-        res = await self._gateway.submit(TradeIntent(
+        gateway = (self._kalshi_gateway
+                   if (getattr(m, "exchange", "") or "") == "kalshi"
+                   and self._kalshi_gateway is not None
+                   else self._gateway)
+        res = await gateway.submit(TradeIntent(
             signal=signal, market=m, size_dollars=size, force_paper=force_paper))
         ok = res.status in ("filled", "paper", "partial", "pending")
         if ok:

@@ -232,3 +232,66 @@ async def test_candidates_admit_tail_bins_reject_dust_and_noneon():
     cands = await p._candidates()
     ids = {m.id for m in cands}
     assert ids == {"tail"}
+
+
+# ---------------------------------------------------------------------------
+# Kalshi monthly macro-bin path — deterministic predicate, per-series scan,
+# resolve on the published (rounded) figure
+# ---------------------------------------------------------------------------
+
+def _kx(ticker, yes=0.7, strike_type="greater", floor=4.5):
+    from auramaur.exchange.models import Market
+    return Market(id=ticker, exchange="kalshi", ticker=ticker, question="",
+                  outcome_yes_price=yes, outcome_no_price=round(1 - yes, 2),
+                  strike_type=strike_type, floor_strike=floor)
+
+
+@pytest.mark.asyncio
+async def test_kalshi_candidates_scanned_per_series_priced_only():
+    """The Kalshi branch pulls each registered econ series and keeps only bins
+    with a real two-sided price (a no-bid far-dated bin has no lag to trade)."""
+    kdisc = SimpleNamespace(get_markets_by_series=AsyncMock(side_effect=lambda s, limit=200: [
+        _kx(f"{s}-26NOV-T4.5", yes=0.6),     # priced -> keep
+        _kx(f"{s}-26NOV-T9.9", yes=0.0),     # no price -> drop
+    ]))
+    settings = SimpleNamespace(settlement_arb=SimpleNamespace(min_liquidity=100.0))
+    db = MagicMock(); db.fetchall = AsyncMock(return_value=[])  # no Poly candidates
+    p = SettlementArbPillar(
+        db=db, settings=settings, discovery=MagicMock(), exchange=MagicMock(),
+        risk_manager=MagicMock(), pnl_tracker=MagicMock(), fred_source=MagicMock(),
+        analyzer=None, kalshi_discovery=kdisc, kalshi_exchange=MagicMock())
+    cands = await p._candidates()
+    assert {m.id for m in cands} == {
+        "KXCPIYOY-26NOV-T4.5", "KXU3-26NOV-T4.5", "KXPAYROLLS-26NOV-T4.5"}
+    assert kdisc.get_markets_by_series.await_count == 3   # one call per series
+
+
+@pytest.mark.asyncio
+async def test_kalshi_predicate_is_deterministic_no_llm():
+    """A Kalshi macro bin's predicate comes from strike fields — analyzer/db
+    never touched (analyzer=None would crash the LLM path)."""
+    p, _ = _pillar(fred_obs=[])
+    pred = await p._predicate(_kx("KXCPIYOY-26NOV-T4.5", strike_type="greater", floor=4.5))
+    assert pred == {"indicator": "KXCPIYOY", "operator": ">",
+                    "threshold": 4.5, "reference_period": "2026-11"}
+
+
+@pytest.mark.asyncio
+async def test_resolve_uses_published_rounded_figure():
+    """CPI YoY computes to 4.449% continuously, but BLS reports 4.4% — a bin
+    'above 4.4' must resolve NO (4.4 is not > 4.4), not YES off the raw value."""
+    obs = _obs(("2025-06", 100.0), ("2026-06", 104.449))   # raw YoY = +4.449%
+    p, _ = _pillar(fred_obs=obs)
+    market = SimpleNamespace(id="KXCPIYOY-26JUN-T4.4", exchange="kalshi",
+                             outcome_yes_price=0.80, outcome_no_price=0.20)
+    pred = {"indicator": "KXCPIYOY", "operator": ">", "threshold": 4.4,
+            "reference_period": "2026-06"}
+    captured = {}
+
+    async def fake_eval(signal, m):
+        captured["fair"] = signal.claude_prob
+        return SimpleNamespace(approved=False, position_size=0, reason="stop")
+    p._risk.evaluate = fake_eval
+
+    await p._maybe_enter(market, pred)
+    assert captured["fair"] == 0.0    # rounded 4.4 is NOT > 4.4 -> NO locked
