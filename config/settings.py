@@ -466,19 +466,18 @@ class LongHorizonConfig(BaseModel):
     max_open: int = 30
     max_entries_per_cycle: int = 5
     # Raised 300->500 (2026-06-29): the binding constraint on data collection was
-    # the scan universe — discovery returns markets by recency/volume, which skews
-    # SHORT-dated, so long-dated favorites rarely made the top-300. A wider scan
-    # surfaces more of them. (Deeper fix — a dedicated long-dated scan — is a
-    # follow-up.)
+    # Pagination depth for the DATED scan (see _scan_long_dated). The 06-29
+    # widening to 500 was a NO-OP because Gamma caps a page at 100 AND ordered by
+    # volume — the top-100-by-volume contains zero 14-365d moderate favorites. The
+    # fix queries the resolution-date window ordered by liquidity, paginated up to
+    # this many markets, which surfaces the real candidates.
     scan_limit: int = 500
     min_liquidity: float = 1000.0
-    # Horizon floor lowered 30->14 (2026-06-29) to accrue a graduation record:
-    # long-dated (>30d) favorites are RARE in Poly's live universe, so the pillar
-    # was starved (1 candidate in 6h). The underconfidence slope is continuous and
-    # still >1 at 14-30d (weaker than >30d) — a thesis-purity-for-data tradeoff;
-    # the isolated graduation cell will reveal if even this diluted version has edge.
     min_days_to_resolution: float = 14.0
-    max_days_to_resolution: float = 180.0   # cap capital lock-up
+    # 365 (was 180): the >180d bucket is the LARGEST pool of long-dated favorites,
+    # and the underconfidence slope is strongest at long tenor — capping at 180
+    # threw away most candidates. 1yr lock-up is fine at paper / tiny stake.
+    max_days_to_resolution: float = 365.0
     interval_seconds: int = 1800
     # Politics excluded: that's where the effect is strongest in the paper but
     # where the bot has no edge — so we test generalization elsewhere. Checked on

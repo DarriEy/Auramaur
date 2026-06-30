@@ -470,10 +470,10 @@ long_horizon:
   stake_usd: 10.0
   max_open: 30
   max_entries_per_cycle: 5
-  scan_limit: 500
+  scan_limit: 500          # pagination depth for the dated scan (Gamma caps 100/page)
   min_liquidity: 1000.0
   min_days_to_resolution: 14.0
-  max_days_to_resolution: 180.0
+  max_days_to_resolution: 365.0   # was 180 — the >180d bucket is the largest candidate pool
   interval_seconds: 1800
   exclude_categories: ["politics_us", "politics_intl"]
 

@@ -242,3 +242,29 @@ def test_medium_horizon_now_enters_after_widening():
         await db.close()
 
     asyncio.run(run())
+
+
+def test_scan_long_dated_paginates_and_uses_date_window():
+    """The scan queries Gamma's resolution-date window (not the top-100-by-volume
+    page) and paginates until a page is empty — the fix for the 100-row cap."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        from unittest.mock import AsyncMock, MagicMock
+        # page 0 -> one market; page 1 -> empty (stops).
+        m = _market(yes=0.70)
+        disc = MagicMock()
+        disc.get_markets = AsyncMock(side_effect=[[m], []])
+        cal = MagicMock(); cal.record_prediction = AsyncMock()
+        from auramaur.strategy.long_horizon import LongHorizonPillar
+        from auramaur.broker.pnl import PnLTracker
+        pillar = LongHorizonPillar(db=db, settings=_settings(), discovery=disc,
+                                   exchange=_exchange(), risk_manager=_risk(),
+                                   pnl_tracker=PnLTracker(db, _settings()), calibration=cal)
+        got = await pillar._scan_long_dated(_settings().long_horizon)
+        assert got == [m]                                  # one page, then empty -> stop
+        # the date window kwargs were passed
+        kw = disc.get_markets.call_args_list[0].kwargs
+        assert "end_date_min" in kw and "end_date_max" in kw and kw["order"] == "liquidity"
+        await db.close()
+    asyncio.run(run())
