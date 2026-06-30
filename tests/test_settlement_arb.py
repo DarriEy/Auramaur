@@ -267,6 +267,32 @@ async def test_kalshi_candidates_scanned_per_series_priced_only():
 
 
 @pytest.mark.asyncio
+async def test_run_once_fetches_each_fred_series_once_per_cycle():
+    """A fan-out of same-series Kalshi bins must collapse to ONE FRED call per
+    series per cycle — not one per candidate (which bursts past FRED's rate
+    limit, the fred_observations_failed spike)."""
+    bins = [_kx(f"KXCPIYOY-26NOV-T{t}", yes=0.5) for t in (4.3, 4.4, 4.5, 4.6, 4.7)]
+    kdisc = SimpleNamespace(get_markets_by_series=AsyncMock(
+        side_effect=lambda s, limit=200: bins if s == "KXCPIYOY" else []))
+    settings = SimpleNamespace(settlement_arb=SimpleNamespace(
+        enabled=True, paper=True, stake_usd=10.0, min_edge=0.05, min_liquidity=100.0,
+        min_extract_confidence=0.8, verify_min_confidence=0.8, max_entries_per_cycle=5,
+        history_n=60, interval_seconds=1800))
+    fred = SimpleNamespace(get_observations=AsyncMock(return_value=[]))  # print not out
+    db = MagicMock()
+    db.fetchall = AsyncMock(return_value=[])
+    db.execute = AsyncMock()
+    db.commit = AsyncMock()
+    p = SettlementArbPillar(
+        db=db, settings=settings, discovery=MagicMock(), exchange=MagicMock(),
+        risk_manager=MagicMock(), pnl_tracker=MagicMock(), fred_source=fred,
+        analyzer=None, kalshi_discovery=kdisc, kalshi_exchange=MagicMock())
+    await p.run_once()
+    # 5 same-series bins -> ONE get_observations call (memoized), not 5
+    assert fred.get_observations.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_kalshi_predicate_is_deterministic_no_llm():
     """A Kalshi macro bin's predicate comes from strike fields — analyzer/db
     never touched (analyzer=None would crash the LLM path)."""
