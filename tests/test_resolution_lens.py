@@ -439,6 +439,48 @@ def test_known_cached_gap_is_prioritized_over_fresh_under_tight_budget():
     asyncio.run(run())
 
 
+def test_live_cell_gap_beats_higher_gap_paper_cell_for_the_slot():
+    """gap_score is NOT edge quality. The proven LIVE cell (weather) must get the
+    scarce per-cycle entry slot before a HIGHER-gap PAPER cell (politics, which
+    the lens loses on) — otherwise paper exploration starves the one edge that
+    earns real money."""
+    async def run():
+        from types import SimpleNamespace
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            ex = _exchange()
+            settings = _settings(paper=False, max_entries_per_cycle=1)
+            risk = _risk()
+
+            async def _decide(strategy, category):   # weather trades live; rest paper
+                return SimpleNamespace(force_paper=(category != "weather"))
+            risk.graduation = SimpleNamespace(decide=_decide)
+
+            wx = _market(mid="wx", yes=0.30); wx.category = "weather"
+            pol = _market(mid="pol", yes=0.30); pol.category = "politics_intl"
+            # politics has the HIGHER gap and is placed FIRST in scan order
+            pillar = _pillar(db, settings, [pol, wx], exchange=ex, risk=risk)
+            await pillar._ensure_schema()
+            await db.execute("INSERT INTO lens_verdicts (market_id, fair_prob, "
+                             "gap_score, mechanism, verified) VALUES ('pol',0.10,0.9,'bar',1)")
+            await db.execute("INSERT INTO lens_verdicts (market_id, fair_prob, "
+                             "gap_score, mechanism, verified) VALUES ('wx',0.10,0.4,'bar',1)")
+            await db.commit()
+
+            entered = await pillar.run_once()
+            assert entered == 1
+            # the LIVE weather cell took the single slot, not the higher-gap paper one
+            assert await db.fetchone(
+                "SELECT 1 FROM portfolio WHERE market_id='wx'") is not None
+            assert await db.fetchone(
+                "SELECT 1 FROM portfolio WHERE market_id='pol'") is None
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_lens_skips_weak_verdicts_and_caches():
     async def run():
         db = Database(":memory:")
