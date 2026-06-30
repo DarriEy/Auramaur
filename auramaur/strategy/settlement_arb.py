@@ -208,6 +208,7 @@ class SettlementArbPillar:
         await self._ensure_schema()
         markets = await self._candidates()
         entered = 0
+        with_pred = 0
         for m in markets:
             if entered >= cfg.max_entries_per_cycle:
                 break
@@ -215,12 +216,18 @@ class SettlementArbPillar:
                 pred = await self._predicate(m)
                 if pred is None:
                     continue
+                with_pred += 1
                 if await self._maybe_enter(m, pred):
                     entered += 1
             except Exception as e:
                 log.debug("settlement_arb.market_error", market_id=m.id, error=str(e))
-        if entered:
-            log.info("settlement_arb.cycle", entered=entered)
+        # Always log the cycle — a scan that finds candidates but enters nothing
+        # (the steady state while the Poly econ universe is all not-yet-settled
+        # annual / compound-range markets) was previously SILENT, making the
+        # pillar indistinguishable from dead. scanned/with_predicate/entered tell
+        # the three stories apart: no candidates vs none determinable vs converged.
+        log.info("settlement_arb.cycle", scanned=len(markets),
+                 with_predicate=with_pred, entered=entered)
         return entered
 
     async def _candidates(self) -> list:
