@@ -134,6 +134,18 @@ def indicator_at_period(
     return None
 
 
+def _bin_half_width(threshold: float) -> float:
+    """Half-width of the point-bin centered on ``threshold``, derived from the
+    threshold's own decimal precision (Kalshi econ point-bins are one grid step
+    wide: 3.8 -> the [3.75, 3.85) bin, half-width 0.05). Needed because the
+    indicator is computed CONTINUOUSLY from FRED (e.g. CPI YoY = 3.7841%), so an
+    exact ``== 3.8`` test never matches and every point-bin would price fair=0.
+    """
+    s = f"{threshold:.10f}".rstrip("0")
+    decimals = len(s.split(".")[1]) if "." in s else 0
+    return 0.5 * (10.0 ** -decimals)
+
+
 def is_satisfied(value: float, operator: str, threshold: float) -> bool:
     """Does the published value satisfy the YES criterion?"""
     if operator == ">=":
@@ -145,7 +157,9 @@ def is_satisfied(value: float, operator: str, threshold: float) -> bool:
     if operator == "<":
         return value < threshold
     if operator == "==":
-        return abs(value - threshold) < 1e-9
+        # Point-bin: YES iff the continuous indicator rounds INTO this bin, i.e.
+        # falls within half a grid step of the threshold — not exact equality.
+        return abs(value - threshold) < _bin_half_width(threshold) + 1e-12
     return False
 
 

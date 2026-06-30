@@ -20,7 +20,8 @@ _DEFAULT_SERIES: dict[str, str] = {
     "ICSA": "Initial Jobless Claims",
     "JTSJOL": "Job Openings (JOLTS)",
     # Prices
-    "CPIAUCSL": "Consumer Price Index (CPI)",
+    "CPIAUCSL": "Consumer Price Index (CPI, seasonally adj.)",
+    "CPIAUCNS": "Consumer Price Index (CPI, not seasonally adj.)",
     "CPILFESL": "Core CPI (ex Food & Energy)",
     "PCEPI": "PCE Price Index",
     "PPIFIS": "Producer Price Index (PPI)",
