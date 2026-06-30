@@ -438,17 +438,24 @@ class ResolutionLensPillar:
     # -- main cycle --------------------------------------------------------
 
     async def _prioritize_known_gaps(self, markets: list[Market], cfg) -> list[Market]:
-        """Front-load candidates that ALREADY carry a qualifying cached verdict.
+        """Order the scan so the small per-cycle budget earns the most. Two tiers
+        of priority, highest first:
 
-        Entering a gap costs up to three LLM calls (verdict -> verify -> ground),
-        but the per-cycle budget (max_llm_calls_per_cycle) is small. Processing
-        the raw scan order spent that budget computing NEW verdicts every cycle,
-        so gaps the lens had already found never advanced to verify/enter — the
-        cell went silent 2026-06-24 while live SELL gaps (overpriced bins, the
-        floor-exempt side) sat unacted on the book. Sorting known qualifying gaps
-        to the front (highest first) spends the budget advancing them to entry;
-        fresh discovery still runs with whatever budget remains. Stable sort, so
-        order within each group is preserved.
+        1. Candidates that already carry a qualifying cached verdict, whose cell
+           trades LIVE (real money) — the proven edge.
+        2. Same, but on a PAPER-forced cell — unproven exploration.
+        Then fresh discovery with whatever budget remains.
+
+        Entering a gap costs up to three LLM calls (verdict -> verify -> ground)
+        against a small budget, so two things starve real money:
+          - Spending the budget computing NEW verdicts every cycle, so already-
+            found gaps never advance to verify/enter (the cell went silent
+            2026-06-24 while live SELL gaps sat unacted on the book).
+          - Letting a high-gap-but-PAPER cell (unproven/negative — e.g. politics
+            gaps scoring ~0.9) crowd out the proven LIVE weather entries (often
+            scoring lower) that actually earn. gap_score is NOT edge quality.
+        Graduation cells are cached, so the per-category live check is cheap.
+        Stable sort preserves order within each tier.
         """
         if not markets:
             return markets
@@ -458,9 +465,30 @@ class ResolutionLensPillar:
         known = {r["market_id"]: (r["gap_score"] or 0.0) for r in (rows or [])}
         if not known:
             return markets
-        markets.sort(key=lambda m: known.get(m.id, -1.0), reverse=True)
-        log.info("lens.prioritized_known_gaps",
-                 known_gaps=len(known), scanned=len(markets))
+        # Which categories among the known gaps currently trade live for this
+        # cell? Only those put real money to work; everything else is paper
+        # exploration and must not pre-empt it.
+        live_cats: set[str] = set()
+        grad = getattr(self._risk, "graduation", None)
+        if grad is not None and not cfg.paper:
+            for cat in {m.category for m in markets if m.id in known}:
+                try:
+                    cell = await grad.decide(self._source_tag, cat or "")
+                    if not getattr(cell, "force_paper", True):
+                        live_cats.add(cat)
+                except Exception:
+                    pass
+
+        def _rank(m: Market):
+            g = known.get(m.id)
+            if g is None:
+                return (0, 0.0)                       # fresh discovery -> last
+            tier = 2 if m.category in live_cats else 1  # live gaps over paper gaps
+            return (tier, g)
+
+        markets.sort(key=_rank, reverse=True)
+        log.info("lens.prioritized_known_gaps", known_gaps=len(known),
+                 live_gap_cells=len(live_cats), scanned=len(markets))
         return markets
 
     async def run_once(self) -> int:
