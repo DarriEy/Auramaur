@@ -421,6 +421,7 @@ async def assemble_components(
         blocked_categories=s.risk.blocked_categories,
         allowed_categories_live=(s.risk.allowed_categories_live
                                  if s.is_live else None),
+        llm_match_cache_seconds=s.arbitrage.llm_match_cache_seconds,
     )
 
     # News reactor — monitors RSS for breaking news, triggers fast analysis

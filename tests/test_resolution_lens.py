@@ -717,3 +717,117 @@ def test_kalshi_spike_instance_is_parametrized_and_isolated():
         assert poly._eligible(k_mkt) is False
 
     asyncio.run(run())
+
+
+# ----------------------------------------------------------------------
+# Error-path caching + Claude pinning (2026-07 lens salvage)
+# ----------------------------------------------------------------------
+
+def test_verdict_error_not_cached_then_gives_up_after_three():
+    """An LLM/parse error must NOT write the permanent neutral verdict (that
+    poisoned the cache for every market scanned while calls were failing).
+    Retry instead — but after 3 strikes persist the neutral row so one
+    confusing market can't eat the per-cycle budget forever."""
+    async def run():
+        db = Database(":memory:"); await db.connect()
+        m = _market()
+        a = MagicMock()
+        a._call_llm = AsyncMock(side_effect=RuntimeError("boom"))
+        p = _pillar(db, _settings(), [m], analyzer=a)
+        await p._ensure_schema()
+
+        assert await p._verdict(m) is None
+        assert await p._verdict(m) is None
+        row = await db.fetchone(
+            "SELECT 1 FROM lens_verdicts WHERE market_id = ?", (m.id,))
+        assert row is None  # nothing persisted while retrying
+
+        v = await p._verdict(m)  # third strike -> neutral row, permanent
+        assert v == (m.outcome_yes_price, 0.0, "none", -1)
+        row = await db.fetchone(
+            "SELECT gap_score, mechanism FROM lens_verdicts WHERE market_id = ?",
+            (m.id,))
+        assert row["gap_score"] == 0.0 and row["mechanism"] == "none"
+
+    asyncio.run(run())
+
+
+def test_verify_infra_error_leaves_verdict_unverified():
+    """A verify-pass ERROR is not a refutation: verified must stay -1 (retry
+    next cycle), not be persisted as 0 (permanent kill of a real gap)."""
+    async def run():
+        db = Database(":memory:"); await db.connect()
+        m = _market()
+        good = _analyzer()
+        p = _pillar(db, _settings(), [m], analyzer=good)
+        await p._ensure_schema()
+        await p._verdict(m)  # seed a cached gap (verified=-1)
+
+        p._analyzer = MagicMock()
+        p._analyzer._call_llm = AsyncMock(side_effect=RuntimeError("budget"))
+        assert await p._verify_mechanism(m, 0.10, "mech") is False
+        row = await db.fetchone(
+            "SELECT verified FROM lens_verdicts WHERE market_id = ?", (m.id,))
+        assert row["verified"] == -1  # NOT 0
+
+    asyncio.run(run())
+
+
+def test_lens_calls_pin_to_claude():
+    """All three lens LLM calls must pass pin_claude=True — the fine-print
+    read is the edge; routing it to another model is what silenced the cell
+    (2026-06-25 -> 07-02)."""
+    async def run():
+        db = Database(":memory:"); await db.connect()
+        m = _market()
+        a = _analyzer3()
+        p = _pillar3(db, _settings(), [m], analyzer=a,
+                     aggregator=_aggregator_mock())
+        await p._ensure_schema()
+        await p._verdict(m)
+        await p._verify_mechanism(m, 0.10, "mech")
+        await p._ground(m, 0.10, "mech")
+        assert a._call_llm.await_count == 3
+        for call in a._call_llm.await_args_list:
+            assert call.kwargs.get("pin_claude") is True
+
+    asyncio.run(run())
+
+
+def test_pin_claude_bypasses_router_and_uses_reserve():
+    """ClaudeAnalyzer._call_llm(pin_claude=True) must skip Gemini routing and
+    spend against the full budget; unpinned callers stop at budget - reserve."""
+    async def run():
+        from auramaur.nlp.analyzer import ClaudeAnalyzer
+        from auramaur.nlp.errors import BudgetExhausted
+
+        s = Settings()
+        s.gemini.enabled = True
+        s.gemini.off_hours_utc = list(range(24))  # router would pick Gemini
+        s.nlp.daily_claude_call_budget = 100
+        s.nlp.claude_reserve_for_pinned = 25
+
+        a = ClaudeAnalyzer(settings=s)
+        with patch.object(a, "_call_claude_cli", new=AsyncMock(return_value="ok")) as cli, \
+             patch("auramaur.nlp.llm_router.call_gemini", new=AsyncMock(return_value="gem")):
+            s.gemini_api_key = "k"
+            assert await a._call_llm("p", pin_claude=True) == "ok"
+            assert cli.await_args.kwargs.get("reserved") is True
+            assert await a._call_llm("p") == "gem"  # unpinned -> routed
+
+        # Budget math: unpinned stops 25 early, pinned runs to the cap.
+        with patch("auramaur.nlp.call_budget.calls_today", return_value=80):
+            try:
+                await a._call_claude_cli("p")
+                raise AssertionError("unpinned should be exhausted at 80/100")
+            except BudgetExhausted:
+                pass
+            with patch.object(
+                    asyncio, "create_subprocess_exec",
+                    side_effect=AssertionError("stop before real CLI")):
+                try:
+                    await a._call_claude_cli("p", reserved=True)
+                except AssertionError:
+                    pass  # got PAST the budget gate (reserved slice)
+
+    asyncio.run(run())

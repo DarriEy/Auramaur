@@ -44,6 +44,7 @@ _STOP_WORDS = frozenset({
     "yes", "has", "have", "had", "can", "could", "would", "should", "may",
     "if", "but", "so", "than", "then", "what", "which", "who", "whom",
     "how", "when", "where", "why", "before", "after", "during", "between",
+    "next",
 })
 
 
@@ -147,6 +148,7 @@ class ArbitrageScanner:
         min_profit_after_fees_pct: float = 1.5,
         blocked_categories: list[str] | None = None,
         allowed_categories_live: list[str] | None = None,
+        llm_match_cache_seconds: int = 21600,
     ) -> None:
         """Initialize with the discoveries dict from bot components.
 
@@ -174,6 +176,14 @@ class ArbitrageScanner:
         self._allowed_categories_live = (
             set(allowed_categories_live) if allowed_categories_live is not None
             else None)
+        # LLM batch-pairing cache keyed by the candidate id sets. Matching is a
+        # function of the QUESTIONS, not prices, and the top-N lists barely
+        # churn cycle to cycle — without this the scanner re-asked the same
+        # pairing every ~100s and single-handedly exhausted the daily Claude
+        # budget by 07:00 UTC (2026-07-02 audit), starving every other caller.
+        # In-memory: one call per distinct id-set per TTL, resets on restart.
+        self._llm_match_cache_seconds = llm_match_cache_seconds
+        self._match_cache: dict[str, tuple[float, list[tuple[str, str]]]] = {}
 
     def _category_ok(self, market: Market) -> bool:
         """Category gate for scan candidates (stored label or fresh classify)."""
@@ -339,6 +349,20 @@ class ArbitrageScanner:
         if not markets_a or not markets_b:
             return []
 
+        # Serve a still-fresh LLM pairing for this exact candidate set from
+        # cache (matching depends on questions, not prices — stable for hours).
+        import hashlib
+        import time
+        map_a = {m.id: m for m in markets_a}
+        map_b = {m.id: m for m in markets_b}
+        cache_key = hashlib.sha256(
+            ("|".join(sorted(map_a)) + "||" + "|".join(sorted(map_b))).encode()
+        ).hexdigest()
+        cached = self._match_cache.get(cache_key)
+        if cached is not None and time.monotonic() - cached[0] < self._llm_match_cache_seconds:
+            return [(map_a[a], map_b[b]) for a, b in cached[1]
+                    if a in map_a and b in map_b]
+
         # Strategy A: LLM Batch Pairing (Preferred)
         if self._analyzer:
             try:
@@ -364,14 +388,21 @@ class ArbitrageScanner:
                     return []
 
                 # Map IDs back to Market objects
-                map_a = {m.id: m for m in markets_a}
-                map_b = {m.id: m for m in markets_b}
                 results: list[tuple[Market, Market]] = []
 
                 for m in matches:
                     id_a, id_b = m.get("id_a"), m.get("id_b")
                     if id_a in map_a and id_b in map_b:
                         results.append((map_a[id_a], map_b[id_b]))
+
+                # Cache the id pairs (empty results too — "no matches" is just
+                # as expensive to recompute) and drop expired entries.
+                now = time.monotonic()
+                self._match_cache = {
+                    k: v for k, v in self._match_cache.items()
+                    if now - v[0] < self._llm_match_cache_seconds}
+                self._match_cache[cache_key] = (
+                    now, [(a.id, b.id) for a, b in results])
 
                 if results:
                     log.info(

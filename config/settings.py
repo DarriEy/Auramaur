@@ -228,6 +228,11 @@ class NLPConfig(BaseModel):
     max_markets_per_cycle: int = 10
     evidence_per_source: int = 3
     daily_claude_call_budget: int = 100
+    # Slice of the daily budget held back for pin_claude callers (the proven
+    # edges whose quality depends on the specific model). Unpinned callers stop
+    # at budget - reserve; pinned callers can spend up to the full budget, so a
+    # bulk consumer can never starve the money-making calls.
+    claude_reserve_for_pinned: int = 25
 
     # Tool-use analyzer — refines strategic-batch results on top-edge markets
     # by letting Claude Code drive its own web_search / web_fetch. "auto"
@@ -1019,6 +1024,10 @@ class ArbitrageConfig(BaseModel):
     enabled: bool = True
     min_profit_after_fees_pct: float = 1.5
     max_arb_size: float = 25.0
+    # TTL for the LLM batch-pairing cache keyed by the candidate id sets. The
+    # scanner re-matches near-identical top-N lists every cycle; matching is a
+    # function of the QUESTIONS, not prices, so answers are stable for hours.
+    llm_match_cache_seconds: int = 21600
     cross_exchange_auto_execute: bool = True
     negrisk_auto_execute: bool = False
     # Flat per-exchange TAKER fee coefficients (fee = rate * P*(1-P)).
