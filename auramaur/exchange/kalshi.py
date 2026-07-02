@@ -1071,12 +1071,21 @@ class KalshiClient:
             spread = yes_ask - yes_bid if yes_ask > yes_bid else 0.0
             status = str(_get("status", "")).lower()
 
+            # Resolution rules ARE the description. The old `subtitle` key no
+            # longer exists in the v2 payload (it's yes_sub_title now), so every
+            # Kalshi market was stored with an EMPTY description — which starved
+            # the resolution_lens Kalshi spike to zero verdicts (its whole thesis
+            # is reading the CFTC-precise rules text, and min_description_chars
+            # rejected the blank rows before any LLM call).
+            rules = " ".join(
+                str(x).strip() for x in (_get("rules_primary"), _get("rules_secondary"))
+                if x and str(x).strip())
             return Market(
                 id=ticker,
                 exchange="kalshi",
                 ticker=ticker,
                 question=_get("title", "") or "",
-                description=_get("subtitle", "") or "",
+                description=rules or _get("yes_sub_title", "") or _get("subtitle", "") or "",
                 category="",
                 end_date=end_date,
                 active=status in ("open", "active", ""),
