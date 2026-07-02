@@ -156,6 +156,10 @@ class ResolutionLensPillar:
         # so the pillar still constructs without it (grounding then no-ops and the
         # lens falls back to the criteria-strict fair).
         self._aggregator = aggregator
+        # Per-market verdict-call failure counts (in-memory; resets on restart).
+        # Errors are retried, not cached — but after 3 strikes the market gets
+        # the permanent neutral verdict so it can't eat the budget forever.
+        self._verdict_failures: dict[str, int] = {}
 
     # -- candidate filtering ---------------------------------------------
 
@@ -234,20 +238,31 @@ class ResolutionLensPillar:
                     row["mechanism"], int(row["verified"]))
         if self._analyzer is None:
             return None
-        fair, score, mech = m.outcome_yes_price, 0.0, "none"
+        # pin_claude: the fine-print read IS the edge — never let budget
+        # routing silently hand it to a different model (that's what went
+        # dark 2026-06-25 → 07-02: Gemini verdicts never cleared the floors).
         try:
             raw = await self._analyzer._call_llm(LENS_PROMPT.format(
                 question=m.question,
                 description=self._criteria_text(m.description),  # Phase 1: full criteria
                 market_prob=m.outcome_yes_price,
                 today=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-            ))
+            ), pin_claude=True)
             parsed = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
-            fair = max(0.01, min(0.99, float(parsed.get("fair_prob", fair))))
+            fair = max(0.01, min(0.99, float(parsed.get("fair_prob", m.outcome_yes_price))))
             score = max(0.0, min(1.0, float(parsed.get("gap_score", 0.0))))
             mech = str(parsed.get("mechanism", "none"))[:400] or "none"
         except Exception as e:
-            log.warning("lens.llm_parse_error", market_id=m.id, error=str(e))
+            # Do NOT cache the failure: the old neutral-row write made every
+            # LLM/parse error a PERMANENT no-gap verdict (the cache never
+            # expires). Retry next cycle, but give up after a few attempts so
+            # one confusing market can't eat the per-cycle budget forever.
+            self._verdict_failures[m.id] = self._verdict_failures.get(m.id, 0) + 1
+            if self._verdict_failures[m.id] < 3:
+                log.warning("lens.llm_parse_error", market_id=m.id, error=str(e))
+                return None
+            log.warning("lens.verdict_gave_up", market_id=m.id, error=str(e))
+            fair, score, mech = m.outcome_yes_price, 0.0, "none"
         await self._db.execute(
             """INSERT OR REPLACE INTO lens_verdicts
                (market_id, fair_prob, gap_score, mechanism, verified)
@@ -260,22 +275,24 @@ class ResolutionLensPillar:
     async def _verify_mechanism(self, m: Market, fair: float, mechanism: str) -> bool:
         """Phase 2: adversarial check of the named mechanism. Returns True only
         when the second pass CONFIRMS it at >= verify_min_confidence. Persists
-        the verdict (0/1) so it isn't re-checked. Fails closed (refuted) on
-        parse/LLM error — a hallucinated mechanism must not slip through."""
+        the verdict (0/1) so it isn't re-checked. A parsed refutation fails
+        closed and persists — a hallucinated mechanism must not slip through.
+        An infra/parse ERROR is not a refutation: skip this cycle without
+        persisting, so a budget blip can't permanently kill a real gap."""
         cfg = self._settings.resolution_lens
-        confirmed = False
         try:
             raw = await self._analyzer._call_llm(VERIFY_PROMPT.format(
                 question=m.question,
                 description=self._criteria_text(m.description),
                 market_prob=m.outcome_yes_price, fair=fair, mechanism=mechanism,
                 today=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-            ))
+            ), pin_claude=True)
             parsed = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
             confirmed = (str(parsed.get("verdict", "refuted")).lower() == "confirmed"
                          and float(parsed.get("confidence", 0.0)) >= cfg.verify_min_confidence)
         except Exception as e:
             log.warning("lens.verify_parse_error", market_id=m.id, error=str(e))
+            return False  # verified stays -1; retried next cycle
         await self._db.execute(
             "UPDATE lens_verdicts SET verified = ? WHERE market_id = ?",
             (1 if confirmed else 0, m.id))
@@ -334,7 +351,7 @@ class ResolutionLensPillar:
                 deadline=deadline, mechanism=mech, fair=fair,
                 evidence="\n".join(ev_lines),
                 today=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-            ))
+            ), pin_claude=True)
             parsed = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
             g = max(0.01, min(0.99, float(parsed.get("grounded_prob", fair))))
             conf = max(0.0, min(1.0, float(parsed.get("confidence", 0.0))))
@@ -362,9 +379,11 @@ class ResolutionLensPillar:
         return float(row["grounded_fair"]) if row else None
 
     async def _already_entered_or_held(self, market_id: str) -> bool:
+        # Per-instance tag: the Kalshi spike (resolution_lens_kalshi) must
+        # check ITS OWN signals, not the Poly lens's.
         row = await self._db.fetchone(
-            "SELECT 1 FROM signals WHERE market_id = ? AND strategy_source = 'resolution_lens' LIMIT 1",
-            (market_id,),
+            "SELECT 1 FROM signals WHERE market_id = ? AND strategy_source = ? LIMIT 1",
+            (market_id, self._source_tag),
         )
         if row is not None:
             return True

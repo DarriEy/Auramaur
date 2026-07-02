@@ -117,7 +117,8 @@ class ClaudeAnalyzer:
         self._settings = settings
         self._model = settings.nlp.model
 
-    async def _call_claude_cli(self, prompt: str, *, effort: str | None = None) -> str:
+    async def _call_claude_cli(self, prompt: str, *, effort: str | None = None,
+                               reserved: bool = False) -> str:
         """Call Claude via the CLI using the Max+ subscription.
 
         Uses `claude -p <prompt> --output-format text` which authenticates
@@ -126,6 +127,12 @@ class ClaudeAnalyzer:
         ``effort`` is the CLI effort level (low|medium|high|max); defaults to
         ``nlp.effort_primary``.
 
+        ``reserved`` callers (pin_claude paths — the proven edges) may spend up
+        to the full daily budget; everyone else stops ``claude_reserve_for_pinned``
+        calls early, so bulk consumers can't starve the money-making calls
+        (2026-07: the arb matcher burned the whole budget by 07:00 UTC daily
+        while the lens never got a Claude call).
+
         Retries up to 3 times on transient failures (timeout, non-zero exit).
         """
         from auramaur.nlp import call_budget
@@ -133,11 +140,15 @@ class ClaudeAnalyzer:
         use_effort = effort or self._settings.nlp.effort_primary
 
         budget = self._settings.nlp.daily_claude_call_budget
-        if budget > 0 and call_budget.calls_today() >= budget:
-            from auramaur.nlp.errors import BudgetExhausted
-            raise BudgetExhausted(
-                f"Daily Claude call budget ({budget}) exhausted"
-            )
+        if budget > 0:
+            limit = budget if reserved else max(
+                0, budget - self._settings.nlp.claude_reserve_for_pinned)
+            if call_budget.calls_today() >= limit:
+                from auramaur.nlp.errors import BudgetExhausted
+                raise BudgetExhausted(
+                    f"Daily Claude call budget ({limit}/{budget}"
+                    f"{' reserved' if reserved else ''}) exhausted"
+                )
 
         max_attempts = 3
         backoff_seconds = [5, 10, 20]
@@ -182,12 +193,21 @@ class ClaudeAnalyzer:
 
         raise last_error  # type: ignore[misc]
 
-    async def _call_llm(self, prompt: str, *, effort: str | None = None) -> str:
-        """Route to Gemini (off-hours / Claude budget low) else Claude."""
+    async def _call_llm(self, prompt: str, *, effort: str | None = None,
+                        pin_claude: bool = False) -> str:
+        """Route to Gemini (off-hours / Claude budget low) else Claude.
+
+        ``pin_claude=True`` bypasses routing entirely and always calls Claude
+        (against the reserved budget slice). For calls where the model identity
+        IS the edge — the resolution lens's fine-print reads collapsed when
+        conservation routing silently handed them to Gemini (2026-06-25 →
+        2026-07-02: zero qualifying gaps, zero entries)."""
         from functools import partial
 
         from auramaur.nlp.llm_router import route
         from auramaur.nlp import call_budget
+        if pin_claude:
+            return await self._call_claude_cli(prompt, effort=effort, reserved=True)
         claude_fn = partial(self._call_claude_cli, effort=effort)
         return await route(self._settings, call_budget.calls_today(), prompt, claude_fn)
 

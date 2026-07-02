@@ -214,3 +214,45 @@ async def test_internal_arb_uses_engine_exchange_attribute():
     legs = mixin._exit_gateway.place_legs.await_args.args[0]
     assert len(legs) == 2
     assert all(client is exchange for _order, client, _exn in legs)
+
+
+@pytest.mark.asyncio
+async def test_llm_match_cached_per_candidate_set():
+    """The LLM batch pairing must be served from cache for an unchanged
+    candidate set — re-asking every ~100s cycle burned the entire daily
+    Claude budget by 07:00 UTC and starved every other caller. Empty results
+    cache too, and a changed id set is a fresh call."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from auramaur.exchange.models import Market
+    from auramaur.strategy.arbitrage_scanner import ArbitrageScanner
+
+    def _mkt(mid, q, ex):
+        return Market(id=mid, question=q, exchange=ex)
+
+    a1 = _mkt("a1", "Will X happen?", "polymarket")
+    b1 = _mkt("b1", "Will X happen?", "kalshi")
+    b2 = _mkt("b2", "Will Y happen?", "kalshi")
+
+    analyzer = MagicMock()
+    analyzer._call_claude_cli = AsyncMock(
+        return_value='[{"id_a": "a1", "id_b": "b1"}]')
+    sc = ArbitrageScanner(discoveries={}, analyzer=analyzer,
+                          llm_match_cache_seconds=3600)
+
+    first = await sc._match_markets([a1], [b1], "poly", "kalshi")
+    again = await sc._match_markets([a1], [b1], "poly", "kalshi")
+    assert [(x.id, y.id) for x, y in first] == [("a1", "b1")]
+    assert [(x.id, y.id) for x, y in again] == [("a1", "b1")]
+    assert analyzer._call_claude_cli.await_count == 1  # served from cache
+
+    # Different candidate set -> new call; empty answers cache as well.
+    analyzer._call_claude_cli.return_value = "[]"
+    assert await sc._match_markets([a1], [b2], "poly", "kalshi") == []
+    assert await sc._match_markets([a1], [b2], "poly", "kalshi") == []
+    assert analyzer._call_claude_cli.await_count == 2
+
+    # TTL expiry -> refetch.
+    sc._llm_match_cache_seconds = 0
+    await sc._match_markets([a1], [b1], "poly", "kalshi")
+    assert analyzer._call_claude_cli.await_count == 3

@@ -13,6 +13,7 @@ def settings():
     s = MagicMock()
     s.nlp.model = "claude-sonnet-4-20250514"
     s.nlp.daily_claude_call_budget = 100
+    s.nlp.claude_reserve_for_pinned = 0
     s.nlp.skip_second_opinion = False
     s.nlp.cache_ttl_breaking_seconds = 900
     return s
