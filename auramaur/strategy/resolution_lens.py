@@ -253,10 +253,21 @@ class ResolutionLensPillar:
             score = max(0.0, min(1.0, float(parsed.get("gap_score", 0.0))))
             mech = str(parsed.get("mechanism", "none"))[:400] or "none"
         except Exception as e:
-            # Do NOT cache the failure: the old neutral-row write made every
-            # LLM/parse error a PERMANENT no-gap verdict (the cache never
-            # expires). Retry next cycle, but give up after a few attempts so
-            # one confusing market can't eat the per-cycle budget forever.
+            # Budget exhaustion is GLOBAL, not this market's fault — no strike,
+            # no cache write, and no Gemini fallback either: the lens's calls
+            # are pinned because Gemini verdicts measurably never clear the
+            # entry floors, and a cached Gemini verdict would permanently
+            # blind Claude to the market (the 06-25 lobotomy, with memory).
+            # Retry when the budget window resets.
+            from auramaur.nlp.errors import BudgetExhausted
+            if isinstance(e, BudgetExhausted):
+                log.debug("lens.budget_exhausted", market_id=m.id)
+                return None
+            # Do NOT cache other failures either: the old neutral-row write
+            # made every LLM/parse error a PERMANENT no-gap verdict (the cache
+            # never expires). Retry next cycle, but give up after a few
+            # attempts so one confusing market can't eat the per-cycle budget
+            # forever.
             self._verdict_failures[m.id] = self._verdict_failures.get(m.id, 0) + 1
             if self._verdict_failures[m.id] < 3:
                 log.warning("lens.llm_parse_error", market_id=m.id, error=str(e))
