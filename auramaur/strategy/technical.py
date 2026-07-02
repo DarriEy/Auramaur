@@ -31,6 +31,12 @@ class TechnicalAnalyzer:
         price_history: dict[str, list[float]] | None = None,
     ) -> list[TradeCandidate]:
         """Analyze markets for technical signals."""
+        # Honor the config gate — it existed in TechnicalConfig but was never
+        # checked, so the book couldn't be wound down by config. Exits are
+        # engine-level and position-based, so disabling signal generation
+        # strands nothing (same shape as the news_speed wind-down).
+        if not getattr(self.settings.technical, "enabled", True):
+            return []
         if not price_history:
             return []
 

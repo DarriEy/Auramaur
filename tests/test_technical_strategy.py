@@ -8,7 +8,11 @@ from auramaur.strategy.technical import TechnicalAnalyzer
 @pytest.fixture
 def analyzer():
     from config.settings import Settings
-    return TechnicalAnalyzer(Settings())
+    s = Settings()
+    # Pin the gate open: Settings() merges the machine's defaults.local.yaml,
+    # where the book may be wound down (technical.enabled: false).
+    s.technical.enabled = True
+    return TechnicalAnalyzer(s)
 
 
 def _make_market(price: float):
