@@ -77,6 +77,14 @@ risk:
   # where calibration shows edge; sports/politics_us stay out (see above).
   allowed_categories_live: ["crypto", "tech", "politics_intl", "economics",
                             "science", "legal", "weather"]
+  # Per-strategy live-category extensions (see settings.py). bias_harvest's
+  # 'other' cell graduated to probation on its own paper record; extending it
+  # HERE (gateway check #18 only) instead of on the global list keeps the
+  # catch-all label closed to the graduation-exempt market maker and arb
+  # executor, which consume allowed_categories_live directly — a global
+  # 'other' would re-open the 2026-06 mislabel fail-open lane for them.
+  allowed_categories_live_extra:
+    bias_harvest: ["other"]
   time_to_resolution_min_hours: 4
   time_to_resolution_max_days: 0   # 0 = no ceiling; set to 90 to reject 3+ month markets
   max_correlated_positions: 10
@@ -415,7 +423,11 @@ entailment_arb:
   # the real unknowns are fine-print entailment failures and leg risk.
   enabled: true
   paper: true
-  min_gap: 0.04          # violation must exceed this after both legs
+  # Floor for a violation to be tradeable after both legs. Keep >= 0.025:
+  # signals carry edge = gap*100 and the unconditional risk floor
+  # (risk.min_edge_pct = 2.5) rejects anything below 2.5 pts AFTER the LLM
+  # verification was already spent — a lower value here only buys dead calls.
+  min_gap: 0.025
   stake_usd: 10.0        # per leg, also capped by risk sizing
   max_pairs_per_cycle: 3
   scan_limit: 300
@@ -630,7 +642,7 @@ bias_harvest:
   # paper: false (still behind the three live gates).
   enabled: true
   paper: true
-  band_lo: 0.90
+  band_lo: 0.60
   band_hi: 0.97
   # claude_prob = favored price + uplift (the measured band gap is +4..+6pts).
   # MUST stay < 0.05 or the divergence filter blocks entries at MEDIUM conf.

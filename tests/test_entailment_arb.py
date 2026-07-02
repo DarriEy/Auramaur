@@ -489,3 +489,120 @@ def test_llm_low_confidence_blocks():
         await db.close()
 
     asyncio.run(run())
+
+
+def test_negative_implication_arbitrage():
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        a = _market("ma", "Will Egypt win 2-0?", 0.65)
+        b = _market("mb", "Will total goals be over 7.5?", 0.45)
+        await db.execute(
+            "INSERT INTO market_relationships (market_id_a, market_id_b, "
+            "relationship_type, strength) VALUES ('ma', 'mb', 'conditional', 0.9)")
+        await db.commit()
+
+        analyzer = MagicMock()
+        analyzer._call_llm = AsyncMock(return_value=(
+            '{"direction": "a_implies_not_b", "confidence": 0.95, '
+            '"counterexample": "none"}'
+        ))
+        ex = _exchange()
+        pillar = _pillar(db, _settings(llm_enabled=True, min_gap=0.04), [a, b],
+                         exchange=ex, analyzer=analyzer)
+        assert await pillar.run_once() == 1
+        
+        # Verify that two SELL orders (NO orders) were submitted
+        assert ex.place_order.await_count == 2
+        calls = ex.place_order.await_args_list
+        
+        # First leg: NO on A
+        order_a = calls[0][0][0]
+        assert order_a.market_id == "ma"
+        assert order_a.token == TokenType.NO
+        assert order_a.price == 0.35  # 1 - 0.65
+        
+        # Second leg: NO on B
+        order_b = calls[1][0][0]
+        assert order_b.market_id == "mb"
+        assert order_b.token == TokenType.NO
+        assert order_b.price == 0.55  # 1 - 0.45
+        
+        await db.close()
+
+    asyncio.run(run())
+
+
+def test_verify_llm_direction_returned_in_caller_frame():
+    """_verify_llm canonicalizes the pair to sorted-id order for the prompt
+    and the cache, but the caller reasons in its own (a, b) argument order.
+    The verdict must be remapped: without it, every fuzzy pair where
+    a.id > b.id came back inverted (real violations dropped, legitimate
+    spreads entered backwards)."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        # a.id 'mz' sorts AFTER b.id 'ma' -> prompt frame is swapped.
+        a = _market("mz", "Will X win the final?", 0.60)
+        b = _market("ma", "Will X reach the final?", 0.40)
+
+        analyzer = MagicMock()
+        # LLM answers in the SORTED frame: sorted-first ('ma') is implied by
+        # sorted-second ('mz'), i.e. "b_implies_a" in prompt terms.
+        analyzer._call_llm = AsyncMock(return_value=(
+            '{"direction": "b_implies_a", "confidence": 0.9, '
+            '"counterexample": "none found"}'))
+        pillar = _pillar(db, _settings(llm_enabled=True), [a, b],
+                         analyzer=analyzer)
+
+        # Caller frame: mz implies ma -> "a_implies_b".
+        direction, conf = await pillar._verify_llm(a, b)
+        assert direction == "a_implies_b" and conf == 0.9
+        # Cached read must remap identically...
+        direction2, _ = await pillar._verify_llm(a, b)
+        assert direction2 == "a_implies_b"
+        # ...and the swapped argument order sees the mirrored direction.
+        direction3, _ = await pillar._verify_llm(b, a)
+        assert direction3 == "b_implies_a"
+        assert analyzer._call_llm.await_count == 1  # one real call, then cache
+
+        await db.close()
+
+    asyncio.run(run())
+
+
+def test_verify_llm_ignores_stale_prompt_version_cache():
+    """Verdicts cached under an older prompt schema (source != current) are
+    ignored and re-verified once: the v1 cache predates a_implies_not_b, so
+    its permanent 'none' rows would otherwise silently kill mutual-exclusivity
+    for every previously-scanned pair."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        a = _market("ma", "Will Egypt win 2-0?", 0.65)
+        b = _market("mb", "Will total goals be over 7.5?", 0.45)
+        await db.execute(
+            "INSERT INTO entailment_verdicts (market_id_a, market_id_b, "
+            "direction, confidence, source, reasoning) "
+            "VALUES ('ma', 'mb', 'none', 0.9, 'llm', 'old prompt')")
+        await db.commit()
+
+        analyzer = MagicMock()
+        analyzer._call_llm = AsyncMock(return_value=(
+            '{"direction": "a_implies_not_b", "confidence": 0.95, '
+            '"counterexample": "none found"}'))
+        pillar = _pillar(db, _settings(llm_enabled=True), [a, b],
+                         analyzer=analyzer)
+
+        direction, conf = await pillar._verify_llm(a, b)
+        assert direction == "a_implies_not_b" and conf == 0.95
+        assert analyzer._call_llm.await_count == 1  # stale row did not satisfy
+
+        # The re-verified verdict replaced the stale row and now serves reads.
+        direction2, _ = await pillar._verify_llm(a, b)
+        assert direction2 == "a_implies_not_b"
+        assert analyzer._call_llm.await_count == 1
+
+        await db.close()
+
+    asyncio.run(run())

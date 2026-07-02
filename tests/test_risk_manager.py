@@ -494,3 +494,66 @@ async def test_live_allowlist_skipped_in_paper_and_for_exempt(mock_kill):
     d2 = await manager2.evaluate(sig2, market, available_cash=500.0)
     gate = next(c for c in d2.checks if c.name == "category_allowlist")
     assert gate.passed is True
+
+
+@pytest.mark.asyncio
+@patch("auramaur.risk.manager.check_kill_switch")
+async def test_min_liquidity_floor_is_venue_scoped(mock_kill):
+    """Kalshi reports thin top-of-book liquidity, so its orders are gated on
+    risk.kalshi_min_liquidity while every other venue keeps the strict
+    min_liquidity floor."""
+    from auramaur.risk.checks import CheckResult
+    mock_kill.return_value = CheckResult(name="kill_switch", passed=True, reason="", value=False)
+
+    db = MagicMock()
+    db.fetchone = AsyncMock(return_value=None)
+    settings = _make_settings(min_liquidity=1000.0)
+    settings.risk.kalshi_min_liquidity = 300.0
+    manager = RiskManager(settings, db)
+    manager.portfolio = _mock_portfolio()
+    sig = _make_signal(edge=10.0, claude_prob=0.60, market_prob=0.50)
+
+    # $500 book: fails the Polymarket floor...
+    poly = _make_market(liquidity=500.0)
+    d = await manager.evaluate(sig, poly, available_cash=500.0)
+    gate = next(c for c in d.checks if c.name == "min_liquidity")
+    assert gate.passed is False
+
+    # ...but passes the Kalshi floor on the same numbers.
+    kalshi = _make_market(liquidity=500.0)
+    kalshi.exchange = "kalshi"
+    d2 = await manager.evaluate(sig, kalshi, available_cash=500.0)
+    gate2 = next(c for c in d2.checks if c.name == "min_liquidity")
+    assert gate2.passed is True
+
+
+@pytest.mark.asyncio
+@patch("auramaur.risk.manager.check_kill_switch")
+async def test_allowlist_extra_is_per_strategy(mock_kill):
+    """allowed_categories_live_extra widens the live allowlist ONLY for the
+    named strategy_source — other strategies (and by construction the direct
+    consumers of the global list) still see 'other' as fail-closed."""
+    from auramaur.risk.checks import CheckResult
+    mock_kill.return_value = CheckResult(name="kill_switch", passed=True, reason="", value=False)
+
+    db = MagicMock()
+    db.fetchone = AsyncMock(return_value=None)
+    settings = _make_settings(is_live=True, allowed_categories_live=["tech"])
+    settings.risk.allowed_categories_live_extra = {"bias_harvest": ["other"]}
+    manager = RiskManager(settings, db)
+    manager.portfolio = _mock_portfolio()
+    market = _make_market(category="other")
+
+    # The extended strategy clears the gate on its earned category...
+    sig = _make_signal(edge=10.0, claude_prob=0.60, market_prob=0.50)
+    sig.strategy_source = "bias_harvest"
+    d = await manager.evaluate(sig, market, available_cash=500.0)
+    gate = next(c for c in d.checks if c.name == "category_allowlist")
+    assert gate.passed is True
+
+    # ...while an unlisted strategy is still rejected on the same market.
+    sig2 = _make_signal(edge=10.0, claude_prob=0.60, market_prob=0.50)
+    sig2.strategy_source = "llm"
+    d2 = await manager.evaluate(sig2, market, available_cash=500.0)
+    gate2 = next(c for c in d2.checks if c.name == "category_allowlist")
+    assert gate2.passed is False

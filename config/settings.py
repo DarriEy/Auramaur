@@ -164,6 +164,14 @@ class RiskConfig(BaseModel):
         "crypto", "tech", "politics_intl", "economics", "science", "legal",
         "entertainment", "weather", "esports",
     ]
+    # Per-strategy live-category extensions, keyed by strategy_source. Lets a
+    # proven graduation cell (e.g. bias_harvest x other) earn its category
+    # WITHOUT adding it to the global list above — which the graduation-exempt
+    # market maker / arb executor consume directly, so a global 'other' would
+    # fail-open the exact classifier-gap hole the allowlist exists to close.
+    # Consulted only by the gateway's category allowlist check (#18).
+    allowed_categories_live_extra: dict[str, list[str]] = Field(
+        default_factory=dict)
 
 
 class KellyConfig(BaseModel):

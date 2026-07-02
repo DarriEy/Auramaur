@@ -203,7 +203,10 @@ class RiskManager:
                 rc.divergence_filter_enabled and not is_paper_entry,
                 rc.divergence_adverse_low,
                 rc.divergence_adverse_high, rc.divergence_require_confidence),
-            await check_min_liquidity(max(market.liquidity, market.volume), rc.min_liquidity),
+            await check_min_liquidity(
+                max(market.liquidity, market.volume),
+                rc.kalshi_min_liquidity if (market.exchange or "").lower() == "kalshi" else rc.min_liquidity
+            ),
             await check_max_spread(market.spread, rc.max_spread_pct),
             await check_confidence_floor(signal.claude_confidence, rc.confidence_floor),
             await check_implied_prob_bounds(
@@ -239,8 +242,18 @@ class RiskManager:
         # a classifier gap costs opportunity, not money. The fresh keyword
         # classification stays the #17 tripwire for confidently-bad labels.
         if not is_paper_entry:
+            # Per-strategy extensions widen the allowlist ONLY for the named
+            # strategy_source (a proven ladder cell earning its category, e.g.
+            # bias_harvest x other). Putting the extension category on the
+            # GLOBAL list instead would also open it to every direct consumer
+            # of allowed_categories_live — the graduation-exempt market maker
+            # and arb executor — re-creating the fail-open hole the 2026-06
+            # mislabel incident closed.
+            allowed = list(rc.allowed_categories_live) + list(
+                (rc.allowed_categories_live_extra or {}).get(
+                    signal.strategy_source, []))
             pre_checks.append(await check_category_allowlist(
-                market.category or "", rc.allowed_categories_live,
+                market.category or "", allowed,
                 applies=category_applies,
                 fallback_category=fresh_category,
             ))

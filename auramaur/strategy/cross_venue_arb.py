@@ -28,7 +28,6 @@ from __future__ import annotations
 
 from auramaur.strategy.protocols import ExecutionMode
 
-import json
 from datetime import datetime, timezone
 
 import structlog
@@ -168,7 +167,10 @@ class CrossVenueArbPillar:
             raw = await self._analyzer._call_llm(EQUIVALENCE_PROMPT.format(
                 question_a=a.question, description_a=(a.description or "")[:600],
                 question_b=b.question, description_b=(b.description or "")[:600]))
-            parsed = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
+            # Shared robust parser (fences, prose tails, braces inside strings)
+            # — one implementation for every LLM-JSON call site, not a clone.
+            from auramaur.nlp.analyzer import _parse_claude_json
+            parsed = _parse_claude_json(raw)
             orientation = str(parsed.get("orientation", "none"))
             confidence = float(parsed.get("confidence", 0.0))
             reasoning = str(parsed.get("counterexample", ""))[:400]
