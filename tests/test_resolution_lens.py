@@ -831,3 +831,33 @@ def test_pin_claude_bypasses_router_and_uses_reserve():
                     pass  # got PAST the budget gate (reserved slice)
 
     asyncio.run(run())
+
+
+def test_budget_exhaustion_never_strikes_or_caches():
+    """BudgetExhausted is a GLOBAL condition, not the market's fault: it must
+    not count toward the 3-strike give-up, no matter how many cycles it lasts
+    — a day-long budget outage was permanently neutral-caching every scanned
+    market (5 markets poisoned on 2026-07-02 before this fix)."""
+    async def run():
+        from auramaur.nlp.errors import BudgetExhausted
+
+        db = Database(":memory:"); await db.connect()
+        m = _market()
+        a = MagicMock()
+        a._call_llm = AsyncMock(side_effect=BudgetExhausted("daily cap"))
+        p = _pillar(db, _settings(), [m], analyzer=a)
+        await p._ensure_schema()
+
+        for _ in range(10):  # many cycles of exhaustion
+            assert await p._verdict(m) is None
+        row = await db.fetchone(
+            "SELECT 1 FROM lens_verdicts WHERE market_id = ?", (m.id,))
+        assert row is None                       # nothing cached, ever
+        assert p._verdict_failures.get(m.id, 0) == 0  # no strikes accrued
+
+        # Budget returns -> the very next call succeeds normally.
+        p._analyzer = _analyzer()
+        v = await p._verdict(m)
+        assert v is not None and v[1] == 0.8
+
+    asyncio.run(run())
