@@ -34,7 +34,6 @@ from __future__ import annotations
 
 from auramaur.strategy.protocols import ExecutionMode
 
-import json
 import re
 from datetime import datetime, timezone
 
@@ -204,7 +203,7 @@ def kalshi_ladder_pairs(markets: list[Market]) -> list[tuple[Market, Market, str
 # LLM verification prompt (fuzzy pairs only)
 # ----------------------------------------------------------------------
 
-ENTAILMENT_PROMPT = """You are auditing two prediction markets for STRICT logical entailment at the resolution-criteria level. Be adversarial: the default answer is "none".
+ENTAILMENT_PROMPT = """You are auditing two prediction markets for STRICT logical entailment or mutual exclusivity at the resolution-criteria level. Be adversarial: the default answer is "none".
 
 Market A: "{question_a}"
 Resolution details A: {description_a}
@@ -212,10 +211,10 @@ Resolution details A: {description_a}
 Market B: "{question_b}"
 Resolution details B: {description_b}
 
-Strict entailment means: in EVERY possible world, if the implier resolves YES then the implied market MUST resolve YES under its own written criteria. Consider timing windows, qualifying language, different resolution sources, and edge cases. If you can construct ANY plausible scenario where the implier resolves YES and the implied resolves NO, the entailment fails.
+Strict entailment means: in EVERY possible world, if the implier resolves YES then the implied market MUST resolve YES under its own written criteria (or B resolves NO if they are mutually exclusive / a_implies_not_b). Consider timing windows, qualifying language, different resolution sources, and edge cases. If you can construct ANY plausible scenario where the relationship fails, answer "none".
 
 Respond with ONLY this JSON:
-{{"direction": "a_implies_b" | "b_implies_a" | "none", "confidence": 0.0-1.0, "counterexample": "<the best scenario that breaks the strongest candidate direction, or 'none found'>"}}"""
+{{"direction": "a_implies_b" | "b_implies_a" | "a_implies_not_b" | "none", "confidence": 0.0-1.0, "counterexample": "<the best scenario that breaks the strongest candidate direction, or 'none found'>"}}"""
 
 
 # ----------------------------------------------------------------------
@@ -317,15 +316,40 @@ class EntailmentArbPillar:
                      total=len(rows or []))
         return out
 
+    # Bump when ENTAILMENT_PROMPT's answer schema changes: cached verdicts from
+    # an older prompt can never contain the new directions (the v1 cache held
+    # permanent 'none' rows written before a_implies_not_b existed, silently
+    # killing mutual-exclusivity for every previously-scanned pair). Rows with
+    # an older source are ignored on read and re-verified once under the new
+    # prompt.
+    _VERDICT_SOURCE = "llm-v2"
+
+    @staticmethod
+    def _to_call_frame(direction: str, swapped: bool) -> str:
+        """Map a sorted-frame verdict back to the caller's (a, b) frame.
+
+        The prompt and the cache are canonicalized to sorted-id order, but the
+        caller interprets the direction in its own argument order. Without this
+        remap every fuzzy pair where a.id > b.id came back inverted — real
+        violations were dropped and legitimate spreads were entered backwards.
+        a_implies_not_b (mutual exclusivity) is symmetric; no remap needed."""
+        if not swapped:
+            return direction
+        return {"a_implies_b": "b_implies_a",
+                "b_implies_a": "a_implies_b"}.get(direction, direction)
+
     async def _verify_llm(self, a: Market, b: Market):
-        """Cached adversarial entailment verdict for a fuzzy pair."""
+        """Cached adversarial entailment verdict for a fuzzy pair, returned in
+        the CALLER's (a, b) frame."""
         key = tuple(sorted((a.id, b.id)))
+        swapped = key[0] != a.id
         row = await self._db.fetchone(
             "SELECT direction, confidence FROM entailment_verdicts "
-            "WHERE market_id_a = ? AND market_id_b = ?", key,
+            "WHERE market_id_a = ? AND market_id_b = ? AND source = ?",
+            (*key, self._VERDICT_SOURCE),
         )
         if row is not None:
-            return row["direction"], float(row["confidence"])
+            return self._to_call_frame(row["direction"], swapped), float(row["confidence"])
         if self._analyzer is None:
             return "none", 0.0
         first, second = (a, b) if key[0] == a.id else (b, a)
@@ -336,22 +360,23 @@ class EntailmentArbPillar:
         direction, confidence, reasoning = "none", 0.0, ""
         try:
             raw = await self._analyzer._call_llm(prompt)
-            parsed = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
+            from auramaur.nlp.analyzer import _parse_claude_json
+            parsed = _parse_claude_json(raw)
             direction = str(parsed.get("direction", "none"))
             confidence = float(parsed.get("confidence", 0.0))
             reasoning = str(parsed.get("counterexample", ""))[:400]
-            if direction not in ("a_implies_b", "b_implies_a"):
+            if direction not in ("a_implies_b", "b_implies_a", "a_implies_not_b"):
                 direction = "none"
         except Exception as e:
             log.warning("entailment.llm_parse_error", a=a.id, b=b.id, error=str(e))
         await self._db.execute(
             """INSERT OR REPLACE INTO entailment_verdicts
                (market_id_a, market_id_b, direction, confidence, source, reasoning)
-               VALUES (?, ?, ?, ?, 'llm', ?)""",
-            (key[0], key[1], direction, confidence, reasoning),
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (key[0], key[1], direction, confidence, self._VERDICT_SOURCE, reasoning),
         )
         await self._db.commit()
-        return direction, confidence
+        return self._to_call_frame(direction, swapped), confidence
 
     def _required_gap(self, implier: Market, implied: Market) -> float:
         """Minimum violation gap to be a real arb on these legs.
@@ -386,7 +411,7 @@ class EntailmentArbPillar:
                 log.debug("entailment.kalshi_series_error", series=series, error=str(e))
                 continue
             markets.extend(m for m in rows if self._real_book(m))
-        pairs = [(impl, imp, why, 1.0) for impl, imp, why in kalshi_ladder_pairs(markets)]
+        pairs = [(impl, imp, why, 1.0, False) for impl, imp, why in kalshi_ladder_pairs(markets)]
         if pairs:
             log.info("entailment.kalshi_ladders", pairs=len(pairs), markets=len(markets))
         return pairs
@@ -414,34 +439,44 @@ class EntailmentArbPillar:
         # 1. Deterministic ladders — direction known mathematically.
         #    Polymarket (question-keyed) + Kalshi econ bins (ticker-keyed,
         #    series-fetched, fee-cleared in the gate below).
-        candidates: list[tuple[Market, Market, str, float]] = (
+        candidates: list[tuple[Market, Market, str, float, bool]] = (
             await self._kalshi_ladder_candidates()
         )
         candidates += [
-            (impl, imp, why, 1.0) for impl, imp, why in ladder_pairs(good)
+            (impl, imp, why, 1.0, False) for impl, imp, why in ladder_pairs(good)
         ]
 
         # 2. Fuzzy conditional pairs — verify with the LLM ONLY when a
-        # violation is on the table (saves calls), direction never trusted
-        # from the correlator.
+        # violation is on the table (saves calls).
         if cfg.llm_enabled and self._analyzer is not None:
             for a, b in await self._conditional_pairs(by_id):
-                gap_ab = a.outcome_yes_price - b.outcome_yes_price
-                if abs(gap_ab) < cfg.min_gap:
+                pa, pb = a.outcome_yes_price, b.outcome_yes_price
+                has_pos_violation = abs(pa - pb) >= cfg.min_gap
+                has_neg_violation = (pa + pb - 1.0) >= cfg.min_gap
+                if not (has_pos_violation or has_neg_violation):
                     continue
                 direction, conf = await self._verify_llm(a, b)
                 if conf < cfg.llm_min_confidence:
                     continue
                 if direction == "a_implies_b":
-                    candidates.append((a, b, "llm-verified", conf))
+                    candidates.append((a, b, "llm-verified", conf, False))
                 elif direction == "b_implies_a":
-                    candidates.append((b, a, "llm-verified", conf))
+                    candidates.append((b, a, "llm-verified", conf, False))
+                elif direction == "a_implies_not_b":
+                    candidates.append((a, b, "llm-verified-neg", conf, True))
 
         placed = 0
-        for implier, implied, why, conf in candidates:
+        for implier, implied, why, conf, is_neg in candidates:
             if placed >= cfg.max_pairs_per_cycle:
                 break
-            gap = implier.outcome_yes_price - implied.outcome_yes_price
+            
+            if is_neg:
+                # Negative implication: P(A) + P(B) > 1.0
+                gap = implier.outcome_yes_price + implied.outcome_yes_price - 1.0
+            else:
+                # Positive implication: P(A) > P(B)
+                gap = implier.outcome_yes_price - implied.outcome_yes_price
+
             # Fee-aware floor: Polymarket uses min_gap; Kalshi must clear both
             # legs' taker fees + buffer, or the "free" arb loses to fees.
             if gap < self._required_gap(implier, implied):
@@ -449,7 +484,7 @@ class EntailmentArbPillar:
             if await self._already_traded(implier.id, implied.id):
                 continue
             try:
-                if await self._enter_pair(implier, implied, gap, why, conf):
+                if await self._enter_pair(implier, implied, gap, why, conf, is_neg):
                     placed += 1
             except Exception as e:
                 log.error("entailment.entry_error", a=implier.id, b=implied.id,
@@ -461,7 +496,12 @@ class EntailmentArbPillar:
     # -- execution --------------------------------------------------------
 
     def _leg_signal(self, market: Market, side: OrderSide, fair: float,
-                    gap: float, why: str) -> Signal:
+                    gap: float, why: str, is_neg: bool = False) -> Signal:
+        summary = (
+            f"Entailment arb ({why}): P(A) + P(B) must be <= 1.0."
+            if is_neg else
+            f"Entailment arb ({why}): P(implier) must be <= P(implied)."
+        )
         return Signal(
             market_id=market.id,
             market_question=market.question,
@@ -472,13 +512,13 @@ class EntailmentArbPillar:
             claude_confidence=Confidence.HIGH,
             market_prob=market.outcome_yes_price,
             edge=gap * 100.0,
-            evidence_summary=f"Entailment arb ({why}): P(implier) must be <= P(implied).",
+            evidence_summary=summary,
             recommended_side=side,
             strategy_source="entailment_arb",
         )
 
     async def _enter_pair(self, implier: Market, implied: Market,
-                          gap: float, why: str, conf: float) -> bool:
+                          gap: float, why: str, conf: float, is_neg: bool = False) -> bool:
         cfg = self._settings.entailment_arb
         exchange_a = self._exchange_for(implier)
         exchange_b = self._exchange_for(implied)
@@ -492,12 +532,20 @@ class EntailmentArbPillar:
             )
             return False
 
-        # Leg 1: NO on the implier (its YES is overpriced vs the bound).
-        sig_a = self._leg_signal(implier, OrderSide.SELL,
-                                 fair=implied.outcome_yes_price, gap=gap, why=why)
-        # Leg 2: YES on the implied (its YES is underpriced vs the bound).
-        sig_b = self._leg_signal(implied, OrderSide.BUY,
-                                 fair=implier.outcome_yes_price, gap=gap, why=why)
+        if is_neg:
+            # Leg 1: NO on implier/A (YES is overpriced vs the bound 1 - pb).
+            sig_a = self._leg_signal(implier, OrderSide.SELL,
+                                     fair=1.0 - implied.outcome_yes_price, gap=gap, why=why, is_neg=True)
+            # Leg 2: NO on implied/B (YES is overpriced vs the bound 1 - pa).
+            sig_b = self._leg_signal(implied, OrderSide.SELL,
+                                     fair=1.0 - implier.outcome_yes_price, gap=gap, why=why, is_neg=True)
+        else:
+            # Leg 1: NO on the implier (its YES is overpriced vs the bound).
+            sig_a = self._leg_signal(implier, OrderSide.SELL,
+                                     fair=implied.outcome_yes_price, gap=gap, why=why)
+            # Leg 2: YES on the implied (its YES is underpriced vs the bound).
+            sig_b = self._leg_signal(implied, OrderSide.BUY,
+                                     fair=implier.outcome_yes_price, gap=gap, why=why)
 
         dec_a = await self._risk.evaluate(sig_a, implier)
         dec_b = await self._risk.evaluate(sig_b, implied)

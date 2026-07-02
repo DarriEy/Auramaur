@@ -138,7 +138,7 @@ def test_enters_band_market_and_writes_all_rails():
         await db.connect()
         settings = _settings()
         ex = _exchange()
-        pillar, calibration = _pillar(db, settings, [_market(yes=0.85)], exchange=ex)
+        pillar, calibration = _pillar(db, settings, [_market(yes=0.92)], exchange=ex)
 
         entered = await pillar.run_once()
         assert entered == 1
@@ -148,7 +148,7 @@ def test_enters_band_market_and_writes_all_rails():
 
         sig = await db.fetchone("SELECT * FROM signals WHERE strategy_source='bias_harvest'")
         assert sig is not None
-        assert abs(sig["claude_prob"] - 0.89) < 1e-9  # 0.85 + 0.04 uplift
+        assert abs(sig["claude_prob"] - 0.96) < 1e-9  # 0.92 + 0.04 uplift
         assert sig["action"] == "BUY"
 
         trade = await db.fetchone("SELECT * FROM trades WHERE strategy_source='bias_harvest'")
@@ -183,16 +183,16 @@ def test_paper_false_passes_global_mode():
 
 
 def test_favored_no_side_enters_as_sell_signal():
-    """YES at 0.12 -> favored side is NO at 0.88 -> SELL signal (buys NO)."""
+    """YES at 0.05 -> favored side is NO at 0.95 -> SELL signal (buys NO)."""
     async def run():
         db = Database(":memory:")
         await db.connect()
-        pillar, _ = _pillar(db, _settings(), [_market(yes=0.12)])
+        pillar, _ = _pillar(db, _settings(), [_market(yes=0.05)])
         entered = await pillar.run_once()
         assert entered == 1
         sig = await db.fetchone("SELECT * FROM signals WHERE strategy_source='bias_harvest'")
         assert sig["action"] == "SELL"
-        assert abs(sig["claude_prob"] - 0.08) < 1e-9  # 0.12 - 0.04 uplift
+        assert abs(sig["claude_prob"] - 0.01) < 1e-9  # 0.05 - 0.04 uplift
         pos = await db.fetchone("SELECT token FROM portfolio WHERE market_id='m1'")
         assert pos["token"] == "NO"
         await db.close()
@@ -425,5 +425,61 @@ def test_paper_maker_fill_rate_haircut_gates_entries():
         assert 120 < admitted < 280  # not all, not none — a real partition
         await db.close()
         await db2.close()
+
+    asyncio.run(run())
+
+
+def test_bidirectional_regimes():
+    """Test the three distinct bands of the bidirectional strategy:
+    1. [0.60, 0.70) -> buy favored (yes=0.65 -> BUY YES, yes=0.35 -> BUY NO/SELL)
+    2. [0.70, 0.90) -> buy longshot (yes=0.80 -> BUY NO/SELL, yes=0.20 -> BUY YES)
+    3. [0.90, 0.97) -> buy favored (yes=0.95 -> BUY YES, yes=0.05 -> BUY NO/SELL)
+
+    The deep band keeps the proven 'bias_harvest' attribution; the two NEW
+    regimes are tagged 'bias_harvest_wide' so they accrue their own graduation
+    cells instead of inheriting the deep band's live probation record.
+    """
+    async def run():
+        # Band 1: yes=0.65 (favored YES) -> BUY YES, wide tag
+        db1 = Database(":memory:")
+        await db1.connect()
+        pillar1, _ = _pillar(db1, _settings(band_lo=0.60), [_market(yes=0.65)])
+        assert await pillar1.run_once() == 1
+        sig1 = await db1.fetchone("SELECT * FROM signals WHERE strategy_source='bias_harvest_wide'")
+        assert sig1 is not None and sig1["action"] == "BUY"
+        pos1 = await db1.fetchone("SELECT token FROM portfolio WHERE market_id='m1'")
+        assert pos1["token"] == "YES"
+        await db1.close()
+
+        # Band 2: yes=0.80 (favored YES) -> BUY NO (SELL action), wide tag
+        db2 = Database(":memory:")
+        await db2.connect()
+        pillar2, _ = _pillar(db2, _settings(band_lo=0.60), [_market(yes=0.80)])
+        assert await pillar2.run_once() == 1
+        sig2 = await db2.fetchone("SELECT * FROM signals WHERE strategy_source='bias_harvest_wide'")
+        assert sig2 is not None and sig2["action"] == "SELL"
+        pos2 = await db2.fetchone("SELECT token FROM portfolio WHERE market_id='m1'")
+        assert pos2["token"] == "NO"
+        await db2.close()
+
+        # Band 3: yes=0.95 (favored YES) -> BUY YES, PROVEN tag
+        db3 = Database(":memory:")
+        await db3.connect()
+        pillar3, _ = _pillar(db3, _settings(band_lo=0.60), [_market(yes=0.95)])
+        assert await pillar3.run_once() == 1
+        sig3 = await db3.fetchone("SELECT * FROM signals WHERE strategy_source='bias_harvest'")
+        assert sig3 is not None and sig3["action"] == "BUY"
+        pos3 = await db3.fetchone("SELECT token FROM portfolio WHERE market_id='m1'")
+        assert pos3["token"] == "YES"
+        await db3.close()
+
+        # One-shot rule spans BOTH tags: a wide entry blocks any later entry
+        # on the same market.
+        db4 = Database(":memory:")
+        await db4.connect()
+        pillar4, _ = _pillar(db4, _settings(band_lo=0.60), [_market(yes=0.80)])
+        assert await pillar4.run_once() == 1
+        assert await pillar4._already_entered_or_held("m1") is True
+        await db4.close()
 
     asyncio.run(run())
