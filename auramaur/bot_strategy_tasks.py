@@ -299,7 +299,7 @@ class StrategyTaskMixin:
             try:
                 await pillar.run_once()
             except Exception as e:
-                log.error("lens.cycle_error", error=str(e))
+                log.error("lens.cycle_error", error=str(e), exc_info=True)
             await asyncio.sleep(interval)
 
     async def _task_resolution_lens_kalshi(self) -> None:
@@ -339,7 +339,9 @@ class StrategyTaskMixin:
             try:
                 await pillar.run_once()
             except Exception as e:
-                log.error("lens.kalshi_cycle_error", error=str(e))
+                # exc_info: 'database is locked' with no stack burned an
+                # evening of diagnosis — always capture where a cycle died.
+                log.error("lens.kalshi_cycle_error", error=str(e), exc_info=True)
             await asyncio.sleep(interval)
 
     async def _task_oddlot_tender(self) -> None:
