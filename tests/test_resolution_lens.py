@@ -861,3 +861,69 @@ def test_budget_exhaustion_never_strikes_or_caches():
         assert v is not None and v[1] == 0.8
 
     asyncio.run(run())
+
+
+def test_kalshi_instance_merges_close_window_slice():
+    """Kalshi's generic discovery surfaces mostly ultra-long-dated novelty
+    markets, so the DB-backed lexical scan starves the Kalshi lens (funnel
+    audit: zero candidates passed all gates). When the venue's discovery
+    exposes get_markets_by_close_window, the lens must merge that near-dated
+    tradeable slice (trigger-filtered, deduped) into its scan — and a
+    discovery without the method (Polymarket) stays a no-op."""
+    async def run():
+        from auramaur.strategy.resolution_lens import ResolutionLensPillar
+
+        db = Database(":memory:")
+        await db.connect()
+        settings = _settings()
+        calibration = MagicMock(); calibration.record_prediction = AsyncMock()
+
+        in_window = _market(
+            mid="KXTEST-26AUG-T5", liquidity=350.0, days_out=20.0,
+            question="Will the BLS officially confirm CPI above 5 percent?")
+        in_window.exchange = "kalshi"
+        no_trigger = _market(mid="KXNOPE", liquidity=350.0, days_out=20.0,
+                             question="Higher temperature in NYC?")
+        no_trigger.exchange = "kalshi"
+
+        discovery = MagicMock()
+        discovery.get_markets = AsyncMock(return_value=[])
+        discovery.get_markets_by_close_window = AsyncMock(
+            return_value=[in_window, no_trigger])
+
+        pillar = ResolutionLensPillar(
+            db=db, settings=settings, discovery=discovery,
+            exchange=_exchange(), risk_manager=_risk(),
+            pnl_tracker=PnLTracker(db, settings), calibration=calibration,
+            analyzer=_analyzer(), exchange_name="kalshi",
+            source_tag="resolution_lens_kalshi",
+        )
+        entered = await pillar.run_once()
+
+        # The close-window fetch was used with the lens's resolution window...
+        assert discovery.get_markets_by_close_window.await_count == 1
+        args = discovery.get_markets_by_close_window.await_args
+        assert args.args[1] > args.args[0] > 0  # (min_ts, max_ts) sane
+        # ...the trigger-bearing in-window market traded; the no-trigger one
+        # was filtered before any LLM call.
+        assert entered == 1
+        sig = await db.fetchone(
+            "SELECT market_id FROM signals WHERE strategy_source='resolution_lens_kalshi'")
+        assert sig is not None and sig["market_id"] == "KXTEST-26AUG-T5"
+        row = await db.fetchone(
+            "SELECT 1 FROM lens_verdicts WHERE market_id='KXNOPE'")
+        assert row is None
+
+        # A discovery WITHOUT the method degrades to the plain scan (no-op).
+        class _NoWindow:
+            async def get_markets(self, limit=300):
+                return []
+        poly = ResolutionLensPillar(
+            db=db, settings=settings, discovery=_NoWindow(),
+            exchange=_exchange(), risk_manager=_risk(),
+            pnl_tracker=PnLTracker(db, settings), calibration=calibration,
+            analyzer=_analyzer(),
+        )
+        assert await poly._close_window_candidates() == []
+
+    asyncio.run(run())
