@@ -274,13 +274,22 @@ class ResolutionLensPillar:
                 return None
             log.warning("lens.verdict_gave_up", market_id=m.id, error=str(e))
             fair, score, mech = m.outcome_yes_price, 0.0, "none"
-        await self._db.execute(
-            """INSERT OR REPLACE INTO lens_verdicts
-               (market_id, fair_prob, gap_score, mechanism, verified)
-               VALUES (?, ?, ?, ?, -1)""",
-            (m.id, fair, score, mech),
-        )
-        await self._db.commit()
+        try:
+            await self._db.execute(
+                """INSERT OR REPLACE INTO lens_verdicts
+                   (market_id, fair_prob, gap_score, mechanism, verified)
+                   VALUES (?, ?, ?, ?, -1)""",
+                (m.id, fair, score, mech),
+            )
+            await self._db.commit()
+        except Exception as e:
+            # A failed CACHE write must not kill the cycle or waste the LLM
+            # call that just succeeded — the verdict is valid right now, it
+            # just won't be cached (recomputed next cycle). Observed:
+            # transient 'database is locked' killed every Kalshi cycle at its
+            # first verdict write (2026-07-03), zeroing the spike.
+            log.warning("lens.verdict_cache_write_failed", market_id=m.id,
+                        error=str(e))
         return fair, score, mech, -1
 
     async def _verify_mechanism(self, m: Market, fair: float, mechanism: str) -> bool:
