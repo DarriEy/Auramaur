@@ -762,7 +762,12 @@ class ResolutionLensConfig(BaseModel):
     # the hypothesis that Kalshi's CFTC-legalistic resolution criteria carry
     # fine-print mispricing. Kalshi's book is thinner, so it gets its own floor.
     kalshi_enabled: bool = False
-    kalshi_min_liquidity: float = 300.0
+    # Kalshi's bulk liquidity field underreports badly (top-of-book only, often
+    # 0 even on active econ ladders) — 300 starved the spike to zero verdicts
+    # (2026-07-03 funnel: 14/218 candidates cleared it, none also in-window).
+    # 50 matches the cross_venue floor; safe for a paper spike that holds to
+    # resolution, where illiquidity can't block an exit.
+    kalshi_min_liquidity: float = 50.0
 
 
 class GraduationConfig(BaseModel):

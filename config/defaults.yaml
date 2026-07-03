@@ -611,8 +611,12 @@ resolution_lens:
   # 'resolution_lens_kalshi' (its own graduation cells; can't dilute the proven
   # Poly lens). Pre-registered kill: <5 signals in 2wk or negative paper
   # realized -> flip back to false.
-  kalshi_enabled: true     # spike STARTED 2026-06-25 — 2wk paper measurement
-  kalshi_min_liquidity: 300.0
+  # Spike clock RESTARTED 2026-07-03: the instrument was disconnected until
+  # now (empty descriptions -> rules-text fix; long-dated-only discovery ->
+  # close-window merge; 300 floor vs underreporting bulk liquidity field ->
+  # 50, matching cross_venue). Don't judge the pre-07-03 silence.
+  kalshi_enabled: true
+  kalshi_min_liquidity: 50.0
   min_gap_score: 0.4       # lens-judged headline/criteria divergence floor
   high_conf_gap_score: 0.7 # >= this -> HIGH confidence (clears divergence filter)
   min_edge: 0.08           # |strict fair - market| floor

@@ -521,6 +521,32 @@ class ResolutionLensPillar:
                  live_gap_cells=len(live_cats), scanned=len(markets))
         return markets
 
+    async def _close_window_candidates(self) -> list[Market]:
+        """Near-dated tradeable slice fetched LIVE from the venue, for venues
+        whose generic discovery starves the DB scan.
+
+        Kalshi's /events default ordering surfaces mostly ultra-long-dated
+        novelty markets, so the markets table almost never holds Kalshi rows
+        inside the lens's 12h-90d resolution window (funnel audit 2026-07-03:
+        9 of 218 trigger candidates in-window, 0 passing all gates) — the
+        same discovery bias that starved informed_flow. The close-window
+        endpoint returns the actually-tradeable slice (econ ladders, event
+        markets) with fresh rules text. No-op for venues whose discovery
+        lacks the method (Polymarket's Gamma scan doesn't have this bias)."""
+        fetch = getattr(self._discovery, "get_markets_by_close_window", None)
+        if fetch is None:
+            return []
+        cfg = self._settings.resolution_lens
+        now = int(datetime.now(timezone.utc).timestamp())
+        min_ts = now + int(cfg.min_hours_to_resolution * 3600)
+        max_ts = now + int(cfg.max_days_to_resolution * 86400)
+        try:
+            rows = await fetch(min_ts, max_ts, limit=cfg.scan_limit)
+        except Exception as e:
+            log.debug("lens.close_window_error", error=str(e))
+            return []
+        return [m for m in rows or [] if has_lens_trigger(m.question)]
+
     async def run_once(self) -> int:
         cfg = self._settings.resolution_lens
         if not cfg.enabled:
@@ -529,8 +555,16 @@ class ResolutionLensPillar:
         # Lexical pre-filter over the whole universe; fall back to the volume
         # scan only if the markets table is empty (cold start).
         markets = await self._lexical_candidates()
+        lexical_n = len(markets)
+        # Merge the live near-dated venue slice (dedup by id; DB rows first so
+        # cached-verdict prioritization keeps working on known ids).
+        fresh = await self._close_window_candidates()
+        if fresh:
+            seen_ids = {m.id for m in markets}
+            markets += [m for m in fresh if m.id not in seen_ids]
         if markets:
-            log.info("lens.candidates", lexical=len(markets))
+            log.info("lens.candidates", lexical=lexical_n,
+                     close_window=len(markets) - lexical_n)
         else:
             markets = await self._discovery.get_markets(limit=cfg.scan_limit)
         markets = await self._prioritize_known_gaps(markets, cfg)
