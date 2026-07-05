@@ -489,6 +489,39 @@ long_horizon:
   interval_seconds: 1800
   exclude_categories: ["politics_us", "politics_intl"]
 
+agent_trader:
+  # LLM day-trader — the Hermes agent paradigm rebuilt as a first-class pillar
+  # (the external-agent bridge fabricated its own ledger; this rides the bot's
+  # rails: full risk gate, gateway placement, resolution-tracker settlement).
+  # THE EXPERIMENT: the same mandate/candidates/memory runs on EVERY model
+  # below; each is its own attribution cell (agent_trader_<alias>) so the paper
+  # ledger shows whether model tier ("intelligence") changes directional edge.
+  # PAPER-FORCED. One non-reserved Claude CLI call per model per cycle
+  # (~36/day at 3 models x 2h) — stops early when the shared budget is low, so
+  # it can never starve the pinned lens slice.
+  enabled: true
+  paper: true
+  interval_seconds: 7200
+  models:
+    - alias: haiku
+      model: claude-haiku-4-5
+    - alias: sonnet
+      model: claude-sonnet-5
+    - alias: opus
+      model: claude-opus-4-8
+  scan_limit: 200
+  markets_per_cycle: 10
+  max_entries_per_cycle: 2
+  max_open_per_model: 10
+  stake_usd: 10.0
+  min_liquidity: 1000.0
+  min_days_to_resolution: 0.25
+  max_days_to_resolution: 30.0
+  min_edge_pts: 5.0
+  memory_events: 12
+  exclude_categories: []
+  llm_timeout_seconds: 240
+
 informed_flow:
   # Informed-flow follower over Kalshi — mimic the side of abnormally-large
   # (informed) order flow. Abnormal trade size (ATS) proxies non-liquidity trading

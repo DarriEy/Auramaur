@@ -66,6 +66,30 @@ class StrategyTaskMixin:
                 log.error("long_horizon.cycle_error", error=str(e))
             await asyncio.sleep(interval)
 
+    async def _task_agent_trader(self) -> None:
+        """Periodic multi-model LLM day-trader (paper-forced; the
+        intelligence-cap A/B — one attribution cell per model)."""
+        from auramaur.strategy.agent_trader import AgentTraderPillar
+
+        pillar = AgentTraderPillar(
+            db=self._components.db,
+            settings=self.settings,
+            discovery=self._components.discovery,
+            exchange=self._components.exchange,
+            risk_manager=self._components.risk_manager,
+            pnl_tracker=self._components.pnl_tracker,
+            calibration=self._components.calibration,
+        )
+        interval = max(600, self.settings.agent_trader.interval_seconds)
+        while self._running:
+            if await self._check_kill_switch():
+                return
+            try:
+                await pillar.run_once()
+            except Exception as e:
+                log.error("agent_trader.cycle_error", error=str(e))
+            await asyncio.sleep(interval)
+
     async def _task_informed_flow(self) -> None:
         """Periodic Kalshi informed-flow follower (abnormal-trade-size). Paper-
         forced; no-ops cleanly when the Kalshi venue isn't composed."""
