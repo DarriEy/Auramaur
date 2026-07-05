@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import structlog
 
 from auramaur.exchange.models import (
@@ -57,8 +59,12 @@ class SmartOrderRouter:
         3. BUY entries are taker-or-skip: price at the best ask when the
            realizable edge (edge minus cross cost) clears the minimum-edge
            floor and the ask is within ``entry_max_cross_cents`` of the
-           reference price (the cents cap is waived above 40% edge);
-           otherwise raise :class:`UnmarketableSignal`.
+           reference price (the cents cap is waived above 40% edge, but
+           only when the fair value for the bought token also clears the
+           ask by the minimum-edge floor in absolute points); otherwise
+           raise :class:`UnmarketableSignal`. The token count is re-derived
+           from the dollar intent at the crossed price so the notional
+           can't inflate when the ask sits above the reference.
         4. SELL orders keep the passive path (limit one tick inside the
            book, market-order fallbacks) — exits must get out, and "no
            fill" is not an acceptable outcome for them.
@@ -131,9 +137,23 @@ class SmartOrderRouter:
                     f"{min_edge_pct:.2f}% (ref {base_order.price:.2f}, ask {ask:.2f})"
                 )
             # Cents cap: never chase more than entry_max_cross_cents above
-            # the reference price. Very high edges (>40%) waive the cap —
-            # the proportional floor above still bounds them.
-            if edge_pct <= 40.0 and (ask - base_order.price) > max_cross + 1e-9:
+            # the reference price. Very high edges (>40%) may waive the cap,
+            # but only when the model's fair value for the token being bought
+            # clears the ask by the minimum-edge floor in ABSOLUTE points.
+            # signal.edge is relative to fair value, so on cheap markets a
+            # few points of gap reads as a huge percentage — exactly where
+            # thin books park asks at multiples of fair value; a relative
+            # threshold alone would waive the cap into those asks.
+            fair_token = (
+                signal.claude_prob
+                if base_order.token == TokenType.YES
+                else 1.0 - signal.claude_prob
+            )
+            waive_cents_cap = (
+                edge_pct > 40.0
+                and (fair_token - ask) * 100.0 >= min_edge_pct
+            )
+            if not waive_cents_cap and (ask - base_order.price) > max_cross + 1e-9:
                 raise UnmarketableSignal(
                     f"ask {ask:.2f} is {round((ask - base_order.price) * 100)}c above "
                     f"reference {base_order.price:.2f} (cap {round(max_cross * 100)}c)"
@@ -141,6 +161,35 @@ class SmartOrderRouter:
             crossed_to_ask = True
             order_type = OrderType.LIMIT
             limit_price = max(0.01, min(0.99, round(ask, 2)))
+
+            # The token count was derived at the REFERENCE price; the fill
+            # happens at limit_price. Re-derive it from the original dollar
+            # intent so the notional can't silently inflate by
+            # limit/reference when crossing up (shrink-only: a cheaper fill
+            # keeps the token count and simply spends less). Applied again
+            # after depth-aware sweep pricing, which can lift the limit.
+            intended_dollars = base_order.size * base_order.price
+
+            def _rederived_size(current: float, price: float) -> float:
+                if price <= base_order.price + 1e-9 or price <= 0:
+                    return current
+                resized = round(intended_dollars / price, 2)
+                # Venue minimums (5 tokens / $1 notional), same floor as
+                # prepare_order; the bump never exceeds the pre-cross size.
+                resized = max(resized, max(5.0, math.ceil(100.0 / price) / 100))
+                return min(current, resized)
+
+            new_size = _rederived_size(base_order.size, limit_price)
+            if new_size < base_order.size - 1e-9:
+                log.info(
+                    "router.size_rederived_at_cross",
+                    market_id=market.id,
+                    reference=base_order.price,
+                    limit_price=limit_price,
+                    original_size=round(base_order.size, 2),
+                    resized=round(new_size, 2),
+                )
+                base_order = base_order.model_copy(update={"size": new_size})
 
             # Depth-aware sizing: the gate above only proved the BEST ask clears
             # the floor. For the FULL size we walk the asks up to the slippage
@@ -159,8 +208,8 @@ class SmartOrderRouter:
                 # Highest price that still leaves >= min_edge after slippage.
                 edge_budget_pts = max(0.0, edge_pct - min_edge_pct)
                 price_cap = base_order.price + edge_budget_pts / 100.0
-                # Honor the cents cap too (waived above 40% edge, mirroring above).
-                if edge_pct <= 40.0:
+                # Honor the cents cap too (same waiver as above).
+                if not waive_cents_cap:
                     price_cap = min(price_cap, base_order.price + max_cross)
                 price_cap = max(price_cap, ask)  # always at least take the best ask
                 price_cap = min(0.99, price_cap)
@@ -192,6 +241,11 @@ class SmartOrderRouter:
                 # matching means the effective fill is the VWAP (<= the limit).
                 if sweep_price > 0:
                     limit_price = max(0.01, min(0.99, round(sweep_price, 2)))
+                    # Sweep pricing can lift the limit past the best ask —
+                    # re-derive the size at the price we will actually pay.
+                    resized = _rederived_size(base_order.size, limit_price)
+                    if resized < base_order.size - 1e-9:
+                        base_order = base_order.model_copy(update={"size": resized})
                 cross_cost_pts = (vwap - base_order.price) * 100.0 if vwap else cross_cost_pts
                 realizable_edge = edge_pct - cross_cost_pts
 
