@@ -129,6 +129,22 @@ class SmartOrderRouter:
                     f"no asks on the book for {market.id} — dead or one-sided market"
                 )
             ask = book.best_ask
+            # Signal.edge is documented as ABSOLUTE points (see the model),
+            # so subtracting crossing costs in points below is sound — but a
+            # producer that slips back to a relative figure would inflate the
+            # budget exactly on cheap markets where thin books park asks at
+            # multiples of fair value. Clamp the edge basis to the gap the
+            # signal's own fair value implies for the token being bought; for
+            # conforming producers the fair-implied gap is >= the (fee-
+            # adjusted) edge, so this is a no-op.
+            fair_token = (
+                signal.claude_prob
+                if base_order.token == TokenType.YES
+                else 1.0 - signal.claude_prob
+            )
+            edge_pct = min(
+                edge_pct, max(0.0, (fair_token - base_order.price) * 100.0)
+            )
             cross_cost_pts = (ask - base_order.price) * 100.0
             realizable_edge = edge_pct - cross_cost_pts
             if realizable_edge < min_edge_pct:
@@ -137,18 +153,9 @@ class SmartOrderRouter:
                     f"{min_edge_pct:.2f}% (ref {base_order.price:.2f}, ask {ask:.2f})"
                 )
             # Cents cap: never chase more than entry_max_cross_cents above
-            # the reference price. Very high edges (>40%) may waive the cap,
-            # but only when the model's fair value for the token being bought
-            # clears the ask by the minimum-edge floor in ABSOLUTE points.
-            # signal.edge is relative to fair value, so on cheap markets a
-            # few points of gap reads as a huge percentage — exactly where
-            # thin books park asks at multiples of fair value; a relative
-            # threshold alone would waive the cap into those asks.
-            fair_token = (
-                signal.claude_prob
-                if base_order.token == TokenType.YES
-                else 1.0 - signal.claude_prob
-            )
+            # the reference price. Very high edges (>40 points) may waive the
+            # cap, but only when fair value for the token being bought also
+            # clears the ASK itself by the minimum-edge floor.
             waive_cents_cap = (
                 edge_pct > 40.0
                 and (fair_token - ask) * 100.0 >= min_edge_pct

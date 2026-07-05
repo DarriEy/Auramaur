@@ -198,9 +198,12 @@ async def test_takes_price_improvement_when_ask_below_reference():
 async def test_high_urgency_prices_at_real_ask():
     """edge > 40 used to submit at the stale reference price, which just
     rested on the book until the TTL reaper killed it. It must price at the
-    actual ask to be marketable (cents cap waived above 40% edge)."""
+    actual ask to be marketable (cents cap waived above 40 points of edge,
+    with fair value clearing the ask). The signal is coherent: fair 0.95 vs
+    reference 0.40 implies the 55-point edge it claims."""
     router = _router(_book(0.40, 0.55), base_price=0.40)
-    order = await router.route(_signal(edge=56.8), Market(id="m1", question="Q?"), 10.0, False)
+    order = await router.route(
+        _signal(edge=55.0, claude_prob=0.95), Market(id="m1", question="Q?"), 10.0, False)
     assert order is not None
     assert order.order_type == OrderType.LIMIT
     assert order.price == 0.55
@@ -218,15 +221,15 @@ async def test_high_urgency_still_skips_below_floor():
 
 
 @pytest.mark.asyncio
-async def test_waiver_needs_absolute_edge_at_the_ask():
-    """signal.edge is RELATIVE to fair value, so a few points of gap on a
-    cheap market reads as a huge percentage — the old >40% waiver then let
-    the router pay a dead-book ask at a multiple of fair value. The waiver
-    must also require fair value to clear the ASK by the min-edge floor in
-    absolute points: fair 0.13 vs ask 0.42 fails that, so the cents cap
-    holds and the entry is skipped."""
+async def test_relative_edge_clamped_to_fair_implied_gap():
+    """A producer that emits a RELATIVE edge (a few points of gap on a cheap
+    market reads as a huge percentage) used to both clear the floor and waive
+    the cents cap, letting the router pay a dead-book ask at a multiple of
+    fair value. The edge basis is now clamped to the gap the signal's own
+    fair value implies (fair 0.13 vs reference 0.08 = 5 points, not 47), so
+    crossing to a 0.42 ask fails the min-edge floor outright."""
     router = _router(_book(0.05, 0.42), base_price=0.08)
-    with pytest.raises(UnmarketableSignal, match="above"):
+    with pytest.raises(UnmarketableSignal, match="edge at the ask"):
         await router.route(
             _signal(edge=47.0, claude_prob=0.13, market_prob=0.08),
             Market(id="m1", question="Q?"), 10.0, False,
