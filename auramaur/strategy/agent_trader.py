@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import tempfile
 from datetime import datetime, timedelta, timezone
 
 import structlog
@@ -45,12 +46,19 @@ from auramaur.strategy.classifier import blocked_category_hit, ensure_category
 
 log = structlog.get_logger()
 
+# The arms may research the open web (same precedent as agent_analyzer) —
+# real evidence-gathering, identical for every arm, no bot-opinion leakage.
+_ALLOWED_TOOLS = "WebSearch,WebFetch"
+
 MANDATE = """\
 You are a prediction-market day trader running a small paper book. You are \
 judged purely on realized P&L per trade. You see your own recent record below \
 — learn from it: if a class of thesis keeps losing, stop making it.
 
 Rules:
+- You may use WebSearch/WebFetch to check current facts (prices, dates, \
+announcements, standings) before deciding. Base decisions ONLY on the market \
+data below plus your own research — you have no other context.
 - Only propose a trade when you believe the market price is wrong by at least \
 {min_edge_pts:.0f} points and you can say WHY in one concrete sentence (the \
 mechanism: what the crowd is mispricing and what you know that it doesn't).
@@ -337,13 +345,19 @@ class AgentTraderPillar:
             if call_budget.calls_today() >= limit:
                 raise BudgetExhausted(
                     f"non-reserved Claude budget ({limit}/{budget}) exhausted")
+        # cwd MUST be neutral: `claude -p` loads CLAUDE.md and the project
+        # memory from its working directory, and run from the repo root the
+        # arms were caught citing the operator's own market analyses ("your
+        # prior CPI work") — contaminating the A/B and correlating the arms.
         proc = await asyncio.create_subprocess_exec(
             "claude", "-p", prompt,
             "--output-format", "text",
             "--model", model,
             "--effort", effort,
+            "--allowedTools", _ALLOWED_TOOLS,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            cwd=tempfile.gettempdir(),
         )
         try:
             stdout, stderr = await asyncio.wait_for(

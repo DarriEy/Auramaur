@@ -219,6 +219,46 @@ async def test_one_model_failure_does_not_stop_other_arms(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_cli_call_isolated_and_tool_enabled(tmp_path, monkeypatch):
+    """The subprocess must run from a NEUTRAL cwd (claude -p loads CLAUDE.md
+    and project memory from its working directory — run from the repo root the
+    arms cited the operator's own analyses, contaminating the A/B) and with
+    the research tools enabled."""
+    import tempfile as _tempfile
+
+    import auramaur.strategy.agent_trader as at
+
+    captured = {}
+
+    class FakeProc:
+        returncode = 0
+
+        async def communicate(self):
+            return b'{"decisions": []}', b""
+
+    async def fake_exec(*cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return FakeProc()
+
+    monkeypatch.setattr(at.asyncio, "create_subprocess_exec", fake_exec)
+    pillar, db, _ = await _pillar(
+        tmp_path, [_model_spec()], [_market("m1")], "")
+    pillar._call_model = AgentTraderPillar._call_model.__get__(pillar)
+    try:
+        cfg = pillar._settings.agent_trader
+        out = await pillar._call_model("prompt", "claude-haiku-4-5", "medium", cfg)
+        assert out == '{"decisions": []}'
+        cmd = captured["cmd"]
+        assert "--allowedTools" in cmd
+        assert cmd[cmd.index("--allowedTools") + 1] == "WebSearch,WebFetch"
+        assert "--model" in cmd and "claude-haiku-4-5" in cmd
+        assert captured["kwargs"]["cwd"] == _tempfile.gettempdir()
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_sell_side_derived_from_prob_vs_market(tmp_path):
     # Model says 0.10 vs market 0.30 -> SELL YES (buy NO downstream).
     reply = '{"decisions": [{"market_id": "m1", "prob_yes": 0.10, "thesis": "t"}]}'

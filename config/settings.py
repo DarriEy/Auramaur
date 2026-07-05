@@ -545,7 +545,8 @@ class AgentTraderConfig(BaseModel):
     min_edge_pts: float = 5.0
     memory_events: int = 12
     exclude_categories: list[str] = []
-    llm_timeout_seconds: int = 240
+    # Generous: the arms may run WebSearch rounds before answering.
+    llm_timeout_seconds: int = 420
 
 
 class EconIndicatorConfig(BaseModel):
