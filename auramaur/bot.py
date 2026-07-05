@@ -1388,6 +1388,10 @@ class AuramaurBot(
         if self.settings.long_horizon.enabled:
             tasks.append(asyncio.create_task(self._task_long_horizon(), name="long_horizon"))
 
+        # Multi-model LLM day-trader (paper-forced; intelligence-cap A/B)
+        if self.settings.agent_trader.enabled:
+            tasks.append(asyncio.create_task(self._task_agent_trader(), name="agent_trader"))
+
         # Informed-flow follower over Kalshi (paper-forced; abnormal-trade-size)
         if self.settings.informed_flow.enabled:
             tasks.append(asyncio.create_task(self._task_informed_flow(), name="informed_flow"))

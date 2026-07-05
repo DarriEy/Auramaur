@@ -42,6 +42,9 @@ def _book_modes(settings) -> list[tuple[str, str, str]]:
     rl = settings.resolution_lens
     rows.append(("resolution_lens", *paper_mode(
         rl, f"gap>={rl.min_gap_score:.1f}, edge>={rl.min_edge*100:.0f}c")))
+    at = settings.agent_trader
+    rows.append(("agent_trader", *paper_mode(
+        at, f"models: {', '.join(m.alias for m in at.models)} — one cell each")))
 
     rows.append(("market_maker",
                  "LIVE" if settings.market_maker.enabled and settings.is_live

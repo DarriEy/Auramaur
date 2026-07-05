@@ -498,6 +498,56 @@ class LongHorizonConfig(BaseModel):
     exclude_categories: list[str] = ["politics_us", "politics_intl"]
 
 
+class AgentTraderModel(BaseModel):
+    """One experiment arm of the intelligence-cap A/B: a model identity plus
+    the CLI effort it runs at. ``alias`` names the attribution cell
+    (``agent_trader_<alias>``) — keep it stable or the cell's history splits."""
+
+    alias: str
+    model: str
+    effort: str = "medium"
+
+
+class AgentTraderConfig(BaseModel):
+    """LLM day-trader pillar (strategy/agent_trader.py) — the Hermes paradigm
+    rebuilt on the bot's rails after the external-agent ledger fabrication
+    (see agentmcp/book.py S4).
+
+    Runs the SAME mandate/candidates/memory across every model in ``models``;
+    each is its own strategy cell (``agent_trader_<alias>``) so the paper
+    ledger answers whether model tier changes directional edge. PAPER-FORCED
+    (``paper`` + new directional cells under the enforced graduation ladder).
+
+    Budget: one non-reserved Claude CLI call per model per cycle — at the
+    default 2h interval and 3 models that is ~36 calls/day, and the pillar
+    stops early whenever the shared non-reserved budget is gone, so it can
+    never starve the pinned (lens) slice.
+    """
+
+    enabled: bool = False
+    paper: bool = True
+    interval_seconds: int = 7200
+    models: list[AgentTraderModel] = [
+        AgentTraderModel(alias="haiku", model="claude-haiku-4-5"),
+        AgentTraderModel(alias="sonnet", model="claude-sonnet-5"),
+        AgentTraderModel(alias="opus", model="claude-opus-4-8"),
+    ]
+    scan_limit: int = 200
+    markets_per_cycle: int = 10
+    max_entries_per_cycle: int = 2
+    max_open_per_model: int = 10
+    stake_usd: float = 10.0
+    min_liquidity: float = 1000.0
+    # Day-trader horizon: near-dated books turn over fast enough to feed the
+    # memory loop; min keeps out markets resolving mid-cycle.
+    min_days_to_resolution: float = 0.25
+    max_days_to_resolution: float = 30.0
+    min_edge_pts: float = 5.0
+    memory_events: int = 12
+    exclude_categories: list[str] = []
+    llm_timeout_seconds: int = 240
+
+
 class EconIndicatorConfig(BaseModel):
     """Data-driven Kalshi economic-indicator bin pricing (strategy/econ_indicator.py).
 
@@ -1174,6 +1224,7 @@ class Settings(BaseSettings):
     cross_venue_arb: CrossVenueArbConfig = Field(default_factory=lambda: CrossVenueArbConfig(**_DEFAULTS.get("cross_venue_arb", {})))
     econ_indicator: EconIndicatorConfig = Field(default_factory=lambda: EconIndicatorConfig(**_DEFAULTS.get("econ_indicator", {})))
     long_horizon: LongHorizonConfig = Field(default_factory=lambda: LongHorizonConfig(**_DEFAULTS.get("long_horizon", {})))
+    agent_trader: AgentTraderConfig = Field(default_factory=lambda: AgentTraderConfig(**_DEFAULTS.get("agent_trader", {})))
     informed_flow: InformedFlowConfig = Field(default_factory=lambda: InformedFlowConfig(**_DEFAULTS.get("informed_flow", {})))
     settlement_arb: SettlementArbConfig = Field(default_factory=lambda: SettlementArbConfig(**_DEFAULTS.get("settlement_arb", {})))
     weather_temp: WeatherTempConfig = Field(default_factory=lambda: WeatherTempConfig(**_DEFAULTS.get("weather_temp", {})))
