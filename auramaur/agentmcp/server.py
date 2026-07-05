@@ -27,6 +27,16 @@ from __future__ import annotations
 
 import os
 
+import sys
+import logging
+import structlog
+
+# Redirect all structlog and stdlib logging to stderr so they don't corrupt JSON-RPC stdout
+logging.basicConfig(level=logging.INFO, stream=sys.stderr, force=True)
+structlog.configure(
+    logger_factory=structlog.WriteLoggerFactory(file=sys.stderr)
+)
+
 # Force paper BEFORE Settings is ever constructed. Belt-and-suspenders on top of
 # the separate process / no-live-credentials isolation.
 os.environ["AURAMAUR_LIVE"] = "false"
@@ -179,9 +189,19 @@ async def place_trade(
     category = quote.get("category") or "" if quote.get("found") else ""
     exchange = quote.get("exchange") or "polymarket" if quote.get("found") else "polymarket"
 
+    # Strictly enforce real-market pricing: override the LLM's price with the actual
+    # database-quoted price for the token if available to prevent cheating/hallucinated exits.
+    real_price = price
+    if quote.get("found"):
+        token_upper = token.upper()
+        if token_upper == "YES" and quote.get("outcome_yes_price") is not None:
+            real_price = float(quote["outcome_yes_price"])
+        elif token_upper == "NO" and quote.get("outcome_no_price") is not None:
+            real_price = float(quote["outcome_no_price"])
+
     return await _with_book(
         lambda book: book.place_trade(
-            market_id, token, side, size, price,
+            market_id, token, side, size, real_price,
             exchange=exchange, category=category,
         )
     )
@@ -191,8 +211,17 @@ async def place_trade(
 async def close_position(market_id: str, token: str, price: float) -> dict:
     """Sell the entire current paper position in (market, token) at ``price``,
     realizing its P&L. No-op if nothing is held. Paper only."""
+    quote = await _market_data().get_quote(market_id)
+    real_price = price
+    if quote.get("found"):
+        token_upper = token.upper()
+        if token_upper == "YES" and quote.get("outcome_yes_price") is not None:
+            real_price = float(quote["outcome_yes_price"])
+        elif token_upper == "NO" and quote.get("outcome_no_price") is not None:
+            real_price = float(quote["outcome_no_price"])
+
     return await _with_book(
-        lambda book: book.close_position(market_id, token, price)
+        lambda book: book.close_position(market_id, token, real_price)
     )
 
 
