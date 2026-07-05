@@ -42,7 +42,8 @@ def _settings(max_cross_cents: int = 4, min_edge_pct: float = 2.5) -> MagicMock:
 
 
 def _router(book: OrderBook, base_price: float, settings=None,
-            side: OrderSide = OrderSide.BUY) -> SmartOrderRouter:
+            side: OrderSide = OrderSide.BUY,
+            token: TokenType = TokenType.YES) -> SmartOrderRouter:
     exchange = MagicMock()
     exchange.prepare_order = MagicMock(
         return_value=Order(
@@ -50,7 +51,7 @@ def _router(book: OrderBook, base_price: float, settings=None,
             exchange="polymarket",
             token_id="tok",
             side=side,
-            token=TokenType.YES,
+            token=token,
             size=10.0,
             price=base_price,
             dry_run=True,
@@ -60,12 +61,12 @@ def _router(book: OrderBook, base_price: float, settings=None,
     return SmartOrderRouter(settings if settings is not None else _settings(), exchange)
 
 
-def _signal(edge: float) -> Signal:
+def _signal(edge: float, claude_prob: float = 0.6, market_prob: float = 0.45) -> Signal:
     return Signal(
         market_id="m1",
-        claude_prob=0.6,
+        claude_prob=claude_prob,
         claude_confidence="HIGH",
-        market_prob=0.45,
+        market_prob=market_prob,
         edge=edge,
     )
 
@@ -172,8 +173,12 @@ async def test_depth_sweep_prices_at_marginal_level():
                            settings=_depth_settings(max_cross_cents=10, cap_frac=1.0, min_fill=0.5))
     order = await router.route(_signal(edge=12.0), Market(id="m1", question="Q?"), 40.0, False)
     assert order is not None
-    assert order.size == 40.0          # capacity ample (cap_frac 1.0)
     assert order.price == 0.55         # marginal sweep level, not the 0.50 ask
+    # Size is re-derived from the dollar intent (40 tokens * 0.49 reference)
+    # at each price lift: 19.6 / 0.50 = 39.2 at the ask, then 19.6 / 0.55 =
+    # 35.64 at the sweep price — the notional stays at the intent instead of
+    # inflating with the limit.
+    assert order.size == 35.64
 
 
 @pytest.mark.asyncio
@@ -186,6 +191,7 @@ async def test_takes_price_improvement_when_ask_below_reference():
     assert order.order_type == OrderType.LIMIT
     assert order.price == 0.20
     assert order.post_only is False
+    assert order.size == 10.0  # cheaper fill keeps the token count (shrink-only)
 
 
 @pytest.mark.asyncio
@@ -209,6 +215,59 @@ async def test_high_urgency_still_skips_below_floor():
     router = _router(_book(0.10, 0.90), base_price=0.20)
     with pytest.raises(UnmarketableSignal, match="edge at the ask"):
         await router.route(_signal(edge=42.5), Market(id="m1", question="Q?"), 10.0, False)
+
+
+@pytest.mark.asyncio
+async def test_waiver_needs_absolute_edge_at_the_ask():
+    """signal.edge is RELATIVE to fair value, so a few points of gap on a
+    cheap market reads as a huge percentage — the old >40% waiver then let
+    the router pay a dead-book ask at a multiple of fair value. The waiver
+    must also require fair value to clear the ASK by the min-edge floor in
+    absolute points: fair 0.13 vs ask 0.42 fails that, so the cents cap
+    holds and the entry is skipped."""
+    router = _router(_book(0.05, 0.42), base_price=0.08)
+    with pytest.raises(UnmarketableSignal, match="above"):
+        await router.route(
+            _signal(edge=47.0, claude_prob=0.13, market_prob=0.08),
+            Market(id="m1", question="Q?"), 10.0, False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_waiver_holds_when_fair_clears_ask():
+    """A genuine high-conviction entry still waives the cents cap: fair 0.90
+    clears the 0.50 ask by far more than the floor. The size is re-derived
+    at the crossed price (10 tokens * 0.40 ref = $4 intent -> 8 at 0.50)."""
+    router = _router(_book(0.40, 0.50), base_price=0.40)
+    order = await router.route(
+        _signal(edge=55.0, claude_prob=0.90), Market(id="m1", question="Q?"), 10.0, False)
+    assert order is not None
+    assert order.price == 0.50
+    assert order.size == 8.0
+
+
+@pytest.mark.asyncio
+async def test_waiver_uses_no_token_fair_value():
+    """When the bought token is NO, the waiver measures fair = 1 - claude_prob
+    against the NO ask."""
+    router = _router(_book(0.40, 0.50), base_price=0.40, token=TokenType.NO)
+    order = await router.route(
+        _signal(edge=55.0, claude_prob=0.10), Market(id="m1", question="Q?"), 10.0, False)
+    assert order is not None
+    assert order.price == 0.50
+    assert order.size == 8.0
+
+
+@pytest.mark.asyncio
+async def test_cross_rederives_size_from_dollar_intent():
+    """Crossing up re-derives the token count from the dollar intent at the
+    limit price: 10 tokens sized at 0.22 ($2.20) become 9.17 at the 0.24 ask
+    instead of 10 tokens costing $2.40."""
+    router = _router(_book(0.20, 0.24), base_price=0.22)
+    order = await router.route(_signal(edge=10.0), Market(id="m1", question="Q?"), 10.0, False)
+    assert order is not None
+    assert order.price == 0.24
+    assert order.size == 9.17
 
 
 @pytest.mark.asyncio
