@@ -79,7 +79,11 @@ class TechnicalAnalyzer:
 
         # Oversold (Price < Mean) -> Buy YES
         if deviation < -self.mean_rev_threshold:
-            edge = abs(deviation) * 100
+            # deviation (relative to the mean) is the TRIGGER; the emitted
+            # edge follows the Signal.edge contract: absolute points between
+            # fair value (the mean) and the current price. A relative figure
+            # here overstated the edge on cheap markets by 1/price.
+            edge = abs(avg_price - current_price) * 100
             return Signal(
                 market_id=market.id,
                 market_question=market.question,
@@ -95,7 +99,7 @@ class TechnicalAnalyzer:
 
         # Overbought (Price > Mean) -> Buy NO (Sell YES)
         if deviation > self.mean_rev_threshold:
-            edge = deviation * 100
+            edge = abs(current_price - avg_price) * 100
             return Signal(
                 market_id=market.id,
                 market_question=market.question,
@@ -125,11 +129,15 @@ class TechnicalAnalyzer:
         if total_move >= (self.min_move_pct / 100.0):
             # Check if trend is consistent (last 3 points are increasing)
             if history[-1] > history[-2] > history[-3]:
-                edge = total_move * 100
+                # total_move (relative) is the TRIGGER; the emitted edge is
+                # absolute points to the continuation target (Signal.edge
+                # contract).
+                fair = min(0.99, current_price + 0.05)  # Expect continuation
+                edge = (fair - current_price) * 100
                 return Signal(
                     market_id=market.id,
                     market_question=market.question,
-                    claude_prob=min(0.99, current_price + 0.05),  # Expect continuation
+                    claude_prob=fair,
                     claude_confidence=Confidence.LOW,
                     market_prob=current_price,
                     edge=edge,
@@ -143,11 +151,12 @@ class TechnicalAnalyzer:
         if total_move <= -(self.min_move_pct / 100.0):
             # Check if trend is consistent (last 3 points are decreasing)
             if history[-1] < history[-2] < history[-3]:
-                edge = abs(total_move) * 100
+                fair = max(0.01, current_price - 0.05)
+                edge = (current_price - fair) * 100
                 return Signal(
                     market_id=market.id,
                     market_question=market.question,
-                    claude_prob=max(0.01, current_price - 0.05),
+                    claude_prob=fair,
                     claude_confidence=Confidence.LOW,
                     market_prob=current_price,
                     edge=edge,

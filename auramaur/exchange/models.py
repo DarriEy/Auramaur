@@ -337,6 +337,13 @@ class Signal(BaseModel):
     claude_prob: float
     claude_confidence: Confidence
     market_prob: float
+    # Edge contract: ABSOLUTE percentage points between fair value and the
+    # market price (fee-adjusted where the producer knows the fee), i.e.
+    # roughly (claude_prob - market_prob) * 100. NOT relative to fair value:
+    # the router subtracts crossing costs in points from this number, and a
+    # relative figure on a cheap market reads as a huge edge exactly where
+    # thin books park asks at multiples of fair value. The router also clamps
+    # this against the fair-implied gap as a backstop.
     edge: float
     second_opinion_prob: float | None = None
     divergence: float | None = None
