@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS agent_trader_theses (
     market_prob REAL,
     thesis TEXT DEFAULT '',
     stake REAL DEFAULT 0,
+    entered INTEGER DEFAULT 1,
     created_at TEXT DEFAULT (datetime('now'))
 )
 """
@@ -158,6 +159,12 @@ class AgentTraderPillar:
         if self._schema_ready:
             return
         await self._db.execute(_THESES_TABLE)
+        try:
+            # Upgrade a pre-`entered` table in place (rows so far all entered).
+            await self._db.execute(
+                "ALTER TABLE agent_trader_theses ADD COLUMN entered INTEGER DEFAULT 1")
+        except Exception:
+            pass  # column already exists
         await self._db.commit()
         self._schema_ready = True
 
@@ -194,8 +201,15 @@ class AgentTraderPillar:
             log.debug("agent_trader.book_full", alias=alias,
                       open=len(open_rows))
             return 0
-        held = {r["market_id"] for r in open_rows}
-        offered = [m for m in candidates if m.id not in held]
+        seen_rows = await self._db.fetchall(
+            "SELECT DISTINCT market_id FROM agent_trader_theses WHERE model_alias = ?",
+            (alias,),
+        )
+        # Skip anything this alias already holds OR has already opined on
+        # (a prediction-only thesis on a claimed market is recorded once,
+        # not re-elicited every cycle).
+        seen = {r["market_id"] for r in seen_rows} | {r["market_id"] for r in open_rows}
+        offered = [m for m in candidates if m.id not in seen]
         offered = offered[: cfg.markets_per_cycle]
         if not offered:
             return 0
@@ -275,7 +289,7 @@ class AgentTraderPillar:
                FROM agent_trader_theses t
                JOIN pnl_ledger l ON l.market_id = t.market_id
                     AND l.strategy_source = ? AND l.is_paper = 1
-               WHERE t.model_alias = ?
+               WHERE t.model_alias = ? AND t.entered = 1
                GROUP BY t.id ORDER BY t.created_at DESC LIMIT ?""",
             (self.cell(alias), alias, limit),
         )
@@ -292,13 +306,27 @@ class AgentTraderPillar:
             )
         return "\n".join(lines)
 
+    async def _market_claimed(self, market_id: str) -> bool:
+        """Any existing trade or position on this market — by ANY strategy or
+        arm — claims it for that entrant's cell (market-level settlement
+        attribution), so a new entry here would mis-attribute."""
+        row = await self._db.fetchone(
+            "SELECT 1 FROM trades WHERE market_id = ? LIMIT 1", (market_id,))
+        if row is not None:
+            return True
+        row = await self._db.fetchone(
+            "SELECT 1 FROM portfolio WHERE market_id = ? LIMIT 1", (market_id,))
+        return row is not None
+
     async def _open_theses(self, alias: str) -> list:
-        """This alias's theses with no realized event yet — its open book."""
+        """This alias's ENTERED theses with no realized event yet — its open
+        book. Stake-0 prediction-only rows (entered=0) are analysis data, not
+        positions."""
         return await self._db.fetchall(
             """SELECT t.market_id, t.question, t.token, t.prob, t.market_prob,
                       t.thesis, t.created_at
                FROM agent_trader_theses t
-               WHERE t.model_alias = ?
+               WHERE t.model_alias = ? AND t.entered = 1
                  AND NOT EXISTS (SELECT 1 FROM pnl_ledger l
                                  WHERE l.market_id = t.market_id
                                    AND l.strategy_source = ?
@@ -385,6 +413,28 @@ class AgentTraderPillar:
                       market_id=market.id, edge=round(edge_pts, 1))
             return False
         side = OrderSide.BUY if prob_yes > market_yes else OrderSide.SELL
+
+        # ONE POSITION PER MARKET, across the whole bot. Settlement attribution
+        # is market-level earliest-entrant-wins (ledger._ENTRY_STRATEGY_SQL), so
+        # a second arm — even on the OPPOSITE token — would have its P&L
+        # credited to the first arm's cell and corrupt the A/B. The blocked
+        # arm's PREDICTION is still recorded (stake 0, entered=0): the
+        # head-to-head disagreement stays measurable via calibration, just not
+        # via the ledger.
+        if await self._market_claimed(market.id):
+            await self._db.execute(
+                """INSERT INTO agent_trader_theses
+                   (model_alias, market_id, question, token, prob, market_prob,
+                    thesis, stake, entered)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0)""",
+                (alias, market.id, market.question,
+                 "YES" if side == OrderSide.BUY else "NO",
+                 prob_yes, market_yes, decision["thesis"][:500]),
+            )
+            await self._db.commit()
+            log.info("agent_trader.market_claimed", alias=alias,
+                     market_id=market.id, prob=round(prob_yes, 2))
+            return False
 
         signal = Signal(
             market_id=market.id,
