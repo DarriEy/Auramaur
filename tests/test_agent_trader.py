@@ -219,6 +219,43 @@ async def test_one_model_failure_does_not_stop_other_arms(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_second_arm_blocked_on_claimed_market_records_prediction(tmp_path):
+    """Settlement attribution is market-level earliest-entrant-wins, so once
+    one arm (or any strategy) has a trade on a market, another arm must NOT
+    position there — even on the opposite token — or its P&L lands in the
+    first cell. The blocked arm's prediction is still recorded (stake 0,
+    entered=0) and never shows up in its open book."""
+    reply = '{"decisions": [{"market_id": "m1", "prob_yes": 0.55, "thesis": "t"}]}'
+    pillar, db, _ = await _pillar(
+        tmp_path, [_model_spec("haiku")], [_market("m1", yes=0.30)], reply)
+    try:
+        # Another strategy already traded this market.
+        await db.execute(
+            """INSERT INTO trades (market_id, timestamp, side, size, price,
+               is_paper, order_id, status, exchange, strategy_source)
+               VALUES ('m1', datetime('now'), 'BUY', 10, 0.3, 1, 'x', 'paper',
+                       'polymarket', 'agent_trader_sonnet')""")
+        await db.commit()
+
+        assert await pillar.run_once() == 0
+        pillar._gateway.submit.assert_not_awaited()
+        thesis = await db.fetchone(
+            "SELECT model_alias, stake, entered, prob FROM agent_trader_theses")
+        assert thesis["model_alias"] == "haiku"
+        assert thesis["entered"] == 0
+        assert thesis["stake"] == 0
+        assert thesis["prob"] == pytest.approx(0.55)
+        # Prediction-only rows are not open positions.
+        assert await pillar._open_theses("haiku") == []
+        # And the market is not re-offered to this alias next cycle.
+        assert await pillar.run_once() == 0
+        n = await db.fetchone("SELECT COUNT(*) c FROM agent_trader_theses")
+        assert n["c"] == 1
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_cli_call_isolated_and_tool_enabled(tmp_path, monkeypatch):
     """The subprocess must run from a NEUTRAL cwd (claude -p loads CLAUDE.md
     and project memory from its working directory — run from the repo root the
