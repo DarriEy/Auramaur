@@ -219,6 +219,36 @@ async def test_one_model_failure_does_not_stop_other_arms(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_arm_order_rotates_per_cycle(tmp_path):
+    """Arms run sequentially and first entrant claims the market, so a fixed
+    order hands every contested market to the same arm. The starting arm must
+    rotate each cycle."""
+    reply = '{"decisions": []}'
+    pillar, db, _ = await _pillar(
+        tmp_path,
+        [_model_spec("haiku"), _model_spec("sonnet", "claude-sonnet-5"),
+         _model_spec("opus", "claude-opus-4-8")],
+        [_market("m1")], reply)
+    order: list[str] = []
+
+    async def record(prompt, model, effort, cfg):
+        order.append(model)
+        return reply
+
+    pillar._call_model = record
+    try:
+        await pillar.run_once()
+        await pillar.run_once()
+        await pillar.run_once()
+        assert order[0] == "claude-haiku-4-5"
+        assert order[3] == "claude-sonnet-5"   # cycle 2 starts one later
+        assert order[6] == "claude-opus-4-8"   # cycle 3 starts two later
+        assert len(set(order[:3])) == 3        # every arm still runs each cycle
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_second_arm_blocked_on_claimed_market_records_prediction(tmp_path):
     """Settlement attribution is market-level earliest-entrant-wins, so once
     one arm (or any strategy) has a trade on a market, another arm must NOT

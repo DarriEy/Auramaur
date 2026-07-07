@@ -150,6 +150,7 @@ class AgentTraderPillar:
             settings=settings, db=db, pnl_tracker=pnl_tracker,
         )
         self._schema_ready = False
+        self._cycle_n = 0
 
     @staticmethod
     def cell(alias: str) -> str:
@@ -182,7 +183,14 @@ class AgentTraderPillar:
             log.info("agent_trader.no_candidates")
             return 0
         entered_total = 0
-        for spec in cfg.models:
+        # Rotate which arm runs first each cycle. Arms run sequentially and a
+        # market is claimed by the first entrant, so a fixed order hands every
+        # contested market to the same arm — the later arms' cells fill up
+        # with leftovers (observed: one arm claim-blocked 3x in a night).
+        start = self._cycle_n % len(cfg.models)
+        self._cycle_n += 1
+        rotated = list(cfg.models[start:]) + list(cfg.models[:start])
+        for spec in rotated:
             try:
                 entered_total += await self._run_model(spec, candidates, cfg)
             except Exception as e:
