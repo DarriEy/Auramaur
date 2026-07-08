@@ -521,6 +521,7 @@ agent_trader:
   memory_events: 12
   exclude_categories: []
   llm_timeout_seconds: 420   # room for WebSearch rounds
+  decline_ttl_hours: 24.0    # a pass keeps the market off the arm's slate this long
 
 informed_flow:
   # Informed-flow follower over Kalshi — mimic the side of abnormally-large

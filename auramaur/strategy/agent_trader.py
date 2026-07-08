@@ -79,6 +79,15 @@ CANDIDATE MARKETS (current YES price is the crowd's probability):
 {candidates}
 """
 
+_DECLINES_TABLE = """
+CREATE TABLE IF NOT EXISTS agent_trader_declines (
+    model_alias TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    declined_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (model_alias, market_id)
+)
+"""
+
 _THESES_TABLE = """
 CREATE TABLE IF NOT EXISTS agent_trader_theses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -160,6 +169,7 @@ class AgentTraderPillar:
         if self._schema_ready:
             return
         await self._db.execute(_THESES_TABLE)
+        await self._db.execute(_DECLINES_TABLE)
         try:
             # Upgrade a pre-`entered` table in place (rows so far all entered).
             await self._db.execute(
@@ -213,10 +223,23 @@ class AgentTraderPillar:
             "SELECT DISTINCT market_id FROM agent_trader_theses WHERE model_alias = ?",
             (alias,),
         )
-        # Skip anything this alias already holds OR has already opined on
-        # (a prediction-only thesis on a claimed market is recorded once,
-        # not re-elicited every cycle).
-        seen = {r["market_id"] for r in seen_rows} | {r["market_id"] for r in open_rows}
+        declined_rows = await self._db.fetchall(
+            """SELECT market_id FROM agent_trader_declines
+               WHERE model_alias = ?
+                 AND declined_at > datetime('now', ?)""",
+            (alias, f"-{float(cfg.decline_ttl_hours)} hours"),
+        )
+        # Skip anything this alias already holds, has already opined on (a
+        # prediction-only thesis is recorded once, not re-elicited), or
+        # DECLINED within the TTL — without the decline memory, the same
+        # unseen top-of-volume markets were re-offered every cycle and each
+        # arm burned a call re-rejecting them. After the TTL the market is
+        # offered again (prices move; a stale no is not a permanent no).
+        seen = (
+            {r["market_id"] for r in seen_rows}
+            | {r["market_id"] for r in open_rows}
+            | {r["market_id"] for r in declined_rows}
+        )
         offered = [m for m in candidates if m.id not in seen]
         offered = offered[: cfg.markets_per_cycle]
         if not offered:
@@ -231,6 +254,22 @@ class AgentTraderPillar:
         )
         raw = await self._call_model(prompt, spec.model, spec.effort, cfg)
         decisions = parse_decisions(raw, cfg.max_entries_per_cycle)
+
+        # The model actually saw and passed on these — remember the pass for
+        # decline_ttl_hours. Only after a SUCCESSFUL call: a budget/timeout
+        # failure means the markets were never evaluated.
+        decided_ids = {d["market_id"] for d in decisions}
+        passed = [m.id for m in offered if m.id not in decided_ids]
+        if passed:
+            await self._db.executemany(
+                """INSERT INTO agent_trader_declines (model_alias, market_id, declined_at)
+                   VALUES (?, ?, datetime('now'))
+                   ON CONFLICT(model_alias, market_id) DO UPDATE SET
+                       declined_at = excluded.declined_at""",
+                [(alias, mid) for mid in passed],
+            )
+            await self._db.commit()
+
         if not decisions:
             log.info("agent_trader.no_decisions", alias=alias,
                      model=spec.model)
