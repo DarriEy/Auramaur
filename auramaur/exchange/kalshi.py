@@ -958,23 +958,16 @@ class KalshiClient:
                          AND market_id IN (SELECT id FROM markets WHERE exchange = 'kalshi')"""
                 )
 
-            # Purge orphaned PAPER Kalshi rows. The paper trader is
-            # exchange-agnostic and never writes Kalshi positions, so any
-            # is_paper=1 Kalshi row is a legacy orphan (a one-time 2026-06-07
-            # snapshot carrying pre-#119 inverted marks). Paper rows are never
-            # re-marked, so they linger frozen forever and leak into unfiltered
-            # risk reads (risk/portfolio.py `SELECT * FROM portfolio`), inflating
-            # category exposure / position count with fiction. This live sync is
-            # the sole authoritative Kalshi source — drop the paper book. (If
-            # paper-Kalshi trading is ever reintroduced, revisit this.)
-            await db.execute(
-                "DELETE FROM portfolio WHERE exchange = 'kalshi' AND is_paper = 1"
-            )
-            await db.execute(
-                """DELETE FROM cost_basis
-                   WHERE is_paper = 1
-                     AND market_id IN (SELECT id FROM markets WHERE exchange = 'kalshi')"""
-            )
+            # NOTE (history): a paper-Kalshi purge lived here 2026-06→07 (#131)
+            # under the assumption that "the paper trader never writes Kalshi
+            # positions". That became false when the Kalshi PAPER strategies
+            # shipped (informed_flow #230/#231, the Kalshi lens #257,
+            # econ_indicator) — the purge then silently shredded every Kalshi
+            # paper book on each live sync: fills accrued but cost_basis and
+            # portfolio rows vanished within minutes, so nothing ever settled
+            # into the ledger and those cells' records were structurally
+            # impossible. The purge is REMOVED; the legacy 2026-06-07 orphan
+            # snapshot it targeted was already gone after a month of purges.
 
             await db.commit()
             if synced > 0:
