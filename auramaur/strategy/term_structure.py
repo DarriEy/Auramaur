@@ -228,6 +228,12 @@ class TermStructurePillar:
     # ------------------------------------------------------------------
 
     async def _families(self, cfg) -> list[tuple[str, list[Market]]]:
+        """Seed-and-search family assembly. A volume-ranked dated scan cannot
+        see ladders — deep strikes are low-volume by construction, so the
+        top-of-volume slice yields lone members (observed: 73 eligible, 10
+        ladder members, ZERO complete families; the same wall long_horizon hit
+        with its first scan). Any parseable 'by <date>' hit is treated as a
+        SEED, and the family's siblings are fetched live via text search."""
         now = datetime.now(timezone.utc)
         emin = (now + timedelta(days=cfg.min_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
         emax = (now + timedelta(days=cfg.max_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -243,17 +249,46 @@ class TermStructurePillar:
         except TypeError:
             raw = await self._discovery.get_markets(limit=cfg.scan_limit)
 
-        groups: dict[str, list[Market]] = {}
+        groups: dict[str, dict[str, Market]] = {}
+        seed_volume: dict[str, float] = {}
         for m in raw:
             if not self._eligible(m, cfg):
                 continue
             fam = family_key(m.question)
             if fam is None or parse_deadline(m.question) is None:
                 continue
-            groups.setdefault(fam, []).append(m)
+            groups.setdefault(fam, {})[m.id] = m
+            seed_volume[fam] = seed_volume.get(fam, 0.0) + m.volume
+
+        # Complete incomplete families by live sibling search, highest-volume
+        # seeds first, bounded to max_families searches per cycle.
+        searcher = getattr(self._discovery, "search_markets", None)
+        if searcher is not None:
+            searched = 0
+            for fam in sorted(groups, key=lambda f: -seed_volume[f]):
+                if len(groups[fam]) >= cfg.min_strikes:
+                    continue  # scan already delivered the ladder
+                if searched >= cfg.max_families:
+                    break
+                searched += 1
+                try:
+                    siblings = await searcher(fam, limit=20)
+                    for s in siblings or []:
+                        if family_key(s.question) != fam:
+                            continue
+                        if parse_deadline(s.question) is None:
+                            continue
+                        if not self._eligible(s, cfg):
+                            continue
+                        groups[fam][s.id] = s
+                except Exception as e:
+                    log.debug("term_structure.sibling_search_failed",
+                              family=fam, error=str(e))
+                    continue
 
         out: list[tuple[str, list[Market]]] = []
-        for fam, strikes in groups.items():
+        for fam, by_id in groups.items():
+            strikes = list(by_id.values())
             if len(strikes) < cfg.min_strikes:
                 continue
             strikes.sort(key=lambda m: parse_deadline(m.question))
