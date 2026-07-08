@@ -31,6 +31,27 @@ log = structlog.get_logger()
 # pairs have no row in ``markets``).
 _KRAKEN_QUOTES = ("USDC", "USDT", "ZUSD", "USD", "EUR", "ZEUR")
 
+# Token-scoped entry-strategy resolution: credit the strategy that opened
+# THIS side of the market. Market-level attribution (below) credits every
+# realization on a market to its earliest entrant — with 40+ markets carrying
+# trades from 2+ strategies, one strategy's win on the OPPOSITE token landed
+# in another's cell (observed: an llm NO win booked into an agent arm's cell
+# because the arm's YES entry was 3 minutes earlier). trades has no token
+# column, so the token comes from the paired fill (same order_id), scoped to
+# the realization's mode. Same-token stacking by multiple strategies still
+# collapses to the earliest entrant — cost_basis is genuinely merged there.
+_TOKEN_ENTRY_STRATEGY_SQL = """
+    SELECT t.strategy_source FROM trades t
+    JOIN fills f ON f.order_id = t.order_id
+    WHERE f.market_id = ?
+      AND UPPER(f.token) = UPPER(?)
+      AND f.is_paper = ?
+      AND t.strategy_source IS NOT NULL
+      AND t.strategy_source != 'order_monitor'
+      AND t.strategy_source != ''
+    ORDER BY f.timestamp ASC LIMIT 1
+"""
+
 # Entry-strategy resolution — same semantics as
 # auramaur.monitoring.attribution._entry_strategy_expr: credit the strategy
 # that DECIDED to open the position (earliest non-order_monitor trade, then
@@ -68,8 +89,16 @@ def _looks_like_us_ticker(market_id: str) -> bool:
     return market_id.isupper() and market_id.isalpha() and 1 <= len(market_id) <= 5
 
 
-async def _market_context(db: Database, market_id: str) -> tuple[str, str, str]:
-    """Resolve ``(venue, category, strategy_source)`` for a realization."""
+async def _market_context(
+    db: Database, market_id: str, token: str = "", is_paper: bool | None = None,
+) -> tuple[str, str, str]:
+    """Resolve ``(venue, category, strategy_source)`` for a realization.
+
+    When the realization's ``token`` and mode are known (they always are on
+    the ledger write path), the strategy is resolved for THAT side of the
+    market first; the market-level earliest-entrant lookup is the fallback
+    for legacy rows without a paired fill (kraken pairs, manual fills).
+    """
     row = await db.fetchone(
         "SELECT exchange, category FROM markets WHERE id = ?", (market_id,)
     )
@@ -88,11 +117,19 @@ async def _market_context(db: Database, market_id: str) -> tuple[str, str, str]:
     else:
         venue, category = "", ""
 
-    srow = await db.fetchone(
-        f"SELECT {_ENTRY_STRATEGY_SQL} AS src",
-        (market_id, market_id, market_id),
-    )
-    strategy = (srow["src"] if srow else "") or ""
+    strategy = ""
+    if token and is_paper is not None:
+        srow = await db.fetchone(
+            _TOKEN_ENTRY_STRATEGY_SQL,
+            (market_id, token, 1 if is_paper else 0),
+        )
+        strategy = (srow["strategy_source"] if srow else "") or ""
+    if not strategy:
+        srow = await db.fetchone(
+            f"SELECT {_ENTRY_STRATEGY_SQL} AS src",
+            (market_id, market_id, market_id),
+        )
+        strategy = (srow["src"] if srow else "") or ""
     return venue, category, strategy
 
 
@@ -114,7 +151,8 @@ async def record_ledger_event(
     Never raises — a ledger failure must not break order/settlement flow.
     """
     try:
-        venue, category, strategy = await _market_context(db, market_id)
+        venue, category, strategy = await _market_context(
+            db, market_id, token=token, is_paper=is_paper)
         if realized_at is None:
             await db.execute(
                 """INSERT OR IGNORE INTO pnl_ledger
