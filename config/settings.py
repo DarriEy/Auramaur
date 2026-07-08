@@ -553,6 +553,37 @@ class AgentTraderConfig(BaseModel):
     decline_ttl_hours: float = 24.0
 
 
+class TermStructureConfig(BaseModel):
+    """Deadline-ladder curve reader (strategy/term_structure.py).
+
+    One LLM read per FAMILY (same event, multiple 'by <date>' strikes) into an
+    event-time curve, then every strike is priced off that curve — one call
+    amortizes across up to a dozen markets, attacking the budget-throughput
+    constraint that starves per-market readers. PAPER-FORCED new directional
+    cell. Curves are cached ``curve_ttl_hours`` so steady-state spends calls
+    only on new/expired families.
+    """
+
+    enabled: bool = False
+    paper: bool = True
+    interval_seconds: int = 7200
+    model: str = "claude-opus-4-8"
+    effort: str = "medium"
+    scan_limit: int = 300
+    min_strikes: int = 3
+    max_families: int = 12
+    families_per_cycle: int = 3   # fresh LLM reads per cycle (cached fams free)
+    curve_ttl_hours: float = 24.0
+    max_entries_per_family: int = 2
+    stake_usd: float = 10.0
+    min_liquidity: float = 1000.0
+    min_days: float = 0.25
+    max_days: float = 90.0
+    min_edge_pts: float = 8.0
+    llm_timeout_seconds: int = 420
+    exclude_categories: list[str] = []
+
+
 class EconIndicatorConfig(BaseModel):
     """Data-driven Kalshi economic-indicator bin pricing (strategy/econ_indicator.py).
 
@@ -1230,6 +1261,7 @@ class Settings(BaseSettings):
     econ_indicator: EconIndicatorConfig = Field(default_factory=lambda: EconIndicatorConfig(**_DEFAULTS.get("econ_indicator", {})))
     long_horizon: LongHorizonConfig = Field(default_factory=lambda: LongHorizonConfig(**_DEFAULTS.get("long_horizon", {})))
     agent_trader: AgentTraderConfig = Field(default_factory=lambda: AgentTraderConfig(**_DEFAULTS.get("agent_trader", {})))
+    term_structure: TermStructureConfig = Field(default_factory=lambda: TermStructureConfig(**_DEFAULTS.get("term_structure", {})))
     informed_flow: InformedFlowConfig = Field(default_factory=lambda: InformedFlowConfig(**_DEFAULTS.get("informed_flow", {})))
     settlement_arb: SettlementArbConfig = Field(default_factory=lambda: SettlementArbConfig(**_DEFAULTS.get("settlement_arb", {})))
     weather_temp: WeatherTempConfig = Field(default_factory=lambda: WeatherTempConfig(**_DEFAULTS.get("weather_temp", {})))

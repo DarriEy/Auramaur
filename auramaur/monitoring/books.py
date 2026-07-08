@@ -45,6 +45,9 @@ def _book_modes(settings) -> list[tuple[str, str, str]]:
     at = settings.agent_trader
     rows.append(("agent_trader", *paper_mode(
         at, f"models: {', '.join(m.alias for m in at.models)} — one cell each")))
+    ts = settings.term_structure
+    rows.append(("term_structure", *paper_mode(
+        ts, f">={ts.min_strikes} strikes, curve/24h, edge>={ts.min_edge_pts:.0f}pts")))
 
     rows.append(("market_maker",
                  "LIVE" if settings.market_maker.enabled and settings.is_live

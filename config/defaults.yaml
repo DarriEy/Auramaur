@@ -523,6 +523,33 @@ agent_trader:
   llm_timeout_seconds: 420   # room for WebSearch rounds
   decline_ttl_hours: 24.0    # a pass keeps the market off the arm's slate this long
 
+term_structure:
+  # Deadline-ladder curve reader — the reading edge, amortized: ONE LLM read
+  # per family ("X by <date>" ladders, 70+ active with 3-13 strikes) into an
+  # event-time curve, then every strike is priced off it. Curves cached 24h;
+  # steady-state spends calls only on new/expired families. Deadlines parsed
+  # from QUESTION TEXT (stored end_date is unreliable for ladder strikes).
+  # PAPER-FORCED, own graduation cell. Monotonicity violations are logged for
+  # entailment_arb, not traded here.
+  enabled: true
+  paper: true
+  interval_seconds: 7200
+  model: claude-opus-4-8
+  effort: medium
+  scan_limit: 300
+  min_strikes: 3
+  max_families: 12
+  families_per_cycle: 3
+  curve_ttl_hours: 24.0
+  max_entries_per_family: 2
+  stake_usd: 10.0
+  min_liquidity: 1000.0
+  min_days: 0.25
+  max_days: 90.0
+  min_edge_pts: 8.0
+  llm_timeout_seconds: 420
+  exclude_categories: []
+
 informed_flow:
   # Informed-flow follower over Kalshi — mimic the side of abnormally-large
   # (informed) order flow. Abnormal trade size (ATS) proxies non-liquidity trading

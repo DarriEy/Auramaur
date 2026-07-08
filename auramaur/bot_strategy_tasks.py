@@ -90,6 +90,30 @@ class StrategyTaskMixin:
                 log.error("agent_trader.cycle_error", error=str(e))
             await asyncio.sleep(interval)
 
+    async def _task_term_structure(self) -> None:
+        """Periodic deadline-ladder curve reader (paper-forced; one LLM read
+        prices a whole family of strikes)."""
+        from auramaur.strategy.term_structure import TermStructurePillar
+
+        pillar = TermStructurePillar(
+            db=self._components.db,
+            settings=self.settings,
+            discovery=self._components.discovery,
+            exchange=self._components.exchange,
+            risk_manager=self._components.risk_manager,
+            pnl_tracker=self._components.pnl_tracker,
+            calibration=self._components.calibration,
+        )
+        interval = max(600, self.settings.term_structure.interval_seconds)
+        while self._running:
+            if await self._check_kill_switch():
+                return
+            try:
+                await pillar.run_once()
+            except Exception as e:
+                log.error("term_structure.cycle_error", error=str(e))
+            await asyncio.sleep(interval)
+
     async def _task_informed_flow(self) -> None:
         """Periodic Kalshi informed-flow follower (abnormal-trade-size). Paper-
         forced; no-ops cleanly when the Kalshi venue isn't composed."""

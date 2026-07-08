@@ -1392,6 +1392,10 @@ class AuramaurBot(
         if self.settings.agent_trader.enabled:
             tasks.append(asyncio.create_task(self._task_agent_trader(), name="agent_trader"))
 
+        # Deadline-ladder curve reader (paper-forced; amortized reading edge)
+        if self.settings.term_structure.enabled:
+            tasks.append(asyncio.create_task(self._task_term_structure(), name="term_structure"))
+
         # Informed-flow follower over Kalshi (paper-forced; abnormal-trade-size)
         if self.settings.informed_flow.enabled:
             tasks.append(asyncio.create_task(self._task_informed_flow(), name="informed_flow"))
