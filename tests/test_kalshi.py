@@ -171,30 +171,33 @@ class TestKalshiLivePositionAccounting:
             await db.close()
 
     @pytest.mark.asyncio
-    async def test_sync_positions_purges_orphaned_paper_kalshi_rows(self):
-        """Legacy is_paper=1 Kalshi rows (the paper trader never writes Kalshi)
-        are orphans with frozen, side-inverted marks that leak into unfiltered
-        risk reads. A live sync must purge them from portfolio and cost_basis."""
+    async def test_sync_positions_preserves_paper_kalshi_rows(self):
+        """The live sync must NOT touch is_paper=1 Kalshi rows. A purge lived
+        here while nothing traded Kalshi on paper; once the Kalshi paper
+        strategies shipped (informed_flow, the Kalshi lens, econ_indicator) it
+        silently shredded their books on every sync — fills accrued but
+        positions and cost basis vanished, so nothing ever settled into the
+        ledger and those cells' records were structurally impossible."""
         db = Database(":memory:")
         await db.connect()
         try:
-            # Seed a stale orphaned paper Kalshi position + cost basis.
+            # Seed a PAPER Kalshi position + cost basis (a live pillar's book).
             await db.execute(
                 """INSERT INTO portfolio
                    (market_id, exchange, side, size, avg_price, current_price,
                     unrealized_pnl, category, token, token_id, is_paper, updated_at)
-                   VALUES ('KXSTALE', 'kalshi', 'BUY', 100, 0.80, 0.10,
-                           -70.0, 'other', 'NO', 'KXSTALE', 1, '2026-01-01 00:00:00')"""
+                   VALUES ('KXPAPER', 'kalshi', 'BUY', 27, 0.37, 0.37,
+                           0.0, 'economics', 'YES', 'KXPAPER', 1, datetime('now'))"""
             )
             await db.execute(
                 """INSERT INTO markets (id, exchange, question, category, active,
                    outcome_yes_price, outcome_no_price, last_updated)
-                   VALUES ('KXSTALE', 'kalshi', 'Stale?', 'other', 1, 0.9, 0.1, datetime('now'))"""
+                   VALUES ('KXPAPER', 'kalshi', 'Paper?', 'economics', 1, 0.37, 0.63, datetime('now'))"""
             )
             await db.execute(
                 """INSERT INTO cost_basis
                    (market_id, token, token_id, size, avg_cost, total_cost, is_paper, updated_at)
-                   VALUES ('KXSTALE', 'NO', 'KXSTALE', 100, 0.80, 80.0, 1, '2026-01-01 00:00:00')"""
+                   VALUES ('KXPAPER', 'YES', 'KXPAPER', 27, 0.37, 9.99, 1, datetime('now'))"""
             )
             await db.commit()
 
@@ -216,11 +219,11 @@ class TestKalshiLivePositionAccounting:
 
             await client.sync_positions(db)
 
-            # Orphaned paper row purged from both tables.
+            # Paper book untouched by the LIVE sync.
             assert await db.fetchone(
-                "SELECT 1 FROM portfolio WHERE market_id='KXSTALE' AND is_paper=1") is None
+                "SELECT 1 FROM portfolio WHERE market_id='KXPAPER' AND is_paper=1") is not None
             assert await db.fetchone(
-                "SELECT 1 FROM cost_basis WHERE market_id='KXSTALE' AND is_paper=1") is None
+                "SELECT 1 FROM cost_basis WHERE market_id='KXPAPER' AND is_paper=1") is not None
             # Live position still synced.
             assert await db.fetchone(
                 "SELECT 1 FROM portfolio WHERE market_id='KXLIVE' AND is_paper=0") is not None
