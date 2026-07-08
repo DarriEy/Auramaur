@@ -86,6 +86,7 @@ def _settings(models):
     cfg.memory_events = 12
     cfg.exclude_categories = []
     cfg.llm_timeout_seconds = 240
+    cfg.decline_ttl_hours = 24.0
     s.risk.blocked_categories = []
     s.nlp.daily_claude_call_budget = 0  # unlimited in tests
     return s
@@ -214,6 +215,56 @@ async def test_one_model_failure_does_not_stop_other_arms(tmp_path):
         assert entered == 1          # the healthy arm still entered
         sig = await db.fetchone("SELECT strategy_source FROM signals")
         assert sig["strategy_source"] == "agent_trader_opus"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_declined_market_not_reoffered_within_ttl(tmp_path):
+    """A market the arm passed on is remembered for decline_ttl_hours — the
+    old behavior re-offered the same unseen markets every cycle and burned a
+    call re-declining them."""
+    pillar, db, _ = await _pillar(
+        tmp_path, [_model_spec()], [_market("m1")], '{"decisions": []}')
+    calls = {"n": 0}
+
+    async def counting(prompt, model, effort, cfg):
+        calls["n"] += 1
+        return '{"decisions": []}'
+
+    pillar._call_model = counting
+    try:
+        await pillar.run_once()
+        assert calls["n"] == 1
+        row = await db.fetchone(
+            "SELECT model_alias FROM agent_trader_declines WHERE market_id='m1'")
+        assert row["model_alias"] == "haiku"
+        # Same slate next cycle -> nothing to offer -> no call burned.
+        await pillar.run_once()
+        assert calls["n"] == 1
+
+        # After the TTL the market is offered again.
+        await db.execute(
+            "UPDATE agent_trader_declines SET declined_at = datetime('now', '-25 hours')")
+        await db.commit()
+        await pillar.run_once()
+        assert calls["n"] == 2
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_decided_market_is_not_declined(tmp_path):
+    """A market the arm traded goes to theses, not to the decline table."""
+    reply = '{"decisions": [{"market_id": "m1", "prob_yes": 0.55, "thesis": "t"}]}'
+    pillar, db, _ = await _pillar(
+        tmp_path, [_model_spec()], [_market("m1", yes=0.30), _market("m2", yes=0.50)],
+        reply)
+    try:
+        assert await pillar.run_once() == 1
+        declined = await db.fetchall(
+            "SELECT market_id FROM agent_trader_declines")
+        assert [r["market_id"] for r in declined] == ["m2"]
     finally:
         await db.close()
 

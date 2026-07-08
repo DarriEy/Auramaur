@@ -547,6 +547,10 @@ class AgentTraderConfig(BaseModel):
     exclude_categories: list[str] = []
     # Generous: the arms may run WebSearch rounds before answering.
     llm_timeout_seconds: int = 420
+    # How long a pass on an offered market keeps it out of that arm's
+    # candidate slate (prevents burning calls re-declining the same markets
+    # every cycle; after the TTL prices have moved enough to re-ask).
+    decline_ttl_hours: float = 24.0
 
 
 class EconIndicatorConfig(BaseModel):
