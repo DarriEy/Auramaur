@@ -280,6 +280,9 @@ async def test_arm_order_rotates_per_cycle(tmp_path):
         [_model_spec("haiku"), _model_spec("sonnet", "claude-sonnet-5"),
          _model_spec("opus", "claude-opus-4-8")],
         [_market("m1")], reply)
+    # Disable decline memory (#266): with it on, m1 is off every arm's slate
+    # after cycle 1 and later cycles never call — this test is about order.
+    pillar._settings.agent_trader.decline_ttl_hours = 0.0
     order: list[str] = []
 
     async def record(prompt, model, effort, cfg):
