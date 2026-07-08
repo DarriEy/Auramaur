@@ -100,6 +100,7 @@ async def _pillar(tmp_path, markets, llm_reply: str):
     await db.connect()
     discovery = MagicMock()
     discovery.get_markets = AsyncMock(return_value=markets)
+    discovery.search_markets = AsyncMock(return_value=[])
     risk = MagicMock()
     decision = MagicMock()
     decision.approved = True
@@ -218,5 +219,36 @@ async def test_families_below_min_strikes_ignored(tmp_path):
     try:
         assert await pillar.run_once() == 0
         pillar._call_model.assert_not_awaited()
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_seed_and_search_completes_a_family(tmp_path):
+    """A volume-ranked scan yields lone ladder members (deep strikes are
+    low-volume); a single seed must trigger a live sibling search that
+    completes the family."""
+    reply = ('{"thesis": "t", "curve": [{"market_id": "a", "prob": 0.40},'
+             '{"market_id": "b", "prob": 0.70}, {"market_id": "c", "prob": 0.72}]}')
+    seed_only = [_strike("a", 5, 0.10)]  # scan sees ONE strike
+    pillar, db, _ = await _pillar(tmp_path, seed_only, reply)
+    pillar._settings.term_structure.min_strikes = 3
+    full = _ladder()
+    pillar._discovery.search_markets = AsyncMock(return_value=full + [
+        # noise the merge must reject: wrong family / no deadline
+        Market(id="x", question="Unrelated by July 9, 2026?",
+               outcome_yes_price=0.5, outcome_no_price=0.5, liquidity=5000,
+               volume=100, active=True, exchange="polymarket"),
+        Market(id="y", question="Event happening soon?", outcome_yes_price=0.5,
+               outcome_no_price=0.5, liquidity=5000, volume=100, active=True,
+               exchange="polymarket"),
+    ])
+    try:
+        entered = await pillar.run_once()
+        assert entered == 2
+        pillar._discovery.search_markets.assert_awaited_once()
+        sigs = {r["market_id"] for r in await db.fetchall(
+            "SELECT market_id FROM signals")}
+        assert sigs == {"a", "b"}
     finally:
         await db.close()
