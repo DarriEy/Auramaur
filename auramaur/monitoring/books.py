@@ -48,6 +48,9 @@ def _book_modes(settings) -> list[tuple[str, str, str]]:
     ts = settings.term_structure
     rows.append(("term_structure", *paper_mode(
         ts, f">={ts.min_strikes} strikes, curve/24h, edge>={ts.min_edge_pts:.0f}pts")))
+    va = settings.vol_anchor
+    rows.append(("vol_anchor", *paper_mode(
+        va, f"GBM thresholds, tau {va.tau_years:.2f}y, edge>={va.min_edge_pts:.0f}pts")))
 
     rows.append(("market_maker",
                  "LIVE" if settings.market_maker.enabled and settings.is_live
