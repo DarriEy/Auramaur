@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import tempfile
 from pathlib import Path
 
 import structlog
@@ -335,6 +336,16 @@ class AgentAnalyzer:
         Tool access is restricted to WebSearch + WebFetch only — no file
         system, no code execution.  Cost is bounded by --max-turns and
         the daily call budget enforced by _check_budget().
+
+        Runs from a NEUTRAL cwd (same treatment as agent_trader /
+        term_structure): from the repo root, `claude -p` loads CLAUDE.md and
+        the project auto-memory — and the auto-memory channel is WRITABLE, so
+        a trading call can append unreviewed beliefs to the context that
+        seeds every future session and its own future calls (observed
+        2026-07-09: a 02:28 depth-agent cycle wrote its market analysis into
+        the operator's memory index — the world-model-poisoning shape, via
+        memory). The agent's sanctioned state is world_model.json, passed
+        explicitly in the prompt; it needs nothing from the ambient context.
         """
         cmd = [
             "claude", "-p", prompt,
@@ -361,6 +372,7 @@ class AgentAnalyzer:
                     *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    cwd=tempfile.gettempdir(),
                 )
                 stdout, stderr = await asyncio.wait_for(
                     proc.communicate(), timeout=self._timeout_seconds,
