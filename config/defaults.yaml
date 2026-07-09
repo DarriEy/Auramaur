@@ -134,6 +134,13 @@ graduation:
   cache_seconds: 300
   # Structural/two-sided strategies bypass the ladder.
   exempt_strategies: ["arbitrage", "market_maker", "order_monitor"]
+  # Unproven-spray breadth cap (open PAPER positions across ALL cells before
+  # new unproven entries are skipped). Raised from the 100 default after the
+  # Kalshi paper-book restoration legitimately re-added a large block of open
+  # positions overnight and froze every unproven cell (including a pillar on
+  # its first day). Still a hard ceiling — exploration concentrates, it just
+  # doesn't get starved by bookkeeping repairs.
+  max_unproven_positions: 175
 
 intervals:
   market_scan_seconds: 300
