@@ -576,13 +576,21 @@ vol_anchor:
   stake_usd: 10.0
   max_entries_per_cycle: 3
   realized_window_days: 30
-  tau_years: 0.25
+  # Calibrated 2026-07-09 from a year of daily closes + ~30d of recorded
+  # tick data (cross-venue). Anchors = 1y realized vol (the priors were too
+  # high for everything but ETH — inflated anchors manufacture phantom BUY
+  # edges on long-dated touch). tau: weekly-AR(1) half-life measured ~1wk
+  # (tau 0.013-0.025y) but that's biased LOW by RV estimation noise; 0.05
+  # (~18d decay) splits measurement and the vol-literature slow component.
+  # Net effect vs the priors: mid-horizon (2-8wk) markets pull to the anchor
+  # faster (more signal), long-dated fairs come down (fewer phantom buys).
+  tau_years: 0.05
   long_run_vol:
-    bitcoin: 0.50
-    ethereum: 0.70
-    solana: 0.90
-    ripple: 0.85
-    dogecoin: 0.95
+    bitcoin: 0.45
+    ethereum: 0.67
+    solana: 0.72
+    ripple: 0.68
+    dogecoin: 0.78
   exclude_categories: []
 
 informed_flow:

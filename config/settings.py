@@ -605,13 +605,18 @@ class VolAnchorConfig(BaseModel):
     stake_usd: float = 10.0
     max_entries_per_cycle: int = 3
     realized_window_days: int = 30
-    # Mean-reversion horizon for the sigma blend (years). ~90d: a 4-day market
-    # prices off the tape, a 6-month market mostly off the anchor.
-    tau_years: float = 0.25
-    # Long-run annualized vol anchors, by coingecko id. Conservative.
+    # Mean-reversion horizon for the sigma blend (years). Calibrated
+    # 2026-07-09: weekly-AR(1) half-life measured ~1wk (biased low by RV
+    # estimation noise); 0.05 (~18d decay) splits the measurement and the
+    # vol-literature slow component. A 4-day market prices off the tape;
+    # anything beyond ~6 weeks prices mostly off the anchor.
+    tau_years: float = 0.05
+    # Long-run annualized vol anchors, by coingecko id: 1y realized vol,
+    # calibrated 2026-07-09 (year of daily closes, cross-checked against
+    # ~30d of recorded tick data).
     long_run_vol: dict[str, float] = {
-        "bitcoin": 0.50, "ethereum": 0.70, "solana": 0.90,
-        "ripple": 0.85, "dogecoin": 0.95,
+        "bitcoin": 0.45, "ethereum": 0.67, "solana": 0.72,
+        "ripple": 0.68, "dogecoin": 0.78,
     }
     exclude_categories: list[str] = []
 
