@@ -1396,6 +1396,10 @@ class AuramaurBot(
         if self.settings.term_structure.enabled:
             tasks.append(asyncio.create_task(self._task_term_structure(), name="term_structure"))
 
+        # Vol-anchored crypto threshold pricing (paper-forced; deterministic)
+        if self.settings.vol_anchor.enabled:
+            tasks.append(asyncio.create_task(self._task_vol_anchor(), name="vol_anchor"))
+
         # Informed-flow follower over Kalshi (paper-forced; abnormal-trade-size)
         if self.settings.informed_flow.enabled:
             tasks.append(asyncio.create_task(self._task_informed_flow(), name="informed_flow"))

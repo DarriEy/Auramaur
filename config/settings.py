@@ -584,6 +584,38 @@ class TermStructureConfig(BaseModel):
     exclude_categories: list[str] = []
 
 
+class VolAnchorConfig(BaseModel):
+    """Deterministic vol-anchored crypto threshold pricing (strategy/vol_anchor.py).
+
+    Edge: crowd threshold prices back out to a FLAT implied-vol term structure
+    anchored on the recent tape; vol mean-reverts, so long-dated touch markets
+    are mispriced whenever recent realized sits far from the long-run anchor.
+    Zero LLM cost (spot/closes from CoinGecko + closed-form GBM, martingale
+    convention, no drift view). PAPER-FORCED, own graduation cell.
+    """
+
+    enabled: bool = False
+    paper: bool = True
+    interval_seconds: int = 3600
+    scan_limit: int = 300
+    min_liquidity: float = 1000.0
+    min_days: float = 1.0
+    max_days: float = 240.0
+    min_edge_pts: float = 8.0
+    stake_usd: float = 10.0
+    max_entries_per_cycle: int = 3
+    realized_window_days: int = 30
+    # Mean-reversion horizon for the sigma blend (years). ~90d: a 4-day market
+    # prices off the tape, a 6-month market mostly off the anchor.
+    tau_years: float = 0.25
+    # Long-run annualized vol anchors, by coingecko id. Conservative.
+    long_run_vol: dict[str, float] = {
+        "bitcoin": 0.50, "ethereum": 0.70, "solana": 0.90,
+        "ripple": 0.85, "dogecoin": 0.95,
+    }
+    exclude_categories: list[str] = []
+
+
 class EconIndicatorConfig(BaseModel):
     """Data-driven Kalshi economic-indicator bin pricing (strategy/econ_indicator.py).
 
@@ -1262,6 +1294,7 @@ class Settings(BaseSettings):
     long_horizon: LongHorizonConfig = Field(default_factory=lambda: LongHorizonConfig(**_DEFAULTS.get("long_horizon", {})))
     agent_trader: AgentTraderConfig = Field(default_factory=lambda: AgentTraderConfig(**_DEFAULTS.get("agent_trader", {})))
     term_structure: TermStructureConfig = Field(default_factory=lambda: TermStructureConfig(**_DEFAULTS.get("term_structure", {})))
+    vol_anchor: VolAnchorConfig = Field(default_factory=lambda: VolAnchorConfig(**_DEFAULTS.get("vol_anchor", {})))
     informed_flow: InformedFlowConfig = Field(default_factory=lambda: InformedFlowConfig(**_DEFAULTS.get("informed_flow", {})))
     settlement_arb: SettlementArbConfig = Field(default_factory=lambda: SettlementArbConfig(**_DEFAULTS.get("settlement_arb", {})))
     weather_temp: WeatherTempConfig = Field(default_factory=lambda: WeatherTempConfig(**_DEFAULTS.get("weather_temp", {})))

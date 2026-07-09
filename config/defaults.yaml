@@ -557,6 +557,34 @@ term_structure:
   llm_timeout_seconds: 420
   exclude_categories: []
 
+vol_anchor:
+  # Deterministic vol-anchored crypto threshold pricing. Crowd threshold
+  # prices imply a FLAT vol term structure (a 4-day and a 6-month ETH market
+  # both implied sigma ~52% on a calm tape, 2026-07-09); vol mean-reverts, so
+  # long-dated touch markets are mispriced when the tape is calm/wild.
+  # Closed-form GBM (martingale convention, NO drift view), spot + realized
+  # vol from CoinGecko, candidates from LIVE discovery only (stale-DB prices
+  # faked strike-arb in this family). Zero LLM budget. PAPER-FORCED.
+  enabled: true
+  paper: true
+  interval_seconds: 3600
+  scan_limit: 300
+  min_liquidity: 1000.0
+  min_days: 1.0
+  max_days: 240.0
+  min_edge_pts: 8.0
+  stake_usd: 10.0
+  max_entries_per_cycle: 3
+  realized_window_days: 30
+  tau_years: 0.25
+  long_run_vol:
+    bitcoin: 0.50
+    ethereum: 0.70
+    solana: 0.90
+    ripple: 0.85
+    dogecoin: 0.95
+  exclude_categories: []
+
 informed_flow:
   # Informed-flow follower over Kalshi — mimic the side of abnormally-large
   # (informed) order flow. Abnormal trade size (ATS) proxies non-liquidity trading
