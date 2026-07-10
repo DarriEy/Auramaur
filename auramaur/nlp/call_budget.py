@@ -90,6 +90,50 @@ def calls_today() -> int:
         return _mem_calls if _mem_day == today else 0
 
 
+def paced_limit(base_limit: int, *, peak_start_hour: int, peak_end_hour: int,
+                offpeak_share: float, now_hour: int | None = None) -> int:
+    """Time-shaped ceiling on the NON-RESERVED budget.
+
+    The daily counter resets at midnight (UTC on this host), but the bot's
+    opportunity flow peaks 12-22 UTC (measured: signals/entries cluster at
+    14-17 UTC — US econ prints land 12:30 UTC, then US market hours), and
+    under greedy consumption the pool was documented exhausted by ~13:36 UTC
+    — dead exactly when the flow arrives. Before the peak window opens,
+    non-reserved callers may spend at most ``offpeak_share`` of the pool;
+    inside and after it, the full pool. The reserved (pinned) slice is
+    untouched — the proven edges were never subject to this limit.
+
+    Pure function (``now_hour`` injectable for tests). Hours are UTC.
+    ``offpeak_share >= 1`` or an empty window disables pacing.
+    """
+    if base_limit <= 0:
+        return base_limit
+    share = max(0.0, min(1.0, offpeak_share))
+    if share >= 1.0 or peak_start_hour >= peak_end_hour:
+        return base_limit
+    if now_hour is None:
+        from datetime import datetime, timezone
+        now_hour = datetime.now(timezone.utc).hour
+    if now_hour < peak_start_hour:
+        return int(base_limit * share)
+    return base_limit
+
+
+def non_reserved_limit(settings) -> int:
+    """The shared non-reserved ceiling every unpinned caller checks against:
+    (budget - pinned reserve), paced by the peak-window envelope. Returns 0
+    when the budget is fully reserved; a non-positive configured budget means
+    unlimited (callers already special-case budget <= 0)."""
+    nlp = settings.nlp
+    base = max(0, nlp.daily_claude_call_budget - nlp.claude_reserve_for_pinned)
+    return paced_limit(
+        base,
+        peak_start_hour=nlp.budget_peak_start_hour_utc,
+        peak_end_hour=nlp.budget_peak_end_hour_utc,
+        offpeak_share=nlp.budget_offpeak_share,
+    )
+
+
 def record_call() -> int:
     """Count one successful Claude call; returns today's new total."""
     global _mem_calls, _mem_day

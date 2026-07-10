@@ -241,6 +241,15 @@ class NLPConfig(BaseModel):
     # at budget - reserve; pinned callers can spend up to the full budget, so a
     # bulk consumer can never starve the money-making calls.
     claude_reserve_for_pinned: int = 25
+    # Pacing envelope on the NON-RESERVED pool (call_budget.paced_limit). The
+    # counter resets at midnight UTC but opportunity flow peaks 12-22 UTC
+    # (measured; US prints land 12:30 UTC), and greedy consumption exhausted
+    # the pool by early afternoon — dead when the flow arrives. Before
+    # peak_start only offpeak_share of the pool may be spent; inside/after
+    # the window the remainder unlocks. offpeak_share: 1.0 disables.
+    budget_peak_start_hour_utc: int = 12
+    budget_peak_end_hour_utc: int = 22
+    budget_offpeak_share: float = 0.4
 
     # Tool-use analyzer — refines strategic-batch results on top-edge markets
     # by letting Claude Code drive its own web_search / web_fetch. "auto"

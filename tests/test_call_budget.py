@@ -58,3 +58,61 @@ def test_sqlite_failure_degrades_to_memory(tmp_path):
     assert (n1, n2) == (1, 2)
     assert call_budget.calls_today() == 2
     assert call_budget._mem_day == date.today().isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Pacing envelope — the non-reserved pool is time-shaped toward the peak
+# window (measured flow peaks 12-22 UTC; greedy consumption used to exhaust
+# the pool by ~13:36 UTC, dead exactly when the flow arrives).
+# ---------------------------------------------------------------------------
+
+
+def test_paced_limit_offpeak_ration_and_peak_unlock():
+    kw = dict(peak_start_hour=12, peak_end_hour=22, offpeak_share=0.4)
+    # Overnight: only the ration is spendable.
+    assert call_budget.paced_limit(150, now_hour=0, **kw) == 60
+    assert call_budget.paced_limit(150, now_hour=11, **kw) == 60
+    # Inside and after the window: the full pool.
+    assert call_budget.paced_limit(150, now_hour=12, **kw) == 150
+    assert call_budget.paced_limit(150, now_hour=17, **kw) == 150
+    assert call_budget.paced_limit(150, now_hour=23, **kw) == 150
+
+
+def test_paced_limit_disable_switches():
+    # share >= 1 disables pacing entirely.
+    assert call_budget.paced_limit(
+        150, peak_start_hour=12, peak_end_hour=22, offpeak_share=1.0,
+        now_hour=3) == 150
+    # Degenerate window disables pacing.
+    assert call_budget.paced_limit(
+        150, peak_start_hour=22, peak_end_hour=12, offpeak_share=0.4,
+        now_hour=3) == 150
+    # Non-positive base passes through (callers special-case budget <= 0).
+    assert call_budget.paced_limit(
+        0, peak_start_hour=12, peak_end_hour=22, offpeak_share=0.4,
+        now_hour=3) == 0
+
+
+def test_non_reserved_limit_subtracts_reserve_then_paces(monkeypatch):
+    from unittest.mock import MagicMock
+
+    s = MagicMock()
+    s.nlp.daily_claude_call_budget = 175
+    s.nlp.claude_reserve_for_pinned = 25
+    s.nlp.budget_peak_start_hour_utc = 12
+    s.nlp.budget_peak_end_hour_utc = 22
+    s.nlp.budget_offpeak_share = 0.4
+
+    import auramaur.nlp.call_budget as cb
+
+    real = cb.paced_limit
+    captured = {}
+
+    def spy(base_limit, **kwargs):
+        captured["base"] = base_limit
+        return real(base_limit, **kwargs)
+
+    monkeypatch.setattr(cb, "paced_limit", spy)
+    limit = cb.non_reserved_limit(s)
+    assert captured["base"] == 150          # reserve subtracted first
+    assert limit in (60, 150)               # paced by wall clock

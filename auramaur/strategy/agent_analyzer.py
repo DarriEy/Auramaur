@@ -237,13 +237,20 @@ class AgentAnalyzer:
         self._timeout_seconds: int = 600  # 10 minutes for thorough analysis
 
     def _check_budget(self) -> None:
-        """Enforce daily Claude call budget. Raises BudgetExhausted if spent."""
+        """Enforce the daily Claude call budget. Raises BudgetExhausted if
+        spent. The depth agent is an unpinned bulk consumer, so it checks the
+        PACED non-reserved limit (peak-window envelope + pinned reserve) —
+        previously it checked the FULL budget, so it could eat into the lens's
+        reserved slice on top of ignoring pacing."""
         from auramaur.nlp import call_budget
         from auramaur.nlp.errors import BudgetExhausted
         budget = self.settings.nlp.daily_claude_call_budget
-        if budget > 0 and call_budget.calls_today() >= budget:
+        if budget <= 0:
+            return
+        limit = call_budget.non_reserved_limit(self.settings)
+        if call_budget.calls_today() >= limit:
             raise BudgetExhausted(
-                f"Daily agent call budget ({budget}) exhausted"
+                f"Daily agent call budget ({limit}/{budget}, paced) exhausted"
             )
 
     async def analyze_markets(

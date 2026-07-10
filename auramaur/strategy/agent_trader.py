@@ -416,10 +416,10 @@ class AgentTraderPillar:
 
         budget = self._settings.nlp.daily_claude_call_budget
         if budget > 0:
-            limit = max(0, budget - self._settings.nlp.claude_reserve_for_pinned)
+            limit = call_budget.non_reserved_limit(self._settings)
             if call_budget.calls_today() >= limit:
                 raise BudgetExhausted(
-                    f"non-reserved Claude budget ({limit}/{budget}) exhausted")
+                    f"non-reserved Claude budget ({limit}/{budget}, paced) exhausted")
         # cwd MUST be neutral: `claude -p` loads CLAUDE.md and the project
         # memory from its working directory, and run from the repo root the
         # arms were caught citing the operator's own market analyses ("your
