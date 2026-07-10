@@ -16,6 +16,10 @@ def settings():
     s.nlp.claude_reserve_for_pinned = 0
     s.nlp.skip_second_opinion = False
     s.nlp.cache_ttl_breaking_seconds = 900
+    # Pacing disabled: these tests exercise retries, not the envelope.
+    s.nlp.budget_peak_start_hour_utc = 12
+    s.nlp.budget_peak_end_hour_utc = 22
+    s.nlp.budget_offpeak_share = 1.0
     return s
 
 

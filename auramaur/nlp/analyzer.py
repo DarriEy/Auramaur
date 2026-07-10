@@ -141,8 +141,10 @@ class ClaudeAnalyzer:
 
         budget = self._settings.nlp.daily_claude_call_budget
         if budget > 0:
-            limit = budget if reserved else max(
-                0, budget - self._settings.nlp.claude_reserve_for_pinned)
+            # Non-reserved callers get the PACED limit (peak-window envelope,
+            # see call_budget.paced_limit); reserved callers the full budget.
+            limit = budget if reserved else call_budget.non_reserved_limit(
+                self._settings)
             if call_budget.calls_today() >= limit:
                 from auramaur.nlp.errors import BudgetExhausted
                 raise BudgetExhausted(

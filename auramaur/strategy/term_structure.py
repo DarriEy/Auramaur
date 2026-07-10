@@ -377,10 +377,10 @@ class TermStructurePillar:
 
         budget = self._settings.nlp.daily_claude_call_budget
         if budget > 0:
-            limit = max(0, budget - self._settings.nlp.claude_reserve_for_pinned)
+            limit = call_budget.non_reserved_limit(self._settings)
             if call_budget.calls_today() >= limit:
                 raise BudgetExhausted(
-                    f"non-reserved Claude budget ({limit}/{budget}) exhausted")
+                    f"non-reserved Claude budget ({limit}/{budget}, paced) exhausted")
         # Neutral cwd: `claude -p` loads CLAUDE.md + project memory from its
         # working directory (see agent_trader / the context-leak note).
         proc = await asyncio.create_subprocess_exec(
