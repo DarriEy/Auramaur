@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>is.auramaur.bot</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOURUSER/Auramaur/.venv/bin/auramaur</string>
+        <string>run</string>
+        <string>--hybrid</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/YOURUSER/Auramaur</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>AURAMAUR_LIVE</key>
+        <string>true</string>
+        <!-- The bot spawns `claude` subprocesses (Max+ CLI) and needs the
+             venv + ~/.local/bin on PATH; launchd's default PATH is bare. -->
+        <key>PATH</key>
+        <string>/Users/YOURUSER/Auramaur/.venv/bin:/Users/YOURUSER/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <!-- Keep the bot alive ONLY while the kill switch is absent: a crash or
+         reboot auto-restarts it; creating ./KILL_SWITCH lets it exit (the bot
+         halts itself on the switch) and launchd will NOT resurrect it until
+         the file is removed. The switch is now a launchd-level control too. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>PathState</key>
+        <dict>
+            <key>/Users/YOURUSER/Auramaur/KILL_SWITCH</key>
+            <false/>
+        </dict>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/YOURUSER/Auramaur/logs/run_live_launchd.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOURUSER/Auramaur/logs/run_live_launchd.out</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
