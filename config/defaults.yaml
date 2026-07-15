@@ -453,7 +453,13 @@ econ_indicator:
   # FRED history (random-walk nowcast + change-vol, sigma floored), trade bins
   # the crowd misprices. Directional -> PAPER-FORCED until the ledger +
   # calibration prove it; edge must clear the Kalshi taker fee on top of min_edge.
-  enabled: true
+  # WOUND DOWN 2026-07-15: first honestly-recorded settlement wave (post the
+  # paper-book restoration) came back clearly negative, and the known model
+  # deficiency is the cause — the random-walk YoY nowcast ignores base
+  # effects, so it fights the crowd exactly when the crowd is right (the
+  # divergence guard kept blocking its own best-rated trades). Re-enable
+  # only WITH the base-effects nowcast (the deferred Phase-B item).
+  enabled: false
   paper: true
   series: []             # empty = all registered (KXCPIYOY, KXU3, KXPAYROLLS)
   stake_usd: 10.0
@@ -545,8 +551,12 @@ term_structure:
   effort: medium
   scan_limit: 300
   min_strikes: 3
-  max_families: 12
-  families_per_cycle: 3
+  # Throughput raised 2026-07-15 (12->16 families, 3->5 fresh reads/cycle):
+  # the pillar's early ledger is the strongest of the new cells and its
+  # marginal cost is low (curves cached 24h; reads ride the paced
+  # non-reserved pool, never the pinned lens slice).
+  max_families: 16
+  families_per_cycle: 5
   curve_ttl_hours: 24.0
   max_entries_per_family: 2
   stake_usd: 10.0
@@ -750,7 +760,12 @@ bias_harvest:
   # paper: false (still behind the three live gates).
   enabled: true
   paper: true
-  band_lo: 0.60
+  # band_lo 0.90 = deep band only (the proven cell). The 0.60-0.90 regimes
+  # (bias_harvest_wide) were WOUND DOWN 2026-07-15: their own graduation-cell
+  # paper ledger came back clearly negative with a low win rate at adequate
+  # sample — the tail losses eat the wide-band harvest, exactly the failure
+  # the isolation was built to catch. Reversible: band_lo back to 0.60.
+  band_lo: 0.90
   band_hi: 0.97
   # claude_prob = favored price + uplift (the measured band gap is +4..+6pts).
   # MUST stay < 0.05 or the divergence filter blocks entries at MEDIUM conf.
