@@ -580,8 +580,8 @@ class TermStructureConfig(BaseModel):
     effort: str = "medium"
     scan_limit: int = 300
     min_strikes: int = 3
-    max_families: int = 12
-    families_per_cycle: int = 3   # fresh LLM reads per cycle (cached fams free)
+    max_families: int = 16
+    families_per_cycle: int = 5   # fresh LLM reads per cycle (cached fams free)
     curve_ttl_hours: float = 24.0
     max_entries_per_family: int = 2
     stake_usd: float = 10.0
