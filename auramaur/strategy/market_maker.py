@@ -281,6 +281,21 @@ class MarketMaker:
 
     async def _quote_market(self, market: Market) -> tuple[dict | None, str | None]:
         """Fetch order book, compute quotes, and place two-sided order for a market."""
+        # Cash reserve floor: MM is graduation-exempt and quotes continuously,
+        # so by default it absorbs EVERY free live dollar as inventory — a
+        # $200 float deposited for directional entries was fully claimed by MM
+        # fills within a week (2026-07). New quote pairs are skipped while
+        # spendable cash sits at/below the reserve; exits and cancels are
+        # never gated, so inventory still unwinds back to cash.
+        reserve = float(getattr(self._settings.market_maker, "cash_reserve_usd", 0.0))
+        if reserve > 0 and self._settings.is_live:
+            probe = getattr(self._exchange, "_free_collateral_usd", None)
+            free = await probe() if probe is not None else None
+            if free is not None and free <= reserve:
+                log.info("market_maker.reserve_floor", free=round(free, 2),
+                         reserve=reserve, market_id=market.id)
+                return None, "cash_reserve_floor"
+
         # Fetch YES order book to determine BBO
         book = await self._exchange.get_order_book(market.clob_token_yes)
 

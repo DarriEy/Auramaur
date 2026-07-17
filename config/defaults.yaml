@@ -393,6 +393,10 @@ market_maker:
   quote_size: 10.0          # tokens per side
   max_inventory: 50.0       # max directional exposure per market
   max_markets: 5            # max simultaneous MM markets
+  # No NEW quote pairs while spendable live cash <= this floor (exits and
+  # cancels never gated). MM is the only always-live cell, so without a
+  # floor it auto-claims every free dollar as inventory working capital.
+  cash_reserve_usd: 50.0
   refresh_seconds: 30       # re-quote frequency
   # Per-op watchdog: a stuck Polymarket call (no timeout) hung the whole MM loop
   # twice on 2026-06-30 (silent 12-24 min). Bound each quote op so a stuck call is

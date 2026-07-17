@@ -336,6 +336,11 @@ class MarketMakerConfig(BaseModel):
     quote_size: float = 10.0  # tokens per side
     max_inventory: float = 50.0  # max directional exposure per market
     max_markets: int = 5  # max simultaneous MM markets
+    # Live-cash floor MM must leave untouched: no NEW quote pairs while
+    # spendable collateral <= this (exits/cancels never gated). Stops MM —
+    # the only always-live cell — from auto-claiming every deposited dollar
+    # as inventory working capital.
+    cash_reserve_usd: float = 50.0
     refresh_seconds: int = 30  # re-quote frequency
     # Per-operation watchdog: a single Polymarket call (orderbook fetch, quote
     # placement) that stalls without a timeout will hang the WHOLE MM loop

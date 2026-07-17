@@ -50,6 +50,9 @@ class PositionSyncer:
         self._exchange = exchange
         self._paper = paper
         self._pnl = pnl
+        # Last good spendable-balance reading, served when the balance API
+        # throws transiently (a failed probe is not a zero balance).
+        self._last_balance: float = 0.0
 
     # ------------------------------------------------------------------
     # Public API
@@ -233,14 +236,21 @@ class PositionSyncer:
             )
             gross = int(resp.get("balance", 0)) / 1e6 if isinstance(resp, dict) else 0.0
         except Exception as e:
+            # A transient API failure is NOT a zero balance. Returning 0.0
+            # here stomped the monitor's cash to $0 (false LOW CASH alarm,
+            # observed 2026-07-17 while the venue held real spendable cash)
+            # and could wrongly gate entries. Serve the last good reading —
+            # sizing against slightly-stale cash is bounded by the submit-time
+            # guard, which re-checks against the venue anyway.
             log.error("sync.balance.error", error=str(e))
-            return 0.0
+            return self._last_balance
 
         reserved = 0.0
         reserve_fn = getattr(self._exchange, "_reserved_buy_collateral_from_open_orders", None)
         if reserve_fn is not None:
             reserved = reserve_fn() or 0.0
         available = max(0.0, gross - reserved)
+        self._last_balance = available
         log.info("sync.balance.computed", available=round(available, 2),
                  gross=round(gross, 2), reserved=round(reserved, 2))
         return available
