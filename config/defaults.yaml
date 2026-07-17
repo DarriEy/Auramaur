@@ -505,6 +505,16 @@ long_horizon:
   max_days_to_resolution: 365.0   # was 180 — the >180d bucket is the largest candidate pool
   interval_seconds: 1800
   exclude_categories: ["politics_us", "politics_intl"]
+  # Kalshi instance — long_horizon_kalshi cell, paper-first on its own ledger.
+  # Admits politics_intl: the live Kalshi book's gains are long-tenor
+  # geopolitical PERSISTENCE (fear-fade ladders, status-quo favorites) — slope
+  # trades on the market's own price, not forecasts. US politics stays out.
+  kalshi_enabled: true
+  kalshi_exclude_categories: ["politics_us"]
+  # Decay harvest: exit once the favored side captured this fraction of its
+  # entry->$1 distance — realizes the front-loaded premium on a weeks clock
+  # (graduation-ladder compatible) and recycles locked capital. 0 disables.
+  take_profit_capture: 0.6
 
 agent_trader:
   # LLM day-trader — the Hermes agent paradigm rebuilt as a first-class pillar

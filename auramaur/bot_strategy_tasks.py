@@ -44,10 +44,13 @@ class StrategyTaskMixin:
             await asyncio.sleep(interval)
 
     async def _task_long_horizon(self) -> None:
-        """Periodic long-horizon favorite-underpricing scan (paper-forced)."""
+        """Periodic long-horizon favorite-underpricing scan (paper-forced).
+        Runs the Polymarket instance and, when configured and composed, a
+        second Kalshi instance (long_horizon_kalshi — its own ladder cell,
+        politics_intl admitted; see the pillar docstring)."""
         from auramaur.strategy.long_horizon import LongHorizonPillar
 
-        pillar = LongHorizonPillar(
+        pillars = [LongHorizonPillar(
             db=self._components.db,
             settings=self.settings,
             discovery=self._components.discovery,
@@ -55,15 +58,33 @@ class StrategyTaskMixin:
             risk_manager=self._components.risk_manager,
             pnl_tracker=self._components.pnl_tracker,
             calibration=self._components.calibration,
-        )
+        )]
+        if self.settings.long_horizon.kalshi_enabled:
+            kalshi_discovery = (self._components.discoveries or {}).get("kalshi")
+            kalshi_exchange = (self._components.exchanges or {}).get("kalshi")
+            if kalshi_discovery is not None and kalshi_exchange is not None:
+                pillars.append(LongHorizonPillar(
+                    db=self._components.db,
+                    settings=self.settings,
+                    discovery=kalshi_discovery,
+                    exchange=kalshi_exchange,
+                    risk_manager=self._components.risk_manager,
+                    pnl_tracker=self._components.pnl_tracker,
+                    calibration=self._components.calibration,
+                    venue="kalshi",
+                ))
+            else:
+                log.info("long_horizon.kalshi_not_composed")
         interval = max(60, self.settings.long_horizon.interval_seconds)
         while self._running:
             if await self._check_kill_switch():
                 return
-            try:
-                await pillar.run_once()
-            except Exception as e:
-                log.error("long_horizon.cycle_error", error=str(e))
+            for pillar in pillars:
+                try:
+                    await pillar.run_once()
+                except Exception as e:
+                    log.error("long_horizon.cycle_error", venue=pillar._venue,
+                              error=str(e))
             await asyncio.sleep(interval)
 
     async def _task_agent_trader(self) -> None:

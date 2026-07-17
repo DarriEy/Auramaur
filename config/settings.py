@@ -510,6 +510,16 @@ class LongHorizonConfig(BaseModel):
     # where the bot has no edge — so we test generalization elsewhere. Checked on
     # top of risk.blocked_categories, against the CLASSIFIED category.
     exclude_categories: list[str] = ["politics_us", "politics_intl"]
+    # Kalshi instance (long_horizon_kalshi cell, paper-first on its own ledger).
+    # Its exclusions ADMIT politics_intl: the live Kalshi evidence for the slope
+    # edge is long-tenor geopolitical persistence — a price-slope trade, not a
+    # forecast.
+    kalshi_enabled: bool = False
+    kalshi_exclude_categories: list[str] = ["politics_us"]
+    # Decay harvest: exit once the side has captured this fraction of the
+    # entry->$1 distance. 0 disables. Realizes the front-loaded premium on a
+    # weeks clock (ladder-compatible) instead of waiting years for resolution.
+    take_profit_capture: float = 0.6
 
 
 class AgentTraderModel(BaseModel):

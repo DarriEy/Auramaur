@@ -36,7 +36,15 @@ from datetime import datetime, timezone
 import structlog
 
 from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
-from auramaur.exchange.models import Confidence, Market, OrderSide, Signal
+from auramaur.exchange.models import (
+    Confidence,
+    Market,
+    Order,
+    OrderSide,
+    OrderType,
+    Signal,
+    TokenType,
+)
 from auramaur.strategy.classifier import blocked_category_hit, ensure_category
 from auramaur.strategy.protocols import ExecutionMode
 
@@ -54,14 +62,27 @@ def calibrated_fair(price: float, slope: float) -> float:
 
 
 class LongHorizonPillar:
-    """Periodic long-horizon favored-side scanner for Polymarket."""
+    """Periodic long-horizon favored-side scanner.
+
+    Runs per venue: the classic Polymarket instance, and (when
+    ``kalshi_enabled``) a second instance over Kalshi attributed to
+    ``long_horizon_kalshi`` — its own graduation cell, so the venue earns
+    live status on its own ledger (the resolution_lens_kalshi idiom). The
+    Kalshi cell also ADMITS politics_intl: the live evidence for the slope
+    edge on Kalshi is precisely long-tenor geopolitical persistence (the
+    2026-04→07 live book: fear-fade ladders and status-quo favorites carried
+    the whole gain), and the research the pillar is built on found the slope
+    strongest in politics. These are persistence trades on the market's own
+    price, not forecasts — the no-politics-forecasting rule is about
+    forecasts.
+    """
 
     # Uniform Strategy contract (see strategy/protocols.py).
     name = "long_horizon"
     execution_mode = ExecutionMode.GATEWAY_SINGLE
 
     def __init__(self, db, settings, discovery, exchange, risk_manager,
-                 pnl_tracker, calibration) -> None:
+                 pnl_tracker, calibration, *, venue: str = "polymarket") -> None:
         self._db = db
         self._settings = settings
         self._discovery = discovery
@@ -69,8 +90,10 @@ class LongHorizonPillar:
         self._risk = risk_manager
         self._pnl = pnl_tracker
         self._calibration = calibration
+        self._venue = venue
+        self._tag = "long_horizon" if venue == "polymarket" else f"long_horizon_{venue}"
         self._gateway = ExecutionGateway(
-            router=None, exchange=exchange, exchange_name="polymarket",
+            router=None, exchange=exchange, exchange_name=venue,
             settings=settings, db=db, pnl_tracker=pnl_tracker,
         )
 
@@ -82,6 +105,10 @@ class LongHorizonPillar:
         cfg = self._settings.long_horizon
         if not cfg.enabled:
             return 0
+        try:
+            await self._harvest_decay(cfg)
+        except Exception as e:
+            log.error("long_horizon.harvest_error", error=str(e))
         open_count = await self._open_position_count()
         if open_count >= cfg.max_open:
             log.debug("long_horizon.book_full", open=open_count, cap=cfg.max_open)
@@ -148,14 +175,16 @@ class LongHorizonPillar:
         cfg = self._settings.long_horizon
         if not market.active:
             return False
-        if (market.exchange or "polymarket") != "polymarket":
-            return False  # v1: Polymarket only (0% fees — the edge clears cleanly)
+        if (market.exchange or "polymarket") != self._venue:
+            return False  # each instance owns exactly its venue's book
         if market.liquidity < cfg.min_liquidity:
             return False
         # Classify before the block (mislabel-safe, like bias_harvest/the gateway):
         # exclude the global block AND politics (the paper's effect is strongest
         # there but it's the bot's no-edge zone — we test generalization elsewhere).
-        excluded = set(self._settings.risk.blocked_categories) | set(cfg.exclude_categories)
+        venue_excludes = (cfg.kalshi_exclude_categories if self._venue == "kalshi"
+                          else cfg.exclude_categories)
+        excluded = set(self._settings.risk.blocked_categories) | set(venue_excludes)
         hit = blocked_category_hit(excluded, market.question, market.description,
                                    market.category)
         if hit:
@@ -175,8 +204,8 @@ class LongHorizonPillar:
 
     async def _already_entered_or_held(self, market_id: str) -> bool:
         row = await self._db.fetchone(
-            "SELECT 1 FROM signals WHERE market_id = ? AND strategy_source = 'long_horizon' LIMIT 1",
-            (market_id,),
+            "SELECT 1 FROM signals WHERE market_id = ? AND strategy_source = ? LIMIT 1",
+            (market_id, self._tag),
         )
         if row is not None:
             return True  # one shot per market, ever
@@ -190,7 +219,8 @@ class LongHorizonPillar:
             """SELECT COUNT(*) AS n FROM portfolio p
                WHERE EXISTS (SELECT 1 FROM signals s
                              WHERE s.market_id = p.market_id
-                               AND s.strategy_source = 'long_horizon')""",
+                               AND s.strategy_source = ?)""",
+            (self._tag,),
         )
         return int(row["n"]) if row else 0
 
@@ -213,7 +243,7 @@ class LongHorizonPillar:
                 f"(+{edge_fav * 100:.1f}pts); no forecast claimed."
             ),
             recommended_side=OrderSide.BUY if fav_is_yes else OrderSide.SELL,
-            strategy_source="long_horizon",
+            strategy_source=self._tag,
             # Names the structural gap so the name-the-gap divergence gate passes:
             # the divergence IS the thesis (published calibration slope), not an
             # unexplained model disagreement.
@@ -263,6 +293,73 @@ class LongHorizonPillar:
         return True
 
     # ------------------------------------------------------------------
+    # Decay harvest — realize the front-loaded premium, don't wait for the bell
+    # ------------------------------------------------------------------
+
+    async def _harvest_decay(self, cfg) -> int:
+        """Exit positions whose side has captured >= ``take_profit_capture`` of
+        the entry->$1 distance.
+
+        The slope/persistence premium decays FRONT-LOADED (the scare recedes,
+        the milestone slips) — holding the last cents to a multi-year
+        resolution is bad capital velocity, and worse: a cell whose events
+        only realize at resolution can never accrue the graduation ladder's
+        20-events-in-90-days record. Harvesting the decay converts marks into
+        honest realized ledger events on a weeks clock, recycles the locked
+        capital, and keeps the strategy judgeable. Marks must be FRESH
+        (stale-active rows freeze prices; the #80 lesson) — positions whose
+        market row hasn't updated recently are skipped, not exited."""
+        capture_floor = float(getattr(cfg, "take_profit_capture", 0.0))
+        if capture_floor <= 0:
+            return 0
+        rows = await self._db.fetchall(
+            """SELECT p.market_id, p.token, p.token_id, p.size, p.avg_price,
+                      p.is_paper, m.outcome_yes_price, m.clob_token_yes,
+                      m.clob_token_no
+               FROM portfolio p JOIN markets m ON m.id = p.market_id
+               WHERE p.size > 0 AND p.exchange = ?
+                 AND m.last_updated >= datetime('now', '-1 day')
+                 AND EXISTS (SELECT 1 FROM signals s
+                             WHERE s.market_id = p.market_id
+                               AND s.strategy_source = ?)""",
+            (self._venue, self._tag))
+        exited = 0
+        for r in rows:
+            token = (r["token"] or "YES").upper()
+            p_yes = float(r["outcome_yes_price"] or 0.0)
+            if not (0.0 < p_yes < 1.0):
+                continue
+            mark = p_yes if token == "YES" else 1.0 - p_yes
+            entry = float(r["avg_price"] or 0.0)
+            if entry <= 0 or entry >= 1.0 or mark <= entry:
+                continue
+            captured = (mark - entry) / (1.0 - entry)
+            if captured < capture_floor:
+                continue
+            token_id = r["token_id"] or (
+                r["clob_token_yes"] if token == "YES" else r["clob_token_no"]) or ""
+            order = Order(
+                market_id=r["market_id"],
+                exchange=self._venue,
+                token_id=token_id,
+                side=OrderSide.SELL,
+                token=TokenType(token),
+                size=float(r["size"]),
+                price=max(0.01, min(0.99, round(mark, 2))),
+                order_type=OrderType.LIMIT,
+                dry_run=bool(r["is_paper"]) or not self._settings.is_live,
+                source="exit",
+            )
+            res = await self._gateway.submit_exit(
+                order, exchange=self._exchange, exchange_name=self._venue)
+            if res.status in ("filled", "paper", "partial", "pending"):
+                exited += 1
+                log.info("long_horizon.decay_harvested", market_id=r["market_id"],
+                         tag=self._tag, entry=entry, mark=round(mark, 2),
+                         captured=round(captured, 2), paper=bool(r["is_paper"]))
+        return exited
+
+    # ------------------------------------------------------------------
     # Bookkeeping — same rails as bias_harvest / the engine
     # ------------------------------------------------------------------
 
@@ -281,10 +378,10 @@ class LongHorizonPillar:
         await self._db.execute(
             """INSERT INTO signals (market_id, claude_prob, claude_confidence,
                market_prob, edge, evidence_summary, action, strategy_source)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'long_horizon')""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (signal.market_id, signal.claude_prob, signal.claude_confidence.value,
              signal.market_prob, signal.edge, signal.evidence_summary,
-             signal.recommended_side.value),
+             signal.recommended_side.value, self._tag),
         )
         await self._db.commit()
 
@@ -300,13 +397,13 @@ class LongHorizonPillar:
             """INSERT INTO portfolio (market_id, exchange, side, size, avg_price,
                current_price, unrealized_pnl, category, token, token_id,
                is_paper, updated_at)
-               VALUES (?, 'polymarket', 'BUY', ?, ?, ?, 0, ?, ?, ?, ?, datetime('now'))
+               VALUES (?, ?, 'BUY', ?, ?, ?, 0, ?, ?, ?, ?, datetime('now'))
                ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
                    size = excluded.size,
                    avg_price = excluded.avg_price,
                    current_price = excluded.current_price,
                    updated_at = excluded.updated_at""",
-            (order.market_id, fill_size, fill_price, fill_price,
+            (order.market_id, self._venue, fill_size, fill_price, fill_price,
              market.category or "", order.token.value, order.token_id,
              1 if is_paper else 0),
         )
