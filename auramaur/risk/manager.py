@@ -169,8 +169,20 @@ class RiskManager:
         # keep every gate. The blocklist still applies to paper — decided-no-edge
         # categories never even paper-trade. `cell` is cached, so computing it
         # here and reusing it below is free.
+        # The ladder cell must be looked up under the CLASSIFIED category:
+        # freshly-discovered markets reach the risk gate before their DB row
+        # (and venue-tag classification) exists, so market.category is often
+        # empty/raw here — the lookup then lands on an UNPROVEN ('') cell and
+        # paper-forces entries a proven cell has already earned (observed: a
+        # probation cell's entries recorded paper for a week because every
+        # candidate arrived category-less). ensure_category prefers the
+        # stored label and falls back to keyword classification.
+        from auramaur.strategy.classifier import ensure_category
+        cell_category = ensure_category(
+            market.question or "", market.description or "",
+            market.category or "")
         cell = await self.graduation.decide(
-            signal.strategy_source, market.category or "")
+            signal.strategy_source, cell_category)
         is_paper_entry = (
             not self.settings.is_live
             or self.live_entries_blocked  # operational preflight BLOCK
