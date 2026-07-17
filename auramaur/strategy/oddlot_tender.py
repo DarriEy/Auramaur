@@ -109,8 +109,7 @@ class OddLotTenderPillar:
                     and verdict["confidence"] >= cfg.llm_min_confidence):
                 found += 1
                 await self._on_opportunity(f, verdict)
-        if analyzed:
-            log.info("oddlot.cycle_done", analyzed=analyzed, opportunities=found)
+        log.info("oddlot.cycle", analyzed=analyzed, opportunities=found)
         return found
 
     async def _audit_filing(self, f) -> dict | None:

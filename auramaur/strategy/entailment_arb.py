@@ -489,8 +489,7 @@ class EntailmentArbPillar:
             except Exception as e:
                 log.error("entailment.entry_error", a=implier.id, b=implied.id,
                           error=str(e))
-        if placed:
-            log.info("entailment.cycle_done", pairs=placed)
+        log.info("entailment.cycle", candidates=len(candidates), placed=placed)
         return placed
 
     # -- execution --------------------------------------------------------
