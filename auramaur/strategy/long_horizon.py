@@ -115,7 +115,10 @@ class LongHorizonPillar:
             return 0
         markets = await self._scan_long_dated(cfg)
         entered = 0
+        band = 0
         for market in markets:
+            if self._favored(market) is not None and self._eligible(market):
+                band += 1
             if entered >= cfg.max_entries_per_cycle:
                 break
             if open_count + entered >= cfg.max_open:
@@ -125,8 +128,11 @@ class LongHorizonPillar:
                     entered += 1
             except Exception as e:
                 log.error("long_horizon.entry_error", market_id=market.id, error=str(e))
-        if entered:
-            log.info("long_horizon.cycle_done", entered=entered)
+        # Log EVERY cycle (the settlement_arb #246 lesson): a quiet log must
+        # be distinguishable from a dead task, and the funnel numbers are the
+        # diagnosis when a venue instance silently finds nothing.
+        log.info("long_horizon.cycle", venue=self._venue, scanned=len(markets),
+                 in_band=band, open=open_count, entered=entered)
         return entered
 
     async def _scan_long_dated(self, cfg) -> list[Market]:
