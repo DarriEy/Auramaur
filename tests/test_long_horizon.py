@@ -268,3 +268,133 @@ def test_scan_long_dated_paginates_and_uses_date_window():
         assert "end_date_min" in kw and "end_date_max" in kw and kw["order"] == "liquidity"
         await db.close()
     asyncio.run(run())
+
+
+# ----------------------------------------------------------------------
+# Kalshi instance + decay harvest (2026-07)
+# ----------------------------------------------------------------------
+
+
+def _kalshi_pillar(db, settings, markets, exchange=None, risk=None):
+    discovery = MagicMock()
+    discovery.get_markets = AsyncMock(return_value=markets)
+    calibration = MagicMock()
+    calibration.record_prediction = AsyncMock()
+    return LongHorizonPillar(
+        db=db, settings=settings, discovery=discovery,
+        exchange=exchange or _exchange(), risk_manager=risk or _risk(),
+        pnl_tracker=PnLTracker(db, settings), calibration=calibration,
+        venue="kalshi",
+    )
+
+
+async def test_kalshi_instance_owns_tag_venue_and_admits_politics_intl():
+    """The Kalshi instance writes long_horizon_kalshi signals and a kalshi
+    portfolio row, ADMITS politics_intl (the live-book evidence category),
+    and rejects Polymarket markets (each instance owns exactly its venue)."""
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        settings = _settings()
+        markets = [
+            _market("KX1", yes=0.75, category="politics_intl", exchange="kalshi"),
+            _market("p1", yes=0.75, category="tech", exchange="polymarket"),
+        ]
+        pillar = _kalshi_pillar(db, settings, markets)
+        entered = await pillar.run_once()
+        assert entered == 1
+        sig = await db.fetchone("SELECT market_id, strategy_source FROM signals")
+        assert sig["market_id"] == "KX1"
+        assert sig["strategy_source"] == "long_horizon_kalshi"
+        port = await db.fetchone(
+            "SELECT exchange FROM portfolio WHERE market_id='KX1'")
+        assert port["exchange"] == "kalshi"
+    finally:
+        await db.close()
+
+
+async def test_poly_instance_still_excludes_politics():
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        settings = _settings()
+        pillar, _ = _pillar(db, settings, [
+            _market("p2", yes=0.75, category="politics_intl")])
+        assert await pillar.run_once() == 0
+    finally:
+        await db.close()
+
+
+async def _seed_position(db, *, market_id, tag, venue, token, size, avg,
+                         yes_price, fresh=True):
+    await db.execute(
+        """INSERT INTO markets (id, exchange, question, category, active,
+           outcome_yes_price, outcome_no_price, last_updated, created_at)
+           VALUES (?, ?, 'q?', 'tech', 1, ?, ?, ?, datetime('now'))""",
+        (market_id, venue, yes_price, round(1 - yes_price, 2),
+         "now" if fresh else "2026-01-01 00:00:00"))
+    if fresh:
+        await db.execute(
+            "UPDATE markets SET last_updated = datetime('now') WHERE id = ?",
+            (market_id,))
+    await db.execute(
+        """INSERT INTO signals (market_id, claude_prob, claude_confidence,
+           market_prob, edge, evidence_summary, action, strategy_source)
+           VALUES (?, 0.8, 'MEDIUM', 0.7, 8.0, 'e', 'BUY', ?)""",
+        (market_id, tag))
+    await db.execute(
+        """INSERT INTO portfolio (market_id, exchange, side, size, avg_price,
+           current_price, unrealized_pnl, category, token, token_id, is_paper,
+           updated_at)
+           VALUES (?, ?, 'BUY', ?, ?, ?, 0, 'tech', ?, 'tok', 1, datetime('now'))""",
+        (market_id, venue, size, avg, avg, token))
+    # The BUY's cost basis — what the harvest's SELL realizes against.
+    await db.execute(
+        """INSERT INTO cost_basis (market_id, token, token_id, size, avg_cost,
+           total_cost, realized_pnl, is_paper, updated_at)
+           VALUES (?, ?, 'tok', ?, ?, ?, 0, 1, datetime('now'))""",
+        (market_id, token, size, avg, size * avg))
+    await db.commit()
+
+
+async def test_decay_harvest_exits_captured_position_and_realizes():
+    """A NO position entered at 0.66 with the market now at YES=0.06 (mark
+    0.94) has captured (0.94-0.66)/(1-0.66) = 82% >= 60% -> exit fires, and
+    the sell realizes a ledger event attributed to the ENTRY cell (the
+    token-scoped #268 lookup) — graduation events on a weeks clock."""
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        settings = _settings()
+        pillar = _kalshi_pillar(db, settings, [])
+        await _seed_position(db, market_id="KXH", tag="long_horizon_kalshi",
+                             venue="kalshi", token="NO", size=30, avg=0.66,
+                             yes_price=0.06)
+        exited = await pillar._harvest_decay(settings.long_horizon)
+        assert exited == 1
+        row = await db.fetchone(
+            "SELECT strategy_source, pnl FROM pnl_ledger WHERE market_id='KXH'")
+        assert row is not None
+        assert row["pnl"] > 0
+    finally:
+        await db.close()
+
+
+async def test_decay_harvest_skips_below_floor_and_stale_marks():
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        settings = _settings()
+        pillar = _kalshi_pillar(db, settings, [])
+        # Captured only 26% (< 60%) -> hold.
+        await _seed_position(db, market_id="KXLOW", tag="long_horizon_kalshi",
+                             venue="kalshi", token="NO", size=30, avg=0.66,
+                             yes_price=0.25)
+        # Fully captured but the mark is STALE (frozen row) -> skip, not exit.
+        await _seed_position(db, market_id="KXSTALE", tag="long_horizon_kalshi",
+                             venue="kalshi", token="NO", size=30, avg=0.66,
+                             yes_price=0.02, fresh=False)
+        assert await pillar._harvest_decay(settings.long_horizon) == 0
+        assert await db.fetchone("SELECT 1 FROM pnl_ledger") is None
+    finally:
+        await db.close()
