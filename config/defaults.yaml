@@ -511,6 +511,12 @@ long_horizon:
   # trades on the market's own price, not forecasts. US politics stays out.
   kalshi_enabled: true
   kalshi_exclude_categories: ["politics_us"]
+  # Kalshi bulk liquidity underreports (lens precedent: floor 300->50); the
+  # Poly floor rejected 98% of far-dated Kalshi markets. Multi-year tenors
+  # admitted — the persistence winners resolve 2028-2035 and the decay
+  # harvest keeps capital velocity acceptable.
+  kalshi_min_liquidity: 50.0
+  kalshi_max_days_to_resolution: 1460.0
   # Decay harvest: exit once the favored side captured this fraction of its
   # entry->$1 distance — realizes the front-loaded premium on a weeks clock
   # (graduation-ladder compatible) and recycles locked capital. 0 disables.
