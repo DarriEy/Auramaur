@@ -258,3 +258,45 @@ def test_unproven_spray_cap_disabled_when_zero():
         await db.close()
 
     asyncio.run(run())
+
+
+async def test_ladder_cell_uses_classified_category_when_label_missing():
+    """Freshly-discovered markets reach the risk gate BEFORE their DB row /
+    venue-tag classification exists, so market.category is empty. The ladder
+    lookup must classify first — the raw lookup landed on an unproven ('')
+    cell and paper-forced entries a probation cell had already earned
+    (observed live: a proven cell's entries recorded paper for a week
+    because every candidate arrived category-less)."""
+    from tests.test_risk_manager import (
+        _make_market, _make_settings, _make_signal, _mock_portfolio,
+    )
+
+    from auramaur.risk.checks import CheckResult
+    from auramaur.risk.manager import RiskManager
+
+    db = Database(":memory:")
+    await db.connect()
+
+    settings = _make_settings()
+    settings.graduation = GraduationConfig(mode="enforce", min_events=5)
+    # 'crypto' is on the default live allowlist in _make_settings-land;
+    # earn probation for llm x crypto on paper.
+    await _seed(db, "llm", "crypto", n=5, pnl_each=1.0, is_paper=1)
+
+    with patch("auramaur.risk.manager.check_kill_switch") as mock_kill:
+        mock_kill.return_value = CheckResult(
+            name="kill_switch", passed=True, reason="", value=False)
+
+        manager = RiskManager(settings, db)
+        manager.portfolio = _mock_portfolio()
+        signal = _make_signal(edge=10.0, claude_prob=0.60, market_prob=0.50)
+        # Category-less market whose QUESTION classifies as crypto.
+        market = _make_market(category="")
+        market.question = "Will Bitcoin reach $90,000 by December 31, 2026?"
+
+        d = await manager.evaluate(signal, market, available_cash=500.0)
+        assert d.graduation_status == "probation", (
+            f"expected the classified (crypto) cell, got {d.graduation_status}")
+        assert d.force_paper is False
+
+    await db.close()
