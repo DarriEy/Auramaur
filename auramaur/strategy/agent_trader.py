@@ -208,8 +208,7 @@ class AgentTraderPillar:
                 # stop the other cells — they are independent experiment arms.
                 log.warning("agent_trader.model_cycle_error",
                             alias=spec.alias, error=str(e))
-        if entered_total:
-            log.info("agent_trader.cycle_done", entered=entered_total)
+        log.info("agent_trader.cycle", arms=len(cfg.models), entered=entered_total)
         return entered_total
 
     async def _run_model(self, spec, candidates: list[Market], cfg) -> int:

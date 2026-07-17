@@ -218,9 +218,8 @@ class TermStructurePillar:
             except Exception as e:
                 log.warning("term_structure.family_error", family=fam,
                             error=str(e))
-        if entered:
-            log.info("term_structure.cycle_done", entered=entered,
-                     families=len(families), reads=calls)
+        log.info("term_structure.cycle", families=len(families), reads=calls,
+                 entered=entered)
         return entered
 
     # ------------------------------------------------------------------

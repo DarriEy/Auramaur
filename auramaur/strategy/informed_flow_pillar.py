@@ -86,8 +86,7 @@ class InformedFlowPillar:
                     entered += 1
             except Exception as e:
                 log.error("informed_flow.entry_error", market_id=market.id, error=str(e))
-        if entered:
-            log.info("informed_flow.cycle_done", entered=entered)
+        log.info("informed_flow.cycle", scanned=len(markets), entered=entered)
         return entered
 
     # ------------------------------------------------------------------

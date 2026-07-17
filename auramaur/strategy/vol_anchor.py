@@ -263,8 +263,8 @@ class VolAnchorPillar:
                 continue
             if await self._try_enter(market, fair, sigma, realized, kind, cfg):
                 entered += 1
-        if priced:
-            log.info("vol_anchor.cycle_done", priced=priced, entered=entered)
+        log.info("vol_anchor.cycle", candidates=len(candidates), priced=priced,
+                 entered=entered)
         return entered
 
     async def _candidates(self, cfg) -> list[tuple[str, str, float, datetime, Market]]:

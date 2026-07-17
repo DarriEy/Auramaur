@@ -358,6 +358,5 @@ class CrossVenueArbPillar:
                     entered += 1
             except Exception as e:
                 log.error("cross_venue.entry_error", a=a.id, b=b.id, error=str(e))
-        if entered:
-            log.info("cross_venue.cycle_done", entered=entered)
+        log.info("cross_venue.cycle", pairs=len(pairs), entered=entered)
         return entered

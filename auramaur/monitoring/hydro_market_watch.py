@@ -94,6 +94,5 @@ class HydroMarketWatcher:
                 log.info("hydro_watch.new_market", venue=venue, market_id=m.id,
                          question=(m.question or "")[:80])
                 new += 1
-        if new:
-            log.info("hydro_watch.cycle_done", new=new)
+        log.info("hydro_watch.cycle", new=new)
         return new
