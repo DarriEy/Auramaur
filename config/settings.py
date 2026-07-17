@@ -516,6 +516,14 @@ class LongHorizonConfig(BaseModel):
     # forecast.
     kalshi_enabled: bool = False
     kalshi_exclude_categories: list[str] = ["politics_us"]
+    # Kalshi's bulk liquidity field UNDERREPORTS (the lens hit the same wall:
+    # floor 300 -> 50); the Polymarket floor rejected 98% of far-dated Kalshi
+    # markets. And the persistence lane on Kalshi lives at MULTI-YEAR tenors
+    # (the live-book winners resolve 2028-2035) — the 365d lock-up cap that
+    # protects the Poly instance would exclude the entire lane; the decay
+    # harvest is what makes long tenor affordable.
+    kalshi_min_liquidity: float = 50.0
+    kalshi_max_days_to_resolution: float = 1460.0
     # Decay harvest: exit once the side has captured this fraction of the
     # entry->$1 distance. 0 disables. Realizes the front-loaded premium on a
     # weeks clock (ladder-compatible) instead of waiting years for resolution.

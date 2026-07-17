@@ -145,7 +145,9 @@ class LongHorizonPillar:
         from datetime import timedelta
         now = datetime.now(timezone.utc)
         emin = (now + timedelta(days=cfg.min_days_to_resolution)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        emax = (now + timedelta(days=cfg.max_days_to_resolution)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        max_days = (cfg.kalshi_max_days_to_resolution if self._venue == "kalshi"
+                    else cfg.max_days_to_resolution)
+        emax = (now + timedelta(days=max_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
         out: list[Market] = []
         try:
             for off in range(0, max(int(cfg.scan_limit), 1), 100):
@@ -183,7 +185,9 @@ class LongHorizonPillar:
             return False
         if (market.exchange or "polymarket") != self._venue:
             return False  # each instance owns exactly its venue's book
-        if market.liquidity < cfg.min_liquidity:
+        min_liq = (cfg.kalshi_min_liquidity if self._venue == "kalshi"
+                   else cfg.min_liquidity)
+        if market.liquidity < min_liq:
             return False
         # Classify before the block (mislabel-safe, like bias_harvest/the gateway):
         # exclude the global block AND politics (the paper's effect is strongest
@@ -204,8 +208,10 @@ class LongHorizonPillar:
         days_left = (end - datetime.now(timezone.utc)).total_seconds() / 86400.0
         if days_left < cfg.min_days_to_resolution:
             return False  # not a LONG-horizon market — no underconfidence edge
-        if days_left > cfg.max_days_to_resolution:
-            return False  # capital lock-up cap
+        max_days = (cfg.kalshi_max_days_to_resolution if self._venue == "kalshi"
+                    else cfg.max_days_to_resolution)
+        if days_left > max_days:
+            return False  # capital lock-up cap (decay harvest funds the kalshi tenor)
         return True
 
     async def _already_entered_or_held(self, market_id: str) -> bool:
