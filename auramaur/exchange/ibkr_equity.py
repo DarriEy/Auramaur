@@ -12,6 +12,8 @@ backtested net-negative in every variant — pre-failed, never activated.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+import math
 import time
 from auramaur.killswitch import kill_switch_present
 
@@ -27,9 +29,17 @@ log = structlog.get_logger()
 _FX_COOLDOWN_S = 1800
 
 
+@dataclass(frozen=True)
+class EquityQuote:
+    bid: float
+    ask: float
+    timestamp: float
+
+
 class IBKREquityClient:
-    def __init__(self, settings):
+    def __init__(self, settings, *, force_paper_readonly: bool = False):
         self._settings = settings
+        self._force_paper_readonly = force_paper_readonly
         self._ib = None
         self._connected = False
         self._cooldown_until = 0.0
@@ -45,12 +55,13 @@ class IBKREquityClient:
             raise ConnectionError("ibkr equity connect on cooldown")
         from ib_async import IB
         cfg = self._settings.ibkr
-        port = cfg.paper_port if cfg.environment == "paper" else cfg.live_port
+        port = cfg.paper_port if self._force_paper_readonly or cfg.environment == "paper" else cfg.live_port
+        readonly = True if self._force_paper_readonly else cfg.readonly
         try:
             self._ib = IB()
             await self._ib.connectAsync(
                 host=cfg.host, port=port, clientId=cfg.equity_client_id,
-                readonly=cfg.readonly,
+                readonly=readonly,
             )
             self._ib.reqMarketDataType(cfg.market_data_type)
         except Exception:
@@ -59,7 +70,7 @@ class IBKREquityClient:
             raise
         self._connected = True
         log.info("ibkr_equity.connected", port=port, client_id=cfg.equity_client_id,
-                 readonly=cfg.readonly)
+                 readonly=readonly, forced_paper=self._force_paper_readonly)
 
     async def get_price(self, symbol: str) -> float | None:
         await self._ensure_connected()
@@ -88,6 +99,54 @@ class IBKREquityClient:
         except Exception as e:  # noqa: BLE001
             log.warning("ibkr_equity.price_error", symbol=symbol, error=str(e)[:100])
             return None
+
+    async def get_quote(self, symbol: str) -> EquityQuote | None:
+        """Executable BBO for paper fills; returns None without a valid spread."""
+        await self._ensure_connected()
+        from ib_async import Stock
+        try:
+            stock = Stock(symbol, "SMART", "USD")
+            await self._ib.qualifyContractsAsync(stock)
+            [ticker] = await self._ib.reqTickersAsync(stock)
+            bid, ask = float(ticker.bid or 0), float(ticker.ask or 0)
+            if not math.isfinite(bid) or not math.isfinite(ask):
+                return None
+            if bid <= 0 or ask <= 0 or bid > ask:
+                return None
+            tick_time = getattr(ticker, "time", None)
+            if tick_time is None:
+                log.warning("ibkr_equity.quote_missing_timestamp", symbol=symbol)
+                return None
+            timestamp = tick_time.timestamp()
+            if not math.isfinite(timestamp):
+                return None
+            return EquityQuote(bid=bid, ask=ask, timestamp=timestamp)
+        except Exception as e:  # noqa: BLE001
+            log.warning("ibkr_equity.quote_error", symbol=symbol, error=str(e)[:100])
+            return None
+
+    async def get_adjusted_daily_closes(self, symbol: str) -> list[tuple[str, float]]:
+        """Recent adjusted session closes as ``(YYYY-MM-DD, close)`` pairs."""
+        await self._ensure_connected()
+        from ib_async import Stock
+        try:
+            stock = Stock(symbol, "SMART", "USD")
+            await self._ib.qualifyContractsAsync(stock)
+            bars = await self._ib.reqHistoricalDataAsync(
+                stock, endDateTime="", durationStr="1 M", barSizeSetting="1 day",
+                whatToShow="ADJUSTED_LAST", useRTH=True)
+            out = []
+            for bar in bars or []:
+                day = getattr(bar, "date", "")
+                day_text = day.isoformat() if hasattr(day, "isoformat") else str(day)[:10]
+                close = float(getattr(bar, "close", 0) or 0)
+                if len(day_text) >= 10 and close > 0:
+                    out.append((day_text[:10], close))
+            return out
+        except Exception as e:  # noqa: BLE001
+            log.warning("ibkr_equity.daily_closes_error", symbol=symbol,
+                        error=str(e)[:100])
+            return []
 
     async def place_order(
         self, symbol: str, side: OrderSide | str, usd_amount: float,

@@ -204,11 +204,9 @@ cryptodotcom:
   environment: "sandbox"
 
 ibkr:
-  # Ready but quiet: live TWS API socket is up on 7496 and all the first-class
-  # plumbing is wired, BUT option discovery needs an OPRA market-data
-  # subscription (Error 10091 without it) which can't activate until the held
-  # CAD deposit clears (~2026-06-08). Re-enable (enabled:true) once OPRA data is
-  # active AND funds clear; then flip paper_trade:false to go fully live.
+  # Shared IBKR operational defaults remain unchanged. The ETF experiment below
+  # forces its own paper-port, read-only quote connection in code, so it cannot
+  # silently alter or arm the independently configured options/odd-lot paths.
   #
   # PRE-REGISTERED EXPERIMENT (2026-06-09, Phase 6 of the edge-first redesign).
   # IBKR is an experiment, not a commitment. Criteria fixed BEFORE activation
@@ -239,13 +237,47 @@ ibkr:
   client_id: 1
   max_contracts_per_symbol: 10
   market_data_type: 3
-  readonly: false  # non-read-only socket so the options client can place orders
-  # Going straight to live once funded — paper-prep is bypassed. With paper_trade
-  # false, flipping enabled:true (after OPRA data + funds land ~2026-06-08) places
-  # real option orders directly. Set paper_trade:true if you want a brief paper
-  # shakeout first. paper_budget_usd is only used when paper_trade is true.
+  readonly: false
+  # Options, if separately enabled later, still default to paper accounting.
   paper_trade: false
   paper_budget_usd: 5000.0
+  # Structurally paper-only ETF book. This reads quotes from the IBKR paper
+  # Gateway but never calls an order-placement method.
+  etf_paper_enabled: false
+  # Multi-asset ETF universe: broad US, sectors, international, rates, real
+  # assets, and defensives. Long-only instruments avoid leverage/inverse decay.
+  etf_symbols: ["SPY", "QQQ", "IWM", "DIA", "VTI",
+    "XLK", "XLF", "XLV", "XLE", "XLI", "XLY", "XLP", "XLU", "XLB", "XLRE", "XLC",
+    "VEA", "VWO", "EWC", "EWJ",
+    "TLT", "IEF", "SHY", "TIP",
+    "GLD", "SLV", "DBC", "VNQ"]
+  etf_paper_budget_usd: 5000.0
+  etf_max_entry_usd: 250.0
+  etf_max_deployment_pct: 50.0
+  etf_max_asset_class_pct: 30.0
+  etf_max_positions: 4
+  etf_daily_loss_limit_usd: 100.0
+  etf_max_signal_refreshes_per_cycle: 4
+  etf_fee_per_order_usd: 1.00
+  etf_max_spread_bps: 20.0
+  etf_min_prob: 0.62
+  etf_exit_prob: 0.47
+  etf_min_confidence: "MEDIUM"
+  etf_signal_horizon_days: 5
+  etf_signal_refresh_hours: 6.0
+  etf_cycle_seconds: 900
+  etf_stop_loss_pct: 5.0
+  etf_take_profit_pct: 8.0
+  etf_trailing_stop_pct: 3.0
+  etf_reentry_cooldown_hours: 24.0
+  # Intelligence-cap experiment: identical evidence/prompt/risk across three
+  # independent, isolated paper cells. Only model tier/reasoning effort changes.
+  etf_models:
+    - {alias: "luna", model: "gpt-5.6-luna", effort: "low", input_cost_per_million: 0.0, output_cost_per_million: 0.0}
+    - {alias: "terra", model: "gpt-5.6-terra", effort: "medium", input_cost_per_million: 0.0, output_cost_per_million: 0.0}
+    - {alias: "sol", model: "gpt-5.6-sol", effort: "high", input_cost_per_million: 0.0, output_cost_per_million: 0.0}
+  etf_openai_timeout_seconds: 120
+  etf_openai_daily_call_limit: 100
   # Directional equity speculation — gated; NO validated edge. Own socket
   # (equity_client_id). Needs readonly:false + a funded/permissioned account.
   # Directional equity momentum book REMOVED 2026-06-09 — pre-failed (the
@@ -542,6 +574,16 @@ agent_trader:
       model: claude-sonnet-5
     - alias: opus
       model: claude-opus-4-8
+    # Gemini arms — cross-provider tier comparison. PAID API (unlike the
+    # Claude arms on the plan): own daily ceiling below, and every call's
+    # token usage is metered into agent_trader_costs so each arm's record
+    # is judged NET of its own intelligence bill.
+    - alias: gflash
+      model: gemini-3.1-flash-preview
+      provider: gemini
+    - alias: gpro
+      model: gemini-3.1-pro-preview
+      provider: gemini
   scan_limit: 200
   markets_per_cycle: 10
   max_entries_per_cycle: 2
@@ -555,6 +597,10 @@ agent_trader:
   exclude_categories: []
   llm_timeout_seconds: 420   # room for WebSearch rounds
   decline_ttl_hours: 24.0    # a pass keeps the market off the arm's slate this long
+  gemini_daily_call_limit: 30   # across all gemini arms; independent of the Claude pool
+  gemini_price_per_mtok:        # $/1M tokens [input, output] — update from the rate card
+    gemini-3.1-flash-preview: [0.30, 2.50]
+    gemini-3.1-pro-preview: [2.00, 12.00]
 
 term_structure:
   # Deadline-ladder curve reader — the reading edge, amortized: ONE LLM read
