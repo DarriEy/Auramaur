@@ -118,9 +118,6 @@ async def gather_books(db) -> list[dict]:
 
     open_rows = await db.fetchall(
         """SELECT CASE WHEN p.exchange = 'kraken' THEN 'kraken_directional'
-                  WHEN p.market_id LIKE 'ibkr-etf:%:%' THEN
-                    'ibkr_etf_' || substr(p.market_id, 10,
-                      instr(substr(p.market_id, 10), ':') - 1)
                   ELSE COALESCE(
                  (SELECT s.strategy_source FROM signals s
                   WHERE s.market_id = p.market_id
@@ -135,6 +132,21 @@ async def gather_books(db) -> list[dict]:
         by_book.setdefault(r["book"], {}).update(
             open_n=int(r["open_n"] or 0), open_usd=float(r["open_usd"] or 0.0),
             open_paper_n=int(r["open_paper_n"] or 0))
+
+    etf_rows = await db.fetchall(
+        """SELECT l.model_alias,
+                  COUNT(*) AS n,
+                  SUM(l.pnl) AS pnl,
+                  SUM(CASE WHEN l.pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                  (SELECT COUNT(*) FROM ibkr_etf_positions p
+                    WHERE p.model_alias = l.model_alias) AS open_n
+             FROM ibkr_etf_ledger l GROUP BY l.model_alias""")
+    for row in etf_rows or []:
+        by_book[f"ibkr_etf_{row['model_alias']}"] = {
+            "paper_n": int(row["n"] or 0), "paper_pnl": float(row["pnl"] or 0),
+            "wins": int(row["wins"] or 0), "n": int(row["n"] or 0),
+            "open_paper_n": int(row["open_n"] or 0),
+        }
 
     out = []
     for book, d in sorted(by_book.items()):

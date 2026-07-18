@@ -13,6 +13,7 @@ backtested net-negative in every variant — pre-failed, never activated.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import time
 from auramaur.killswitch import kill_switch_present
 
@@ -108,6 +109,8 @@ class IBKREquityClient:
             await self._ib.qualifyContractsAsync(stock)
             [ticker] = await self._ib.reqTickersAsync(stock)
             bid, ask = float(ticker.bid or 0), float(ticker.ask or 0)
+            if not math.isfinite(bid) or not math.isfinite(ask):
+                return None
             if bid <= 0 or ask <= 0 or bid > ask:
                 return None
             tick_time = getattr(ticker, "time", None)
@@ -115,6 +118,8 @@ class IBKREquityClient:
                 log.warning("ibkr_equity.quote_missing_timestamp", symbol=symbol)
                 return None
             timestamp = tick_time.timestamp()
+            if not math.isfinite(timestamp):
+                return None
             return EquityQuote(bid=bid, ask=ask, timestamp=timestamp)
         except Exception as e:  # noqa: BLE001
             log.warning("ibkr_equity.quote_error", symbol=symbol, error=str(e)[:100])

@@ -105,7 +105,6 @@ class WebSearchSource:
                         content=r.get("body", ""),
                         url=url,
                         published_at=datetime.now(timezone.utc),
-                        timestamp_quality="unknown",
                     )
                 )
         return items

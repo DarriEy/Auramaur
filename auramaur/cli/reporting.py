@@ -105,19 +105,21 @@ def ibkr_intelligence():
                           AVG(CASE WHEN f.actual_outcome IS NOT NULL THEN
                             CASE WHEN (f.probability >= .5) = (f.actual_outcome = 1)
                                  THEN 1.0 ELSE 0.0 END END) AS accuracy,
-                          COALESCE((SELECT SUM(l.pnl) FROM pnl_ledger l
-                            WHERE l.strategy_source = 'ibkr_etf_' || f.model_alias
-                              AND l.is_paper = 1), 0) AS realized_pnl,
-                          COALESCE((SELECT COUNT(*) FROM portfolio p
-                            WHERE p.market_id LIKE 'ibkr-etf:' || f.model_alias || ':%'
-                              AND p.is_paper = 1), 0) AS open_positions
+                          COALESCE((SELECT SUM(l.pnl) FROM ibkr_etf_ledger l
+                            WHERE l.model_alias = f.model_alias), 0) AS realized_pnl,
+                          COALESCE((SELECT -SUM(l.pnl) FROM ibkr_etf_ledger l
+                            WHERE l.model_alias = f.model_alias
+                              AND l.kind = 'intelligence'), 0) AS intelligence_cost,
+                          COALESCE((SELECT COUNT(*) FROM ibkr_etf_positions p
+                            WHERE p.model_alias = f.model_alias), 0) AS open_positions
                    FROM ibkr_etf_forecasts f GROUP BY f.model_alias
                    ORDER BY f.model_alias""")
             table = Table(title="IBKR ETF OpenAI intelligence comparison")
             for name, justify in (("cell", "left"), ("model", "left"),
                                   ("forecasts", "right"), ("resolved", "right"),
                                   ("accuracy", "right"), ("Brier", "right"),
-                                  ("open", "right"), ("realized P&L", "right")):
+                                  ("open", "right"), ("intelligence", "right"),
+                                  ("net P&L", "right")):
                 table.add_column(name, justify=justify)
             for row in rows:
                 table.add_row(
@@ -125,7 +127,8 @@ def ibkr_intelligence():
                     str(row["resolved"]),
                     f"{row['accuracy']:.1%}" if row["accuracy"] is not None else "—",
                     f"{row['brier']:.3f}" if row["brier"] is not None else "—",
-                    str(row["open_positions"]), f"${row['realized_pnl']:+,.2f}")
+                    str(row["open_positions"]), f"${row['intelligence_cost']:,.4f}",
+                    f"${row['realized_pnl']:+,.2f}")
             console.print(table)
         finally:
             await db.close()

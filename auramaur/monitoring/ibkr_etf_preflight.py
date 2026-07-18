@@ -94,15 +94,23 @@ async def preflight(settings, db, *, client=None, model_checker=None) -> ETFPref
     if own_client:
         await client.close()
 
-    required_tables = ("trades", "fills", "cost_basis", "portfolio", "pnl_ledger",
-                       "ibkr_etf_forecasts", "ibkr_etf_state",
-                       "ibkr_etf_cooldowns", "ibkr_etf_openai_attempts")
+    required_tables = ("ibkr_etf_forecasts", "ibkr_etf_state",
+                       "ibkr_etf_cooldowns", "ibkr_etf_openai_attempts",
+                       "ibkr_etf_positions", "ibkr_etf_fills", "ibkr_etf_ledger")
     rows = await db.fetchall("SELECT name FROM sqlite_master WHERE type='table'")
     missing = sorted(set(required_tables) - {row["name"] for row in rows})
     if missing:
         add("database schema", "BLOCK", "missing: " + ", ".join(missing))
     else:
-        add("database schema", "OK", "ETF state and standard audit tables are present")
+        add("database schema", "OK", "isolated ETF state and accounting tables are present")
+
+    unpriced = [arm.alias for arm in cfg.etf_models
+                if arm.input_cost_per_million <= 0 or arm.output_cost_per_million <= 0]
+    if unpriced:
+        add("token pricing", "BLOCK", "set explicit input/output token prices for: "
+            + ", ".join(unpriced))
+    else:
+        add("token pricing", "OK", "every model arm books usage cost into its cell ledger")
 
     checker = model_checker or _check_openai_models
     models = [arm.model for arm in cfg.etf_models]

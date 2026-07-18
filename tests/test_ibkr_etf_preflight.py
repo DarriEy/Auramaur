@@ -31,13 +31,15 @@ async def test_ready_preflight_checks_all_dependencies():
     settings = Settings()
     settings.ibkr.enabled = True
     settings.ibkr.etf_paper_enabled = True
+    for arm in settings.ibkr.etf_models:
+        arm.input_cost_per_million = arm.output_cost_per_million = 1.0
     settings.openai_api_key = "test-key"
     report = await preflight(
         settings, db, client=ReadyClient(), model_checker=models_available)
     assert report.ready
     assert {result.name for result in report.results} == {
         "feature gates", "paper isolation", "market quote", "adjusted bars",
-        "database schema", "OpenAI models", "experiment cells"}
+        "database schema", "token pricing", "OpenAI models", "experiment cells"}
     await db.close()
 
 

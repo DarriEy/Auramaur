@@ -19,6 +19,7 @@ class ETFAnalysis:
     thesis: str
     key_risks: tuple[str, ...]
     skipped_reason: str | None = None
+    intelligence_cost_usd: float = 0.0
 
 
 _SCHEMA = {
@@ -52,7 +53,8 @@ class OpenAIETFAnalyzer:
 
     def __init__(self, api_key: str, model: str, effort: str,
                  timeout_seconds: int = 120, db=None,
-                 model_alias: str = "") -> None:
+                 model_alias: str = "", input_cost_per_million: float = 0.0,
+                 output_cost_per_million: float = 0.0) -> None:
         self.model = model
         self.effort = effort
         self._api_key = api_key
@@ -61,6 +63,8 @@ class OpenAIETFAnalyzer:
         self._warned_missing_key = False
         self._db = db
         self._model_alias = model_alias
+        self._input_cost_per_million = input_cost_per_million
+        self._output_cost_per_million = output_cost_per_million
 
     async def _start_attempt(self) -> int | None:
         if self._db is None:
@@ -73,20 +77,32 @@ class OpenAIETFAnalyzer:
         return cursor.lastrowid
 
     async def _finish_attempt(self, attempt_id: int | None, status: str,
-                              started: float, data=None, error: str = "") -> None:
+                              started: float, data=None, error: str = "") -> float:
         if self._db is None or attempt_id is None:
-            return
+            return 0.0
         data = data or {}
         usage = data.get("usage") or {}
+        input_tokens = int(usage.get("input_tokens", 0) or 0)
+        output_tokens = int(usage.get("output_tokens", 0) or 0)
+        cost = (
+            input_tokens * self._input_cost_per_million
+            + output_tokens * self._output_cost_per_million
+        ) / 1_000_000
         await self._db.execute(
             """UPDATE ibkr_etf_openai_attempts SET status=?, response_id=?,
-                 input_tokens=?, output_tokens=?, total_tokens=?, latency_ms=?,
+                 input_tokens=?, output_tokens=?, total_tokens=?, cost_usd=?, latency_ms=?,
                  error=?, finished_at=datetime('now') WHERE id=?""",
-            (status, str(data.get("id", "")), int(usage.get("input_tokens", 0) or 0),
-             int(usage.get("output_tokens", 0) or 0),
+            (status, str(data.get("id", "")), input_tokens, output_tokens,
              int(usage.get("total_tokens", 0) or 0),
-             int((time.monotonic() - started) * 1000), error[:300], attempt_id))
+             cost, int((time.monotonic() - started) * 1000), error[:300], attempt_id))
+        if cost > 0:
+            await self._db.execute(
+                """INSERT OR IGNORE INTO ibkr_etf_ledger
+                   (model_alias, kind, pnl, source_ref)
+                   VALUES (?, 'intelligence', ?, ?)""",
+                (self._model_alias, -cost, f"openai:{attempt_id}"))
         await self._db.commit()
+        return cost
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -173,8 +189,11 @@ class OpenAIETFAnalyzer:
                 thesis=str(parsed["thesis"]),
                 key_risks=tuple(str(x) for x in parsed["key_risks"]),
             )
-            await self._finish_attempt(attempt_id, "completed", started, data)
-            return result
+            cost = await self._finish_attempt(attempt_id, "completed", started, data)
+            return ETFAnalysis(
+                probability=result.probability, confidence=result.confidence,
+                thesis=result.thesis, key_risks=result.key_risks,
+                intelligence_cost_usd=cost)
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             await self._finish_attempt(
                 attempt_id, "parse_error", started, data, str(exc))

@@ -8,6 +8,7 @@ import pytest
 
 from auramaur.db.database import Database
 from auramaur.bot import run_ibkr_etf_arms_once
+from auramaur.exchange.paper import PaperTrader
 from auramaur.exchange.ibkr_equity import EquityQuote
 from auramaur.strategy.ibkr_etf_paper import IBKRETFPaperPillar
 from config.settings import Settings
@@ -57,22 +58,17 @@ async def test_bullish_view_opens_paper_position_at_ask():
     pillar = await _pillar(db)
     await pillar.run_once()
 
-    fill = await db.fetchone("SELECT * FROM fills")
-    assert fill["market_id"] == "ibkr-etf:luna:SPY"
+    fill = await db.fetchone("SELECT * FROM ibkr_etf_fills")
+    assert fill["model_alias"] == "luna"
+    assert fill["symbol"] == "SPY"
     assert fill["side"] == "BUY"
     assert fill["price"] == 100.0
-    assert fill["is_paper"] == 1
-    pos = await db.fetchone("SELECT exchange, is_paper FROM portfolio")
-    assert dict(pos) == {"exchange": "ibkr", "is_paper": 1}
-    trade = await db.fetchone(
-        "SELECT exchange, side, is_paper, order_id, status, strategy_source "
-        "FROM trades")
-    assert trade["exchange"] == "ibkr"
-    assert trade["side"] == "BUY"
-    assert trade["is_paper"] == 1
-    assert trade["order_id"].startswith("ibkr-etf-paper-luna-SPY-")
-    assert trade["status"] == "filled"
-    assert trade["strategy_source"] == "ibkr_etf_luna"
+    pos = await db.fetchone("SELECT * FROM ibkr_etf_positions")
+    assert pos["model_alias"] == "luna"
+    assert await db.fetchone("SELECT * FROM fills") is None
+    assert await db.fetchone("SELECT * FROM trades") is None
+    assert await db.fetchone("SELECT * FROM cost_basis") is None
+    assert await db.fetchone("SELECT * FROM portfolio") is None
     await db.close()
 
 
@@ -87,17 +83,14 @@ async def test_bearish_refresh_closes_at_bid_and_attributes_ledger():
     pillar._views.clear()
     await pillar.run_once()
 
-    fills = await db.fetchall("SELECT side, price FROM fills ORDER BY id")
+    fills = await db.fetchall("SELECT side, price FROM ibkr_etf_fills ORDER BY id")
     assert [(r["side"], r["price"]) for r in fills] == [
         ("BUY", 100.0), ("SELL", 99.9)]
-    trades = await db.fetchall("SELECT side, order_id FROM trades ORDER BY id")
-    assert [row["side"] for row in trades] == ["BUY", "SELL"]
-    assert trades[0]["order_id"] != trades[1]["order_id"]
-    ledger = await db.fetchone(
-        "SELECT venue, category, strategy_source FROM pnl_ledger")
-    assert dict(ledger) == {"venue": "ibkr", "category": "traditional_markets",
-                            "strategy_source": "ibkr_etf_luna"}
-    assert await db.fetchone("SELECT * FROM portfolio") is None
+    ledger = await db.fetchall(
+        "SELECT kind, pnl FROM ibkr_etf_ledger ORDER BY id")
+    assert [row["kind"] for row in ledger] == ["commission", "commission", "trade"]
+    assert sum(row["pnl"] for row in ledger) == pytest.approx(-2.249)
+    assert await db.fetchone("SELECT * FROM ibkr_etf_positions") is None
     await db.close()
 
 
@@ -107,7 +100,7 @@ async def test_wide_spread_blocks_entry_before_analysis():
     await db.connect()
     pillar = await _pillar(db, client=QuotesOnlyClient(99.0, 101.0))
     await pillar.run_once()
-    assert await db.fetchone("SELECT * FROM fills") is None
+    assert await db.fetchone("SELECT * FROM ibkr_etf_fills") is None
     await db.close()
 
 
@@ -115,10 +108,12 @@ def test_default_profile_is_small_readonly_paper_book():
     settings = Settings()
     assert {"SPY", "QQQ", "IWM", "TLT", "GLD", "VEA"}.issubset(
         settings.ibkr.etf_symbols)
-    assert settings.ibkr.etf_paper_budget_usd == 100_000.0
-    assert settings.ibkr.etf_max_entry_usd == 5_000.0
-    assert settings.ibkr.etf_max_deployment_pct == 80.0
-    assert settings.ibkr.etf_max_positions == 16
+    assert settings.ibkr.etf_paper_enabled is False
+    assert settings.ibkr.etf_paper_budget_usd == 5_000.0
+    assert settings.ibkr.etf_max_entry_usd == 250.0
+    assert settings.ibkr.etf_max_deployment_pct == 50.0
+    assert settings.ibkr.etf_max_positions == 4
+    assert settings.ibkr.etf_max_signal_refreshes_per_cycle == 4
     assert [(m.alias, m.model, m.effort) for m in settings.ibkr.etf_models] == [
         ("luna", "gpt-5.6-luna", "low"),
         ("terra", "gpt-5.6-terra", "medium"),
@@ -131,6 +126,7 @@ async def test_model_cells_hold_independent_positions():
     db = Database(":memory:")
     await db.connect()
     settings = Settings()
+    settings.ibkr.etf_paper_enabled = True
     settings.ibkr.etf_symbols = ["SPY"]
     luna = IBKRETFPaperPillar(settings, QuotesOnlyClient(), db, Aggregator(),
                               Analyzer(0.70), model_alias="luna")
@@ -140,8 +136,9 @@ async def test_model_cells_hold_independent_positions():
     await luna.run_once()
     await sol.run_once()
     rows = await db.fetchall(
-        "SELECT market_id FROM cost_basis WHERE size > 0 ORDER BY market_id")
-    assert [r["market_id"] for r in rows] == ["ibkr-etf:luna:SPY", "ibkr-etf:sol:SPY"]
+        "SELECT model_alias, symbol FROM ibkr_etf_positions ORDER BY model_alias")
+    assert [(r["model_alias"], r["symbol"]) for r in rows] == [
+        ("luna", "SPY"), ("sol", "SPY")]
     await db.close()
 
 
@@ -155,7 +152,7 @@ async def test_position_count_caps_broad_bullish_universe():
     pillar._s.ibkr.etf_max_signal_refreshes_per_cycle = 3
     await pillar.run_once()
     row = await db.fetchone(
-        "SELECT COUNT(*) AS n FROM cost_basis WHERE market_id LIKE 'ibkr-etf:%' AND size > 0")
+        "SELECT COUNT(*) AS n FROM ibkr_etf_positions")
     assert row["n"] == 1
     await db.close()
 
@@ -165,11 +162,11 @@ async def test_asset_class_cap_reduces_entry_size():
     db = Database(":memory:")
     await db.connect()
     pillar = await _pillar(db)
-    pillar._s.ibkr.etf_max_asset_class_pct = 2.0  # $2,000 of $100k
+    pillar._s.ibkr.etf_max_asset_class_pct = 2.0  # $100 of $5k
     await pillar.run_once()
     row = await db.fetchone(
-        "SELECT total_cost FROM cost_basis WHERE market_id = 'ibkr-etf:luna:SPY'")
-    assert row["total_cost"] == pytest.approx(2_000.0)
+        "SELECT quantity, avg_cost FROM ibkr_etf_positions WHERE model_alias='luna'")
+    assert row["quantity"] * row["avg_cost"] + 1.0 == pytest.approx(100.0)
     await db.close()
 
 
@@ -178,15 +175,27 @@ async def test_daily_loss_limit_blocks_entries_but_not_loop():
     db = Database(":memory:")
     await db.connect()
     await db.execute(
-        """INSERT INTO pnl_ledger
-           (market_id, venue, category, strategy_source, kind, pnl, is_paper,
-            source_ref, realized_at)
-           VALUES ('old', 'ibkr', 'traditional_markets', 'ibkr_etf_luna',
-                   'sell', -2500, 1, 'test:daily-loss', datetime('now'))""")
+        """INSERT INTO ibkr_etf_ledger
+           (model_alias, kind, pnl, source_ref, realized_at)
+           VALUES ('luna', 'trade', -150, 'test:daily-loss', datetime('now'))""")
     await db.commit()
     pillar = await _pillar(db)
     await pillar.run_once()
-    assert await db.fetchone("SELECT * FROM fills") is None
+    assert await db.fetchone("SELECT * FROM ibkr_etf_fills") is None
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_etf_fill_cannot_move_shared_paper_wallet():
+    db = Database(":memory:")
+    await db.connect()
+    wallet = PaperTrader(db, initial_balance=1_000.0)
+    before = await wallet._compute_balance()
+    pillar = await _pillar(db)
+    await pillar.run_once()
+    assert await wallet._compute_balance() == before
+    assert await db.fetchone("SELECT * FROM pnl_ledger") is None
+    assert await db.fetchone("SELECT * FROM cost_basis") is None
     await db.close()
 
 

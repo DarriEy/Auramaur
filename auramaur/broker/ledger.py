@@ -105,10 +105,6 @@ async def _market_context(
     if row is not None:
         venue = row["exchange"] or ""
         category = row["category"] or ""
-    elif market_id.startswith("ibkr-etf:"):
-        parts = market_id.split(":", 2)
-        alias = parts[1] if len(parts) == 3 else "paper"
-        return "ibkr", "traditional_markets", f"ibkr_etf_{alias}"
     elif market_id.startswith("coinbase:"):
         return "coinbase", "coinbase_spot", "coinbase_paper"
     elif _looks_like_kraken_pair(market_id):

@@ -59,10 +59,6 @@ class Database:
             current_version = row[0] if isinstance(row[0], int) else row["version"]
             if current_version < SCHEMA_VERSION:
                 await self._run_migrations(current_version)
-        await self._db.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_price_history_snapshot_key "
-            "ON price_history(snapshot_key) WHERE snapshot_key IS NOT NULL"
-        )
         await self._db.commit()
 
     async def _run_migrations(self, from_version: int) -> None:
@@ -107,10 +103,6 @@ class Database:
             await self._migrate_v19_to_v20()
         if from_version < 21:
             await self._migrate_v20_to_v21()
-        if from_version < 22:
-            await self._migrate_v21_to_v22()
-        if from_version < 23:
-            await self._migrate_v22_to_v23()
 
     async def _migrate_v1_to_v2(self) -> None:
         """Add category to calibration, add new tables."""
@@ -540,48 +532,10 @@ class Database:
         log.info("database.migrated", from_version=19, to_version=20, merged_groups=merged)
 
     async def _migrate_v20_to_v21(self) -> None:
-        """Add data-lineage tables and idempotency for future price writes."""
-        try:
-            await self._db.execute("ALTER TABLE price_history ADD COLUMN snapshot_key TEXT")
-        except Exception:
-            pass
-        await self._db.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_price_history_snapshot_key "
-            "ON price_history(snapshot_key) WHERE snapshot_key IS NOT NULL"
-        )
+        """Register the isolated IBKR ETF paper experiment schema."""
         await self._db.execute("UPDATE schema_version SET version = 21")
         await self._db.commit()
         log.info("database.migrated", from_version=20, to_version=21)
-
-    async def _migrate_v21_to_v22(self) -> None:
-        """Add durable IBKR ETF experiment state and session-resolution fields."""
-        alterations = [
-            "opened_session_date TEXT NOT NULL DEFAULT ''",
-            "horizon_sessions INTEGER NOT NULL DEFAULT 5",
-            "sessions_elapsed INTEGER NOT NULL DEFAULT 0",
-            "last_session_date TEXT",
-        ]
-        for column in alterations:
-            try:
-                await self._db.execute(
-                    f"ALTER TABLE ibkr_etf_forecasts ADD COLUMN {column}")
-            except Exception:
-                pass
-        await self._db.execute("UPDATE schema_version SET version = 22")
-        await self._db.commit()
-        log.info("database.migrated", from_version=21, to_version=22)
-
-    async def _migrate_v22_to_v23(self) -> None:
-        """Add information-strategy trials and evidence influence mode."""
-        try:
-            await self._db.execute(
-                "ALTER TABLE evidence_observations ADD COLUMN "
-                "information_mode TEXT NOT NULL DEFAULT 'production'")
-        except Exception:
-            pass
-        await self._db.execute("UPDATE schema_version SET version = 23")
-        await self._db.commit()
-        log.info("database.migrated", from_version=22, to_version=23)
 
     async def _migrate_v11_to_v12(self) -> None:
         """Add strategy_source column to signals and trades for hybrid mode attribution."""

@@ -142,14 +142,6 @@ graduation:
   # doesn't get starved by bookkeeping repairs.
   max_unproven_positions: 175
 
-information_graduation:
-  # Shadow sources earn forecast influence, never capital directly. Promotion
-  # requires paired control/treatment forecasts on independent resolutions.
-  min_resolved: 30
-  min_paired: 50
-  min_success_rate: 0.98
-  probation_multiplier: 0.25
-
 intervals:
   market_scan_seconds: 300
   news_poll_seconds: 120
@@ -251,7 +243,7 @@ ibkr:
   paper_budget_usd: 5000.0
   # Structurally paper-only ETF book. This reads quotes from the IBKR paper
   # Gateway but never calls an order-placement method.
-  etf_paper_enabled: true
+  etf_paper_enabled: false
   # Multi-asset ETF universe: broad US, sectors, international, rates, real
   # assets, and defensives. Long-only instruments avoid leverage/inverse decay.
   etf_symbols: ["SPY", "QQQ", "IWM", "DIA", "VTI",
@@ -259,12 +251,12 @@ ibkr:
     "VEA", "VWO", "EWC", "EWJ",
     "TLT", "IEF", "SHY", "TIP",
     "GLD", "SLV", "DBC", "VNQ"]
-  etf_paper_budget_usd: 100000.0
-  etf_max_entry_usd: 5000.0
-  etf_max_deployment_pct: 80.0
+  etf_paper_budget_usd: 5000.0
+  etf_max_entry_usd: 250.0
+  etf_max_deployment_pct: 50.0
   etf_max_asset_class_pct: 30.0
-  etf_max_positions: 16
-  etf_daily_loss_limit_usd: 2000.0
+  etf_max_positions: 4
+  etf_daily_loss_limit_usd: 100.0
   etf_max_signal_refreshes_per_cycle: 4
   etf_fee_per_order_usd: 1.00
   etf_max_spread_bps: 20.0
@@ -279,11 +271,11 @@ ibkr:
   etf_trailing_stop_pct: 3.0
   etf_reentry_cooldown_hours: 24.0
   # Intelligence-cap experiment: identical evidence/prompt/risk across three
-  # independent $100k paper cells. Only model tier/reasoning effort changes.
+  # independent, isolated paper cells. Only model tier/reasoning effort changes.
   etf_models:
-    - {alias: "luna", model: "gpt-5.6-luna", effort: "low"}
-    - {alias: "terra", model: "gpt-5.6-terra", effort: "medium"}
-    - {alias: "sol", model: "gpt-5.6-sol", effort: "high"}
+    - {alias: "luna", model: "gpt-5.6-luna", effort: "low", input_cost_per_million: 0.0, output_cost_per_million: 0.0}
+    - {alias: "terra", model: "gpt-5.6-terra", effort: "medium", input_cost_per_million: 0.0, output_cost_per_million: 0.0}
+    - {alias: "sol", model: "gpt-5.6-sol", effort: "high", input_cost_per_million: 0.0, output_cost_per_million: 0.0}
   etf_openai_timeout_seconds: 120
   etf_openai_daily_call_limit: 100
   # Directional equity speculation — gated; NO validated edge. Own socket

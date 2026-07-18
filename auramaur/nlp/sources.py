@@ -18,7 +18,6 @@ SOURCE_AUTHORITY: dict[str, float] = {
     "guardian": 2.0, "npr": 2.0, "politico": 2.0, "cnbc": 2.0,
     # Structured / primary data
     "fred": 2.0, "usgs": 2.5, "market_data": 2.5, "coingecko": 2.0,
-    "nws": 3.0, "bls": 3.0, "bea": 3.0, "congress": 3.0, "eia": 3.0,
     "manifold": 2.0, "polymarket_context": 2.0,
     # General web / aggregators
     "web": 1.5, "newsapi": 1.5, "espn": 1.5,

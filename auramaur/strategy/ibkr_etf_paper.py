@@ -10,8 +10,7 @@ from zoneinfo import ZoneInfo
 
 import structlog
 
-from auramaur.broker.pnl import PnLTracker
-from auramaur.exchange.models import Fill, Market, OrderSide, TokenType
+from auramaur.exchange.models import Market, OrderSide
 from auramaur.strategy.protocols import ExecutionMode
 
 log = structlog.get_logger()
@@ -63,7 +62,6 @@ class IBKRETFPaperPillar:
         self._cache = cache
         self._alias = model_alias
         self._evidence_cache = evidence_cache if evidence_cache is not None else {}
-        self._pnl = PnLTracker(db, settings)
         self._views: dict[str, tuple[float, float, str]] = {}
         self._cooldown: dict[str, float] = {}
         self._refresh_cursor = 0
@@ -148,13 +146,13 @@ class IBKRETFPaperPillar:
             await self._db.execute(
                 """INSERT INTO ibkr_etf_forecasts
                    (model_alias, model, symbol, probability, confidence, thesis,
-                    risks_json, reference_price, opened_session_date,
-                    horizon_sessions, due_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', ?))""",
+                    risks_json, reference_price, intelligence_cost_usd,
+                    opened_session_date, horizon_sessions, due_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', ?))""",
                 (self._alias, getattr(self._analyzer, "model", "unknown"), symbol,
                  view[0], view[1], str(getattr(analysis, "thesis", "")),
                  json.dumps(list(getattr(analysis, "key_risks", []) or [])),
-                 reference_price,
+                 reference_price, float(getattr(analysis, "intelligence_cost_usd", 0)),
                  datetime.now(timezone.utc).astimezone(_ET).date().isoformat(),
                  self._s.ibkr.etf_signal_horizon_days, f"+{days} days"))
         return view
@@ -232,71 +230,72 @@ class IBKRETFPaperPillar:
 
     async def _daily_realized(self) -> float:
         row = await self._db.fetchone(
-            """SELECT COALESCE(SUM(pnl), 0) AS pnl FROM pnl_ledger
-               WHERE strategy_source = ? AND is_paper = 1
-                 AND date(realized_at) = date('now')""", (self.strategy_source,))
+            """SELECT COALESCE(SUM(pnl), 0) AS pnl FROM ibkr_etf_ledger
+               WHERE model_alias = ?
+                 AND date(realized_at) = date('now')""", (self._alias,))
+        if row is None:
+            return 0.0
         return float(row["pnl"] or 0.0) if row else 0.0
 
     async def _positions(self) -> dict[str, tuple[float, float]]:
         rows = await self._db.fetchall(
-            "SELECT market_id, size, avg_cost FROM cost_basis "
-            "WHERE market_id LIKE ? AND is_paper = 1 AND size > 0",
-            (f"ibkr-etf:{self._alias}:%",))
-        return {r["market_id"].rsplit(":", 1)[1]:
-                (float(r["size"]), float(r["avg_cost"])) for r in rows}
+            """SELECT symbol, quantity, avg_cost FROM ibkr_etf_positions
+               WHERE model_alias = ? AND quantity > 0""", (self._alias,))
+        return {r["symbol"]: (float(r["quantity"]), float(r["avg_cost"]))
+                for r in rows}
 
     async def _peak(self, symbol: str, gain: float) -> float:
-        market_id = self._market_id(symbol)
         await self._db.execute(
-            """INSERT INTO position_peaks (market_id, peak_pnl_pct, updated_at)
-               VALUES (?, ?, datetime('now')) ON CONFLICT(market_id) DO UPDATE SET
-               peak_pnl_pct = MAX(peak_pnl_pct, excluded.peak_pnl_pct),
-               updated_at = excluded.updated_at""", (market_id, gain))
+            """UPDATE ibkr_etf_positions SET
+               peak_pnl_pct = MAX(peak_pnl_pct, ?),
+               updated_at = datetime('now')
+               WHERE model_alias = ? AND symbol = ?""",
+            (gain, self._alias, symbol))
         row = await self._db.fetchone(
-            "SELECT peak_pnl_pct FROM position_peaks WHERE market_id = ?", (market_id,))
+            """SELECT peak_pnl_pct FROM ibkr_etf_positions
+               WHERE model_alias = ? AND symbol = ?""", (self._alias, symbol))
         return float(row["peak_pnl_pct"])
 
     async def _fill(self, symbol: str, side: OrderSide, qty: float, price: float) -> None:
         fee = self._s.ibkr.etf_fee_per_order_usd
-        order_id = f"ibkr-etf-paper-{self._alias}-{symbol}-{uuid4().hex}"
-        await self._pnl.record_fill(Fill(
-            order_id=order_id, market_id=self._market_id(symbol),
-            token_id=symbol, side=side, token=TokenType.YES, size=qty,
-            price=price, fee=fee, is_paper=True))
+        fill_ref = f"ibkr-etf-paper-{self._alias}-{symbol}-{uuid4().hex}"
         await self._db.execute(
-            """INSERT INTO trades
-               (market_id, exchange, side, size, price, is_paper, order_id,
-                status, risk_checks_passed, strategy_source)
-               VALUES (?, 'ibkr', ?, ?, ?, 1, ?, 'filled', ?, ?)""",
-            (self._market_id(symbol), side.value, qty, price, order_id,
-             json.dumps({"paper_only": True, "forced_readonly": True}),
-             self.strategy_source))
-        await self._db.commit()
+            """INSERT INTO ibkr_etf_fills
+               (model_alias, symbol, side, quantity, price, commission_usd, fill_ref)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (self._alias, symbol, side.value, qty, price, fee, fill_ref))
+        await self._db.execute(
+            """INSERT INTO ibkr_etf_ledger (model_alias, kind, pnl, source_ref)
+               VALUES (?, 'commission', ?, ?)""",
+            (self._alias, -fee, f"{fill_ref}:commission"))
         if side == OrderSide.BUY:
-            # PnLTracker intentionally does not capitalize buy fees for binary
-            # venues. ETFs need true net returns, so fold this book's entry
-            # commission into its basis after the shared fill write.
             await self._db.execute(
-                """UPDATE cost_basis SET total_cost = total_cost + ?,
-                   avg_cost = (total_cost + ?) / size
-                   WHERE market_id = ? AND token = 'YES' AND is_paper = 1""",
-                (fee, fee, self._market_id(symbol)))
+                """INSERT INTO ibkr_etf_positions
+                   (model_alias, symbol, quantity, avg_cost, current_price)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (self._alias, symbol, qty, price, price))
+        else:
+            position = await self._db.fetchone(
+                """SELECT quantity, avg_cost FROM ibkr_etf_positions
+                   WHERE model_alias = ? AND symbol = ?""", (self._alias, symbol))
+            if position is None:
+                raise ValueError(f"cannot sell absent ETF paper position: {symbol}")
+            realized = (price - float(position["avg_cost"])) * qty
+            await self._db.execute(
+                """INSERT INTO ibkr_etf_ledger (model_alias, kind, pnl, source_ref)
+                   VALUES (?, 'trade', ?, ?)""",
+                (self._alias, realized, f"{fill_ref}:trade"))
+            await self._db.execute(
+                "DELETE FROM ibkr_etf_positions WHERE model_alias = ? AND symbol = ?",
+                (self._alias, symbol))
 
     async def _mirror(self, symbol: str, qty: float, entry: float,
                       current: float) -> None:
         await self._db.execute(
-            """INSERT INTO portfolio
-               (market_id, exchange, side, size, avg_price, current_price,
-                unrealized_pnl, category, token, token_id, is_paper, updated_at)
-               VALUES (?, 'ibkr', 'BUY', ?, ?, ?, ?, 'traditional_markets',
-                       'YES', ?, 1, datetime('now'))
-               ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
-                 size=excluded.size, avg_price=excluded.avg_price,
-                 current_price=excluded.current_price,
-                 unrealized_pnl=excluded.unrealized_pnl,
-                 updated_at=excluded.updated_at""",
-            (self._market_id(symbol), qty, entry, current,
-             (current - entry) * qty, symbol))
+            """UPDATE ibkr_etf_positions SET current_price=?, unrealized_pnl=?,
+                 updated_at=datetime('now')
+               WHERE model_alias=? AND symbol=?""",
+            (current, (current - entry) * qty, self._alias, symbol))
 
     async def run_once(self) -> int:
         if not self._s.ibkr.etf_paper_enabled or not self.market_open():
@@ -364,11 +363,6 @@ class IBKRETFPaperPillar:
                     reason = "llm_bearish"
                 if reason:
                     await self._fill(symbol, OrderSide.SELL, qty, quote.bid)
-                    await self._db.execute(
-                        "DELETE FROM portfolio WHERE market_id = ? AND is_paper = 1",
-                        (self._market_id(symbol),))
-                    await self._db.execute("DELETE FROM position_peaks WHERE market_id = ?",
-                                           (self._market_id(symbol),))
                     self._cooldown[symbol] = time.time() + (
                         cfg.etf_reentry_cooldown_hours * 3600)
                     await self._db.execute(
@@ -405,7 +399,7 @@ class IBKRETFPaperPillar:
                     continue
                 qty = (notional - cfg.etf_fee_per_order_usd) / quote.ask
                 await self._fill(symbol, OrderSide.BUY, qty, quote.ask)
-                entry = notional / qty
+                entry = quote.ask
                 await self._mirror(symbol, qty, entry, quote.bid)
                 allocated += notional
                 class_allocated[asset_class] = (

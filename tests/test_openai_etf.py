@@ -72,7 +72,8 @@ async def test_every_api_attempt_records_usage_and_status():
     db = Database(":memory:")
     await db.connect()
     analyzer = OpenAIETFAnalyzer(
-        "test-key", "gpt-5.6-sol", "high", db=db, model_alias="sol")
+        "test-key", "gpt-5.6-sol", "high", db=db, model_alias="sol",
+        input_cost_per_million=2.0, output_cost_per_million=10.0)
     session = FakeSession()
     analyzer._get_session = lambda: _async_value(session)
     market = SimpleNamespace(question="Will SPY rise?", description="Five days")
@@ -82,5 +83,8 @@ async def test_every_api_attempt_records_usage_and_status():
     assert row["status"] == "completed"
     assert row["response_id"] == "resp_test"
     assert row["total_tokens"] == 120
+    assert row["cost_usd"] == pytest.approx(0.0004)
     assert row["finished_at"] is not None
+    fee = await db.fetchone("SELECT kind, pnl FROM ibkr_etf_ledger")
+    assert dict(fee) == {"kind": "intelligence", "pnl": pytest.approx(-0.0004)}
     await db.close()

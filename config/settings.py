@@ -951,15 +951,6 @@ class GraduationConfig(BaseModel):
     max_unproven_positions: int = 100
 
 
-class InformationGraduationConfig(BaseModel):
-    """Evidence influence earned from paired source-ablation trials."""
-
-    min_resolved: int = 30
-    min_paired: int = 50
-    min_success_rate: float = 0.98
-    probation_multiplier: float = 0.25
-
-
 class BrokerConfig(BaseModel):
     sync_interval_seconds: int = 60
     use_limit_orders: bool = True
@@ -982,6 +973,8 @@ class OpenAIETFModel(BaseModel):
     alias: str
     model: str
     effort: Literal["low", "medium", "high"] = "medium"
+    input_cost_per_million: float = 0.0
+    output_cost_per_million: float = 0.0
 
     @model_validator(mode="after")
     def validate_identity(self):
@@ -990,6 +983,8 @@ class OpenAIETFModel(BaseModel):
             raise ValueError("ETF model alias must contain only letters, numbers, and underscores")
         if not self.model.strip():
             raise ValueError("ETF model name must not be empty")
+        if self.input_cost_per_million < 0 or self.output_cost_per_million < 0:
+            raise ValueError("ETF model token prices must be non-negative")
         self.alias = alias
         self.model = self.model.strip()
         return self
@@ -1028,12 +1023,12 @@ class IBKRConfig(BaseModel):
     # --- Structurally paper-only broad-market ETF experiment ---
     etf_paper_enabled: bool = False
     etf_symbols: list[str] = ["SPY", "QQQ", "IWM"]
-    etf_paper_budget_usd: float = 100_000.0
-    etf_max_entry_usd: float = 5_000.0
-    etf_max_deployment_pct: float = 80.0
+    etf_paper_budget_usd: float = 5_000.0
+    etf_max_entry_usd: float = 250.0
+    etf_max_deployment_pct: float = 50.0
     etf_max_asset_class_pct: float = 30.0
-    etf_max_positions: int = 16
-    etf_daily_loss_limit_usd: float = 2_000.0
+    etf_max_positions: int = 4
+    etf_daily_loss_limit_usd: float = 100.0
     etf_max_signal_refreshes_per_cycle: int = 4
     etf_fee_per_order_usd: float = 1.00
     etf_max_spread_bps: float = 20.0
@@ -1085,6 +1080,11 @@ class IBKRConfig(BaseModel):
             raise ValueError("IBKR ETF probability thresholds must satisfy exit < entry")
         if self.etf_openai_daily_call_limit < len(self.etf_models):
             raise ValueError("IBKR ETF daily OpenAI limit must allow every model arm one call")
+        if self.etf_paper_enabled and any(
+            arm.input_cost_per_million <= 0 or arm.output_cost_per_million <= 0
+            for arm in self.etf_models
+        ):
+            raise ValueError("Enabled IBKR ETF arms require explicit nonzero token prices")
         if self.etf_openai_timeout_seconds <= 0 or self.etf_cycle_seconds <= 0:
             raise ValueError("IBKR ETF timeout and cycle interval must be positive")
         return self
@@ -1352,10 +1352,6 @@ class Settings(BaseSettings):
     reddit_user_agent: str = "auramaur/0.1"
     twitter_bearer_token: str = ""
     fred_api_key: str = ""
-    bls_api_key: str = ""
-    bea_api_key: str = ""
-    congress_api_key: str = ""
-    eia_api_key: str = ""
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     discord_webhook_url: str = ""
@@ -1430,9 +1426,6 @@ class Settings(BaseSettings):
     technical: TechnicalConfig = Field(default_factory=lambda: TechnicalConfig(**_DEFAULTS.get("technical", {})))
     bias_harvest: BiasHarvestConfig = Field(default_factory=lambda: BiasHarvestConfig(**_DEFAULTS.get("bias_harvest", {})))
     graduation: GraduationConfig = Field(default_factory=lambda: GraduationConfig(**_DEFAULTS.get("graduation", {})))
-    information_graduation: InformationGraduationConfig = Field(
-        default_factory=lambda: InformationGraduationConfig(
-            **_DEFAULTS.get("information_graduation", {})))
     entailment_arb: EntailmentArbConfig = Field(default_factory=lambda: EntailmentArbConfig(**_DEFAULTS.get("entailment_arb", {})))
     cross_venue_arb: CrossVenueArbConfig = Field(default_factory=lambda: CrossVenueArbConfig(**_DEFAULTS.get("cross_venue_arb", {})))
     econ_indicator: EconIndicatorConfig = Field(default_factory=lambda: EconIndicatorConfig(**_DEFAULTS.get("econ_indicator", {})))

@@ -7,6 +7,7 @@ that fixes that, plus the surrounding guards (cap, no-price, zero-rounding).
 """
 
 import sys
+import math
 import types
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -62,6 +63,21 @@ async def test_quote_without_exchange_timestamp_fails_closed(monkeypatch):
         qualifyContractsAsync=AsyncMock(),
         reqTickersAsync=AsyncMock(return_value=[
             SimpleNamespace(bid=100.0, ask=100.1, time=None)]),
+    )
+    assert await client.get_quote("SPY") is None
+
+
+async def test_nan_quote_fails_closed(monkeypatch):
+    fake = types.ModuleType("ib_async")
+    fake.Stock = lambda *a, **k: SimpleNamespace(symbol=a[0])
+    monkeypatch.setitem(sys.modules, "ib_async", fake)
+    client = IBKREquityClient(_settings())
+    client._connected = True
+    client._ib = SimpleNamespace(
+        qualifyContractsAsync=AsyncMock(),
+        reqTickersAsync=AsyncMock(return_value=[
+            SimpleNamespace(bid=math.nan, ask=math.nan, time=SimpleNamespace(
+                timestamp=lambda: 1.0))]),
     )
     assert await client.get_quote("SPY") is None
 

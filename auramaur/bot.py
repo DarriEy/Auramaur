@@ -681,7 +681,9 @@ class AuramaurBot(
         analyzers = [OpenAIETFAnalyzer(
             self.settings.openai_api_key, spec.model, spec.effort,
             self.settings.ibkr.etf_openai_timeout_seconds,
-            db=self._components.get("db"), model_alias=spec.alias)
+            db=self._components.get("db"), model_alias=spec.alias,
+            input_cost_per_million=spec.input_cost_per_million,
+            output_cost_per_million=spec.output_cost_per_million)
             for spec in self.settings.ibkr.etf_models]
         pillars = [IBKRETFPaperPillar(
             self.settings, client, self._components.get("db"),
@@ -1500,7 +1502,7 @@ class AuramaurBot(
         if self.settings.kraken.enabled:
             tasks.append(asyncio.create_task(self._task_kraken_pillar(), name="kraken_treasury"))
 
-        if self.settings.ibkr.etf_paper_enabled:
+        if self.settings.ibkr.enabled and self.settings.ibkr.etf_paper_enabled:
             tasks.append(asyncio.create_task(
                 self._task_ibkr_etf_paper(), name="ibkr_etf_paper"))
 

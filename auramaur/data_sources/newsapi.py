@@ -84,9 +84,6 @@ class NewsAPISource:
                 published_at = datetime.fromisoformat(published_str.replace("Z", "+00:00"))
             except (ValueError, AttributeError):
                 published_at = datetime.now(timezone.utc)
-                timestamp_quality = "unknown"
-            else:
-                timestamp_quality = "exact"
 
             item_id = hashlib.sha256(f"{url}:{title}".encode()).hexdigest()[:16]
             items.append(
@@ -97,7 +94,6 @@ class NewsAPISource:
                     content=content,
                     url=url,
                     published_at=published_at,
-                    timestamp_quality=timestamp_quality,
                 )
             )
         logger.info("newsapi_fetched", count=len(items), query=query)
