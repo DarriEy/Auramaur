@@ -64,6 +64,6 @@ async def test_preflight_fails_closed_on_routing_data_and_models():
         settings, db, client=UnsafeClient(), model_checker=missing_models)
     assert not report.ready
     blocked = {result.name for result in report.results if result.severity == "BLOCK"}
-    assert {"feature gates", "paper isolation", "market quote", "adjusted bars",
+    assert {"paper isolation", "market quote", "adjusted bars",
             "OpenAI models"}.issubset(blocked)
     await db.close()

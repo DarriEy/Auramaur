@@ -232,10 +232,10 @@ class TestIBKRConfig:
         s = Settings()
         # Ready-but-quiet: configured for the live port + paper-trade prep, but
         # enabled stays false until OPRA data + funds land (~2026-06-08).
-        assert s.ibkr.enabled is False
-        assert s.ibkr.environment == "live"
-        assert s.ibkr.readonly is False
-        assert s.ibkr.paper_trade is False  # going straight to live once funded
+        assert s.ibkr.enabled is True
+        assert s.ibkr.environment == "paper"
+        assert s.ibkr.readonly is True
+        assert s.ibkr.paper_trade is True
         assert s.ibkr.paper_budget_usd == 5000.0
         assert s.ibkr.paper_port == 7497
         assert s.ibkr.live_port == 7496
@@ -249,6 +249,6 @@ class TestIBKRConfig:
         with open(defaults_path) as f:
             raw = yaml.safe_load(f)
 
-        assert raw["ibkr"]["enabled"] is False
-        assert raw["ibkr"]["environment"] == "live"
-        assert raw["ibkr"]["paper_trade"] is False
+        assert raw["ibkr"]["enabled"] is True
+        assert raw["ibkr"]["environment"] == "paper"
+        assert raw["ibkr"]["paper_trade"] is True

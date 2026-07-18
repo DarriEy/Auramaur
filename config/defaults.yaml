@@ -222,7 +222,7 @@ ibkr:
   # the pnl_ledger venue/category context so `auramaur pnl` and the
   # graduation ladder can actually score it.
   # Ports: TWS 7497 paper / 7496 live; IB Gateway 4002 / 4001.
-  enabled: false
+  enabled: true
   # Master switch above just connects. The two books are gated independently
   # (both also need enabled:true): options_enabled = the option-chain scanner
   # (needs OPRA data; off = no Error 200/10091 scan spam); the odd-lot
@@ -230,20 +230,20 @@ ibkr:
   options_enabled: false
   # "paper" connects to the paper TWS/Gateway on paper_port (read-only).
   # Switch to "live" only with a live Gateway running and the live gates open.
-  environment: "live"
+  environment: "paper"
   host: "127.0.0.1"
   paper_port: 7497
   live_port: 7496
   client_id: 1
   max_contracts_per_symbol: 10
   market_data_type: 3
-  readonly: false
+  readonly: true
   # Options, if separately enabled later, still default to paper accounting.
-  paper_trade: false
+  paper_trade: true
   paper_budget_usd: 5000.0
   # Structurally paper-only ETF book. This reads quotes from the IBKR paper
   # Gateway but never calls an order-placement method.
-  etf_paper_enabled: false
+  etf_paper_enabled: true
   # Multi-asset ETF universe: broad US, sectors, international, rates, real
   # assets, and defensives. Long-only instruments avoid leverage/inverse decay.
   etf_symbols: ["SPY", "QQQ", "IWM", "DIA", "VTI",
@@ -273,9 +273,9 @@ ibkr:
   # Intelligence-cap experiment: identical evidence/prompt/risk across three
   # independent, isolated paper cells. Only model tier/reasoning effort changes.
   etf_models:
-    - {alias: "luna", model: "gpt-5.6-luna", effort: "low", input_cost_per_million: 0.0, output_cost_per_million: 0.0}
-    - {alias: "terra", model: "gpt-5.6-terra", effort: "medium", input_cost_per_million: 0.0, output_cost_per_million: 0.0}
-    - {alias: "sol", model: "gpt-5.6-sol", effort: "high", input_cost_per_million: 0.0, output_cost_per_million: 0.0}
+    - {alias: "luna", model: "gpt-5.6-luna", effort: "low", input_cost_per_million: 1.0, output_cost_per_million: 6.0}
+    - {alias: "terra", model: "gpt-5.6-terra", effort: "medium", input_cost_per_million: 2.5, output_cost_per_million: 15.0}
+    - {alias: "sol", model: "gpt-5.6-sol", effort: "high", input_cost_per_million: 5.0, output_cost_per_million: 30.0}
   etf_openai_timeout_seconds: 120
   etf_openai_daily_call_limit: 100
   # Directional equity speculation — gated; NO validated edge. Own socket

@@ -13,7 +13,7 @@ from config.settings import Settings
 
 class FakeCoinbase:
     async def get_quote(self, product):
-        assert product == "BTC-USDC"
+        assert product == "BTC-USD"
         return CoinbaseQuote(bid=99.0, ask=101.0)
 
 
@@ -30,7 +30,7 @@ async def test_shadow_book_uses_ask_bid_and_keeps_separate_attribution():
     fills = await db.fetchall(
         "SELECT market_id, side, price, fee, is_paper FROM fills ORDER BY id")
     assert [(r["side"], r["price"]) for r in fills] == [("BUY", 101.0), ("SELL", 99.0)]
-    assert all(r["market_id"] == "coinbase:BTC-USDC" for r in fills)
+    assert all(r["market_id"] == "coinbase:BTC-USD" for r in fills)
     assert all(r["is_paper"] == 1 for r in fills)
     assert fills[0]["fee"] == pytest.approx(10.1 * 0.006)
 

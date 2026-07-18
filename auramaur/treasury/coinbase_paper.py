@@ -14,9 +14,11 @@ class CoinbasePaperBook:
     """Price identical decisions on Coinbase without credentials or execution."""
 
     _PRODUCTS = {
-        "XBTUSDC": "BTC-USDC",
-        "ETHUSDC": "ETH-USDC",
-        "SOLUSDC": "SOL-USDC",
+        # Coinbase Exchange retired these USDC books; use the active USD books
+        # to shadow the same underlying Kraken decisions.
+        "XBTUSDC": "BTC-USD",
+        "ETHUSDC": "ETH-USD",
+        "SOLUSDC": "SOL-USD",
     }
 
     def __init__(self, settings, client, db) -> None:
