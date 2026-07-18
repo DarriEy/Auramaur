@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 
+import aiosqlite
 import structlog
 
 from auramaur.db.database import Database
@@ -58,6 +60,51 @@ class NLPCache:
     def __init__(self, db: Database) -> None:
         self._db = db
 
+    @staticmethod
+    def _is_transient_lock(exc: Exception) -> bool:
+        detail = str(exc).lower()
+        return "database is locked" in detail or "database is busy" in detail
+
+    async def _rollback_after_lock(self) -> None:
+        try:
+            await self._db.db.rollback()
+        except Exception:  # noqa: BLE001 - preserve the original cache failure
+            pass
+
+    async def _read_with_lock_retry(self, sql: str, params: tuple):
+        for attempt in range(3):
+            try:
+                return await self._db.fetchone(sql, params)
+            except aiosqlite.OperationalError as exc:
+                if not self._is_transient_lock(exc):
+                    raise
+                await self._rollback_after_lock()
+                if attempt == 2:
+                    log.warning("nlp_cache.read_lock_exhausted", error=str(exc))
+                    return None
+                delay = 0.25 * (2 ** attempt)
+                log.info("nlp_cache.read_lock_retry", attempt=attempt + 1, delay=delay)
+                await asyncio.sleep(delay)
+
+    async def _write_with_lock_retry(self, sql: str, params: tuple) -> bool:
+        """Retry an idempotent cache upsert; cache failure never loses analysis."""
+        for attempt in range(3):
+            try:
+                await self._db.execute(sql, params)
+                await self._db.commit()
+                return True
+            except aiosqlite.OperationalError as exc:
+                if not self._is_transient_lock(exc):
+                    raise
+                await self._rollback_after_lock()
+                if attempt == 2:
+                    log.warning("nlp_cache.write_lock_exhausted", error=str(exc))
+                    return False
+                delay = 0.25 * (2 ** attempt)
+                log.info("nlp_cache.write_lock_retry", attempt=attempt + 1, delay=delay)
+                await asyncio.sleep(delay)
+        return False  # pragma: no cover
+
     async def get(self, cache_key: str, current_price: float | None = None) -> dict | None:
         """Return cached response if it exists, has not expired, and price hasn't moved.
 
@@ -70,7 +117,7 @@ class NLPCache:
         Returns:
             The cached response dict, or None if missing / expired / stale.
         """
-        row = await self._db.fetchone(
+        row = await self._read_with_lock_retry(
             """
             SELECT response, ttl_seconds, created_at, market_price
             FROM nlp_cache
@@ -125,7 +172,7 @@ class NLPCache:
         confidence = response.get("confidence", "LOW")
         response_json = json.dumps(response)
 
-        await self._db.execute(
+        written = await self._write_with_lock_retry(
             """
             INSERT OR REPLACE INTO nlp_cache
                 (cache_key, market_id, response, probability, confidence, ttl_seconds, market_price, created_at)
@@ -133,8 +180,9 @@ class NLPCache:
             """,
             (cache_key, market_id, response_json, probability, confidence, ttl_seconds, market_price),
         )
-        await self._db.commit()
-        log.debug("nlp_cache.put", cache_key=cache_key[:12], ttl=ttl_seconds, market_price=market_price)
+        if written:
+            log.debug("nlp_cache.put", cache_key=cache_key[:12], ttl=ttl_seconds,
+                      market_price=market_price)
 
     async def cleanup(self) -> None:
         """Remove all expired cache entries."""
