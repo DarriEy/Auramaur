@@ -150,6 +150,22 @@ async def test_no_price_paper_still_returns_paper():
     assert res.filled_size == 0.0
 
 
+async def test_explicit_live_order_cannot_bypass_closed_global_gates(monkeypatch):
+    """``dry_run=False`` is only one gate; closed global gates force paper."""
+    monkeypatch.setattr(
+        "auramaur.exchange.ibkr_equity.kill_switch_present", lambda: False)
+    client = IBKREquityClient(_settings(is_live=False, readonly=False))
+    client.get_price = AsyncMock(return_value=100.0)
+    client._place_cash_order = AsyncMock()
+
+    res = await client.place_order(
+        "SPY", OrderSide.BUY, 50.0, dry_run=False)
+
+    assert res.order_id == "PAPER"
+    assert res.is_paper is True
+    client._place_cash_order.assert_not_awaited()
+
+
 def _fake_ib_async(monkeypatch, created):
     """Install a fake ib_async whose MarketOrder records the order object so a
     test can assert on cashQty / totalQuantity."""
