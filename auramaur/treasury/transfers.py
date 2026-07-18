@@ -37,7 +37,17 @@ from pydantic import BaseModel
 
 log = structlog.get_logger()
 
-_LEDGER = Path("data/transfer_ledger.sqlite3")
+def _default_ledger_path() -> Path:
+    """Anchor the enforcement ledger to the portable state directory.
+
+    A CWD-relative path would land on ephemeral container filesystem inside
+    Compose (only AURAMAUR_STATE_DIR is volume-mounted), silently resetting
+    the daily-cap history on every recreate. Natively state_dir() is the repo
+    root, so this resolves to the same data/ location as before.
+    """
+    from auramaur.runtime import state_dir
+
+    return state_dir() / "data" / "transfer_ledger.sqlite3"
 
 # An approver receives a summary dict and returns True to authorize. The default
 # denies — approval must be an explicit, deliberate act.
@@ -58,10 +68,10 @@ class TransferResult(BaseModel):
 
 
 class TransferManager:
-    def __init__(self, settings, kraken_client, ledger_path: Path = _LEDGER):
+    def __init__(self, settings, kraken_client, ledger_path: Path | None = None):
         self._settings = settings
         self._kraken = kraken_client
-        self._ledger_path = ledger_path
+        self._ledger_path = Path(ledger_path) if ledger_path else _default_ledger_path()
 
     # ------------------------------------------------------------------
     # Daily ledger (persisted so the daily cap survives restarts)
@@ -231,9 +241,13 @@ class TransferManager:
         if amount_usd > cfg.per_transfer_cap_usd:
             return blocked(f"${amount_usd:.2f} over per-transfer cap ${cfg.per_transfer_cap_usd:.2f}")
 
-        # 4. Armed? If not, this is a preview — nothing moves.
+        # 4. Armed? If not, this is a preview — nothing moves. A broken ledger
+        # still reports blocked rather than raising out of a preview.
         if not self._settings.transfers_armed:
-            spent = self._spent_today()
+            try:
+                spent = self._spent_today()
+            except (OSError, sqlite3.Error, RuntimeError) as e:
+                return blocked(f"transfer ledger unavailable; refusing withdrawal: {e}")
             summary = {"asset": asset, "amount_usd": amount_usd, "dest_key": dest_key,
                        "spent_today": spent, "daily_cap": cfg.daily_cap_usd}
             log.info("transfer.dry_run", reason="transfers not armed", **summary)
