@@ -105,6 +105,8 @@ async def _market_context(
     if row is not None:
         venue = row["exchange"] or ""
         category = row["category"] or ""
+    elif market_id.startswith("coinbase:"):
+        return "coinbase", "coinbase_spot", "coinbase_paper"
     elif _looks_like_kraken_pair(market_id):
         # Kraken directional book: market_id is the spot pair, no markets row.
         # 'kraken_spot' matches the calibration category used for its signals.

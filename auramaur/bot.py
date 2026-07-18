@@ -637,7 +637,17 @@ class AuramaurBot(
         from auramaur.monitoring.display import console
 
         client = KrakenSpotClient(self.settings)
-        pillar = KrakenPillar(self.settings, client, bot=self, console=console)
+        coinbase_client = None
+        comparator = None
+        if self.settings.coinbase.paper_enabled:
+            from auramaur.exchange.coinbase import CoinbasePublicClient
+            from auramaur.treasury.coinbase_paper import CoinbasePaperBook
+            coinbase_client = CoinbasePublicClient()
+            comparator = CoinbasePaperBook(
+                self.settings, coinbase_client, self._components.get("db"))
+        pillar = KrakenPillar(
+            self.settings, client, bot=self, console=console,
+            paper_comparator=comparator)
         interval = self.settings.kraken.treasury_interval_seconds
         try:
             while self._running:
@@ -647,6 +657,8 @@ class AuramaurBot(
                 await asyncio.sleep(interval)
         finally:
             await client.close()
+            if coinbase_client is not None:
+                await coinbase_client.close()
 
     async def _task_momentum_coupling(self) -> None:
         """Fast path: spot->prediction momentum-coupling pillar (gated, detect-only).

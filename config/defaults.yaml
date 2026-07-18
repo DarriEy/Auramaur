@@ -333,6 +333,12 @@ kraken:
   directional_conviction_budget_enabled: false
   directional_conviction_min_mult: 0.34
 
+# Read-only venue comparator for the Kraken paper decisions. It fetches public
+# bid/ask quotes and records shadow fills; there are no credentials or order API.
+coinbase:
+  paper_enabled: true
+  paper_fee_pct: 0.60
+
 transfers:
   # Cross-venue fund movement (Kraken -> Polymarket, Polygon USDC only).
   # Requires BOTH this and the AURAMAUR_ENABLE_TRANSFERS env gate, plus the
