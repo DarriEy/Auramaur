@@ -524,3 +524,4 @@ async def assemble_components(
         "source_names": source_names,
         "exchange_filter": exchange_filter,
     })
+
