@@ -154,6 +154,33 @@ def ibkr_etf_preflight():
 
     sys.exit(asyncio.run(_run()))
 
+
+@main.command("ibkr-multiasset-preflight")
+def ibkr_multiasset_preflight():
+    """Verify contract resolution, data, isolation, and schema for six books."""
+    import sys
+
+    async def _run() -> int:
+        from auramaur.monitoring.ibkr_multiasset_preflight import preflight
+
+        settings = Settings()
+        db = Database()
+        await db.connect()
+        try:
+            report = await preflight(settings, db)
+        finally:
+            await db.close()
+        colour = {"OK": "green", "WARN": "yellow", "BLOCK": "red"}
+        for result in report.results:
+            console.print(
+                f"  [{colour[result.severity]}]{result.severity:<5}[/] "
+                f"{result.book}: {result.detail}")
+        console.print("\n[bold green]MULTI-ASSET PAPER READY[/]" if report.ready else
+                      "\n[bold red]MULTI-ASSET PAPER BLOCKED[/]")
+        return 0 if report.ready else 1
+
+    sys.exit(asyncio.run(_run()))
+
 @main.command()
 @click.option("--exchange", default=None, help="Exchange to evaluate (e.g. kalshi)")
 @click.option("--days", default=7, help="Window in days (default 7)")

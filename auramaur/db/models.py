@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -504,6 +504,62 @@ CREATE TABLE IF NOT EXISTS ibkr_etf_ledger (
 );
 CREATE INDEX IF NOT EXISTS idx_ibkr_etf_ledger_arm_day
     ON ibkr_etf_ledger(model_alias, realized_at);
+
+-- Isolated accounting for the six typed IBKR multi-asset paper books. These
+-- tables never feed the shared prediction-market paper wallet.
+CREATE TABLE IF NOT EXISTS ibkr_paper_positions (
+    book TEXT NOT NULL,
+    instrument_key TEXT NOT NULL,
+    con_id INTEGER NOT NULL DEFAULT 0,
+    currency TEXT NOT NULL,
+    quantity REAL NOT NULL,
+    multiplier REAL NOT NULL DEFAULT 1,
+    fx_to_usd REAL NOT NULL DEFAULT 1,
+    avg_cost REAL NOT NULL,
+    current_price REAL,
+    unrealized_pnl_usd REAL NOT NULL DEFAULT 0,
+    opened_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (book, instrument_key)
+);
+
+CREATE TABLE IF NOT EXISTS ibkr_paper_fills (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    book TEXT NOT NULL,
+    instrument_key TEXT NOT NULL,
+    con_id INTEGER NOT NULL DEFAULT 0,
+    side TEXT NOT NULL CHECK(side IN ('BUY', 'SELL')),
+    quantity REAL NOT NULL,
+    multiplier REAL NOT NULL DEFAULT 1,
+    price REAL NOT NULL,
+    currency TEXT NOT NULL,
+    fx_to_usd REAL NOT NULL DEFAULT 1,
+    commission_usd REAL NOT NULL DEFAULT 0,
+    fill_ref TEXT NOT NULL UNIQUE,
+    filled_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ibkr_paper_fills_book_time
+    ON ibkr_paper_fills(book, filled_at);
+
+CREATE TABLE IF NOT EXISTS ibkr_paper_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    book TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('trade', 'commission', 'financing')),
+    pnl_usd REAL NOT NULL,
+    source_ref TEXT NOT NULL UNIQUE,
+    realized_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ibkr_paper_ledger_book_day
+    ON ibkr_paper_ledger(book, realized_at);
+
+CREATE TABLE IF NOT EXISTS ibkr_paper_state (
+    book TEXT PRIMARY KEY,
+    refresh_cursor INTEGER NOT NULL DEFAULT 0,
+    last_cycle_at TEXT,
+    last_success_at TEXT,
+    last_error TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 
 CREATE TABLE IF NOT EXISTS position_peaks (
     market_id TEXT PRIMARY KEY,

@@ -703,6 +703,32 @@ class AuramaurBot(
             for analyzer in analyzers:
                 await analyzer.close()
 
+    async def _task_ibkr_multiasset_paper(self) -> None:
+        """Six read-only quote feeds with isolated local paper accounting."""
+        from auramaur.exchange.ibkr_instruments import IBKRBook
+        from auramaur.exchange.ibkr_market_data import IBKRReadOnlyMarketData
+        from auramaur.strategy.ibkr_multiasset_paper import IBKRMultiAssetPaperBook
+
+        client = IBKRReadOnlyMarketData(self.settings)
+        books = [IBKRMultiAssetPaperBook(
+            self.settings, client, self._components.get("db"), book)
+            for book in IBKRBook
+            if self.settings.ibkr.multiasset_books[book.value].enabled]
+        try:
+            while self._running:
+                if await self._check_kill_switch():
+                    return
+                for book in books:
+                    try:
+                        await book.run_once()
+                    except Exception as exc:  # noqa: BLE001
+                        log.error("ibkr_multiasset.book_cycle_error",
+                                  book=book.book.value, error=str(exc),
+                                  exc_info=True)
+                await asyncio.sleep(self.settings.ibkr.multiasset_cycle_seconds)
+        finally:
+            await client.close()
+
     async def _task_momentum_coupling(self) -> None:
         """Fast path: spot->prediction momentum-coupling pillar (gated, detect-only).
 
@@ -1505,6 +1531,9 @@ class AuramaurBot(
         if self.settings.ibkr.enabled and self.settings.ibkr.etf_paper_enabled:
             tasks.append(asyncio.create_task(
                 self._task_ibkr_etf_paper(), name="ibkr_etf_paper"))
+        if self.settings.ibkr.enabled and self.settings.ibkr.multiasset_paper_enabled:
+            tasks.append(asyncio.create_task(
+                self._task_ibkr_multiasset_paper(), name="ibkr_multiasset_paper"))
 
         # Fast path: momentum-coupling pillar (gated by momentum_coupling.enabled)
         if self.settings.momentum_coupling.enabled:

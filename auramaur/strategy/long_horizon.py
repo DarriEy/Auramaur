@@ -111,7 +111,8 @@ class LongHorizonPillar:
             log.error("long_horizon.harvest_error", error=str(e))
         open_count = await self._open_position_count()
         if open_count >= cfg.max_open:
-            log.debug("long_horizon.book_full", open=open_count, cap=cfg.max_open)
+            log.info("long_horizon.cycle", venue=self._venue, scanned=0, in_band=0,
+                     open=open_count, entered=0, book_full=True)
             return 0
         markets = await self._scan_long_dated(cfg)
         entered = 0

@@ -226,7 +226,7 @@ class AgentTraderPillar:
         alias = spec.alias
         open_rows = await self._open_theses(alias)
         if len(open_rows) >= cfg.max_open_per_model:
-            log.debug("agent_trader.book_full", alias=alias,
+            log.info("agent_trader.book_full", alias=alias,
                       open=len(open_rows))
             return 0
         seen_rows = await self._db.fetchall(
