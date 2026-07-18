@@ -742,9 +742,16 @@ class KrakenPillar:
                     if view is None:
                         continue
                     prob, conf = view
+                    cal_prob = await self._calibrated_prob(prob)
                     min_prob = getattr(kcfg, "directional_llm_min_prob", 0.60) or 0.60
-                    if prob < min_prob or not self._conf_ok(conf):
+                    if cal_prob < min_prob or not self._conf_ok(conf):
+                        log.info("kraken.directional.gate", pair=pair,
+                                 raw=round(prob, 3), calibrated=round(cal_prob, 3),
+                                 gate=min_prob, entered=False)
                         continue
+                    log.info("kraken.directional.gate", pair=pair,
+                             raw=round(prob, 3), calibrated=round(cal_prob, 3),
+                             gate=min_prob, entered=True)
                 else:
                     mom = await self._momentum(pair)
                     if mom is None or mom < entry_thr:
@@ -845,6 +852,50 @@ class KrakenPillar:
         kcfg = self._s.kraken
         floor = getattr(kcfg, "directional_llm_min_confidence", "MEDIUM")
         return self._CONF_RANK.get(str(conf).upper(), 0) >= self._CONF_RANK.get(str(floor).upper(), 2)
+
+    async def _calibrated_prob(self, raw: float) -> float:
+        """Map a raw LLM view probability through the MEASURED calibration of
+        this signal's own resolved record (calibration rows kraken-dir:*).
+
+        Six weeks of tracked predictions showed the read strongly
+        discriminating but compressed and mis-centered: raw values lived in
+        [0.42, 0.56] while outcomes spread 14%..43% across that band — so a
+        raw-probability gate at 0.60 could NEVER fire (the trial was
+        structurally untradeable) while the signal itself carried real
+        information. A rolling linear fit of outcome-on-prediction converts
+        the raw read into the probability its own track record implies; the
+        entry/exit gates compare against THAT. Falls back to raw (identity)
+        until >= 60 resolved points exist, and is re-fit hourly at most.
+        Slope is clamped to [0, 8] so a degenerate window can't explode."""
+        import time as _time
+        cache = getattr(self, "_calib_fit", None)
+        if cache is None or (_time.monotonic() - cache[0]) > 3600.0:
+            a, b = 0.0, 1.0  # intercept, slope -> identity
+            db = self._db()
+            if db is not None:
+                try:
+                    rows = await db.fetchall(
+                        """SELECT predicted_prob AS p, actual_outcome AS y
+                           FROM calibration
+                           WHERE market_id LIKE 'kraken-dir:%'
+                             AND actual_outcome IS NOT NULL
+                             AND created_at >= datetime('now', '-60 days')""")
+                    if len(rows) >= 60:
+                        n = len(rows)
+                        mp = sum(r["p"] for r in rows) / n
+                        my = sum(r["y"] for r in rows) / n
+                        cov = sum((r["p"] - mp) * (r["y"] - my) for r in rows)
+                        var = sum((r["p"] - mp) ** 2 for r in rows)
+                        if var > 1e-9:
+                            slope = max(0.0, min(8.0, cov / var))
+                            a, b = my - slope * mp, slope
+                except Exception as e:
+                    log.debug("kraken.calib_fit_error",
+                              error=f"{type(e).__name__}: {e}"[:120])
+            cache = (_time.monotonic(), a, b)
+            self._calib_fit = cache
+        _, a, b = cache
+        return min(0.99, max(0.01, a + b * raw))
 
     async def _llm_view(self, pair: str, force: bool = False) -> tuple[float, str] | None:
         """LLM/news-driven P(asset higher over the horizon) for a pair.
