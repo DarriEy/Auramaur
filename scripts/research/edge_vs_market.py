@@ -48,6 +48,27 @@ def main():
         for r in c.execute(query):
             rows.append({"m": r["model_p"], "mkt": r["market_p"],
                          "o": r["actual_outcome"], "cat": r["category"] or "none"})
+        # Preserve leakage-safe historical calibration coverage from before
+        # snapshots existed. The benchmark is the last signal at or before the
+        # prediction resolved; markets already represented above are excluded.
+        legacy = """SELECT cal.predicted_prob model_p, s.market_prob market_p,
+                           cal.actual_outcome, cal.category
+                    FROM calibration cal
+                    JOIN signals s ON s.id=(
+                        SELECT MAX(s2.id) FROM signals s2
+                        WHERE s2.market_id=cal.market_id
+                          AND datetime(s2.timestamp)<=datetime(cal.resolved_at)
+                    )
+                    WHERE cal.actual_outcome IS NOT NULL
+                      AND cal.id IN (SELECT MAX(id) FROM calibration
+                          WHERE actual_outcome IS NOT NULL GROUP BY market_id)
+                      AND cal.market_id NOT IN (
+                          SELECT market_id FROM forecast_snapshots
+                          WHERE actual_outcome IS NOT NULL)
+                      AND s.market_prob IS NOT NULL"""
+        for r in c.execute(legacy):
+            rows.append({"m": r["model_p"], "mkt": r["market_p"],
+                         "o": r["actual_outcome"], "cat": r["category"] or "none"})
     else:
         print("No point-in-time forecast snapshots yet; refusing a look-ahead-prone comparison.")
         c.close()

@@ -19,15 +19,17 @@ async def audit_data_contracts(db: Database) -> list[ContractViolation]:
         ("probability_range",
          "SELECT COUNT(*) n FROM calibration WHERE predicted_prob NOT BETWEEN 0 AND 1 OR predicted_prob IS NULL",
          "calibration probability outside [0,1]"),
-        ("forecast_lineage",
-         "SELECT COUNT(*) n FROM forecast_snapshots WHERE evidence_run_ids='[]' AND strategy_source='llm'",
-         "LLM forecast has no evidence run"),
+        ("orphan_forecast_evidence",
+         """SELECT COUNT(*) n FROM forecast_snapshots f
+            JOIN json_each(f.evidence_run_ids) e
+            LEFT JOIN ingestion_runs r ON r.id=e.value WHERE r.id IS NULL""",
+         "forecast names an ingestion run that does not exist"),
         ("future_evidence",
          "SELECT COUNT(*) n FROM evidence_observations WHERE datetime(published_at) > datetime(observed_at, '+1 hour')",
          "publication time is implausibly after observation"),
-        ("stuck_ingestion",
-         "SELECT COUNT(*) n FROM ingestion_runs WHERE status='running' AND datetime(started_at) < datetime('now','-1 hour')",
-         "ingestion run never completed"),
+        ("incomplete_ingestion",
+         "SELECT COUNT(*) n FROM ingestion_runs WHERE completed_at IS NULL OR status='running'",
+         "persisted ingestion row is incomplete"),
     ]
     violations = []
     for name, sql, detail in checks:

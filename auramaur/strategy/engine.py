@@ -593,46 +593,28 @@ class TradingEngine(CycleOrchestrationMixin):
             )
             analysis.calibrated_probability = calibrated
 
-        # Store the model view, contemporaneous market benchmark, and legacy
-        # calibration row as one transaction. There can be no orphan forecast
-        # or calibration observation after a partial database failure.
-        import hashlib
-        import json
-        config_payload = self.settings.nlp.model_dump(mode="json")
-        config_fingerprint = hashlib.sha256(
-            json.dumps(config_payload, sort_keys=True, separators=(",", ":"))
-            .encode("utf-8")
-        ).hexdigest()[:16]
-        import uuid
-        savepoint = f"forecast_observation_{uuid.uuid4().hex}"
-        try:
-            await self.db.execute(f"SAVEPOINT {savepoint}")
-            await self.db.execute(
-                """INSERT INTO forecast_snapshots
-                   (market_id,exchange,category,forecast_purpose,raw_probability,
-                    calibrated_probability,market_yes_price,market_no_price,observed_at,
-                    evidence_run_ids,model,strategy_source,config_fingerprint)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (market.id, market.exchange or self.exchange_name or "polymarket",
-                 market.category or "", "analysis", analysis.probability,
-                 analysis.calibrated_probability, market.outcome_yes_price,
-                 market.outcome_no_price, datetime.now(timezone.utc).isoformat(),
-                 json.dumps(evidence_run_ids), getattr(self.analyzer, "_model", ""),
-                 strategy_source, config_fingerprint),
+        # Existing calibration remains on its established connection. New
+        # lineage is observer-only: enqueueing is non-blocking and its worker
+        # owns a separate connection, so it cannot roll back or stall trading.
+        if self.calibration is not None:
+            await self.calibration.record_prediction(
+                market.id, analysis.probability, market.category or "",
             )
-            if self.calibration is not None:
-                await self.calibration.record_prediction(
-                    market.id, analysis.probability, market.category or "", commit=False,
-                )
-            await self.db.execute(f"RELEASE SAVEPOINT {savepoint}")
-            await self.db.commit()
-        except Exception:
-            try:
-                await self.db.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
-                await self.db.execute(f"RELEASE SAVEPOINT {savepoint}")
-            except Exception:
-                await self.db.db.rollback()
-            raise
+        observer = getattr(self.aggregator, "observer", None)
+        if observer is not None:
+            observer.forecast(
+                market_id=market.id,
+                exchange=market.exchange or self.exchange_name or "polymarket",
+                category=market.category or "", raw_probability=analysis.probability,
+                calibrated_probability=analysis.calibrated_probability,
+                market_yes_price=market.outcome_yes_price,
+                market_no_price=market.outcome_no_price,
+                observed_at=datetime.now(timezone.utc).isoformat(),
+                evidence_run_ids=evidence_run_ids,
+                model=getattr(self.analyzer, "_model", ""),
+                strategy_source=strategy_source,
+                config=self.settings.nlp.model_dump(mode="json"),
+            )
 
         # 2c. Order flow nudge
         if self.flow_tracker is not None:

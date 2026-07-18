@@ -35,7 +35,7 @@ class InformationGraduation:
         self._probation_multiplier = probation_multiplier
 
     async def register(self, source: str, category: str, horizon: str,
-                       event_type: str = "") -> str:
+                       event_type: str = "", *, commit: bool = True) -> str:
         key = f"{source}|{category}|{horizon}|{event_type}"
         strategy_id = hashlib.sha256(key.encode()).hexdigest()[:24]
         await self._db.execute(
@@ -48,11 +48,12 @@ class InformationGraduation:
             "INSERT OR IGNORE INTO information_graduation_state (strategy_id) VALUES (?)",
             (strategy_id,),
         )
-        await self._db.commit()
+        if commit:
+            await self._db.commit()
         return strategy_id
 
     async def assign(self, strategy_id: str, market_id: str, observed_at: datetime,
-                     market_price: float) -> tuple[str, str]:
+                     market_price: float, *, commit: bool = True) -> tuple[str, str]:
         """Create a deterministic, immutable 50/50 control/treatment assignment."""
         stamp = observed_at.astimezone(timezone.utc).isoformat()
         digest = hashlib.sha256(f"{strategy_id}|{market_id}|{stamp}".encode()).hexdigest()
@@ -64,7 +65,8 @@ class InformationGraduation:
                VALUES (?,?,?,?,?,?,?)""",
             (trial_id, strategy_id, market_id, stamp, assignment, digest, market_price),
         )
-        await self._db.commit()
+        if commit:
+            await self._db.commit()
         return trial_id, assignment
 
     async def record_forecast(self, trial_id: str, arm: str, probability: float,
@@ -82,7 +84,7 @@ class InformationGraduation:
         )
         await self._db.commit()
 
-    async def resolve(self, trial_id: str, outcome: bool) -> None:
+    async def resolve(self, trial_id: str, outcome: bool, *, commit: bool = True) -> None:
         actual = int(outcome)
         await self._db.execute(
             "UPDATE information_trials SET resolved_outcome=?,resolved_at=datetime('now') WHERE id=?",
@@ -114,7 +116,8 @@ class InformationGraduation:
                    VALUES (?,?,?,?,?,?,?,?,?)""",
                 (trial_id, source["source"], cb, tb, cl, tl, cb-tb, cl-tl, tp-cp),
             )
-        await self._db.commit()
+        if commit:
+            await self._db.commit()
 
     async def evaluate(self, strategy_id: str) -> InformationDecision:
         row = await self._db.fetchone(

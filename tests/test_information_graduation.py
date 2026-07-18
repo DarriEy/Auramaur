@@ -6,6 +6,7 @@ from auramaur.data_sources.aggregator import Aggregator
 from auramaur.data_sources.base import NewsItem
 from auramaur.db.database import Database
 from auramaur.information_graduation import InformationGraduation
+from auramaur.lineage_observer import LineageObserver
 from auramaur.nlp.calibration import CalibrationTracker
 
 
@@ -22,19 +23,19 @@ class ShadowSource:
 
 
 @pytest.mark.asyncio
-async def test_shadow_evidence_is_persisted_but_withheld():
-    db = Database(":memory:")
-    await db.connect()
-    ladder = InformationGraduation(db)
-    result = await Aggregator(
-        [ShadowSource()], db=db, information_graduation=ladder,
-    ).gather("fact", market_id="m", market_price=.4)
+async def test_shadow_evidence_is_persisted_but_withheld(tmp_path):
+    observer = await LineageObserver.create(str(tmp_path / "shadow.db"))
+    result = await Aggregator([ShadowSource()], observer=observer).gather(
+        "fact", market_id="m", market_price=.4,
+    )
+    await observer.flush()
+    db = observer.db
     assert result == []
     row = await db.fetchone("SELECT information_mode,rank_position FROM evidence_observations")
     assert row["information_mode"] == "shadow" and row["rank_position"] is None
     trial = await db.fetchone("SELECT assignment,market_price FROM information_trials")
     assert trial["assignment"] in {"control", "treatment"} and trial["market_price"] == .4
-    await db.close()
+    await observer.close()
 
 
 @pytest.mark.asyncio
@@ -76,19 +77,22 @@ async def test_assignment_is_immutable_and_deterministic():
 
 
 @pytest.mark.asyncio
-async def test_market_resolution_reconciles_information_trials():
-    db = Database(":memory:")
+async def test_market_resolution_reconciles_information_trials(tmp_path):
+    db = Database(str(tmp_path / "resolution.db"))
     await db.connect()
-    ladder = InformationGraduation(db)
+    observer = await LineageObserver.create(str(tmp_path / "resolution.db"))
+    ladder = observer.ladder
     sid = await ladder.register("candidate", "weather", "0-6h")
     trial, _ = await ladder.assign(
         sid, "resolved-market", datetime.now(timezone.utc), .5,
     )
     await ladder.record_forecast(trial, "control", .4)
     await ladder.record_forecast(trial, "treatment", .8)
-    await CalibrationTracker(db).record_prediction("resolved-market", .7, "weather")
+    tracker = CalibrationTracker(db, lineage_observer=observer)
+    await tracker.record_prediction("resolved-market", .7, "weather")
 
-    await CalibrationTracker(db).record_resolution("resolved-market", True)
+    await tracker.record_resolution("resolved-market", True)
+    await observer.flush()
 
     resolved = await db.fetchone(
         "SELECT resolved_outcome FROM information_trials WHERE id=?", (trial,),
@@ -98,4 +102,5 @@ async def test_market_resolution_reconciles_information_trials():
     )
     assert resolved["resolved_outcome"] == 1
     assert contribution["incremental_brier"] > 0
+    await observer.close()
     await db.close()

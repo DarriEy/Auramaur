@@ -13,6 +13,11 @@ from auramaur.data_sources.base import NewsItem
 log = structlog.get_logger()
 _TIMEOUT = aiohttp.ClientTimeout(total=15)
 
+# Candidate-source trust is isolated from production ranking.
+OFFICIAL_SHADOW_AUTHORITY = {
+    "nws": 3.0, "bls": 3.0, "bea": 3.0, "congress": 3.0, "eia": 3.0,
+}
+
 
 def _dt(value: str | None) -> tuple[datetime, str]:
     if value:
@@ -66,7 +71,7 @@ class NWSSource(_HTTPSource):
         try:
             data = await self._get(
                 "https://api.weather.gov/alerts/active",
-                headers={"User-Agent": "Auramaur/0.1 (research; dae5@hi.is)"},
+                headers={"User-Agent": "Auramaur/0.1 (research bot)"},
             )
         except Exception as exc:
             log.warning("nws.fetch_failed", error=str(exc)[:120])

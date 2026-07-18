@@ -13,10 +13,8 @@ from typing import TYPE_CHECKING
 import structlog
 
 from auramaur.data_sources.base import DataSource, NewsItem
-from auramaur.db.database import Database
-
 if TYPE_CHECKING:
-    from auramaur.information_graduation import InformationGraduation
+    from auramaur.lineage_observer import LineageObserver
 
 logger = structlog.get_logger(__name__)
 
@@ -33,11 +31,10 @@ class Aggregator:
 
     source_name: str = "aggregator"
 
-    def __init__(self, sources: list[DataSource], db: Database | None = None,
-                 information_graduation: InformationGraduation | None = None) -> None:
+    def __init__(self, sources: list[DataSource],
+                 observer: LineageObserver | None = None) -> None:
         self._sources = sources
-        self._db = db
-        self._information_graduation = information_graduation
+        self.observer = observer
 
     @staticmethod
     def _source_matches_category(source: DataSource, category: str | None) -> bool:
@@ -85,12 +82,13 @@ class Aggregator:
                     item.information_mode = mode
                 fetch_rows.append((run_id, source_name, "ok", len(items),
                                    round((time.monotonic() - before) * 1000), "",
-                                   datetime.now(tz=timezone.utc).isoformat()))
+                                   datetime.now(tz=timezone.utc).isoformat(), mode))
                 return items
             except Exception as exc:
                 fetch_rows.append((run_id, source_name, "error", 0,
                                    round((time.monotonic() - before) * 1000), str(exc)[:500],
-                                   datetime.now(tz=timezone.utc).isoformat()))
+                                   datetime.now(tz=timezone.utc).isoformat(),
+                                   getattr(source, "information_mode", "production")))
                 logger.exception(
                     "aggregator_source_failed",
                     source=source_name,
@@ -143,87 +141,35 @@ class Aggregator:
         observed_at = datetime.now(tz=timezone.utc).isoformat()
         for item in unique:
             item.ingestion_run_id = run_id
-        if self._db is not None:
-            savepoint = f"ingestion_lineage_{run_id}"
-            try:
-                # Telemetry is deliberately one transaction after the network
-                # work. A lock/disk/schema failure must never suppress usable
-                # evidence or strand a half-written ingestion run.
-                await self._db.execute(f"SAVEPOINT {savepoint}")
-                await self._db.execute(
-                    "INSERT INTO ingestion_runs "
-                    "(id,query,category,market_id,started_at,completed_at,status,"
-                    "active_sources,raw_items,unique_items) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    (run_id, query, category or "", market_id, started.isoformat(),
-                     observed_at,
-                     "partial" if any(row[2] == "error" for row in fetch_rows) else "ok",
-                     len(active_sources), len(all_items), len(unique)),
-                )
-                if fetch_rows:
-                    await self._db.executemany(
-                        "INSERT OR REPLACE INTO source_fetches "
-                        "(run_id,source,status,item_count,latency_ms,error,observed_at) "
-                        "VALUES (?,?,?,?,?,?,?)", fetch_rows,
-                    )
-                evidence_rows = []
-                persisted_items = list({(item.source, item.id): item for item in all_items}.values())
-                ranks = {item.id: rank for rank, item in enumerate(unique, start=1)}
-                for item in persisted_items:
-                    excerpt = (item.content or "")[:500]
-                    content_hash = hashlib.sha256(
+        if self.observer is not None:
+            ranks = {item.id: rank for rank, item in enumerate(unique, start=1)}
+            persisted = list({(item.source, item.id): item for item in all_items}.values())
+            self.observer.ingestion(
+                run_id=run_id, query=query, category=category or "", market_id=market_id,
+                started_at=started.isoformat(), observed_at=observed_at,
+                fetch_rows=fetch_rows, raw_items=len(all_items),
+                items=[{
+                    "run_id": run_id, "item_id": item.id, "source": item.source,
+                    "title": item.title, "url": item.url,
+                    "content_hash": hashlib.sha256(
                         f"{item.title}\n{item.content}".encode("utf-8", "replace")
-                    ).hexdigest()
-                    evidence_rows.append((
-                        run_id, item.id, item.source, item.title, item.url, content_hash,
-                        excerpt, item.published_at.isoformat(), observed_at,
-                        item.timestamp_quality, item.relevance_score, ranks.get(item.id),
-                        market_id, item.information_mode,
-                    ))
-                if evidence_rows:
-                    await self._db.executemany(
-                        "INSERT OR REPLACE INTO evidence_observations "
-                        "(run_id,item_id,source,title,url,content_hash,excerpt,published_at,"
-                        "observed_at,timestamp_quality,relevance_score,rank_position,market_id,"
-                        "information_mode) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", evidence_rows,
-                    )
-                await self._db.execute(f"RELEASE SAVEPOINT {savepoint}")
-                await self._db.commit()
-            except Exception as exc:
-                try:
-                    await self._db.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
-                    await self._db.execute(f"RELEASE SAVEPOINT {savepoint}")
-                except Exception:
-                    try:
-                        await self._db.db.rollback()
-                    except Exception:
-                        pass
-                logger.exception("aggregator_lineage_persist_failed", error=str(exc)[:200])
-
-        # Assignment is immutable and happens after observation but before any
-        # future paired analysis consumes the candidate. Shadow evidence itself
-        # remains withheld above; this only accrues the eligible trial cohort.
-        if (self._information_graduation is not None and market_id
-                and market_price is not None):
-            for source in active_sources:
-                if getattr(source, "information_mode", "production") != "shadow":
-                    continue
-                if not any(item.source == source.source_name for item in all_items):
-                    continue
-                try:
-                    strategy_id = await self._information_graduation.register(
-                        source.source_name, category or "",
-                        getattr(source, "trial_horizon", ""),
-                        getattr(source, "trial_event_type", "query_evidence"),
-                    )
-                    await self._information_graduation.assign(
-                        strategy_id, market_id, datetime.fromisoformat(observed_at),
-                        market_price,
-                    )
-                except Exception:
-                    logger.exception(
-                        "information_trial_assignment_failed", source=source.source_name,
-                        market_id=market_id,
-                    )
+                    ).hexdigest(),
+                    "excerpt": (item.content or "")[:500],
+                    "published_at": item.published_at.isoformat(),
+                    "observed_at": observed_at, "timestamp_quality": item.timestamp_quality,
+                    "relevance_score": item.relevance_score,
+                    "rank_position": ranks.get(item.id), "market_id": market_id,
+                    "information_mode": item.information_mode,
+                } for item in persisted],
+                active_sources=[{
+                    "name": source.source_name,
+                    "mode": getattr(source, "information_mode", "production"),
+                    "horizon": getattr(source, "trial_horizon", ""),
+                    "event_type": getattr(source, "trial_event_type", "query_evidence"),
+                    "had_items": any(i.source == source.source_name for i in all_items),
+                    "market_price": market_price,
+                } for source in active_sources],
+            )
 
         logger.info(
             "aggregator_gathered",
@@ -249,3 +195,5 @@ class Aggregator:
                     "aggregator_source_close_failed",
                     source=getattr(source, "source_name", str(source)),
                 )
+        if self.observer is not None:
+            await self.observer.close()

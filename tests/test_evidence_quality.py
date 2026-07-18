@@ -47,6 +47,10 @@ class TestSourceAuthority:
         # Low-tier source name but authoritative URL → takes the higher weight.
         assert authority("rss", "https://www.reuters.com/world/x") == SOURCE_AUTHORITY["reuters"]
 
+    def test_url_does_not_substring_match_paths_or_hostnames(self):
+        assert authority("rss", "https://example.com/congress-vote") == SOURCE_AUTHORITY["rss"]
+        assert authority("rss", "https://reuters.com.evil.example/story") == SOURCE_AUTHORITY["rss"]
+
     def test_handles_none(self):
         assert authority(None, None) == 1.0
 

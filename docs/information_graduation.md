@@ -4,6 +4,11 @@ Official NWS, BLS, BEA, Congress.gov, and EIA observations begin in shadow
 mode. They are persisted with source health and point-in-time lineage, but are
 withheld from production forecasts.
 
+Lineage is observer-only. Fetch and analysis paths enqueue immutable events
+without awaiting database I/O; a background worker owns a separate SQLite
+connection and transaction boundary. A lineage lock, commit, or rollback
+failure therefore cannot roll back trading state or abort an analysis.
+
 Cells are keyed by source, category, horizon, and event type. Deterministic
 control/treatment assignment and paired forecast/contribution storage are
 implemented in `auramaur.information_graduation`. Promotion requires source

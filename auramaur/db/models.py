@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -188,7 +188,8 @@ CREATE TABLE IF NOT EXISTS ingestion_runs (
 CREATE TABLE IF NOT EXISTS source_fetches (
     run_id TEXT NOT NULL, source TEXT NOT NULL, status TEXT NOT NULL,
     item_count INTEGER NOT NULL DEFAULT 0, latency_ms INTEGER NOT NULL DEFAULT 0,
-    error TEXT DEFAULT '', observed_at TEXT NOT NULL, PRIMARY KEY (run_id, source)
+    error TEXT DEFAULT '', observed_at TEXT NOT NULL,
+    information_mode TEXT NOT NULL DEFAULT 'production', PRIMARY KEY (run_id, source)
 );
 
 CREATE TABLE IF NOT EXISTS evidence_observations (

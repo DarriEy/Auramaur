@@ -170,7 +170,9 @@ async def check_data_sources(
     # errors. This is a real health signal; evidence counts alone cannot tell
     # an irrelevant query from a dead provider.
     fetch_rows = await db.fetchall(
-        "SELECT source,status,observed_at FROM source_fetches",
+        "SELECT source,status,observed_at FROM source_fetches "
+        "WHERE information_mode='production' AND observed_at>=?",
+        (since_window.astimezone(timezone.utc).isoformat(),),
     )
     if fetch_rows:
         def parsed(value: str) -> datetime:
@@ -187,6 +189,13 @@ async def check_data_sources(
                 continue
             if observed >= window_start:
                 by_source.setdefault(row["source"], []).append((observed, row["status"]))
+        if not by_source:
+            return CriterionResult(
+                name="data_sources", status="INSUFFICIENT_DATA",
+                value="0 production sources active",
+                threshold="recent successful production attempts",
+                detail="no parseable production fetch attempts in the readiness window",
+            )
         stale = []
         failing = []
         for source, attempts in by_source.items():

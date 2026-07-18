@@ -310,6 +310,26 @@ async def test_data_sources_compare_timestamp_instants_not_lexical_strings(db: D
     assert result.status == "PASS"
 
 
+@pytest.mark.asyncio
+async def test_data_sources_ignore_zero_influence_shadow_health(db: Database):
+    now = datetime.now(timezone.utc)
+    for values in (
+        ("shadow", "nws", "error", now.isoformat(), "shadow"),
+        ("production", "rss", "ok", now.isoformat(), "production"),
+    ):
+        await db.execute(
+            "INSERT INTO source_fetches "
+            "(run_id,source,status,observed_at,information_mode) VALUES (?,?,?,?,?)",
+            values,
+        )
+    await db.commit()
+    result = await check_data_sources(
+        db, since_24h=now - timedelta(days=1), since_window=now - timedelta(days=7),
+    )
+    assert result.status == "PASS"
+    assert result.value == "1 active"
+
+
 # ---------------------------------------------------------------------------
 # Pass rate
 # ---------------------------------------------------------------------------

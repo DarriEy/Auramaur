@@ -353,10 +353,10 @@ async def assemble_components(
     sources.append(BlueskySource())
     source_names.append("Bluesky")
 
-    from auramaur.information_graduation import InformationGraduation
     ig = s.information_graduation
-    information_graduation = InformationGraduation(
-        db, min_resolved=ig.min_resolved, min_paired=ig.min_paired,
+    from auramaur.lineage_observer import LineageObserver
+    lineage_observer = await LineageObserver.create(
+        db_path, min_resolved=ig.min_resolved, min_paired=ig.min_paired,
         min_success_rate=ig.min_success_rate,
         probation_multiplier=ig.probation_multiplier,
     )
@@ -369,9 +369,8 @@ async def assemble_components(
         ("edgar", "economics", "1-7d", "corporate_filing"),
         ("social_bundle", "crypto", "1-3d", "unscheduled_narrative"),
     ):
-        await information_graduation.register(source, category, horizon, event_type)
-    aggregator = Aggregator(
-        sources=sources, db=db, information_graduation=information_graduation)
+        await lineage_observer.ladder.register(source, category, horizon, event_type)
+    aggregator = Aggregator(sources=sources, observer=lineage_observer)
 
     # Exchange
     paper = PaperTrader(db=db, initial_balance=s.execution.paper_initial_balance)
@@ -381,7 +380,8 @@ async def assemble_components(
     analyzer = ClaudeAnalyzer(settings=s)
     cache = NLPCache(db=db)
     calibration = CalibrationTracker(
-        db=db, min_samples=s.calibration.min_samples
+        db=db, min_samples=s.calibration.min_samples,
+        lineage_observer=lineage_observer,
     )
 
     # Risk
