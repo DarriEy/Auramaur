@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 20
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -333,97 +333,6 @@ CREATE TABLE IF NOT EXISTS ensemble_predictions (
 );
 CREATE INDEX IF NOT EXISTS idx_ensemble_model ON ensemble_predictions(model);
 CREATE INDEX IF NOT EXISTS idx_ensemble_market ON ensemble_predictions(market_id);
-
-CREATE TABLE IF NOT EXISTS ibkr_etf_forecasts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    model_alias TEXT NOT NULL,
-    model TEXT NOT NULL,
-    symbol TEXT NOT NULL,
-    probability REAL NOT NULL,
-    confidence TEXT NOT NULL,
-    thesis TEXT NOT NULL DEFAULT '',
-    risks_json TEXT NOT NULL DEFAULT '[]',
-    reference_price REAL NOT NULL,
-    final_price REAL,
-    actual_outcome INTEGER,
-    intelligence_cost_usd REAL NOT NULL DEFAULT 0,
-    opened_at TEXT NOT NULL DEFAULT (datetime('now')),
-    opened_session_date TEXT NOT NULL,
-    horizon_sessions INTEGER NOT NULL,
-    sessions_elapsed INTEGER NOT NULL DEFAULT 0,
-    last_session_date TEXT,
-    due_at TEXT NOT NULL,
-    resolved_at TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_ibkr_etf_forecast_arm
-    ON ibkr_etf_forecasts(model_alias, symbol, due_at);
-
-CREATE TABLE IF NOT EXISTS ibkr_etf_state (
-    model_alias TEXT PRIMARY KEY,
-    refresh_cursor INTEGER NOT NULL DEFAULT 0,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS ibkr_etf_cooldowns (
-    model_alias TEXT NOT NULL,
-    symbol TEXT NOT NULL,
-    until_epoch REAL NOT NULL,
-    PRIMARY KEY (model_alias, symbol)
-);
-
-CREATE TABLE IF NOT EXISTS ibkr_etf_openai_attempts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    model_alias TEXT NOT NULL,
-    model TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'started',
-    response_id TEXT DEFAULT '',
-    input_tokens INTEGER NOT NULL DEFAULT 0,
-    output_tokens INTEGER NOT NULL DEFAULT 0,
-    total_tokens INTEGER NOT NULL DEFAULT 0,
-    cost_usd REAL NOT NULL DEFAULT 0,
-    latency_ms INTEGER NOT NULL DEFAULT 0,
-    error TEXT DEFAULT '',
-    started_at TEXT NOT NULL DEFAULT (datetime('now')),
-    finished_at TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_ibkr_etf_attempt_arm_day
-    ON ibkr_etf_openai_attempts(model_alias, started_at);
-
-CREATE TABLE IF NOT EXISTS ibkr_etf_positions (
-    model_alias TEXT NOT NULL,
-    symbol TEXT NOT NULL,
-    quantity REAL NOT NULL,
-    avg_cost REAL NOT NULL,
-    current_price REAL,
-    unrealized_pnl REAL NOT NULL DEFAULT 0,
-    peak_pnl_pct REAL NOT NULL DEFAULT 0,
-    opened_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (model_alias, symbol)
-);
-
-CREATE TABLE IF NOT EXISTS ibkr_etf_fills (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    model_alias TEXT NOT NULL,
-    symbol TEXT NOT NULL,
-    side TEXT NOT NULL CHECK(side IN ('BUY', 'SELL')),
-    quantity REAL NOT NULL,
-    price REAL NOT NULL,
-    commission_usd REAL NOT NULL DEFAULT 0,
-    fill_ref TEXT NOT NULL UNIQUE,
-    filled_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS ibkr_etf_ledger (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    model_alias TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK(kind IN ('trade', 'commission', 'intelligence')),
-    pnl REAL NOT NULL,
-    source_ref TEXT NOT NULL UNIQUE,
-    realized_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_ibkr_etf_ledger_arm_day
-    ON ibkr_etf_ledger(model_alias, realized_at);
 
 CREATE TABLE IF NOT EXISTS position_peaks (
     market_id TEXT PRIMARY KEY,

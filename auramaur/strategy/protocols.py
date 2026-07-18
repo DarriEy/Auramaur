@@ -26,7 +26,6 @@ class ExecutionMode(str, Enum):
     GATEWAY_PAIRED = "gateway_paired"      # gateway.submit_paired() — both-or-nothing arb
     GATEWAY_EXTERNAL = "gateway_external"  # gateway.place_legs() — concurrent arb legs, then records
     DIRECT_QUOTING = "direct_quoting"      # market maker — gateway.place_quote_pair() (resting two-sided)
-    PAPER_SIMULATED = "paper_simulated"    # local fills only; no exchange order method exists
     # The one genuine off-gateway exception:
     DIRECT_EQUITY = "direct_equity"        # oddlot tender — IBKR equities, outside the PM gateway
 

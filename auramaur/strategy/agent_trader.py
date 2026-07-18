@@ -88,16 +88,6 @@ CREATE TABLE IF NOT EXISTS agent_trader_declines (
 )
 """
 
-_COSTS_TABLE = """
-CREATE TABLE IF NOT EXISTS agent_trader_costs (
-    day TEXT NOT NULL,
-    model_alias TEXT NOT NULL,
-    calls INTEGER NOT NULL DEFAULT 0,
-    usd REAL NOT NULL DEFAULT 0,
-    PRIMARY KEY (day, model_alias)
-)
-"""
-
 _THESES_TABLE = """
 CREATE TABLE IF NOT EXISTS agent_trader_theses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -180,7 +170,6 @@ class AgentTraderPillar:
             return
         await self._db.execute(_THESES_TABLE)
         await self._db.execute(_DECLINES_TABLE)
-        await self._db.execute(_COSTS_TABLE)
         try:
             # Upgrade a pre-`entered` table in place (rows so far all entered).
             await self._db.execute(
@@ -262,10 +251,7 @@ class AgentTraderPillar:
             open_book=self._open_block(open_rows),
             candidates=self._candidates_block(offered),
         )
-        if getattr(spec, "provider", "claude") == "gemini":
-            raw = await self._call_gemini(prompt, spec, cfg)
-        else:
-            raw = await self._call_model(prompt, spec.model, spec.effort, cfg)
+        raw = await self._call_model(prompt, spec.model, spec.effort, cfg)
         decisions = parse_decisions(raw, cfg.max_entries_per_cycle)
 
         # The model actually saw and passed on these — remember the pass for
@@ -458,77 +444,6 @@ class AgentTraderPillar:
             raise RuntimeError(
                 f"model call failed ({model}): {stderr.decode()[:200]}")
         return stdout.decode()
-
-    # ------------------------------------------------------------------
-    # Gemini arms — paid REST API, own daily ceiling, metered cost
-    # ------------------------------------------------------------------
-
-    async def _gemini_calls_today(self) -> int:
-        row = await self._db.fetchone(
-            """SELECT COALESCE(SUM(calls), 0) AS n FROM agent_trader_costs
-               WHERE day = date('now')""")
-        return int(row["n"]) if row else 0
-
-    async def _record_gemini_cost(self, alias: str, usd: float) -> None:
-        await self._db.execute(
-            """INSERT INTO agent_trader_costs (day, model_alias, calls, usd)
-               VALUES (date('now'), ?, 1, ?)
-               ON CONFLICT(day, model_alias) DO UPDATE SET
-                   calls = calls + 1, usd = usd + excluded.usd""",
-            (alias, usd))
-        await self._db.commit()
-
-    async def _gemini_request(self, url: str, body: dict, timeout_s: int) -> dict:
-        """One POST to the Gemini REST API (separate method so tests stub it)."""
-        import aiohttp
-        async with aiohttp.ClientSession() as s:
-            async with s.post(url, json=body,
-                              timeout=aiohttp.ClientTimeout(total=timeout_s)) as r:
-                return await r.json()
-
-    async def _call_gemini(self, prompt: str, spec, cfg) -> str:
-        """A Gemini arm's read. PAID per token (unlike the Claude arms on the
-        Max+ plan), so: (a) its own daily ceiling, independent of the Claude
-        paced pool; (b) every call's token usage is metered into
-        agent_trader_costs at configured $/Mtok — the arm's record is judged
-        net of its own intelligence bill (operator's cost-inclusive rule).
-        Google-Search grounding is enabled for research parity with the
-        Claude arms' WebSearch; no JSON response mime (grounding conflicts),
-        the tolerant parse_decisions handles prose-wrapped JSON."""
-        key = self._settings.gemini_api_key
-        if not key:
-            raise RuntimeError("gemini arm: no GEMINI_API_KEY configured")
-        limit = int(getattr(cfg, "gemini_daily_call_limit", 0))
-        if limit > 0 and await self._gemini_calls_today() >= limit:
-            raise RuntimeError(
-                f"gemini daily call limit ({limit}) exhausted")
-        url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-               f"{spec.model}:generateContent?key={key}")
-        body = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "tools": [{"google_search": {}}],
-            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048},
-        }
-        data = await self._gemini_request(url, body, int(cfg.llm_timeout_seconds))
-        try:
-            parts = data["candidates"][0]["content"]["parts"]
-            text = "".join(p.get("text", "") for p in parts).strip()
-        except (KeyError, IndexError, TypeError):
-            raise RuntimeError(
-                f"gemini reply unparseable ({spec.model}): "
-                f"{str(data)[:160]}")
-        usage = data.get("usageMetadata", {}) or {}
-        prices = (getattr(cfg, "gemini_price_per_mtok", {}) or {}).get(
-            spec.model, [0.0, 0.0])
-        usd = (float(usage.get("promptTokenCount", 0)) * float(prices[0])
-               + float(usage.get("candidatesTokenCount", 0)) * float(prices[1])
-               ) / 1e6
-        await self._record_gemini_cost(spec.alias, usd)
-        log.info("agent_trader.gemini_call", alias=spec.alias,
-                 model=spec.model, usd=round(usd, 5),
-                 in_tok=usage.get("promptTokenCount", 0),
-                 out_tok=usage.get("candidatesTokenCount", 0))
-        return text
 
     # ------------------------------------------------------------------
     # Entry — full risk gate, gateway placement, same rails as every pillar

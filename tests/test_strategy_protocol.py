@@ -17,7 +17,6 @@ import pytest
 
 from auramaur.strategy.bias_harvest import BiasHarvestPillar
 from auramaur.strategy.informed_flow_pillar import InformedFlowPillar
-from auramaur.strategy.ibkr_etf_paper import IBKRETFPaperPillar
 from auramaur.strategy.long_horizon import LongHorizonPillar
 from auramaur.strategy.cross_venue_arb import CrossVenueArbPillar
 from auramaur.strategy.econ_indicator import EconIndicatorPillar
@@ -46,7 +45,6 @@ PILLARS = [
     (MarketMaker, "auramaur/strategy/market_maker.py"),
     (ArbitrageScanner, "auramaur/strategy/arbitrage_scanner.py"),
     (OddLotTenderPillar, "auramaur/strategy/oddlot_tender.py"),
-    (IBKRETFPaperPillar, "auramaur/strategy/ibkr_etf_paper.py"),
 ]
 
 # NO_DIRECT_PLACE_MODES (single source of truth in protocols.py): the pillar must
