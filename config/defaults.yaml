@@ -574,6 +574,16 @@ agent_trader:
       model: claude-sonnet-5
     - alias: opus
       model: claude-opus-4-8
+    # Gemini arms — cross-provider tier comparison. PAID API (unlike the
+    # Claude arms on the plan): own daily ceiling below, and every call's
+    # token usage is metered into agent_trader_costs so each arm's record
+    # is judged NET of its own intelligence bill.
+    - alias: gflash
+      model: gemini-3.1-flash-preview
+      provider: gemini
+    - alias: gpro
+      model: gemini-3.1-pro-preview
+      provider: gemini
   scan_limit: 200
   markets_per_cycle: 10
   max_entries_per_cycle: 2
@@ -587,6 +597,10 @@ agent_trader:
   exclude_categories: []
   llm_timeout_seconds: 420   # room for WebSearch rounds
   decline_ttl_hours: 24.0    # a pass keeps the market off the arm's slate this long
+  gemini_daily_call_limit: 30   # across all gemini arms; independent of the Claude pool
+  gemini_price_per_mtok:        # $/1M tokens [input, output] — update from the rate card
+    gemini-3.1-flash-preview: [0.30, 2.50]
+    gemini-3.1-pro-preview: [2.00, 12.00]
 
 term_structure:
   # Deadline-ladder curve reader — the reading edge, amortized: ONE LLM read
