@@ -176,8 +176,11 @@ class IBKREquityClient:
                                is_paper=True,
                                error_message=f"${usd_amount:.2f} exceeds cap ${cap:.2f}")
 
-        if dry_run is None:
-            dry_run = not self._settings.is_live
+        # A caller-supplied ``dry_run=False`` is only the per-order gate; it
+        # must never bypass either global live gate (or the kill switch folded
+        # into settings.is_live).  Downgrade safely to paper when any gate is
+        # closed, matching the main IBKR options client.
+        dry_run = bool(dry_run) or not self._settings.is_live
         # Price is only for paper sizing + the recorded fill estimate; the live
         # order sizes itself from cashQty, so a missing quote never blocks it.
         price = await self.get_price(symbol)
@@ -214,8 +217,7 @@ class IBKREquityClient:
         if abs(held) < 1e-6:
             return None  # nothing to close
 
-        if dry_run is None:
-            dry_run = not self._settings.is_live
+        dry_run = bool(dry_run) or not self._settings.is_live
         price = await self.get_price(symbol)
         value = round(held * price, 2) if price else 0.0
         if dry_run:
@@ -286,8 +288,7 @@ class IBKREquityClient:
                                is_paper=True,
                                error_message=f"${notional:.2f} exceeds cap ${cap:.2f}")
 
-        if dry_run is None:
-            dry_run = not self._settings.is_live
+        dry_run = bool(dry_run) or not self._settings.is_live
         if dry_run:
             log.info("ibkr_equity.share_order.paper", symbol=symbol, side=side_str,
                      qty=qty, limit=limit_price)
@@ -367,8 +368,7 @@ class IBKREquityClient:
         Converting BUYs the USD.<ccy> forex pair (e.g. USDCAD): buying USD, paying
         the source currency. On a cash account the proceeds settle T+1, so this is
         a buffer-maintainer, not same-cycle funding."""
-        if dry_run is None:
-            dry_run = not self._settings.is_live
+        dry_run = bool(dry_run) or not self._settings.is_live
 
         if kill_switch_present():
             log.critical("kill_switch.active", action="ibkr_fx_convert_blocked")
