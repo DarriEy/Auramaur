@@ -101,6 +101,8 @@ class Database:
             await self._migrate_v18_to_v19()
         if from_version < 20:
             await self._migrate_v19_to_v20()
+        if from_version < 21:
+            await self._migrate_v20_to_v21()
 
     async def _migrate_v1_to_v2(self) -> None:
         """Add category to calibration, add new tables."""
@@ -528,6 +530,12 @@ class Database:
         await self._db.execute("UPDATE schema_version SET version = 20")
         await self._db.commit()
         log.info("database.migrated", from_version=19, to_version=20, merged_groups=merged)
+
+    async def _migrate_v20_to_v21(self) -> None:
+        """Register the isolated IBKR ETF paper experiment schema."""
+        await self._db.execute("UPDATE schema_version SET version = 21")
+        await self._db.commit()
+        log.info("database.migrated", from_version=20, to_version=21)
 
     async def _migrate_v11_to_v12(self) -> None:
         """Add strategy_source column to signals and trades for hybrid mode attribution."""

@@ -41,6 +41,16 @@ from auramaur.bot_order_monitor import OrderMonitorMixin
 log = structlog.get_logger()
 
 
+async def run_ibkr_etf_arms_once(pillars) -> None:
+    """Run every intelligence arm independently; one failure cannot stop peers."""
+    for pillar in pillars:
+        try:
+            await pillar.run_once()
+        except Exception as e:  # noqa: BLE001 — isolation is the contract
+            log.error("ibkr_etf.arm_cycle_error", model_alias=pillar.model_alias,
+                      error=str(e), exc_info=True)
+
+
 class AuramaurBot(
     ExitExecutionMixin, StrategyTaskMixin, ArbExecutionMixin, OrderMonitorMixin
 ):
@@ -659,6 +669,39 @@ class AuramaurBot(
             await client.close()
             if coinbase_client is not None:
                 await coinbase_client.close()
+
+    async def _task_ibkr_etf_paper(self) -> None:
+        """OpenAI intelligence-cap A/B over the paper-only ETF mandate."""
+        from auramaur.exchange.ibkr_equity import IBKREquityClient
+        from auramaur.nlp.openai_etf import OpenAIETFAnalyzer
+        from auramaur.strategy.ibkr_etf_paper import IBKRETFPaperPillar
+
+        client = IBKREquityClient(self.settings, force_paper_readonly=True)
+        evidence_cache = {}
+        analyzers = [OpenAIETFAnalyzer(
+            self.settings.openai_api_key, spec.model, spec.effort,
+            self.settings.ibkr.etf_openai_timeout_seconds,
+            db=self._components.get("db"), model_alias=spec.alias,
+            input_cost_per_million=spec.input_cost_per_million,
+            output_cost_per_million=spec.output_cost_per_million)
+            for spec in self.settings.ibkr.etf_models]
+        pillars = [IBKRETFPaperPillar(
+            self.settings, client, self._components.get("db"),
+            self._components.get("aggregator"), analyzer,
+            self._components.get("cache"), model_alias=spec.alias,
+            evidence_cache=evidence_cache)
+            for spec, analyzer in zip(self.settings.ibkr.etf_models, analyzers)]
+        try:
+            while self._running:
+                if await self._check_kill_switch():
+                    return
+                evidence_cache.clear()
+                await run_ibkr_etf_arms_once(pillars)
+                await asyncio.sleep(self.settings.ibkr.etf_cycle_seconds)
+        finally:
+            await client.close()
+            for analyzer in analyzers:
+                await analyzer.close()
 
     async def _task_momentum_coupling(self) -> None:
         """Fast path: spot->prediction momentum-coupling pillar (gated, detect-only).
@@ -1458,6 +1501,10 @@ class AuramaurBot(
         # Kraken treasury/capital pillar (+ gated directional spot)
         if self.settings.kraken.enabled:
             tasks.append(asyncio.create_task(self._task_kraken_pillar(), name="kraken_treasury"))
+
+        if self.settings.ibkr.enabled and self.settings.ibkr.etf_paper_enabled:
+            tasks.append(asyncio.create_task(
+                self._task_ibkr_etf_paper(), name="ibkr_etf_paper"))
 
         # Fast path: momentum-coupling pillar (gated by momentum_coupling.enabled)
         if self.settings.momentum_coupling.enabled:

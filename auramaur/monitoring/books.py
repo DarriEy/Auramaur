@@ -59,6 +59,12 @@ def _book_modes(settings) -> list[tuple[str, str, str]]:
     ol = settings.oddlot_tender
     rows.append(("oddlot_tender", *paper_mode(
         ol, "EDGAR scan, 99-sh entries, manual tender")))
+    etf = settings.ibkr
+    rows.append((
+        "ibkr_etf_openai", "PAPER" if etf.etf_paper_enabled else "off",
+        (f"{len(etf.etf_models)} cells × {len(etf.etf_symbols)} ETFs, "
+         f"${etf.etf_paper_budget_usd:,.0f}/cell"),
+    ))
     rows.append(("arbitrage",
                  "LIVE" if settings.arbitrage.enabled and settings.is_live
                  else ("paper" if settings.arbitrage.enabled else "off"),
@@ -126,6 +132,21 @@ async def gather_books(db) -> list[dict]:
         by_book.setdefault(r["book"], {}).update(
             open_n=int(r["open_n"] or 0), open_usd=float(r["open_usd"] or 0.0),
             open_paper_n=int(r["open_paper_n"] or 0))
+
+    etf_rows = await db.fetchall(
+        """SELECT l.model_alias,
+                  COUNT(*) AS n,
+                  SUM(l.pnl) AS pnl,
+                  SUM(CASE WHEN l.pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                  (SELECT COUNT(*) FROM ibkr_etf_positions p
+                    WHERE p.model_alias = l.model_alias) AS open_n
+             FROM ibkr_etf_ledger l GROUP BY l.model_alias""")
+    for row in etf_rows or []:
+        by_book[f"ibkr_etf_{row['model_alias']}"] = {
+            "paper_n": int(row["n"] or 0), "paper_pnl": float(row["pnl"] or 0),
+            "wins": int(row["wins"] or 0), "n": int(row["n"] or 0),
+            "open_paper_n": int(row["open_n"] or 0),
+        }
 
     out = []
     for book, d in sorted(by_book.items()):

@@ -7,6 +7,7 @@ that fixes that, plus the surrounding guards (cap, no-price, zero-rounding).
 """
 
 import sys
+import math
 import types
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -31,6 +32,54 @@ def _settings(*, is_live=False, readonly=False, cap=50.0):
             market_data_type=3,
         ),
     )
+
+
+async def test_forced_paper_quote_connection_ignores_shared_live_defaults(monkeypatch):
+    captured = {}
+
+    class FakeIB:
+        async def connectAsync(self, **kwargs):
+            captured.update(kwargs)
+
+        def reqMarketDataType(self, value):
+            captured["market_data_type"] = value
+
+    fake = types.ModuleType("ib_async")
+    fake.IB = FakeIB
+    monkeypatch.setitem(sys.modules, "ib_async", fake)
+    client = IBKREquityClient(_settings(readonly=False), force_paper_readonly=True)
+    await client._ensure_connected()
+    assert captured["port"] == 7497
+    assert captured["readonly"] is True
+
+
+async def test_quote_without_exchange_timestamp_fails_closed(monkeypatch):
+    fake = types.ModuleType("ib_async")
+    fake.Stock = lambda *a, **k: SimpleNamespace(symbol=a[0])
+    monkeypatch.setitem(sys.modules, "ib_async", fake)
+    client = IBKREquityClient(_settings())
+    client._connected = True
+    client._ib = SimpleNamespace(
+        qualifyContractsAsync=AsyncMock(),
+        reqTickersAsync=AsyncMock(return_value=[
+            SimpleNamespace(bid=100.0, ask=100.1, time=None)]),
+    )
+    assert await client.get_quote("SPY") is None
+
+
+async def test_nan_quote_fails_closed(monkeypatch):
+    fake = types.ModuleType("ib_async")
+    fake.Stock = lambda *a, **k: SimpleNamespace(symbol=a[0])
+    monkeypatch.setitem(sys.modules, "ib_async", fake)
+    client = IBKREquityClient(_settings())
+    client._connected = True
+    client._ib = SimpleNamespace(
+        qualifyContractsAsync=AsyncMock(),
+        reqTickersAsync=AsyncMock(return_value=[
+            SimpleNamespace(bid=math.nan, ask=math.nan, time=SimpleNamespace(
+                timestamp=lambda: 1.0))]),
+    )
+    assert await client.get_quote("SPY") is None
 
 
 async def test_high_priced_stock_sizes_fractionally_not_blocked():

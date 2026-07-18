@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -967,6 +967,29 @@ class KalshiConfig(BaseModel):
     environment: str = "demo"  # "demo" | "prod"
 
 
+class OpenAIETFModel(BaseModel):
+    """One isolated intelligence-comparison arm for the ETF paper mandate."""
+
+    alias: str
+    model: str
+    effort: Literal["low", "medium", "high"] = "medium"
+    input_cost_per_million: float = 0.0
+    output_cost_per_million: float = 0.0
+
+    @model_validator(mode="after")
+    def validate_identity(self):
+        alias = self.alias.strip().lower()
+        if not alias or not alias.replace("_", "").isalnum():
+            raise ValueError("ETF model alias must contain only letters, numbers, and underscores")
+        if not self.model.strip():
+            raise ValueError("ETF model name must not be empty")
+        if self.input_cost_per_million < 0 or self.output_cost_per_million < 0:
+            raise ValueError("ETF model token prices must be non-negative")
+        self.alias = alias
+        self.model = self.model.strip()
+        return self
+
+
 class IBKRConfig(BaseModel):
     enabled: bool = False
     # `enabled` is the master switch (connect to IBKR at all). The two books
@@ -996,6 +1019,75 @@ class IBKRConfig(BaseModel):
     # size to zero — the paper budget is what makes prep trading possible.
     paper_trade: bool = True
     paper_budget_usd: float = 5000.0
+
+    # --- Structurally paper-only broad-market ETF experiment ---
+    etf_paper_enabled: bool = False
+    etf_symbols: list[str] = ["SPY", "QQQ", "IWM"]
+    etf_paper_budget_usd: float = 5_000.0
+    etf_max_entry_usd: float = 250.0
+    etf_max_deployment_pct: float = 50.0
+    etf_max_asset_class_pct: float = 30.0
+    etf_max_positions: int = 4
+    etf_daily_loss_limit_usd: float = 100.0
+    etf_max_signal_refreshes_per_cycle: int = 4
+    etf_fee_per_order_usd: float = 1.00
+    etf_max_spread_bps: float = 20.0
+    etf_min_prob: float = 0.62
+    etf_exit_prob: float = 0.47
+    etf_min_confidence: str = "MEDIUM"
+    etf_signal_horizon_days: int = 5
+    etf_signal_refresh_hours: float = 6.0
+    etf_cycle_seconds: int = 900
+    etf_stop_loss_pct: float = 5.0
+    etf_take_profit_pct: float = 8.0
+    etf_trailing_stop_pct: float = 3.0
+    etf_reentry_cooldown_hours: float = 24.0
+    etf_models: list[OpenAIETFModel] = [
+        OpenAIETFModel(alias="luna", model="gpt-5.6-luna", effort="low"),
+        OpenAIETFModel(alias="terra", model="gpt-5.6-terra", effort="medium"),
+        OpenAIETFModel(alias="sol", model="gpt-5.6-sol", effort="high"),
+    ]
+    etf_openai_timeout_seconds: int = 120
+    etf_openai_daily_call_limit: int = 100
+
+    @model_validator(mode="after")
+    def validate_etf_experiment(self):
+        symbols = [symbol.strip().upper() for symbol in self.etf_symbols]
+        if not symbols:
+            raise ValueError("IBKR ETF experiment requires at least one symbol")
+        if any(not symbol.isalnum() for symbol in symbols):
+            raise ValueError("IBKR ETF symbols must be non-empty alphanumeric tickers")
+        if len(symbols) != len(set(symbols)):
+            raise ValueError("IBKR ETF symbols must be unique")
+        self.etf_symbols = symbols
+
+        aliases = [arm.alias for arm in self.etf_models]
+        if not aliases:
+            raise ValueError("IBKR ETF experiment requires at least one model arm")
+        if len(aliases) != len(set(aliases)):
+            raise ValueError("IBKR ETF model aliases must be unique")
+        if self.etf_paper_budget_usd <= 0:
+            raise ValueError("IBKR ETF paper budget must be positive")
+        if not 0 < self.etf_max_entry_usd <= self.etf_paper_budget_usd:
+            raise ValueError("IBKR ETF entry cap must be positive and no larger than its budget")
+        if not 0 < self.etf_max_asset_class_pct <= self.etf_max_deployment_pct <= 100:
+            raise ValueError("IBKR ETF asset-class/deployment percentages are inconsistent")
+        if self.etf_max_positions <= 0 or self.etf_max_signal_refreshes_per_cycle <= 0:
+            raise ValueError("IBKR ETF position and refresh limits must be positive")
+        if self.etf_daily_loss_limit_usd <= 0 or self.etf_fee_per_order_usd < 0:
+            raise ValueError("IBKR ETF loss limit must be positive and fees non-negative")
+        if not 0 <= self.etf_exit_prob < self.etf_min_prob <= 1:
+            raise ValueError("IBKR ETF probability thresholds must satisfy exit < entry")
+        if self.etf_openai_daily_call_limit < len(self.etf_models):
+            raise ValueError("IBKR ETF daily OpenAI limit must allow every model arm one call")
+        if self.etf_paper_enabled and any(
+            arm.input_cost_per_million <= 0 or arm.output_cost_per_million <= 0
+            for arm in self.etf_models
+        ):
+            raise ValueError("Enabled IBKR ETF arms require explicit nonzero token prices")
+        if self.etf_openai_timeout_seconds <= 0 or self.etf_cycle_seconds <= 0:
+            raise ValueError("IBKR ETF timeout and cycle interval must be positive")
+        return self
 
     # --- Directional equity speculation (gated; no validated edge) ---
     # Mirrors the Kraken directional pillar. Uses its OWN socket connection
@@ -1248,6 +1340,7 @@ class Settings(BaseSettings):
     # API Keys
     anthropic_api_key_primary: str = ""
     anthropic_api_key_secondary: str = ""
+    openai_api_key: str = ""
     polygon_private_key: str = ""
     polymarket_api_key: str = ""
     polymarket_api_secret: str = ""
