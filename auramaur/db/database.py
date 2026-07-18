@@ -107,6 +107,8 @@ class Database:
             await self._migrate_v21_to_v22()
         if from_version < 23:
             await self._migrate_v22_to_v23()
+        if from_version < 24:
+            await self._migrate_v23_to_v24()
 
     async def _migrate_v1_to_v2(self) -> None:
         """Add category to calibration, add new tables."""
@@ -564,6 +566,19 @@ class Database:
         await self._db.execute("UPDATE schema_version SET version = 23")
         await self._db.commit()
         log.info("database.migrated", from_version=22, to_version=23)
+
+    async def _migrate_v23_to_v24(self) -> None:
+        """Record the market-data source used for each simulated mark/fill."""
+        for table in ("ibkr_paper_positions", "ibkr_paper_fills"):
+            try:
+                await self._db.execute(
+                    f"ALTER TABLE {table} ADD COLUMN price_source TEXT "
+                    "NOT NULL DEFAULT 'ibkr'")
+            except Exception:
+                pass
+        await self._db.execute("UPDATE schema_version SET version = 24")
+        await self._db.commit()
+        log.info("database.migrated", from_version=23, to_version=24)
 
     async def _migrate_v11_to_v12(self) -> None:
         """Add strategy_source column to signals and trades for hybrid mode attribution."""

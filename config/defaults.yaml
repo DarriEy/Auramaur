@@ -254,11 +254,16 @@ ibkr:
   # TWS is logged into the live account but exposes this read-only API socket.
   etf_quote_port: 7497
   # Six isolated local paper books. TWS supplies read-only market data only.
-  # Kept off until the multi-asset preflight verifies permissions per book.
+  # Activated after read-only TWS contract/history preflight. Individual books
+  # still fail closed without fresh native executable quotes.
   multiasset_client_id: 3
-  multiasset_paper_enabled: false
+  multiasset_paper_enabled: true
   multiasset_cycle_seconds: 900
   multiasset_refreshes_per_cycle: 12
+  # Delayed/frozen quotes may be observed, but cannot create credible fills.
+  multiasset_max_quote_age_seconds: 120
+  # Re-discover futures/options/bonds during long-running sessions.
+  multiasset_contract_cache_seconds: 21600
   multiasset_min_momentum_pct: 1.0
   multiasset_exit_momentum_pct: -0.5
   multiasset_books:

@@ -1086,6 +1086,8 @@ class IBKRConfig(BaseModel):
     multiasset_paper_enabled: bool = False
     multiasset_cycle_seconds: int = 900
     multiasset_refreshes_per_cycle: int = 12
+    multiasset_max_quote_age_seconds: int = 120
+    multiasset_contract_cache_seconds: int = 21_600
     multiasset_min_momentum_pct: float = 1.0
     multiasset_exit_momentum_pct: float = -0.5
     multiasset_books: dict[str, IBKRMultiAssetBookConfig] = Field(default_factory=lambda: {
@@ -1132,6 +1134,9 @@ class IBKRConfig(BaseModel):
             raise ValueError("IBKR multi-asset client id must be unique")
         if self.multiasset_cycle_seconds <= 0 or self.multiasset_refreshes_per_cycle <= 0:
             raise ValueError("IBKR multi-asset cycle and refresh limits must be positive")
+        if (self.multiasset_max_quote_age_seconds <= 0
+                or self.multiasset_contract_cache_seconds <= 0):
+            raise ValueError("IBKR multi-asset quote/cache limits must be positive")
         symbols = [symbol.strip().upper() for symbol in self.etf_symbols]
         if not symbols:
             raise ValueError("IBKR ETF experiment requires at least one symbol")

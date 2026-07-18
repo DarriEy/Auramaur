@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, time as wall_time, timezone
 import math
+import time
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -45,7 +46,11 @@ class IBKRMultiAssetPaperBook:
                 et.weekday() == 5 or (et.weekday() == 6 and et.time() < wall_time(17)))
         if self.book is IBKRBook.FUTURES:
             et = now.astimezone(ZoneInfo("America/New_York"))
-            return et.weekday() < 5 and not (wall_time(17) <= et.time() < wall_time(18))
+            if et.weekday() == 5 or (et.weekday() == 4 and et.time() >= wall_time(17)):
+                return False
+            if et.weekday() == 6 and et.time() < wall_time(18):
+                return False
+            return not (wall_time(17) <= et.time() < wall_time(18))
         if self.book is IBKRBook.INTERNATIONAL_EQUITY:
             # Individual closed venues simply return no fresh BBO; the task is
             # active whenever at least one major configured region is open.
@@ -67,12 +72,22 @@ class IBKRMultiAssetPaperBook:
             "SELECT * FROM ibkr_paper_positions WHERE book = ?", (self.book.value,))
         return {row["instrument_key"]: row for row in rows}
 
-    async def _daily_pnl(self) -> float:
+    async def _loss_exposure(self) -> float:
+        """Today's realized P&L plus the latest marks on every open position."""
         row = await self._db.fetchone(
-            """SELECT COALESCE(SUM(pnl_usd), 0) AS pnl FROM ibkr_paper_ledger
-               WHERE book = ? AND date(realized_at) = date('now')""",
-            (self.book.value,))
+            """SELECT
+                 (SELECT COALESCE(SUM(pnl_usd), 0) FROM ibkr_paper_ledger
+                   WHERE book = ? AND date(realized_at) = date('now'))
+                 +
+                 (SELECT COALESCE(SUM(unrealized_pnl_usd), 0)
+                    FROM ibkr_paper_positions WHERE book = ?) AS pnl""",
+            (self.book.value, self.book.value))
         return float(row["pnl"] or 0)
+
+    def _quote_fresh(self, quote) -> bool:
+        age = time.time() - float(quote.timestamp)
+        return (getattr(quote, "source", "ibkr") == "ibkr"
+                and 0 <= age <= self._settings.ibkr.multiasset_max_quote_age_seconds)
 
     @staticmethod
     def _momentum(bars) -> float | None:
@@ -115,10 +130,10 @@ class IBKRMultiAssetPaperBook:
         await self._db.execute(
             """INSERT INTO ibkr_paper_fills
                (book, instrument_key, con_id, side, quantity, multiplier, price,
-                currency, fx_to_usd, commission_usd, fill_ref)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                currency, fx_to_usd, commission_usd, price_source, fill_ref)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (self.book.value, spec.key, quote.con_id, side, quantity,
-             quote.multiplier, price, spec.currency, fx, fee, fill_ref))
+             quote.multiplier, price, spec.currency, fx, fee, quote.source, fill_ref))
         await self._db.execute(
             "INSERT INTO ibkr_paper_ledger (book, kind, pnl_usd, source_ref) VALUES (?, 'commission', ?, ?)",
             (self.book.value, -fee, f"{fill_ref}:commission"))
@@ -126,10 +141,10 @@ class IBKRMultiAssetPaperBook:
             await self._db.execute(
                 """INSERT INTO ibkr_paper_positions
                    (book, instrument_key, con_id, currency, quantity, multiplier,
-                    fx_to_usd, avg_cost, current_price)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    fx_to_usd, avg_cost, current_price, price_source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (self.book.value, spec.key, quote.con_id, spec.currency, quantity,
-                 quote.multiplier, fx, price, price))
+                 quote.multiplier, fx, price, price, quote.source))
         else:
             pnl = (price - float(entry_price)) * quantity * quote.multiplier * fx
             await self._db.execute(
@@ -147,7 +162,6 @@ class IBKRMultiAssetPaperBook:
         if not self.market_open():
             return 0
         positions = await self._positions()
-        daily_pnl = await self._daily_pnl()
         state = await self._db.fetchone(
             "SELECT refresh_cursor FROM ibkr_paper_state WHERE book = ?",
             (self.book.value,))
@@ -158,12 +172,18 @@ class IBKRMultiAssetPaperBook:
         # Open positions are always managed, even when outside the refresh slice.
         keys = {spec.key for spec in selected}
         selected.extend(spec for spec in universe if spec.key in positions and spec.key not in keys)
+        # Mark/manage every held position before considering new risk.
+        selected.sort(key=lambda spec: spec.key not in positions)
+        unmarked_positions = set(positions)
         entries = 0
         error = ""
         for spec in selected:
             try:
-                quote = await self._client.get_quote(spec)
-                if quote is None:
+                held = positions.get(spec.key)
+                quote = (await self._client.get_quote_by_con_id(
+                    spec, int(held["con_id"])) if held
+                    else await self._client.get_quote(spec))
+                if quote is None or not self._quote_fresh(quote):
                     continue
                 spread_bps = (quote.ask - quote.bid) / ((quote.ask + quote.bid) / 2) * 10_000
                 fx = await self._client.get_fx_to_usd(spec.currency)
@@ -173,23 +193,25 @@ class IBKRMultiAssetPaperBook:
                 momentum = self._momentum(bars)
                 if momentum is None:
                     continue
-                held = positions.get(spec.key)
                 if held:
                     entry = float(held["avg_cost"])
                     gain_pct = (quote.bid / entry - 1) * 100
                     pnl = (quote.bid - entry) * float(held["quantity"]) * quote.multiplier * fx
                     await self._db.execute(
                         """UPDATE ibkr_paper_positions SET current_price=?,
-                           unrealized_pnl_usd=?, updated_at=datetime('now')
+                           unrealized_pnl_usd=?, price_source=?, updated_at=datetime('now')
                            WHERE book=? AND instrument_key=?""",
-                        (quote.bid, pnl, self.book.value, spec.key))
+                        (quote.bid, pnl, quote.source, self.book.value, spec.key))
+                    unmarked_positions.discard(spec.key)
                     if (gain_pct <= -cfg.stop_loss_pct or gain_pct >= cfg.take_profit_pct
                             or momentum <= self._settings.ibkr.multiasset_exit_momentum_pct):
                         await self._fill(spec, quote, "SELL", float(held["quantity"]),
                                          fx, entry_price=entry)
                         positions.pop(spec.key, None)
                     continue
-                if daily_pnl <= -cfg.daily_loss_limit_usd or len(positions) >= cfg.max_positions:
+                loss_exposure = await self._loss_exposure()
+                if (unmarked_positions or loss_exposure <= -cfg.daily_loss_limit_usd
+                        or len(positions) >= cfg.max_positions):
                     continue
                 if momentum < self._settings.ibkr.multiasset_min_momentum_pct:
                     continue
@@ -224,6 +246,7 @@ class IBKRMultiAssetPaperBook:
                  last_error=excluded.last_error, updated_at=datetime('now')""",
             (self.book.value, next_cursor, error))
         await self._db.commit()
+        loss_exposure = await self._loss_exposure()
         log.info("ibkr_multiasset.cycle", book=self.book.value, entries=entries,
-                 positions=len(positions), daily_pnl=round(daily_pnl, 2))
+                 positions=len(positions), loss_exposure=round(loss_exposure, 2))
         return entries

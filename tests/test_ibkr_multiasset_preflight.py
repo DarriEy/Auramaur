@@ -54,3 +54,37 @@ async def test_preflight_blocks_client_with_order_surface_and_missing_data():
     assert set(("global_etf", "fx", "futures", "international_equity",
                 "options", "bonds")) <= blocked
     await db.close()
+
+
+@pytest.mark.asyncio
+async def test_preflight_blocks_stale_quotes():
+    class StaleClient(ReadyClient):
+        async def get_quote(self, spec):
+            return MarketDataQuote(spec.key, 99.0, 100.0, time.time() - 3600, 42,
+                                   spec.currency, spec.multiplier)
+
+    db = Database(":memory:")
+    await db.connect()
+    settings = Settings()
+    settings.ibkr.enabled = True
+    report = await preflight(settings, db, client=StaleClient())
+    blocked = {result.book for result in report.results if result.severity == "BLOCK"}
+    assert {"global_etf", "fx", "futures", "international_equity",
+            "options", "bonds"} <= blocked
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_preflight_blocks_synthetic_quotes_as_non_executable():
+    class SyntheticClient(ReadyClient):
+        async def get_quote(self, spec):
+            return MarketDataQuote(spec.key, 99.0, 100.0, time.time(), 42,
+                                   spec.currency, spec.multiplier, "synthetic_option")
+
+    db = Database(":memory:")
+    await db.connect()
+    settings = Settings()
+    settings.ibkr.enabled = True
+    report = await preflight(settings, db, client=SyntheticClient())
+    assert not report.ready
+    await db.close()

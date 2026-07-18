@@ -7,6 +7,7 @@ import pytest
 from auramaur.data_sources.aggregator import Aggregator
 from auramaur.data_sources.base import NewsItem
 from auramaur.db.database import Database
+from auramaur.db.models import SCHEMA_VERSION
 from auramaur.data_quality import audit_data_contracts
 from auramaur.exchange.models import Market
 from auramaur.lineage_observer import LineageObserver
@@ -30,7 +31,7 @@ class Source:
 
 
 @pytest.mark.asyncio
-async def test_existing_v21_database_runs_v22_lineage_registration(tmp_path):
+async def test_existing_v21_database_runs_all_current_migrations(tmp_path):
     path = tmp_path / "v21.db"
     raw = sqlite3.connect(path)
     raw.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
@@ -43,7 +44,7 @@ async def test_existing_v21_database_runs_v22_lineage_registration(tmp_path):
     table = await db.fetchone(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='forecast_snapshots'"
     )
-    assert version["version"] == 22
+    assert version["version"] == SCHEMA_VERSION
     assert table["name"] == "forecast_snapshots"
     await db.close()
 

@@ -41,7 +41,7 @@ class IBKRReadOnlyMarketData:
         self._ib = None
         self._connected = False
         self._cooldown_until = 0.0
-        self._contracts: dict[str, Any] = {}
+        self._contracts: dict[str, tuple[Any, float | None]] = {}
 
     async def _ensure_connected(self) -> None:
         if self._connected and self._ib is not None:
@@ -79,7 +79,10 @@ class IBKRReadOnlyMarketData:
         await self._ensure_connected()
         cached = self._contracts.get(spec.key)
         if cached is not None:
-            return cached
+            contract, expires_at = cached
+            if expires_at is None or time.monotonic() < expires_at:
+                return contract
+            self._contracts.pop(spec.key, None)
 
         if spec.kind is ContractKind.STOCK:
             contract = await self._stock(spec)
@@ -93,7 +96,11 @@ class IBKRReadOnlyMarketData:
             contract = await self._bond(spec)
         else:  # pragma: no cover - exhaustive enum guard
             raise ValueError(f"unsupported IBKR contract kind: {spec.kind}")
-        self._contracts[spec.key] = contract
+        dynamic = spec.kind in {ContractKind.FUTURE, ContractKind.OPTION, ContractKind.BOND}
+        expires_at = (time.monotonic()
+                      + self._settings.ibkr.multiasset_contract_cache_seconds
+                      if dynamic else None)
+        self._contracts[spec.key] = (contract, expires_at)
         return contract
 
     async def _qualify_one(self, contract):
@@ -213,6 +220,17 @@ class IBKRReadOnlyMarketData:
 
     async def get_quote(self, spec: InstrumentSpec) -> MarketDataQuote | None:
         contract = await self.resolve(spec)
+        return await self._quote_contract(spec, contract)
+
+    async def get_quote_by_con_id(self, spec: InstrumentSpec, con_id: int):
+        """Mark a held derivative using the exact contract originally filled."""
+        from ib_async import Contract
+        await self._ensure_connected()
+        contract = await self._qualify_one(
+            Contract(conId=con_id, exchange=spec.exchange))
+        return await self._quote_contract(spec, contract)
+
+    async def _quote_contract(self, spec: InstrumentSpec, contract):
         try:
             ticker = (await self._ib.reqTickersAsync(contract))[0]
             bid, ask = float(ticker.bid or 0), float(ticker.ask or 0)
@@ -334,6 +352,9 @@ class IBKRReadOnlyMarketData:
                               pair, multiplier=1000, calendar="FX_24X5")
         quote = await self.get_quote(spec)
         if quote is None:
+            return None
+        age = time.time() - quote.timestamp
+        if age < 0 or age > self._settings.ibkr.multiasset_max_quote_age_seconds:
             return None
         mid = (quote.bid + quote.ask) / 2
         return 1 / mid if invert else mid
