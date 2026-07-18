@@ -43,6 +43,7 @@ import aiohttp
 import structlog
 
 from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
+from auramaur.data_sources.deribit_iv import DeribitIVSource
 from auramaur.exchange.models import Confidence, Market, OrderSide, Signal
 from auramaur.strategy.classifier import blocked_category_hit, ensure_category
 
@@ -174,6 +175,10 @@ class VolAnchorPillar:
             router=None, exchange=exchange, exchange_name="polymarket",
             settings=settings, db=db, pnl_tracker=pnl_tracker,
         )
+        va = settings.vol_anchor
+        self._iv_source = (DeribitIVSource(
+            dict(va.deribit_currencies), ttl_seconds=va.deribit_ttl_seconds)
+            if getattr(va, "sigma_source", "blend") == "deribit_iv" else None)
 
     # ------------------------------------------------------------------
     # Market data — spot + realized vol, fetched fresh each cycle
@@ -243,7 +248,15 @@ class VolAnchorPillar:
             anchor = cfg.long_run_vol.get(cg_id, 0.0)
             if anchor <= 0:
                 continue
-            sigma = blended_sigma(realized, anchor, t_years, cfg.tau_years)
+            sigma = None
+            sigma_src = "blend"
+            if self._iv_source is not None:
+                sigma = await self._iv_source.term_sigma(cg_id, t_years)
+                if sigma is not None:
+                    sigma_src = "deribit_iv"
+            if sigma is None:
+                # Fallback = the calibrated estimate (pre-Deribit behavior).
+                sigma = blended_sigma(realized, anchor, t_years, cfg.tau_years)
             if kind in ("touch_up", "touch_down"):
                 fair = touch_prob(spot, strike, sigma, t_years)
             elif kind == "above":
@@ -254,7 +267,8 @@ class VolAnchorPillar:
             edge_pts = abs(fair - market.outcome_yes_price) * 100.0
             log.info("vol_anchor.priced", market_id=market.id, asset=cg_id,
                      kind=kind, strike=strike, spot=round(spot, 2),
-                     sigma=round(sigma, 3), realized=round(realized, 3),
+                     sigma=round(sigma, 3), sigma_src=sigma_src,
+                     realized=round(realized, 3),
                      fair=round(fair, 3), market=market.outcome_yes_price,
                      edge=round(edge_pts, 1))
             if edge_pts < cfg.min_edge_pts:

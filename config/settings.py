@@ -665,6 +665,15 @@ class VolAnchorConfig(BaseModel):
     # vol-literature slow component. A 4-day market prices off the tape;
     # anything beyond ~6 weeks prices mostly off the anchor.
     tau_years: float = 0.05
+    # Sigma source: 'deribit_iv' prices off Deribit's ATM implied-vol term
+    # structure (the market-clearing surface; read-only public API) with the
+    # calibrated blend as automatic per-asset fallback; 'blend' uses the
+    # estimate alone. The priced log carries sigma_src either way.
+    sigma_source: str = "deribit_iv"
+    deribit_currencies: dict[str, str] = {
+        "bitcoin": "BTC", "ethereum": "ETH", "solana": "SOL",
+    }
+    deribit_ttl_seconds: float = 1800.0
     # Long-run annualized vol anchors, by coingecko id: 1y realized vol,
     # calibrated 2026-07-09 (year of daily closes, cross-checked against
     # ~30d of recorded tick data).
