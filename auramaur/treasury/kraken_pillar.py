@@ -309,12 +309,14 @@ class KrakenPillar:
         try:
             await self._treasury()
         except Exception as e:  # noqa: BLE001 — a pillar must not kill the loop
-            log.error("kraken.treasury.error", error=str(e))
+            log.error("kraken.treasury.error",
+                      error=f"{type(e).__name__}: {e}"[:200])
         if self._s.kraken.directional_enabled and self._s.kraken.directional_pairs:
             try:
                 await self._directional()
             except Exception as e:  # noqa: BLE001
-                log.error("kraken.directional.error", error=str(e))
+                log.error("kraken.directional.error",
+                          error=f"{type(e).__name__}: {e}"[:200])
 
     # ------------------------------------------------------------------
     # Treasury
