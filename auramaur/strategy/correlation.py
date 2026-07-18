@@ -77,12 +77,14 @@ For each related pair, respond with a JSON array of objects:
 If no relationships found, return []. Only return the JSON array, no other text."""
 
         try:
+            from auramaur.subprocess_security import analysis_subprocess_env
             proc = await asyncio.create_subprocess_exec(
                 "claude", "-p", prompt,
                 "--output-format", "text",
                 "--model", self._model,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=analysis_subprocess_env(),
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
             raw = stdout.decode().strip()

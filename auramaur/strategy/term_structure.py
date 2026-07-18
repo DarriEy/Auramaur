@@ -373,6 +373,7 @@ class TermStructurePillar:
     async def _call_model(self, prompt: str, cfg) -> str:
         from auramaur.nlp import call_budget
         from auramaur.nlp.errors import BudgetExhausted
+        from auramaur.subprocess_security import analysis_subprocess_env
 
         budget = self._settings.nlp.daily_claude_call_budget
         if budget > 0:
@@ -391,6 +392,7 @@ class TermStructurePillar:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=tempfile.gettempdir(),
+            env=analysis_subprocess_env(),
         )
         try:
             stdout, stderr = await asyncio.wait_for(

@@ -23,6 +23,7 @@ private-key.pem
 *.zip
 *.db.backup_*
 data/transfer_ledger.json
+data/transfer_ledger.sqlite3
 data/risk_tolerance
 
 # DB backup blobs (never version runtime data)
