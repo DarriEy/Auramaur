@@ -76,7 +76,9 @@ logs, local config, `~/.claude` credentials, and the repo checkout.
 Also remember, outside this repo's scope:
 
 - [ ] Straummaur: stop its recorder, rsync `~/Straummaur/data` to NEW,
-      restart the recorder there (it is vol_anchor's calibration feed)
+      restart the recorder there (it is vol_anchor's calibration feed).
+      ⚠️ The data directory has NO other backup — it was lost once already
+      (2026-07-18, trashed + emptied under a live recorder). Rsync FIRST.
 - [ ] Hermes: `~/.hermes` and the (unloaded) `ai.hermes.gateway.plist`
       if still present
 - [ ] any shell profiles/keychains holding venue or exchange secrets
