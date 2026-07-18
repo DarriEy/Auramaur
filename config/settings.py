@@ -1116,6 +1116,13 @@ class KrakenConfig(BaseModel):
     directional_conviction_min_mult: float = 0.34  # floor on the budget multiplier
 
 
+class CoinbaseConfig(BaseModel):
+    """Read-only Coinbase shadow book; live execution is intentionally absent."""
+
+    paper_enabled: bool = False
+    paper_fee_pct: float = 0.60
+
+
 class TransfersConfig(BaseModel):
     """Cross-venue fund movement (Kraken <-> Polymarket, Polygon USDC only).
 
@@ -1316,6 +1323,7 @@ class Settings(BaseSettings):
     ibkr: IBKRConfig = Field(default_factory=lambda: IBKRConfig(**_DEFAULTS.get("ibkr", {})))
     cryptodotcom: CryptoComConfig = Field(default_factory=lambda: CryptoComConfig(**_DEFAULTS.get("cryptodotcom", {})))
     kraken: KrakenConfig = Field(default_factory=lambda: KrakenConfig(**_DEFAULTS.get("kraken", {})))
+    coinbase: CoinbaseConfig = Field(default_factory=lambda: CoinbaseConfig(**_DEFAULTS.get("coinbase", {})))
     transfers: TransfersConfig = Field(default_factory=lambda: TransfersConfig(**_DEFAULTS.get("transfers", {})))
     ensemble: EnsembleConfig = Field(default_factory=lambda: EnsembleConfig(**_DEFAULTS.get("ensemble", {})))
     llm_ensemble: LLMEnsembleConfig = Field(default_factory=lambda: LLMEnsembleConfig(**_DEFAULTS.get("llm_ensemble", {})))

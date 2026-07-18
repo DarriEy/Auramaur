@@ -29,11 +29,13 @@ log = structlog.get_logger()
 
 
 class KrakenPillar:
-    def __init__(self, settings, kraken_client, bot=None, console=None):
+    def __init__(self, settings, kraken_client, bot=None, console=None,
+                 paper_comparator=None):
         self._s = settings
         self._k = kraken_client
         self._bot = bot          # for _last_known_cash
         self._console = console
+        self._paper_comparator = paper_comparator
         # Open directional longs: pair -> entry-price proxy. Reconciled from
         # actual Kraken balances each cycle (see _reconcile_positions), so it
         # survives restarts instead of silently over-allocating.
@@ -704,6 +706,9 @@ class KrakenPillar:
                     # the fill; paper books a simulated one at the est price.
                     fill_price = await self._record_directional_fill(
                         pair, OrderSide.SELL, res, price, vol, paper=effective_paper)
+                    if effective_paper and self._paper_comparator is not None:
+                        await self._paper_comparator.record_shadow_fill(
+                            pair, OrderSide.SELL, vol)
                 # Only forget the position once the sell is real. In paper mode
                 # nothing executes, so simulate the close unconditionally; in live
                 # mode require a confirmed fill — otherwise a sell that never
@@ -801,6 +806,9 @@ class KrakenPillar:
                     # simulated fill at the current price.
                     fill_price = await self._record_directional_fill(
                         pair, OrderSide.BUY, res, price, vol, paper=effective_paper)
+                    if effective_paper and self._paper_comparator is not None:
+                        await self._paper_comparator.record_shadow_fill(
+                            pair, OrderSide.BUY, vol)
                     if effective_paper:
                         self._dir_long[pair] = price          # paper: simulate the entry
                     elif fill_price is not None:

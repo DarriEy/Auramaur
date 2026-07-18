@@ -151,6 +151,7 @@ def test_yaml_defaults_safe():
     assert kraken["directional_liquidate_orphans"] is False
     assert 0 < kraken["directional_budget_usd"] <= 2 * kraken["max_order_usd"]
     assert kraken["directional_pairs"] == ["XBTUSDC", "ETHUSDC", "SOLUSDC"]
+    assert raw["coinbase"]["paper_enabled"] is True
 
 
 def test_hf_token_exported_to_environ(monkeypatch):
