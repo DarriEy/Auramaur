@@ -144,6 +144,14 @@ def test_yaml_defaults_safe():
         "defaults.yaml kelly fraction must be <= 50%"
     )
 
+    # Kraken's experimental directional book must ship as a bounded paper trial.
+    kraken = raw["kraken"]
+    assert kraken["directional_llm_paper"] is True
+    assert kraken["auto_convert"] is False
+    assert kraken["directional_liquidate_orphans"] is False
+    assert 0 < kraken["directional_budget_usd"] <= 2 * kraken["max_order_usd"]
+    assert kraken["directional_pairs"] == ["XBTUSDC", "ETHUSDC", "SOLUSDC"]
+
 
 def test_hf_token_exported_to_environ(monkeypatch):
     """hf_token from .env/constructor must reach os.environ — huggingface_hub

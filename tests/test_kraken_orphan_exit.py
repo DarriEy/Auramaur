@@ -64,6 +64,10 @@ def _pillar(fake, **kraken_overrides) -> KrakenPillar:
     s = Settings()
     s.kraken.directional_enabled = True
     s.kraken.directional_pairs = []
+    # These tests exercise the liquidation mechanism itself. The shipped paper
+    # profile disables it operationally so a reduced allowlist cannot touch
+    # legacy real holdings.
+    s.kraken.directional_liquidate_orphans = True
     for k, v in kraken_overrides.items():
         setattr(s.kraken, k, v)
     p = KrakenPillar(settings=s, kraken_client=fake, bot=None)
