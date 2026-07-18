@@ -81,6 +81,24 @@ def test_submit_records_fill_cost_basis_and_trade():
     asyncio.run(run())
 
 
+def test_record_fill_is_idempotent_by_order_id():
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        tracker = PnLTracker(db, Settings())
+        from auramaur.exchange.models import Fill
+        fill = Fill(order_id="same-order", market_id="m1", token_id="tok",
+                    side=OrderSide.BUY, token=TokenType.YES,
+                    size=10, price=0.5, is_paper=True)
+        await tracker.record_fill(fill)
+        await tracker.record_fill(fill)
+        assert len(await db.fetchall("SELECT 1 FROM fills")) == 1
+        row = await db.fetchone(
+            "SELECT size FROM cost_basis WHERE market_id='m1' AND token='YES'")
+        assert float(row["size"]) == 10
+    asyncio.run(run())
+
+
 def test_submit_blocks_buy_that_exceeds_aggregate_market_cap():
     """A BUY that would push TOTAL (held + new) exposure on a (market, token)
     past the $25 ceiling is skipped — even though the single order is sub-cap.
@@ -149,6 +167,24 @@ def test_submit_market_cap_does_not_block_opposite_token_leg():
             "SELECT size FROM cost_basis WHERE market_id='m1' AND token='NO'")
         assert len(no_cb) == 1
 
+    asyncio.run(run())
+
+
+def test_submit_market_cap_read_failure_fails_closed():
+    async def run():
+        db = MagicMock()
+        db.fetchone = AsyncMock(side_effect=RuntimeError("database locked"))
+        order = Order(market_id="m1", exchange="polymarket", token_id="tok",
+                      side=OrderSide.BUY, token=TokenType.YES, size=10, price=0.5)
+        result = OrderResult(order_id="p1", market_id="m1", status="paper",
+                             filled_size=10, filled_price=0.5, is_paper=True)
+        ex = _paper_exchange(order, result)
+        gw = ExecutionGateway(router=None, exchange=ex, exchange_name="polymarket",
+                              settings=Settings(), db=db, pnl_tracker=None)
+        res = await gw.submit(_intent("m1"))
+        assert res.status == "skipped"
+        assert "unavailable" in res.reason
+        ex.place_order.assert_not_awaited()
     asyncio.run(run())
 
 
@@ -265,6 +301,29 @@ def test_submit_paired_records_both_legs():
         fills = await db.fetchall("SELECT market_id FROM fills")
         assert {dict(f)["market_id"] for f in fills} == {"a", "b"}
 
+    asyncio.run(run())
+
+
+def test_submit_paired_checks_caps_before_placing_either_leg():
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        flag = 0 if Settings().is_live else 1
+        await db.execute(
+            "INSERT INTO cost_basis (market_id, token, size, avg_cost, total_cost, is_paper)"
+            " VALUES ('a', 'YES', 60, 0.4, 24, ?)", (flag,))
+        await db.commit()
+        ex_a = _leg("a", place=OrderResult(order_id="pa", market_id="a", status="paper",
+                                            filled_size=20, filled_price=0.4, is_paper=True))
+        ex_b = _leg("b", place=OrderResult(order_id="pb", market_id="b", status="paper",
+                                            filled_size=20, filled_price=0.4, is_paper=True))
+        res_a, res_b = await _paired_gateway(db).submit_paired(
+            _intent("a"), _intent("b"), exchange_a=ex_a,
+            exchange_name_a="polymarket", exchange_b=ex_b,
+            exchange_name_b="polymarket")
+        assert res_a.status == "skipped" and res_b.status == "skipped"
+        ex_a.place_order.assert_not_awaited()
+        ex_b.place_order.assert_not_awaited()
     asyncio.run(run())
 
 
@@ -443,6 +502,47 @@ def test_place_legs_concurrent_places_all_and_records_each():
         rows = await db.fetchall("SELECT strategy_source FROM trades")
         assert len(rows) == 3 and all(dict(r)["strategy_source"] == "negrisk_arb" for r in rows)
         assert len(await db.fetchall("SELECT 1 FROM fills")) == 3
+    asyncio.run(run())
+
+
+def test_place_legs_batch_reservation_blocks_collective_over_cap():
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        clients = []
+        legs = []
+        for _ in range(2):
+            order = Order(market_id="same", exchange="polymarket", token_id="tok",
+                          side=OrderSide.BUY, token=TokenType.YES,
+                          size=30, price=0.5, dry_run=True)
+            client = MagicMock(); client.place_order = AsyncMock()
+            clients.append(client)
+            legs.append((order, client, "polymarket"))
+        out = await _gateway(db, MagicMock()).place_legs(
+            legs, strategy_source="arb", concurrent=True)
+        assert all(result.status == "rejected" for result, _ in out)
+        assert all(exec_result.status == "skipped" for _, exec_result in out)
+        for client in clients:
+            client.place_order.assert_not_awaited()
+    asyncio.run(run())
+
+
+def test_fill_record_failure_does_not_turn_execution_into_submission_failure():
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        order = Order(market_id="m1", exchange="polymarket", token_id="tok",
+                      side=OrderSide.BUY, token=TokenType.YES, size=10, price=0.5)
+        result = OrderResult(order_id="p1", market_id="m1", status="paper",
+                             filled_size=10, filled_price=0.5, is_paper=True)
+        pnl = MagicMock(); pnl.record_fill = AsyncMock(side_effect=RuntimeError("disk full"))
+        gw = ExecutionGateway(router=None, exchange=_paper_exchange(order, result),
+                              exchange_name="polymarket", settings=Settings(), db=db,
+                              pnl_tracker=pnl)
+        res = await gw.submit(_intent("m1"))
+        assert res.status == "paper"
+        assert res.result is result
+        assert res.fill is None
     asyncio.run(run())
 
 

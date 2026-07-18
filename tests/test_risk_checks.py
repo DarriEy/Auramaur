@@ -54,7 +54,7 @@ async def test_kill_switch_inactive():
 
 @pytest.mark.asyncio
 async def test_kill_switch_active():
-    with patch.object(Path, "exists", return_value=True):
+    with patch("auramaur.risk.checks.kill_switch_present", return_value=True):
         result = await check_kill_switch()
         assert result.passed is False
 

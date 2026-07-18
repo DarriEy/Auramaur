@@ -147,10 +147,14 @@ class ExecutionGateway:
                 "AND is_paper = ? AND size > 0",
                 (order.market_id, order.token.value, is_paper_flag),
             )
-        except Exception:
-            # A read failure must not block trading — fail open (the per-order
-            # risk-manager cap still applies).
-            return None
+        except Exception as e:
+            # This is the only guard that sees aggregate exposure. The per-order
+            # risk check cannot protect against stacked entries, so an unknown
+            # aggregate must never become permission to place another live BUY.
+            log.error("gateway.market_cap_read_failed",
+                      market_id=order.market_id, token=order.token.value,
+                      is_live=is_live, error=str(e))
+            return "market_cap: aggregate exposure unavailable"
         held = float(row["held"]) if row else 0.0
         proposed = order.size * order.price
         if held + proposed > cap + 1e-9:
@@ -225,6 +229,16 @@ class ExecutionGateway:
         if order_a is None or order_b is None:
             skip = ExecutionResult(status="skipped", reason="leg build failed")
             return skip, ExecutionResult(status="skipped", reason="leg build failed")
+
+        cap_a = await self._exceeds_market_cap(order_a, is_live=is_live_a)
+        cap_b = await self._exceeds_market_cap(order_b, is_live=is_live_b)
+        if cap_a is not None or cap_b is not None:
+            return (
+                ExecutionResult(status="skipped", order=order_a,
+                                reason=cap_a or "paired leg blocked by market cap"),
+                ExecutionResult(status="skipped", order=order_b,
+                                reason=cap_b or "paired leg blocked by market cap"),
+            )
 
         res_a = await self._place_and_record(
             order_a, strategy_source=a.signal.strategy_source,
@@ -370,6 +384,29 @@ class ExecutionGateway:
         keeps its own half-fill / rollback / inventory logic. ``legs`` items are
         ``(order, exchange_client, exchange_name)``.
         """
+        # External multi-leg paths bypass ``submit`` but are still entries.
+        # Check every BUY before any leg leaves the building. When two legs add
+        # the same market/token in one batch, reserve earlier legs locally so
+        # the batch cannot collectively exceed the cap.
+        reservations: dict[tuple[str, str, int], float] = {}
+        for order, _client, _exchange_name in legs:
+            if order.side != OrderSide.BUY:
+                continue
+            is_live = not order.dry_run
+            blocked = await self._exceeds_market_cap(order, is_live=is_live)
+            key = (order.market_id, order.token.value, 0 if is_live else 1)
+            proposed = order.size * order.price
+            cap = getattr(self.settings.risk, "max_stake_abs_ceiling", 25.0)
+            if blocked is None and reservations.get(key, 0.0) + proposed > cap + 1e-9:
+                blocked = "market_cap: multi-leg batch exceeds aggregate ceiling"
+            if blocked is not None:
+                skipped = ExecutionResult(status="skipped", order=order, reason=blocked)
+                rejected = OrderResult(order_id="MARKET_CAP", market_id=order.market_id,
+                                       status="rejected", is_paper=order.dry_run,
+                                       error_message=blocked)
+                return [(rejected, skipped) for order, _client, _name in legs]
+            reservations[key] = reservations.get(key, 0.0) + proposed
+
         if concurrent:
             results = await asyncio.gather(
                 *(client.place_order(order) for order, client, _ in legs))
@@ -465,8 +502,18 @@ class ExecutionGateway:
                 is_paper=result.is_paper,
             )
             if self.pnl_tracker:
-                await self.pnl_tracker.record_fill(fill)
-                recorded_fill = fill
+                try:
+                    await self.pnl_tracker.record_fill(fill)
+                    recorded_fill = fill
+                except Exception as e:
+                    # The order already executed. Never turn a persistence fault
+                    # into an apparent placement failure that callers may retry.
+                    log.critical(
+                        "gateway.fill_record_failed",
+                        order_id=result.order_id,
+                        market_id=order.market_id,
+                        error=str(e),
+                    )
 
         if result.status in _OK_STATUSES:
             # Mirror into legacy `trades` table so the CLI stats view,

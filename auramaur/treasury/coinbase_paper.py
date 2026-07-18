@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 import structlog
 
 from auramaur.broker.pnl import PnLTracker
@@ -42,7 +44,7 @@ class CoinbasePaperBook:
         notional = qty * price
         fee_pct = self._settings.coinbase.paper_fee_pct / 100.0
         fill = Fill(
-            order_id=f"coinbase-paper-{pair}",
+            order_id=f"coinbase-paper-{pair}-{uuid4().hex}",
             market_id=f"coinbase:{product}",
             token_id=product,
             side=side,

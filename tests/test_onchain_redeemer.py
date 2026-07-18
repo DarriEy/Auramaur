@@ -107,6 +107,7 @@ def test_kill_switch_blocks_live_submission(tmp_path, monkeypatch):
     """Presence of KILL_SWITCH file blocks even with all gates open."""
     monkeypatch.chdir(tmp_path)
     (tmp_path / "KILL_SWITCH").write_text("halt")
+    monkeypatch.setattr("auramaur.broker.onchain.kill_switch_present", lambda: True)
     db = Database(":memory:")
     r = OnChainRedeemer(
         _make_settings(live=True, execution_live=True, enable_redemption=True), db
