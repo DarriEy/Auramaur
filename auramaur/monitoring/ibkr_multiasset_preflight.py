@@ -105,12 +105,21 @@ async def preflight(settings, db, *, client=None, timeout_seconds: int = 30,
         if not book_cfg.enabled:
             add(book.value, "WARN", "book disabled")
             continue
+        disabled = set(cfg.multiasset_disabled_instruments)
+        universe = tuple(spec for spec in BY_BOOK[book] if spec.key not in disabled)
+        skipped = [spec.key for spec in BY_BOOK[book] if spec.key in disabled]
+        if skipped:
+            add(f"{book.value}:coverage", "WARN",
+                "entitlement-gated: " + ", ".join(skipped))
+        if not universe:
+            add(book.value, "BLOCK", "no enabled instruments")
+            continue
         log.info("ibkr_multiasset.preflight_book_start", book=book.value,
-                 instruments=len(BY_BOOK[book]))
+                 instruments=len(universe))
         failures = []
         closed = []
         sources = set()
-        probes = await asyncio.gather(*(probe(spec) for spec in BY_BOOK[book]))
+        probes = await asyncio.gather(*(probe(spec) for spec in universe))
         for failure, source, closed_detail in probes:
             if failure:
                 failures.append(failure)
@@ -125,13 +134,13 @@ async def preflight(settings, db, *, client=None, timeout_seconds: int = 30,
             add(book.value, "BLOCK", preview)
         elif closed:
             add(book.value, "WARN",
-                f"all contracts/history ready; {len(closed)}/{len(BY_BOOK[book])} "
+                f"all contracts/history ready; {len(closed)}/{len(universe)} "
                 f"venues currently closed")
         else:
-            add(book.value, "OK", f"all {len(BY_BOOK[book])} instruments ready; "
+            add(book.value, "OK", f"all {len(universe)} enabled instruments ready; "
                 f"sources={','.join(sorted(sources))}")
         log.info("ibkr_multiasset.preflight_book_complete", book=book.value,
-                 passed=len(BY_BOOK[book]) - len(failures), failed=len(failures))
+                 passed=len(universe) - len(failures), failed=len(failures))
 
         edge = await db.fetchone(
             """SELECT SUM(CASE WHEN kind = 'trade' THEN 1 ELSE 0 END) AS n,

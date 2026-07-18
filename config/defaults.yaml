@@ -270,6 +270,9 @@ ibkr:
   multiasset_preflight_concurrency: 2
   multiasset_preflight_pacing_retries: 2
   multiasset_preflight_retry_seconds: 2.0
+  # TSEJ history/BBO is not entitled on the current IBKR username. Keep the
+  # contract in the catalog and re-enable it after preflight passes.
+  multiasset_disabled_instruments: ["7203.T"]
   multiasset_min_momentum_pct: 1.0
   multiasset_exit_momentum_pct: -0.5
   multiasset_books:

@@ -1101,6 +1101,7 @@ class IBKRConfig(BaseModel):
     multiasset_preflight_concurrency: int = 2
     multiasset_preflight_pacing_retries: int = 2
     multiasset_preflight_retry_seconds: float = 2.0
+    multiasset_disabled_instruments: list[str] = []
     multiasset_min_momentum_pct: float = 1.0
     multiasset_exit_momentum_pct: float = -0.5
     multiasset_books: dict[str, IBKRMultiAssetBookConfig] = Field(default_factory=lambda: {
@@ -1156,6 +1157,9 @@ class IBKRConfig(BaseModel):
                 or self.multiasset_preflight_pacing_retries < 0
                 or self.multiasset_preflight_retry_seconds < 0):
             raise ValueError("IBKR multi-asset preflight pacing limits are invalid")
+        if len(self.multiasset_disabled_instruments) != len(
+                set(self.multiasset_disabled_instruments)):
+            raise ValueError("IBKR disabled instrument keys must be unique")
         symbols = [symbol.strip().upper() for symbol in self.etf_symbols]
         if not symbols:
             raise ValueError("IBKR ETF experiment requires at least one symbol")

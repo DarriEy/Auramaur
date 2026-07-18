@@ -169,6 +169,11 @@ class IBKRReadOnlyMarketData:
         ticker = (await self._ib.reqTickersAsync(underlying))[0]
         spot = float(ticker.marketPrice())
         if not math.isfinite(spot) or spot <= 0:
+            bars = await self._ib.reqHistoricalDataAsync(
+                underlying, endDateTime="", durationStr="5 D",
+                barSizeSetting="1 day", whatToShow="TRADES", useRTH=True)
+            spot = float(bars[-1].close) if bars else float("nan")
+        if not math.isfinite(spot) or spot <= 0:
             raise LookupError(f"no underlying price for {spec.key}")
         chains = await self._ib.reqSecDefOptParamsAsync(
             underlying.symbol, "", underlying.secType, underlying.conId)
@@ -218,7 +223,7 @@ class IBKRReadOnlyMarketData:
         subscription = ScannerSubscription(
             instrument="BOND" if corporate else "BOND.GOVT",
             locationCode="BOND.US" if corporate else "BOND.GOVT.US",
-            scanCode="LOW_BOND_ASK_YIELD_ALL" if corporate else "HIGH_BOND_ASK_YIELD_ALL",
+            scanCode="BOND_CUSIP_AZ" if corporate else "HIGH_BOND_ASK_YIELD_ALL",
             numberOfRows=50,
         )
         rows = await self._ib.reqScannerDataAsync(
@@ -359,6 +364,8 @@ class IBKRReadOnlyMarketData:
         ticker = (await self._ib.reqTickersAsync(underlying))[0]
         spot = float(ticker.marketPrice())
         closes = [float(bar.close) for bar in bars if float(bar.close or 0) > 0]
+        if (not math.isfinite(spot) or spot <= 0) and closes:
+            spot = closes[-1]
         if not math.isfinite(spot) or spot <= 0 or len(closes) < 21:
             return None
         returns = [math.log(b / a) for a, b in zip(closes, closes[1:])]

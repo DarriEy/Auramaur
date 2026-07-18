@@ -152,7 +152,7 @@ BONDS = tuple(
         ("UST_5Y", "government", "US Treasury near 5-year maturity", "UST:5Y"),
         ("UST_10Y", "government", "US Treasury near 10-year maturity", "UST:10Y"),
         ("UST_30Y", "government", "US Treasury near 30-year maturity", "UST:30Y"),
-        ("IG_CORP_5Y", "corporate", "Investment-grade corporate near 5-year maturity", "CORP:IG:5Y"),
+        ("CORP_5Y", "corporate", "US corporate bond near 5-year maturity", "CORP:5Y"),
     )
 )
 

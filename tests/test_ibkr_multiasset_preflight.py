@@ -4,6 +4,7 @@ import asyncio
 import pytest
 
 from auramaur.db.database import Database
+from auramaur.exchange.ibkr_instruments import IBKRBook
 from auramaur.exchange.ibkr_market_data import MarketDataQuote
 from auramaur.monitoring.ibkr_multiasset_preflight import preflight
 from config.settings import Settings
@@ -131,6 +132,28 @@ async def test_preflight_retries_transient_pacing_errors():
     settings.ibkr.multiasset_preflight_retry_seconds = 0
     report = await preflight(settings, db, client=PacingClient())
     assert report.ready
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_entitlement_quarantine_skips_instrument_but_reports_coverage():
+    class EntitledClient(ReadyClient):
+        async def get_quote(self, spec):
+            assert spec.key != "7203.T"
+            return await super().get_quote(spec)
+
+    db = Database(":memory:")
+    await db.connect()
+    settings = Settings()
+    settings.ibkr.enabled = True
+    settings.ibkr.multiasset_disabled_instruments = ["7203.T"]
+    report = await preflight(
+        settings, db, client=EntitledClient(),
+        books=(IBKRBook.INTERNATIONAL_EQUITY,))
+    assert report.ready
+    coverage = next(r for r in report.results
+                    if r.book == "international_equity:coverage")
+    assert coverage.severity == "WARN" and "7203.T" in coverage.detail
     await db.close()
 
 

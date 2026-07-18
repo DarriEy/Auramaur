@@ -13,11 +13,15 @@ method. A live-account TWS login does not make these books live.
 | `futures` | micro equity index, rates, energy, metals and agriculture | nearest contract with >7 days to expiry; exact held `conId` retained | conservative per-contract capital plus multiplier P&L |
 | `international_equity` | Canada, UK, Europe, Japan, Hong Kong and Australia | native listing, exchange and currency | fractional shares, mark translated to USD |
 | `options` | 30–60 DTE ATM calls and puts on liquid ETFs | exact qualified chain contract; exact held `conId` retained | whole contracts, 100 multiplier |
-| `bonds` | US Treasury tenors and investment-grade corporates | maturity-bounded IBKR bond scanner, exact `conId` | $1,000 face-value units |
+| `bonds` | US Treasury tenors and a US corporate issue | maturity-bounded IBKR bond scanner, exact `conId` | $1,000 face-value units |
 
 The catalog is in `auramaur/exchange/ibkr_instruments.py`. Instrument keys are
 unique and every entry declares its security type, exchange, currency, calendar,
 multiplier and discovery policy.
+
+`multiasset_disabled_instruments` is the explicit entitlement quarantine. The
+current username lacks TSEJ data, so `7203.T` remains catalogued but does not
+enter runtime or paper evidence until its preflight succeeds.
 
 ## Isolation and risk
 

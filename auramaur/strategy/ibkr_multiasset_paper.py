@@ -166,7 +166,11 @@ class IBKRMultiAssetPaperBook:
             "SELECT refresh_cursor FROM ibkr_paper_state WHERE book = ?",
             (self.book.value,))
         cursor = int(state["refresh_cursor"] or 0) if state else 0
-        universe = BY_BOOK[self.book]
+        disabled = set(self._settings.ibkr.multiasset_disabled_instruments)
+        universe = tuple(spec for spec in BY_BOOK[self.book]
+                         if spec.key not in disabled)
+        if not universe:
+            return 0
         count = min(len(universe), self._settings.ibkr.multiasset_refreshes_per_cycle)
         selected = [universe[(cursor + i) % len(universe)] for i in range(count)]
         # Open positions are always managed, even when outside the refresh slice.
