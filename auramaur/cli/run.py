@@ -8,6 +8,7 @@ import click
 from rich.live import Live
 
 from auramaur.db.database import Database
+from auramaur.runtime import db_path as runtime_db_path
 from config.settings import Settings
 
 from auramaur.cli._base import console, main
@@ -55,7 +56,12 @@ def run(agent: bool, hybrid: bool, exchange: str | None):
     else:
         console.print("[bold blue]Starting Auramaur bot...[/]")
     from auramaur.cli import AuramaurBot  # call-time lookup keeps test patch working
-    bot = AuramaurBot(settings=settings, exchange_filter=exchange, hybrid=hybrid)
+    bot = AuramaurBot(
+        settings=settings,
+        db_path=str(runtime_db_path()),
+        exchange_filter=exchange,
+        hybrid=hybrid,
+    )
     asyncio.run(bot.run())
 
 @main.command()

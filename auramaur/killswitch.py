@@ -12,12 +12,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-# Repo root = one level up from this file's package dir (auramaur/ -> repo root).
-_REPO_ROOT = Path(__file__).resolve().parent.parent
+from auramaur.runtime import kill_switch_path
 
 # The canonical kill-switch path. Arm/disarm tooling should create/remove THIS
 # file so the check below reliably finds it regardless of launch directory.
-KILL_SWITCH_PATH = _REPO_ROOT / "KILL_SWITCH"
+KILL_SWITCH_PATH = kill_switch_path()
 
 
 def kill_switch_present() -> bool:

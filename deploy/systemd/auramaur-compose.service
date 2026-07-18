@@ -1,0 +1,21 @@
+[Unit]
+Description=Auramaur and IB Gateway Compose stack
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+ConditionPathExists=!/opt/auramaur/runtime/state/KILL_SWITCH
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=auramaur
+Group=auramaur
+WorkingDirectory=/opt/auramaur
+ExecStart=/opt/auramaur/deploy/start.sh
+ExecReload=/opt/auramaur/deploy/start.sh
+ExecStop=/usr/bin/docker compose stop -t 120
+TimeoutStartSec=0
+TimeoutStopSec=180
+
+[Install]
+WantedBy=multi-user.target

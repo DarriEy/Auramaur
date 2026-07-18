@@ -6,13 +6,14 @@ import aiosqlite
 import structlog
 
 from auramaur.db.models import SCHEMA_VERSION, TABLES
+from auramaur.runtime import db_path as runtime_db_path
 
 log = structlog.get_logger()
 
 
 class Database:
-    def __init__(self, db_path: str = "auramaur.db"):
-        self.db_path = db_path
+    def __init__(self, db_path: str | None = None):
+        self.db_path = str(runtime_db_path()) if db_path is None else db_path
         self._db: aiosqlite.Connection | None = None
 
     async def connect(self) -> None:

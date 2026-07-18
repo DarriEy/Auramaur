@@ -33,7 +33,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-kalshi = ["kalshi-python>=2.1.0"]
+# kalshi-python 2.1.x imports cryptography but omits it from its wheel metadata.
+kalshi = ["kalshi-python>=2.1.0", "cryptography>=42.0"]
 ibkr = ["ib_async>=1.0.0"]
 # Semantic evidence ranking. Optional: without it, relevance scoring falls back
 # to scikit-learn TF-IDF and then a no-dependency heuristic.

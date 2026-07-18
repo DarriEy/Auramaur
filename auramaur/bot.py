@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from auramaur.killswitch import kill_switch_present
 from typing import TYPE_CHECKING
 
@@ -1256,7 +1257,8 @@ class AuramaurBot(
         self._running = True
 
         db_path = self._components.db.db_path
-        if db_path != "auramaur.db":
+        from auramaur.runtime import db_path as runtime_db_path
+        if Path(db_path).resolve() != runtime_db_path().resolve():
             console.print(f"  [yellow]Instance: {db_path}[/]")
         # Persistent Claude-budget counter lives in the same sqlite file —
         # point it at this instance's path (multi-instance runs use
