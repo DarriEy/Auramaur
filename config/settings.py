@@ -36,7 +36,10 @@ def _load_defaults() -> dict:
     if defaults_path.exists():
         with open(defaults_path) as f:
             base = yaml.safe_load(f) or {}
-    local_path = Path(__file__).parent / "defaults.local.yaml"
+    local_path = Path(os.environ.get(
+        "AURAMAUR_LOCAL_CONFIG",
+        Path(__file__).parent / "defaults.local.yaml",
+    ))
     if local_path.exists():
         with open(local_path) as f:
             base = _deep_merge(base, yaml.safe_load(f) or {})
@@ -1553,6 +1556,9 @@ class Settings(BaseSettings):
     model_config = {
         "env_file": str(Path(__file__).resolve().parent.parent / ".env"),
         "env_file_encoding": "utf-8",
+        # Portable deployments can override nested settings without editing a
+        # tracked YAML file, e.g. IBKR__HOST=ibgateway.
+        "env_nested_delimiter": "__",
         # Ignore env vars we don't declare. The process shares its environment
         # with libraries that read their own tokens directly (e.g. HF_TOKEN /
         # hf_token for huggingface_hub via sentence-transformers), and an

@@ -190,6 +190,14 @@ def test_hf_token_empty_leaves_environ_untouched(monkeypatch):
     assert "HF_TOKEN" not in os.environ
 
 
+def test_nested_environment_override_for_portable_broker(monkeypatch):
+    monkeypatch.setenv("IBKR__HOST", "ibgateway")
+    monkeypatch.setenv("IBKR__PAPER_PORT", "4002")
+    settings = Settings()
+    assert settings.ibkr.host == "ibgateway"
+    assert settings.ibkr.paper_port == 4002
+
+
 @pytest.mark.parametrize("override", [
     {"etf_symbols": ["SPY", "SPY"]},
     {"etf_paper_budget_usd": 100, "etf_max_entry_usd": 101},

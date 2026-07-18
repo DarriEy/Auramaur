@@ -310,6 +310,7 @@ ibkr = [
     { name = "ib-async" },
 ]
 kalshi = [
+    { name = "cryptography" },
     { name = "kalshi-python" },
 ]
 
@@ -320,6 +321,7 @@ requires-dist = [
     { name = "anthropic", specifier = ">=0.40" },
     { name = "asyncpraw", specifier = ">=7.7" },
     { name = "click", specifier = ">=8.1" },
+    { name = "cryptography", marker = "extra == 'kalshi'", specifier = ">=42.0" },
     { name = "ddgs", specifier = ">=7.0" },
     { name = "fastmcp", marker = "extra == 'agent'", specifier = ">=2" },
     { name = "feedparser", specifier = ">=6.0" },

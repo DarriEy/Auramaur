@@ -87,6 +87,10 @@ strategies trade on paper and earn live capital only by clearing the graduation
 ladder. Calibration learns from every market resolution. Ongoing research, not a
 finished product.
 
+For a common Docker Compose deployment across macOS, WSL, and a single Ubuntu
+VM—including a first-class, GUI-authenticated IB Gateway service—see
+[`docs/PORTABLE_DEPLOYMENT.md`](docs/PORTABLE_DEPLOYMENT.md).
+
 ## License
 
 MIT.

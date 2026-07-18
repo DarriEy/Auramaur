@@ -1,0 +1,91 @@
+name: auramaur
+
+services:
+  auramaur:
+    platform: ${AURAMAUR_PLATFORM:-linux/amd64}
+    image: ${AURAMAUR_IMAGE:-auramaur}:${AURAMAUR_VERSION:-local}
+    build:
+      context: .
+      args:
+        CLAUDE_CODE_VERSION: ${CLAUDE_CODE_VERSION:-2.1.214}
+    # A clean exit is deliberate (notably KILL_SWITCH); crashes restart.
+    restart: on-failure
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Container deployment gates are deliberately separate from a legacy
+      # workstation .env so a parallel shakedown cannot inherit live authority.
+      AURAMAUR_LIVE: ${AURAMAUR_CONTAINER_LIVE:-false}
+      AURAMAUR_ENABLE_TRANSFERS: ${AURAMAUR_CONTAINER_ENABLE_TRANSFERS:-false}
+      AURAMAUR_STATE_DIR: /app/state
+      AURAMAUR_DB_PATH: /app/state/auramaur.db
+      AURAMAUR_LOG_DIR: /app/logs
+      LOGGING__FILE: /app/logs/auramaur.log
+      AURAMAUR_KILL_SWITCH_PATH: /app/state/KILL_SWITCH
+      AURAMAUR_LOCAL_CONFIG: /app/runtime-config/defaults.local.yaml
+      AURAMAUR_IBKR_HOST: ibgateway
+      # The dedicated live account supplies quotes only. Auramaur execution
+      # remains in its local paper ledger until the independent gates above
+      # are deliberately armed at graduation.
+      AURAMAUR_IBKR_ENVIRONMENT: ${IBKR_QUOTE_ENVIRONMENT:-live}
+      AURAMAUR_IBKR_PORT: ${IBKR_QUOTE_PORT:-4002}
+      IBKR__HOST: ibgateway
+      IBKR__ENABLED: ${IBKR_ENABLED:-true}
+      IBKR__OPTIONS_ENABLED: "false"
+      IBKR__ENVIRONMENT: ${IBKR_QUOTE_ENVIRONMENT:-live}
+      IBKR__PAPER_PORT: ${IBKR_QUOTE_PORT:-4002}
+      IBKR__LIVE_PORT: ${IBKR_QUOTE_PORT:-4002}
+      IBKR__ETF_QUOTE_PORT: ${IBKR_QUOTE_PORT:-4002}
+      IBKR__READONLY: "true"
+      IBKR__PAPER_TRADE: "true"
+      IBKR__MULTIASSET_PAPER_ENABLED: ${IBKR_MULTIASSET_PAPER_ENABLED:-true}
+      IBKR__ETF_PAPER_ENABLED: "false"
+      KALSHI_PRIVATE_KEY_PATH: /run/auramaur-kalshi-private.pem
+      HOME: /home/auramaur
+      AURAMAUR_RUNTIME_UID: ${AURAMAUR_UID:-1000}
+      AURAMAUR_RUNTIME_GID: ${AURAMAUR_GID:-1000}
+    volumes:
+      - ./runtime/state:/app/state
+      - ./runtime/logs:/app/logs
+      - ./runtime/config:/app/runtime-config:ro
+      - ${CLAUDE_CONFIG_DIR:-./runtime/claude}:/home/auramaur/.claude
+      - ./secrets:/run/secrets:ro
+      - ${KALSHI_PRIVATE_KEY_SOURCE:-./private-key.pem}:/run/auramaur-kalshi-private.pem:ro
+    networks:
+      broker:
+        ipv4_address: ${AURAMAUR_BOT_IP:-172.18.0.3}
+    depends_on:
+      - ibgateway
+    stop_grace_period: 2m
+
+  ibgateway:
+    platform: ${AURAMAUR_PLATFORM:-linux/amd64}
+    image: ${IB_GATEWAY_IMAGE:-auramaur-ibgateway}:${IB_GATEWAY_VERSION:-local}
+    build:
+      context: deploy/ibgateway
+      args:
+        IB_GATEWAY_INSTALLER: ${IB_GATEWAY_INSTALLER:-ibgateway-latest-standalone-linux-x64.sh}
+    restart: unless-stopped
+    init: true
+    environment:
+      IB_GATEWAY_HEALTH_PORT: ${IB_GATEWAY_HEALTH_PORT:-4002}
+      IB_GATEWAY_VNC_PASSWORD_FILE: /run/secrets/ibgateway_vnc_password
+      AURAMAUR_RUNTIME_UID: ${AURAMAUR_UID:-1000}
+      AURAMAUR_RUNTIME_GID: ${AURAMAUR_GID:-1000}
+    volumes:
+      - ./runtime/ibgateway:/home/ibgateway/Jts
+      - ./secrets/ibgateway-vnc-password.txt:/run/secrets/ibgateway_vnc_password:ro
+    ports:
+      - "127.0.0.1:${IB_GATEWAY_NOVNC_PORT:-6080}:6080"
+    networks:
+      broker:
+        ipv4_address: ${IB_GATEWAY_IP:-172.18.0.2}
+    stop_grace_period: 2m
+
+networks:
+  broker:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${AURAMAUR_BROKER_SUBNET:-172.18.0.0/16}

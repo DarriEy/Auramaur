@@ -1,0 +1,11 @@
+[Unit]
+Description=Check Auramaur and authenticated IB Gateway health
+After=auramaur-compose.service
+
+[Service]
+Type=oneshot
+User=auramaur
+Group=auramaur
+WorkingDirectory=/opt/auramaur
+EnvironmentFile=-/etc/auramaur/monitor.env
+ExecStart=/opt/auramaur/deploy/monitor.sh

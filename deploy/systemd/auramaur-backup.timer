@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily encrypted off-host Auramaur backup
+
+[Timer]
+OnCalendar=*-*-* 07:15:00 UTC
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

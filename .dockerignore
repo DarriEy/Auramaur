@@ -1,0 +1,17 @@
+.git
+.venv
+.env
+secrets
+runtime
+logs
+data
+*.db
+*.db-*
+*.db.lock
+KILL_SWITCH
+__pycache__
+.pytest_cache
+.ruff_cache
+dist
+build
+deploy/ibgateway/ibgateway-*-standalone-linux-x64.sh

@@ -32,3 +32,6 @@ data/risk_tolerance
 # Runtime trading logs (operational figures — never version; PUBLIC repo)
 logs/
 *.out
+runtime/
+secrets/
+deploy/ibgateway/ibgateway-*-standalone-linux-x64.sh
