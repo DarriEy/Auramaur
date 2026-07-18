@@ -65,3 +65,13 @@ def test_book_modes_reflect_config_truth():
     # llm reflects global mode (paper in tests).
     assert modes["llm"] == ("LIVE" if s.is_live else "paper")
     render_books_panel(s, -96.21)  # renders without error
+
+
+def test_kraken_llm_paper_override_is_reported_as_paper():
+    s = Settings()
+    s.kraken.enabled = True
+    s.kraken.directional_enabled = True
+    s.kraken.directional_budget_usd = 60.0
+    s.kraken.directional_llm_paper = True
+    modes = dict((book, mode) for book, mode, _ in _book_modes(s))
+    assert modes["kraken spec"] == "PAPER"

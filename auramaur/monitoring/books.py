@@ -75,7 +75,9 @@ def _book_modes(settings) -> list[tuple[str, str, str]]:
         if k.directional_budget_usd <= 0:
             rows.append(("kraken spec", "WIND-DOWN", "exits only, no re-entry"))
         else:
-            rows.append(("kraken spec", "LIVE" if settings.is_live else "paper",
+            forced_paper = bool(getattr(k, "directional_llm_paper", True))
+            mode = "PAPER" if forced_paper else ("LIVE" if settings.is_live else "paper")
+            rows.append(("kraken spec", mode,
                          f"${k.directional_budget_usd:.0f} budget"))
     return rows
 
