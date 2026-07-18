@@ -1020,7 +1020,7 @@ class IBKRConfig(BaseModel):
     # off to run equities without the OPRA-less scanner spamming Error 200/10091.
     options_enabled: bool = False
     host: str = "127.0.0.1"
-    paper_port: int = 4002
+    paper_port: int = 7497
     live_port: int = 7496
     client_id: int = 1
     environment: str = "paper"  # "paper" | "live"

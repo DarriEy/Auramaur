@@ -237,7 +237,7 @@ class TestIBKRConfig:
         assert s.ibkr.readonly is True
         assert s.ibkr.paper_trade is True
         assert s.ibkr.paper_budget_usd == 5000.0
-        assert s.ibkr.paper_port == 4002
+        assert s.ibkr.paper_port == 7497
         assert s.ibkr.live_port == 7496
         assert "SPY" in s.ibkr.watchlist
 

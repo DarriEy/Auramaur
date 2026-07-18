@@ -232,7 +232,7 @@ ibkr:
   # Switch to "live" only with a live Gateway running and the live gates open.
   environment: "paper"
   host: "127.0.0.1"
-  paper_port: 4002
+  paper_port: 7497
   live_port: 7496
   client_id: 1
   max_contracts_per_symbol: 10
