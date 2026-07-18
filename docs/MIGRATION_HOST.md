@@ -1,4 +1,11 @@
-# Host migration checklist
+# Host migration checklist (DEPRECATED — native launchd path)
+
+> **DEPRECATED 2026-07.** The deployment is the portable Compose stack;
+> migrate with `scripts/migrate_portable.sh` per `docs/PORTABLE_DEPLOYMENT.md`
+> (private state travels as a `deploy/offsite-bundle.sh` bundle — see
+> `docs/SECRETS.md`). Of `scripts/migrate_host.sh`, only `decommission`
+> survives, for wiping a native host before hand-back; Phase 3 below remains
+> its checklist. Phases 1–2 are historical.
 
 Moving the bot to a new machine (e.g. laptop replacement). The companion
 script `scripts/migrate_host.sh` mechanizes each phase; this file is the
@@ -70,9 +77,10 @@ the NEW bot traded; if it did, rsync the DB BACK before restarting OLD.
 
 On OLD: `scripts/migrate_host.sh decommission`
 — after an interactive confirmation it: bootouts + deletes the
-LaunchAgent, securely removes `.env` (Polygon private key + venue API
-keys — the real hazard on a returned machine), removes the DBs/WAL,
-logs, local config, `~/.claude` credentials, and the repo checkout.
+LaunchAgent, securely removes `.env` and `private-key.pem` (Polygon
+private key + venue API keys — the real hazard on a returned machine),
+removes `secrets/`, the DBs/WAL, logs, `runtime/` (Gateway + Claude
+state), local config, and the cached Gateway installer.
 Also remember, outside this repo's scope:
 
 - [ ] Straummaur: stop its recorder, rsync `~/Straummaur/data` to NEW,

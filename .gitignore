@@ -35,3 +35,6 @@ logs/
 runtime/
 secrets/
 deploy/ibgateway/ibgateway-*-standalone-linux-x64.sh
+
+# Encrypted backup/bundle blobs — off-host artifacts, never versioned
+*.age
