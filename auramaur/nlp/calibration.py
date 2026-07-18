@@ -73,11 +73,13 @@ class CalibrationTracker:
         db: Database,
         min_samples: int = 30,
         online_lr: float = _ONLINE_LR,
+        lineage_observer=None,
     ) -> None:
         self._db = db
         self._min_samples = min_samples
         self._params_cache: dict[str, tuple[float, float]] = {}
         self._online_lr = online_lr
+        self._lineage_observer = lineage_observer
         # Moving Brier score: deque of (predicted_prob, actual_outcome) for
         # the last _BRIER_WINDOW resolutions, used to detect calibration drift.
         self._recent_predictions: deque[tuple[float, float]] = deque(
@@ -120,7 +122,8 @@ class CalibrationTracker:
             log.warning("calibration.brier_window_load_failed", error=str(e))
 
     async def record_prediction(
-        self, market_id: str, predicted_prob: float, category: str = ""
+        self, market_id: str, predicted_prob: float, category: str = "",
+        *, commit: bool = True,
     ) -> None:
         """Record a new probability prediction for a market.
 
@@ -137,7 +140,8 @@ class CalibrationTracker:
             """,
             (market_id, predicted_prob, category),
         )
-        await self._db.commit()
+        if commit:
+            await self._db.commit()
         log.debug(
             "calibration.recorded",
             market_id=market_id,
@@ -213,6 +217,8 @@ class CalibrationTracker:
         )
         await self._db.commit()
         log.info("calibration.resolved", market_id=market_id, outcome=actual_outcome)
+        if self._lineage_observer is not None:
+            self._lineage_observer.resolution(market_id, actual_outcome)
 
         # Persist realized $ P&L from this market's fills + the outcome, so edge
         # is measurable in dollars (trades.pnl is never populated otherwise).

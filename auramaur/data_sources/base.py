@@ -15,8 +15,13 @@ class NewsItem(BaseModel):
     content: str = ""
     url: str = ""
     published_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # exact: publisher supplied; inferred/provider_seen/unknown: progressively
+    # weaker time semantics. Unknown dates must not masquerade as breaking news.
+    timestamp_quality: str = "exact"
     relevance_score: float = 0.0
     keywords: list[str] = Field(default_factory=list)
+    ingestion_run_id: str = ""
+    information_mode: str = "production"  # production | shadow | paired
 
 
 @runtime_checkable

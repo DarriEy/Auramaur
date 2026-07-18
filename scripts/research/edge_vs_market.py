@@ -21,6 +21,7 @@ import sqlite3
 from collections import defaultdict
 
 DB = "auramaur.db"
+MIN_RESOLVED = 20
 
 
 def _brier(rs, key):
@@ -30,19 +31,53 @@ def _brier(rs, key):
 def main():
     c = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
     c.row_factory = sqlite3.Row
-    # latest market_prob per market from signals
-    mkt = {}
-    for r in c.execute("SELECT market_id, market_prob FROM signals "
-                       "WHERE market_prob IS NOT NULL ORDER BY timestamp"):
-        mkt[r["market_id"]] = r["market_prob"]
+    # v21 snapshots store the model view and market benchmark atomically. Use
+    # one independent observation per resolution (latest pre-resolution view).
+    has_snapshots = c.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='forecast_snapshots'"
+    ).fetchone()
     rows = []
-    for r in c.execute("SELECT market_id, predicted_prob, actual_outcome, category "
-                       "FROM calibration WHERE actual_outcome IS NOT NULL "
-                       "AND predicted_prob IS NOT NULL"):
-        if r["market_id"] in mkt:
-            rows.append({"m": r["predicted_prob"], "mkt": mkt[r["market_id"]],
+    if has_snapshots:
+        query = """SELECT raw_probability model_p, market_yes_price market_p,
+                          actual_outcome, category
+                   FROM forecast_snapshots f
+                   WHERE actual_outcome IS NOT NULL AND id IN (
+                       SELECT MAX(id) FROM forecast_snapshots
+                       WHERE actual_outcome IS NOT NULL GROUP BY market_id
+                   )"""
+        for r in c.execute(query):
+            rows.append({"m": r["model_p"], "mkt": r["market_p"],
                          "o": r["actual_outcome"], "cat": r["category"] or "none"})
+        # Preserve leakage-safe historical calibration coverage from before
+        # snapshots existed. The benchmark is the last signal at or before the
+        # prediction resolved; markets already represented above are excluded.
+        legacy = """SELECT cal.predicted_prob model_p, s.market_prob market_p,
+                           cal.actual_outcome, cal.category
+                    FROM calibration cal
+                    JOIN signals s ON s.id=(
+                        SELECT MAX(s2.id) FROM signals s2
+                        WHERE s2.market_id=cal.market_id
+                          AND datetime(s2.timestamp)<=datetime(cal.resolved_at)
+                    )
+                    WHERE cal.actual_outcome IS NOT NULL
+                      AND cal.id IN (SELECT MAX(id) FROM calibration
+                          WHERE actual_outcome IS NOT NULL GROUP BY market_id)
+                      AND cal.market_id NOT IN (
+                          SELECT market_id FROM forecast_snapshots
+                          WHERE actual_outcome IS NOT NULL)
+                      AND s.market_prob IS NOT NULL"""
+        for r in c.execute(legacy):
+            rows.append({"m": r["model_p"], "mkt": r["market_p"],
+                         "o": r["actual_outcome"], "cat": r["category"] or "none"})
+    else:
+        print("No point-in-time forecast snapshots yet; refusing a look-ahead-prone comparison.")
+        c.close()
+        return
     c.close()
+    if len(rows) < MIN_RESOLVED:
+        print(f"Insufficient data: {len(rows)} resolved point-in-time forecasts; "
+              f"need at least {MIN_RESOLVED}.")
+        return
 
     def block(rs):
         bm, bk = _brier(rs, "m"), _brier(rs, "mkt")

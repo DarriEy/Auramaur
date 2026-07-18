@@ -322,6 +322,26 @@ async def assemble_components(
     sources.append(ESPNSource())
     source_names.append("ESPN")
 
+    # Primary official lanes start shadow-only: observations are persisted but
+    # withheld from forecasts until their information cells graduate.
+    from auramaur.data_sources.official import BLSSource, NWSSource
+    sources.append(NWSSource())
+    source_names.append("NWS[shadow]")
+    sources.append(BLSSource(api_key=s.bls_api_key))
+    source_names.append("BLS[shadow]")
+    if s.bea_api_key:
+        from auramaur.data_sources.official import BEASource
+        sources.append(BEASource(api_key=s.bea_api_key))
+        source_names.append("BEA[shadow]")
+    if s.congress_api_key:
+        from auramaur.data_sources.official import CongressSource
+        sources.append(CongressSource(api_key=s.congress_api_key))
+        source_names.append("Congress[shadow]")
+    if s.eia_api_key:
+        from auramaur.data_sources.official import EIASource
+        sources.append(EIASource(api_key=s.eia_api_key))
+        source_names.append("EIA[shadow]")
+
     # Category-agnostic broad news (fires on every query).
     from auramaur.data_sources.gdelt import GDELTSource
     from auramaur.data_sources.google_trends import GoogleTrendsSource
@@ -333,7 +353,24 @@ async def assemble_components(
     sources.append(BlueskySource())
     source_names.append("Bluesky")
 
-    aggregator = Aggregator(sources=sources)
+    ig = s.information_graduation
+    from auramaur.lineage_observer import LineageObserver
+    lineage_observer = await LineageObserver.create(
+        db_path, min_resolved=ig.min_resolved, min_paired=ig.min_paired,
+        min_success_rate=ig.min_success_rate,
+        probation_multiplier=ig.probation_multiplier,
+    )
+    for source, category, horizon, event_type in (
+        ("nws", "weather", "0-6h", "severe_weather_transition"),
+        ("bls", "economics", "0-30m", "scheduled_release"),
+        ("bea", "economics", "0-30m", "scheduled_release"),
+        ("congress", "politics_us", "1-14d", "procedural_milestone"),
+        ("eia", "economics", "0-24h", "scheduled_release"),
+        ("edgar", "economics", "1-7d", "corporate_filing"),
+        ("social_bundle", "crypto", "1-3d", "unscheduled_narrative"),
+    ):
+        await lineage_observer.ladder.register(source, category, horizon, event_type)
+    aggregator = Aggregator(sources=sources, observer=lineage_observer)
 
     # Exchange
     paper = PaperTrader(db=db, initial_balance=s.execution.paper_initial_balance)
@@ -343,7 +380,8 @@ async def assemble_components(
     analyzer = ClaudeAnalyzer(settings=s)
     cache = NLPCache(db=db)
     calibration = CalibrationTracker(
-        db=db, min_samples=s.calibration.min_samples
+        db=db, min_samples=s.calibration.min_samples,
+        lineage_observer=lineage_observer,
     )
 
     # Risk
@@ -524,4 +562,3 @@ async def assemble_components(
         "source_names": source_names,
         "exchange_filter": exchange_filter,
     })
-

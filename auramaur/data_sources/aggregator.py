@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
+import time
+import uuid
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 import structlog
 
 from auramaur.data_sources.base import DataSource, NewsItem
+if TYPE_CHECKING:
+    from auramaur.lineage_observer import LineageObserver
 
 logger = structlog.get_logger(__name__)
 
@@ -25,8 +31,10 @@ class Aggregator:
 
     source_name: str = "aggregator"
 
-    def __init__(self, sources: list[DataSource]) -> None:
+    def __init__(self, sources: list[DataSource],
+                 observer: LineageObserver | None = None) -> None:
         self._sources = sources
+        self.observer = observer
 
     @staticmethod
     def _source_matches_category(source: DataSource, category: str | None) -> bool:
@@ -50,6 +58,8 @@ class Aggregator:
         query: str,
         limit_per_source: int = 20,
         category: str | None = None,
+        market_id: str = "",
+        market_price: float | None = None,
     ) -> list[NewsItem]:
         """Fetch from matching sources concurrently, deduplicate, and rank.
 
@@ -58,13 +68,30 @@ class Aggregator:
         ``categories`` set; category-agnostic sources always fire.
         """
 
+        run_id = uuid.uuid4().hex
+        started = datetime.now(tz=timezone.utc)
+        fetch_rows: list[tuple] = []
+
         async def _safe_fetch(source: DataSource) -> list[NewsItem]:
+            source_name = getattr(source, "source_name", str(source))
+            before = time.monotonic()
             try:
-                return await source.fetch(query, limit=limit_per_source)
-            except Exception:
+                items = await source.fetch(query, limit=limit_per_source)
+                mode = getattr(source, "information_mode", "production")
+                for item in items:
+                    item.information_mode = mode
+                fetch_rows.append((run_id, source_name, "ok", len(items),
+                                   round((time.monotonic() - before) * 1000), "",
+                                   datetime.now(tz=timezone.utc).isoformat(), mode))
+                return items
+            except Exception as exc:
+                fetch_rows.append((run_id, source_name, "error", 0,
+                                   round((time.monotonic() - before) * 1000), str(exc)[:500],
+                                   datetime.now(tz=timezone.utc).isoformat(),
+                                   getattr(source, "information_mode", "production")))
                 logger.exception(
                     "aggregator_source_failed",
-                    source=getattr(source, "source_name", str(source)),
+                    source=source_name,
                 )
                 return []
 
@@ -74,7 +101,8 @@ class Aggregator:
             return_exceptions=False,  # exceptions already caught in _safe_fetch
         )
 
-        # Flatten
+        # Flatten. Shadow sources are persisted below but deliberately withheld
+        # from the analyzer until an information-strategy cell graduates.
         all_items: list[NewsItem] = []
         for batch in results:
             all_items.extend(batch)
@@ -83,6 +111,8 @@ class Aggregator:
         seen_titles: set[str] = set()
         unique: list[NewsItem] = []
         for item in all_items:
+            if item.information_mode == "shadow":
+                continue
             norm = _normalise_title(item.title)
             if norm and norm not in seen_titles:
                 seen_titles.add(norm)
@@ -100,11 +130,46 @@ class Aggregator:
             if pub.tzinfo is None:
                 pub = pub.replace(tzinfo=timezone.utc)
             age_hours = max((now - pub).total_seconds() / 3600, 0.01)
+            # Preserve the production ranking formula. Timestamp quality is
+            # captured for offline trials, not allowed to alter proven books.
             recency = 1.0 / age_hours
             source_weight = authority(item.source, item.url)
             return (recency * source_weight) + item.relevance_score
 
         unique.sort(key=_rank, reverse=True)
+
+        observed_at = datetime.now(tz=timezone.utc).isoformat()
+        for item in unique:
+            item.ingestion_run_id = run_id
+        if self.observer is not None:
+            ranks = {item.id: rank for rank, item in enumerate(unique, start=1)}
+            persisted = list({(item.source, item.id): item for item in all_items}.values())
+            self.observer.ingestion(
+                run_id=run_id, query=query, category=category or "", market_id=market_id,
+                started_at=started.isoformat(), observed_at=observed_at,
+                fetch_rows=fetch_rows, raw_items=len(all_items),
+                items=[{
+                    "run_id": run_id, "item_id": item.id, "source": item.source,
+                    "title": item.title, "url": item.url,
+                    "content_hash": hashlib.sha256(
+                        f"{item.title}\n{item.content}".encode("utf-8", "replace")
+                    ).hexdigest(),
+                    "excerpt": (item.content or "")[:500],
+                    "published_at": item.published_at.isoformat(),
+                    "observed_at": observed_at, "timestamp_quality": item.timestamp_quality,
+                    "relevance_score": item.relevance_score,
+                    "rank_position": ranks.get(item.id), "market_id": market_id,
+                    "information_mode": item.information_mode,
+                } for item in persisted],
+                active_sources=[{
+                    "name": source.source_name,
+                    "mode": getattr(source, "information_mode", "production"),
+                    "horizon": getattr(source, "trial_horizon", ""),
+                    "event_type": getattr(source, "trial_event_type", "query_evidence"),
+                    "had_items": any(i.source == source.source_name for i in all_items),
+                    "market_price": market_price,
+                } for source in active_sources],
+            )
 
         logger.info(
             "aggregator_gathered",
@@ -130,3 +195,5 @@ class Aggregator:
                     "aggregator_source_close_failed",
                     source=getattr(source, "source_name", str(source)),
                 )
+        if self.observer is not None:
+            await self.observer.close()

@@ -568,12 +568,14 @@ class TradingEngine(CycleOrchestrationMixin):
         for query in queries:
             items = await self.aggregator.gather(
                 query, limit_per_source=per_query_limit, category=market.category or None,
+                market_id=market.id, market_price=market.outcome_yes_price,
             )
             for item in items:
                 if item.id not in seen_ids:
                     seen_ids.add(item.id)
                     all_evidence.append(item)
         evidence = all_evidence[:self.settings.nlp.evidence_per_source * 3]
+        evidence_run_ids = sorted({e.ingestion_run_id for e in evidence if e.ingestion_run_id})
         source_counts: dict[str, int] = {}
         for e in evidence:
             source_counts[e.source] = source_counts.get(e.source, 0) + 1
@@ -590,8 +592,28 @@ class TradingEngine(CycleOrchestrationMixin):
                 analysis.probability, market.category or ""
             )
             analysis.calibrated_probability = calibrated
+
+        # Existing calibration remains on its established connection. New
+        # lineage is observer-only: enqueueing is non-blocking and its worker
+        # owns a separate connection, so it cannot roll back or stall trading.
+        if self.calibration is not None:
             await self.calibration.record_prediction(
-                market.id, analysis.probability, market.category or ""
+                market.id, analysis.probability, market.category or "",
+            )
+        observer = getattr(self.aggregator, "observer", None)
+        if observer is not None:
+            observer.forecast(
+                market_id=market.id,
+                exchange=market.exchange or self.exchange_name or "polymarket",
+                category=market.category or "", raw_probability=analysis.probability,
+                calibrated_probability=analysis.calibrated_probability,
+                market_yes_price=market.outcome_yes_price,
+                market_no_price=market.outcome_no_price,
+                observed_at=datetime.now(timezone.utc).isoformat(),
+                evidence_run_ids=evidence_run_ids,
+                model=getattr(self.analyzer, "_model", ""),
+                strategy_source=strategy_source,
+                config=self.settings.nlp.model_dump(mode="json"),
             )
 
         # 2c. Order flow nudge
