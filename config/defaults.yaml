@@ -257,7 +257,7 @@ ibkr:
   # Activated after read-only TWS contract/history preflight. Individual books
   # still fail closed without fresh native executable quotes.
   multiasset_client_id: 3
-  multiasset_paper_enabled: true
+  multiasset_paper_enabled: false
   multiasset_cycle_seconds: 900
   multiasset_refreshes_per_cycle: 12
   # Delayed/frozen quotes may be observed, but cannot create credible fills.
