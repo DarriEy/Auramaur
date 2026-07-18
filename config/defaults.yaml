@@ -241,9 +241,11 @@ ibkr:
   # Options, if separately enabled later, still default to paper accounting.
   paper_trade: true
   paper_budget_usd: 5000.0
-  # Structurally paper-only ETF book. This reads quotes from the IBKR paper
-  # Gateway but never calls an order-placement method.
+  # Structurally paper-only ETF book. The quote session may use a live TWS
+  # login, but the API connection stays read-only and fills remain local-only.
   etf_paper_enabled: true
+  # TWS is logged into the live account but exposes this read-only API socket.
+  etf_quote_port: 7497
   # Multi-asset ETF universe: broad US, sectors, international, rates, real
   # assets, and defensives. Long-only instruments avoid leverage/inverse decay.
   etf_symbols: ["SPY", "QQQ", "IWM", "DIA", "VTI",

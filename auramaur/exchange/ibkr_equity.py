@@ -55,7 +55,12 @@ class IBKREquityClient:
             raise ConnectionError("ibkr equity connect on cooldown")
         from ib_async import IB
         cfg = self._settings.ibkr
-        port = cfg.paper_port if self._force_paper_readonly or cfg.environment == "paper" else cfg.live_port
+        if self._force_paper_readonly:
+            port = getattr(cfg, "etf_quote_port", cfg.paper_port)
+            quote_environment = "readonly_data"
+        else:
+            quote_environment = cfg.environment
+            port = cfg.paper_port if quote_environment == "paper" else cfg.live_port
         readonly = True if self._force_paper_readonly else cfg.readonly
         try:
             self._ib = IB()
@@ -70,7 +75,8 @@ class IBKREquityClient:
             raise
         self._connected = True
         log.info("ibkr_equity.connected", port=port, client_id=cfg.equity_client_id,
-                 readonly=readonly, forced_paper=self._force_paper_readonly)
+                 readonly=readonly, quote_environment=quote_environment,
+                 simulated_book=self._force_paper_readonly)
 
     async def get_price(self, symbol: str) -> float | None:
         await self._ensure_connected()

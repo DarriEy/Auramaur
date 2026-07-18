@@ -1044,6 +1044,9 @@ class IBKRConfig(BaseModel):
 
     # --- Structurally paper-only broad-market ETF experiment ---
     etf_paper_enabled: bool = False
+    # Quote-session login is independent of execution: "live" permits the
+    # structurally simulated ETF pillar to read TWS port 7496, still readonly.
+    etf_quote_port: int = 7497
     etf_symbols: list[str] = ["SPY", "QQQ", "IWM"]
     etf_paper_budget_usd: float = 5_000.0
     etf_max_entry_usd: float = 250.0
@@ -1074,6 +1077,8 @@ class IBKRConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_etf_experiment(self):
+        if not 1 <= self.etf_quote_port <= 65535:
+            raise ValueError("IBKR ETF quote port must be a valid TCP port")
         symbols = [symbol.strip().upper() for symbol in self.etf_symbols]
         if not symbols:
             raise ValueError("IBKR ETF experiment requires at least one symbol")

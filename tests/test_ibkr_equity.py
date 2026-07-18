@@ -53,6 +53,26 @@ async def test_forced_paper_quote_connection_ignores_shared_live_defaults(monkey
     assert captured["readonly"] is True
 
 
+@pytest.mark.asyncio
+async def test_simulated_book_can_use_live_tws_quotes_readonly(monkeypatch):
+    captured = {}
+
+    class FakeIB:
+        async def connectAsync(self, **kwargs):
+            captured.update(kwargs)
+
+        def reqMarketDataType(self, market_data_type):
+            pass
+
+    monkeypatch.setitem(sys.modules, "ib_async", SimpleNamespace(IB=FakeIB))
+    settings = _settings(readonly=False)
+    settings.ibkr.etf_quote_port = 7496
+    client = IBKREquityClient(settings, force_paper_readonly=True)
+    await client._ensure_connected()
+    assert captured["port"] == 7496
+    assert captured["readonly"] is True
+
+
 async def test_quote_without_exchange_timestamp_fails_closed(monkeypatch):
     fake = types.ModuleType("ib_async")
     fake.Stock = lambda *a, **k: SimpleNamespace(symbol=a[0])

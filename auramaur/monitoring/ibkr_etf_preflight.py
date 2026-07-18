@@ -68,7 +68,8 @@ async def preflight(settings, db, *, client=None, model_checker=None) -> ETFPref
     client = client or IBKREquityClient(settings, force_paper_readonly=True)
     if getattr(client, "_force_paper_readonly", False):
         add("paper isolation", "OK",
-            f"forced paper port {cfg.paper_port}, client {cfg.equity_client_id}, read-only")
+            f"simulated local book; read-only quote port {cfg.etf_quote_port}, "
+            f"client {cfg.equity_client_id}, read-only")
     else:
         add("paper isolation", "BLOCK", "client is not forced onto paper/read-only routing")
 
