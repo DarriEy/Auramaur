@@ -173,7 +173,7 @@ async def test_kill_switch_blocks_order(paper_trader):
     client = PolymarketClient(settings, paper_trader)
 
     order = _make_order(dry_run=False)
-    with patch.object(Path, "exists", return_value=True):
+    with patch("auramaur.exchange.client.kill_switch_present", return_value=True):
         result = await client.place_order(order)
 
     # Neither paper nor live should execute
@@ -189,7 +189,7 @@ async def test_kill_switch_blocks_even_paper(paper_trader):
     client = PolymarketClient(settings, paper_trader)
 
     order = _make_order(dry_run=True)
-    with patch.object(Path, "exists", return_value=True):
+    with patch("auramaur.exchange.client.kill_switch_present", return_value=True):
         result = await client.place_order(order)
 
     paper_trader.execute.assert_not_awaited()

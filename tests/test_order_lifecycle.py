@@ -211,6 +211,17 @@ async def test_get_order_status_filled(client):
 
 
 @pytest.mark.asyncio
+async def test_get_order_status_missing_stays_ambiguous_pending(client):
+    mock_clob = MagicMock()
+    mock_clob.get_order.return_value = None
+    client._clob_client = mock_clob
+    result = await client.get_order_status("aged-out")
+    assert result.status == "pending"
+    assert result.filled_size == 0
+    assert "unknown" in result.error_message
+
+
+@pytest.mark.asyncio
 async def test_cancel_order_success(client):
     """Mock cancel succeeds."""
     mock_clob = MagicMock()

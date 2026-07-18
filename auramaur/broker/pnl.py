@@ -43,6 +43,36 @@ class PnLTracker:
         SELL: decreases position size, realizes P&L at
               ``(sell_price - avg_cost) * size``.
         """
+        # Exchange/order ids are the idempotency key. The monitor can observe
+        # the same terminal fill more than once after a restart or persistence
+        # timeout; replaying it would double the position and realized P&L.
+        existing = await self._db.fetchone(
+            "SELECT market_id, side, token, size, price, is_paper FROM fills "
+            "WHERE order_id = ? AND side = ? LIMIT 1",
+            (fill.order_id, fill.side.value),
+        )
+        if existing is not None:
+            same = (
+                existing["market_id"] == fill.market_id
+                and existing["side"] == fill.side.value
+                and existing["token"].upper() == fill.token.value.upper()
+                and abs(float(existing["size"]) - fill.size) < 1e-9
+                and abs(float(existing["price"]) - fill.price) < 1e-9
+                and int(existing["is_paper"]) == (1 if fill.is_paper else 0)
+            )
+            if same:
+                log.info("pnl.fill_duplicate_ignored", order_id=fill.order_id)
+                return
+            raise ValueError(f"conflicting fill replay for order {fill.order_id}")
+
+        try:
+            await self._record_fill_once(fill)
+        except Exception:
+            await self._db.rollback()
+            raise
+
+    async def _record_fill_once(self, fill: Fill) -> None:
+        """Write one new fill and its cost basis as a single transaction."""
         # 1. Persist the fill
         cursor = await self._db.execute(
             """INSERT INTO fills
@@ -82,6 +112,7 @@ class PnLTracker:
 
         fill_cost = fill.price * fill.size
 
+        ledger_event: dict | None = None
         if fill.side == OrderSide.BUY:
             # 3. BUY — increase position, recalculate weighted average
             new_size = old_size + fill.size
@@ -136,19 +167,13 @@ class PnLTracker:
             except Exception as e:
                 log.debug("pnl.daily_stats_error", error=str(e))
 
-            # Unified realized-P&L ledger: one row per realization event,
-            # idempotent on fill rowid (the backfill uses the same ref).
-            from auramaur.broker.ledger import record_ledger_event
-            await record_ledger_event(
-                self._db,
-                market_id=fill.market_id,
-                kind="sell",
-                token=fill.token.value,
-                qty=sell_size,
-                pnl=pnl,
-                fees=fill.fee,
-                is_paper=fill.is_paper,
-                source_ref=f"fill:{fill_rowid}",
+            # Defer the ancillary ledger until the authoritative fill + cost
+            # basis transaction commits. The ledger is independently
+            # idempotent and must never commit this transaction halfway through.
+            ledger_event = dict(
+                market_id=fill.market_id, kind="sell", token=fill.token.value,
+                qty=sell_size, pnl=pnl, fees=fill.fee,
+                is_paper=fill.is_paper, source_ref=f"fill:{fill_rowid}",
                 realized_at=fill.timestamp.isoformat(),
             )
 
@@ -187,6 +212,10 @@ class PnLTracker:
             ),
         )
         await self._db.commit()
+
+        if ledger_event is not None:
+            from auramaur.broker.ledger import record_ledger_event
+            await record_ledger_event(self._db, **ledger_event)
 
         log.info(
             "pnl.fill_recorded",

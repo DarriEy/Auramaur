@@ -46,6 +46,7 @@ async def test_clean_state_allows_live(tmp_path, monkeypatch):
 async def test_kill_switch_blocks(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "KILL_SWITCH").write_text("")  # in tmp cwd — never the real file
+    monkeypatch.setattr("auramaur.monitoring.live_gate.kill_switch_present", lambda: True)
     db = await _db()
     try:
         rep = await preflight(Settings(), db)

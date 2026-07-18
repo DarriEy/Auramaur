@@ -626,10 +626,10 @@ class PolymarketClient:
     async def get_order_status(self, order_id: str) -> OrderResult:
         """Query the CLOB API for the current status of an order.
 
-        When the CLOB returns None for an order, it means the order no longer
-        exists in the active-order index — either filled-and-settled long ago,
-        or cancelled. We return a terminal "cancelled" result so callers can
-        drop it from their pending-order tracking instead of re-polling forever.
+        A missing active-order record is ambiguous: the order may have filled
+        and aged out, or it may have been cancelled. Keep it non-terminal until
+        trade-history reconciliation can prove which happened; labelling it
+        cancelled here silently loses real fills.
         """
         await self.clob_call(self._init_clob_client)
         try:
@@ -643,10 +643,11 @@ class PolymarketClient:
             return OrderResult(
                 order_id=order_id,
                 market_id="",
-                status="cancelled",
+                status="pending",
                 filled_size=0,
                 filled_price=0,
                 is_paper=False,
+                error_message="order absent from active index; terminal status unknown",
             )
 
         try:
