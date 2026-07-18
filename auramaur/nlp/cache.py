@@ -63,13 +63,7 @@ class NLPCache:
     @staticmethod
     def _is_transient_lock(exc: Exception) -> bool:
         detail = str(exc).lower()
-        return "database is locked" in detail or "database is busy" in detail
-
-    async def _rollback_after_lock(self) -> None:
-        try:
-            await self._db.db.rollback()
-        except Exception:  # noqa: BLE001 - preserve the original cache failure
-            pass
+        return "database is locked" in detail or "database table is locked" in detail
 
     async def _read_with_lock_retry(self, sql: str, params: tuple):
         for attempt in range(3):
@@ -78,11 +72,10 @@ class NLPCache:
             except aiosqlite.OperationalError as exc:
                 if not self._is_transient_lock(exc):
                     raise
-                await self._rollback_after_lock()
                 if attempt == 2:
                     log.warning("nlp_cache.read_lock_exhausted", error=str(exc))
                     return None
-                delay = 0.25 * (2 ** attempt)
+                delay = 0.25 * (2**attempt)
                 log.info("nlp_cache.read_lock_retry", attempt=attempt + 1, delay=delay)
                 await asyncio.sleep(delay)
 
@@ -96,11 +89,10 @@ class NLPCache:
             except aiosqlite.OperationalError as exc:
                 if not self._is_transient_lock(exc):
                     raise
-                await self._rollback_after_lock()
                 if attempt == 2:
                     log.warning("nlp_cache.write_lock_exhausted", error=str(exc))
                     return False
-                delay = 0.25 * (2 ** attempt)
+                delay = 0.25 * (2**attempt)
                 log.info("nlp_cache.write_lock_retry", attempt=attempt + 1, delay=delay)
                 await asyncio.sleep(delay)
         return False  # pragma: no cover
@@ -178,11 +170,23 @@ class NLPCache:
                 (cache_key, market_id, response, probability, confidence, ttl_seconds, market_price, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
             """,
-            (cache_key, market_id, response_json, probability, confidence, ttl_seconds, market_price),
+            (
+                cache_key,
+                market_id,
+                response_json,
+                probability,
+                confidence,
+                ttl_seconds,
+                market_price,
+            ),
         )
         if written:
-            log.debug("nlp_cache.put", cache_key=cache_key[:12], ttl=ttl_seconds,
-                      market_price=market_price)
+            log.debug(
+                "nlp_cache.put",
+                cache_key=cache_key[:12],
+                ttl=ttl_seconds,
+                market_price=market_price,
+            )
 
     async def cleanup(self) -> None:
         """Remove all expired cache entries."""
