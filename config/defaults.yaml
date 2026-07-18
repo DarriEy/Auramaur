@@ -579,7 +579,7 @@ agent_trader:
     # token usage is metered into agent_trader_costs so each arm's record
     # is judged NET of its own intelligence bill.
     - alias: gflash
-      model: gemini-3.1-flash-preview
+      model: gemini-3.1-flash-lite
       provider: gemini
     - alias: g35flash
       model: gemini-3.5-flash
@@ -602,7 +602,7 @@ agent_trader:
   decline_ttl_hours: 24.0    # a pass keeps the market off the arm's slate this long
   gemini_daily_call_limit: 30   # across all gemini arms; independent of the Claude pool
   gemini_price_per_mtok:        # $/1M tokens [input, output] — update from the rate card
-    gemini-3.1-flash-preview: [0.30, 2.50]
+    gemini-3.1-flash-lite: [0.10, 0.40]
     gemini-3.5-flash: [0.50, 3.50]
     gemini-3.1-pro-preview: [2.00, 12.00]
 
