@@ -115,7 +115,8 @@ class BiasHarvestPillar:
 
         open_count = await self._open_position_count()
         if open_count >= cfg.max_open:
-            log.debug("bias_harvest.book_full", open=open_count, cap=cfg.max_open)
+            log.info("bias_harvest.cycle", scanned=0, entered=0,
+                     book_full=True, open=open_count, cap=cfg.max_open)
             return 0
 
         markets = await self._discovery.get_markets(limit=cfg.scan_limit)

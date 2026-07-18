@@ -1021,6 +1021,32 @@ class OpenAIETFModel(BaseModel):
         return self
 
 
+class IBKRMultiAssetBookConfig(BaseModel):
+    """Risk envelope for one isolated, locally simulated IBKR book."""
+
+    enabled: bool = True
+    budget_usd: float = 5_000.0
+    max_positions: int = 4
+    max_position_pct: float = 15.0
+    max_deployment_pct: float = 50.0
+    daily_loss_limit_usd: float = 100.0
+    stop_loss_pct: float = 5.0
+    take_profit_pct: float = 10.0
+    max_spread_bps: float = 40.0
+
+    @model_validator(mode="after")
+    def validate_risk(self):
+        if self.budget_usd <= 0 or self.max_positions <= 0:
+            raise ValueError("IBKR paper book budget and position count must be positive")
+        if not 0 < self.max_position_pct <= self.max_deployment_pct <= 100:
+            raise ValueError("IBKR paper book deployment percentages are inconsistent")
+        if self.daily_loss_limit_usd <= 0 or self.stop_loss_pct <= 0:
+            raise ValueError("IBKR paper book loss limits must be positive")
+        if self.take_profit_pct <= 0 or self.max_spread_bps <= 0:
+            raise ValueError("IBKR paper book exit/spread limits must be positive")
+        return self
+
+
 class IBKRConfig(BaseModel):
     enabled: bool = False
     # `enabled` is the master switch (connect to IBKR at all). The two books
@@ -1056,6 +1082,16 @@ class IBKRConfig(BaseModel):
     # Quote-session login is independent of execution: "live" permits the
     # structurally simulated ETF pillar to read TWS port 7496, still readonly.
     etf_quote_port: int = 7497
+    multiasset_client_id: int = 3
+    multiasset_paper_enabled: bool = False
+    multiasset_cycle_seconds: int = 900
+    multiasset_refreshes_per_cycle: int = 12
+    multiasset_min_momentum_pct: float = 1.0
+    multiasset_exit_momentum_pct: float = -0.5
+    multiasset_books: dict[str, IBKRMultiAssetBookConfig] = Field(default_factory=lambda: {
+        name: IBKRMultiAssetBookConfig() for name in (
+            "global_etf", "fx", "futures", "international_equity", "options", "bonds")
+    })
     etf_symbols: list[str] = ["SPY", "QQQ", "IWM"]
     etf_paper_budget_usd: float = 5_000.0
     etf_max_entry_usd: float = 250.0
@@ -1088,6 +1124,14 @@ class IBKRConfig(BaseModel):
     def validate_etf_experiment(self):
         if not 1 <= self.etf_quote_port <= 65535:
             raise ValueError("IBKR ETF quote port must be a valid TCP port")
+        expected_books = {"global_etf", "fx", "futures", "international_equity",
+                          "options", "bonds"}
+        if set(self.multiasset_books) != expected_books:
+            raise ValueError("IBKR multi-asset config must define exactly six books")
+        if self.multiasset_client_id in {self.client_id, self.equity_client_id}:
+            raise ValueError("IBKR multi-asset client id must be unique")
+        if self.multiasset_cycle_seconds <= 0 or self.multiasset_refreshes_per_cycle <= 0:
+            raise ValueError("IBKR multi-asset cycle and refresh limits must be positive")
         symbols = [symbol.strip().upper() for symbol in self.etf_symbols]
         if not symbols:
             raise ValueError("IBKR ETF experiment requires at least one symbol")

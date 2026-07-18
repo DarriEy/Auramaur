@@ -253,6 +253,21 @@ ibkr:
   etf_paper_enabled: true
   # TWS is logged into the live account but exposes this read-only API socket.
   etf_quote_port: 7497
+  # Six isolated local paper books. TWS supplies read-only market data only.
+  # Kept off until the multi-asset preflight verifies permissions per book.
+  multiasset_client_id: 3
+  multiasset_paper_enabled: false
+  multiasset_cycle_seconds: 900
+  multiasset_refreshes_per_cycle: 12
+  multiasset_min_momentum_pct: 1.0
+  multiasset_exit_momentum_pct: -0.5
+  multiasset_books:
+    global_etf: {enabled: true, budget_usd: 5000, max_positions: 6, max_position_pct: 12, max_deployment_pct: 60, daily_loss_limit_usd: 100, stop_loss_pct: 5, take_profit_pct: 10, max_spread_bps: 25}
+    fx: {enabled: true, budget_usd: 5000, max_positions: 4, max_position_pct: 10, max_deployment_pct: 40, daily_loss_limit_usd: 75, stop_loss_pct: 2, take_profit_pct: 4, max_spread_bps: 15}
+    futures: {enabled: true, budget_usd: 10000, max_positions: 3, max_position_pct: 15, max_deployment_pct: 40, daily_loss_limit_usd: 150, stop_loss_pct: 3, take_profit_pct: 6, max_spread_bps: 30}
+    international_equity: {enabled: true, budget_usd: 5000, max_positions: 5, max_position_pct: 12, max_deployment_pct: 50, daily_loss_limit_usd: 100, stop_loss_pct: 6, take_profit_pct: 12, max_spread_bps: 50}
+    options: {enabled: true, budget_usd: 3000, max_positions: 3, max_position_pct: 10, max_deployment_pct: 30, daily_loss_limit_usd: 100, stop_loss_pct: 35, take_profit_pct: 50, max_spread_bps: 300}
+    bonds: {enabled: true, budget_usd: 10000, max_positions: 4, max_position_pct: 20, max_deployment_pct: 60, daily_loss_limit_usd: 75, stop_loss_pct: 3, take_profit_pct: 6, max_spread_bps: 100}
   # Multi-asset ETF universe: broad US, sectors, international, rates, real
   # assets, and defensives. Long-only instruments avoid leverage/inverse decay.
   etf_symbols: ["SPY", "QQQ", "IWM", "DIA", "VTI",

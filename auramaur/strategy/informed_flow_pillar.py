@@ -60,7 +60,8 @@ class InformedFlowPillar:
             return 0
         open_count = await self._open_position_count()
         if open_count >= cfg.max_open:
-            log.debug("informed_flow.book_full", open=open_count, cap=cfg.max_open)
+            log.info("informed_flow.cycle", scanned=0, entered=0,
+                     book_full=True, open=open_count, cap=cfg.max_open)
             return 0
         # Scan the NEAR-DATED slice by close-time window, not get_markets() — the
         # /events scan get_markets() uses surfaces only ~18-yr novelty markets
