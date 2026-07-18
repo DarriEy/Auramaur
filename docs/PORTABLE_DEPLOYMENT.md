@@ -82,10 +82,18 @@ Desktop and must not be loaded alongside the legacy native LaunchAgent.
 
 `deploy/backup.sh` uses SQLite's online backup API, integrity-checks the result,
 compresses it, and retains 14 local copies by default. Copy these encrypted to
-off-host object storage. `deploy/offsite-backup.sh` encrypts with an age public
-recipient and uploads through rclone; configure only the public recipient and
+off-host object storage. `deploy/offsite-backup.sh` encrypts with age public
+recipients (space-separated; use at least a primary plus an offline recovery
+recipient) and uploads through rclone; configure only the public recipients and
 remote destination on the VM. `deploy/restore.sh BACKUP` refuses to run while
 Auramaur is active or overwrite an existing DB.
+
+The database is only half the private state. `deploy/offsite-bundle.sh`
+bundles `.env`, `secrets/`, local YAML overrides, Gateway settings, and Claude
+authentication into one age-encrypted tarball and uploads it; run it after any
+credential or config change. `deploy/restore-bundle.sh` stages a bundle into a
+fresh directory for deliberate placement. Identity handling, rotation, and the
+quarterly restore drill are documented in `docs/SECRETS.md`.
 
 The supplied systemd monitor timer checks both containers, the SQLite schema,
 and the authenticated IB Gateway API socket every five minutes. It can post to
@@ -105,8 +113,10 @@ published by this repository.
 
 1. Stage and paper-test NEW with `scripts/migrate_portable.sh stage`.
 2. OLD: `scripts/migrate_portable.sh freeze`, then `export`.
-3. Transfer the verified DB backup, `.env`, `secrets/`, local config, Gateway
-   settings, and Claude authentication through an encrypted channel.
+3. Transfer the verified DB backup plus a `deploy/offsite-bundle.sh` bundle
+   (covers `.env`, `secrets/`, local config, Gateway settings, and Claude
+   authentication) through an encrypted channel; stage on NEW with
+   `deploy/restore-bundle.sh`.
 4. Restore on NEW while stopped. Leave OLD kill-switched.
 5. Start NEW, authenticate Gateway if necessary, and run `deploy/verify.sh`.
 6. Compare account IDs, cash, positions, open orders, and live/paper mode with

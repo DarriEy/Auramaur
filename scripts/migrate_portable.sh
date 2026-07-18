@@ -42,8 +42,8 @@ case "${1:-}" in
     else
       fail "no Auramaur database found"
     fi
-    echo "Export ready. Transfer the newest verified backup plus .env, secrets/,"
-    echo "runtime/config/, runtime/ibgateway/, and Claude credentials separately."
+    echo "Export ready. Transfer the newest verified backup plus a private-state"
+    echo "bundle: deploy/offsite-bundle.sh (see docs/SECRETS.md)."
     ;;
   verify)
     deploy/verify.sh
