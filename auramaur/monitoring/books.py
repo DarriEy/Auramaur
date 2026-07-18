@@ -59,6 +59,12 @@ def _book_modes(settings) -> list[tuple[str, str, str]]:
     ol = settings.oddlot_tender
     rows.append(("oddlot_tender", *paper_mode(
         ol, "EDGAR scan, 99-sh entries, manual tender")))
+    etf = settings.ibkr
+    rows.append((
+        "ibkr_etf_openai", "PAPER" if etf.etf_paper_enabled else "off",
+        (f"{len(etf.etf_models)} cells × {len(etf.etf_symbols)} ETFs, "
+         f"${etf.etf_paper_budget_usd:,.0f}/cell"),
+    ))
     rows.append(("arbitrage",
                  "LIVE" if settings.arbitrage.enabled and settings.is_live
                  else ("paper" if settings.arbitrage.enabled else "off"),
@@ -112,6 +118,9 @@ async def gather_books(db) -> list[dict]:
 
     open_rows = await db.fetchall(
         """SELECT CASE WHEN p.exchange = 'kraken' THEN 'kraken_directional'
+                  WHEN p.market_id LIKE 'ibkr-etf:%:%' THEN
+                    'ibkr_etf_' || substr(p.market_id, 10,
+                      instr(substr(p.market_id, 10), ':') - 1)
                   ELSE COALESCE(
                  (SELECT s.strategy_source FROM signals s
                   WHERE s.market_id = p.market_id

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -951,6 +951,15 @@ class GraduationConfig(BaseModel):
     max_unproven_positions: int = 100
 
 
+class InformationGraduationConfig(BaseModel):
+    """Evidence influence earned from paired source-ablation trials."""
+
+    min_resolved: int = 30
+    min_paired: int = 50
+    min_success_rate: float = 0.98
+    probation_multiplier: float = 0.25
+
+
 class BrokerConfig(BaseModel):
     sync_interval_seconds: int = 60
     use_limit_orders: bool = True
@@ -965,6 +974,25 @@ class KalshiConfig(BaseModel):
     api_key: str = ""
     private_key_path: str = ""
     environment: str = "demo"  # "demo" | "prod"
+
+
+class OpenAIETFModel(BaseModel):
+    """One isolated intelligence-comparison arm for the ETF paper mandate."""
+
+    alias: str
+    model: str
+    effort: Literal["low", "medium", "high"] = "medium"
+
+    @model_validator(mode="after")
+    def validate_identity(self):
+        alias = self.alias.strip().lower()
+        if not alias or not alias.replace("_", "").isalnum():
+            raise ValueError("ETF model alias must contain only letters, numbers, and underscores")
+        if not self.model.strip():
+            raise ValueError("ETF model name must not be empty")
+        self.alias = alias
+        self.model = self.model.strip()
+        return self
 
 
 class IBKRConfig(BaseModel):
@@ -996,6 +1024,70 @@ class IBKRConfig(BaseModel):
     # size to zero — the paper budget is what makes prep trading possible.
     paper_trade: bool = True
     paper_budget_usd: float = 5000.0
+
+    # --- Structurally paper-only broad-market ETF experiment ---
+    etf_paper_enabled: bool = False
+    etf_symbols: list[str] = ["SPY", "QQQ", "IWM"]
+    etf_paper_budget_usd: float = 100_000.0
+    etf_max_entry_usd: float = 5_000.0
+    etf_max_deployment_pct: float = 80.0
+    etf_max_asset_class_pct: float = 30.0
+    etf_max_positions: int = 16
+    etf_daily_loss_limit_usd: float = 2_000.0
+    etf_max_signal_refreshes_per_cycle: int = 4
+    etf_fee_per_order_usd: float = 1.00
+    etf_max_spread_bps: float = 20.0
+    etf_min_prob: float = 0.62
+    etf_exit_prob: float = 0.47
+    etf_min_confidence: str = "MEDIUM"
+    etf_signal_horizon_days: int = 5
+    etf_signal_refresh_hours: float = 6.0
+    etf_cycle_seconds: int = 900
+    etf_stop_loss_pct: float = 5.0
+    etf_take_profit_pct: float = 8.0
+    etf_trailing_stop_pct: float = 3.0
+    etf_reentry_cooldown_hours: float = 24.0
+    etf_models: list[OpenAIETFModel] = [
+        OpenAIETFModel(alias="luna", model="gpt-5.6-luna", effort="low"),
+        OpenAIETFModel(alias="terra", model="gpt-5.6-terra", effort="medium"),
+        OpenAIETFModel(alias="sol", model="gpt-5.6-sol", effort="high"),
+    ]
+    etf_openai_timeout_seconds: int = 120
+    etf_openai_daily_call_limit: int = 100
+
+    @model_validator(mode="after")
+    def validate_etf_experiment(self):
+        symbols = [symbol.strip().upper() for symbol in self.etf_symbols]
+        if not symbols:
+            raise ValueError("IBKR ETF experiment requires at least one symbol")
+        if any(not symbol.isalnum() for symbol in symbols):
+            raise ValueError("IBKR ETF symbols must be non-empty alphanumeric tickers")
+        if len(symbols) != len(set(symbols)):
+            raise ValueError("IBKR ETF symbols must be unique")
+        self.etf_symbols = symbols
+
+        aliases = [arm.alias for arm in self.etf_models]
+        if not aliases:
+            raise ValueError("IBKR ETF experiment requires at least one model arm")
+        if len(aliases) != len(set(aliases)):
+            raise ValueError("IBKR ETF model aliases must be unique")
+        if self.etf_paper_budget_usd <= 0:
+            raise ValueError("IBKR ETF paper budget must be positive")
+        if not 0 < self.etf_max_entry_usd <= self.etf_paper_budget_usd:
+            raise ValueError("IBKR ETF entry cap must be positive and no larger than its budget")
+        if not 0 < self.etf_max_asset_class_pct <= self.etf_max_deployment_pct <= 100:
+            raise ValueError("IBKR ETF asset-class/deployment percentages are inconsistent")
+        if self.etf_max_positions <= 0 or self.etf_max_signal_refreshes_per_cycle <= 0:
+            raise ValueError("IBKR ETF position and refresh limits must be positive")
+        if self.etf_daily_loss_limit_usd <= 0 or self.etf_fee_per_order_usd < 0:
+            raise ValueError("IBKR ETF loss limit must be positive and fees non-negative")
+        if not 0 <= self.etf_exit_prob < self.etf_min_prob <= 1:
+            raise ValueError("IBKR ETF probability thresholds must satisfy exit < entry")
+        if self.etf_openai_daily_call_limit < len(self.etf_models):
+            raise ValueError("IBKR ETF daily OpenAI limit must allow every model arm one call")
+        if self.etf_openai_timeout_seconds <= 0 or self.etf_cycle_seconds <= 0:
+            raise ValueError("IBKR ETF timeout and cycle interval must be positive")
+        return self
 
     # --- Directional equity speculation (gated; no validated edge) ---
     # Mirrors the Kraken directional pillar. Uses its OWN socket connection
@@ -1248,6 +1340,7 @@ class Settings(BaseSettings):
     # API Keys
     anthropic_api_key_primary: str = ""
     anthropic_api_key_secondary: str = ""
+    openai_api_key: str = ""
     polygon_private_key: str = ""
     polymarket_api_key: str = ""
     polymarket_api_secret: str = ""
@@ -1259,6 +1352,10 @@ class Settings(BaseSettings):
     reddit_user_agent: str = "auramaur/0.1"
     twitter_bearer_token: str = ""
     fred_api_key: str = ""
+    bls_api_key: str = ""
+    bea_api_key: str = ""
+    congress_api_key: str = ""
+    eia_api_key: str = ""
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     discord_webhook_url: str = ""
@@ -1333,6 +1430,9 @@ class Settings(BaseSettings):
     technical: TechnicalConfig = Field(default_factory=lambda: TechnicalConfig(**_DEFAULTS.get("technical", {})))
     bias_harvest: BiasHarvestConfig = Field(default_factory=lambda: BiasHarvestConfig(**_DEFAULTS.get("bias_harvest", {})))
     graduation: GraduationConfig = Field(default_factory=lambda: GraduationConfig(**_DEFAULTS.get("graduation", {})))
+    information_graduation: InformationGraduationConfig = Field(
+        default_factory=lambda: InformationGraduationConfig(
+            **_DEFAULTS.get("information_graduation", {})))
     entailment_arb: EntailmentArbConfig = Field(default_factory=lambda: EntailmentArbConfig(**_DEFAULTS.get("entailment_arb", {})))
     cross_venue_arb: CrossVenueArbConfig = Field(default_factory=lambda: CrossVenueArbConfig(**_DEFAULTS.get("cross_venue_arb", {})))
     econ_indicator: EconIndicatorConfig = Field(default_factory=lambda: EconIndicatorConfig(**_DEFAULTS.get("econ_indicator", {})))

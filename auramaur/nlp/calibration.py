@@ -120,7 +120,8 @@ class CalibrationTracker:
             log.warning("calibration.brier_window_load_failed", error=str(e))
 
     async def record_prediction(
-        self, market_id: str, predicted_prob: float, category: str = ""
+        self, market_id: str, predicted_prob: float, category: str = "",
+        *, commit: bool = True,
     ) -> None:
         """Record a new probability prediction for a market.
 
@@ -137,7 +138,8 @@ class CalibrationTracker:
             """,
             (market_id, predicted_prob, category),
         )
-        await self._db.commit()
+        if commit:
+            await self._db.commit()
         log.debug(
             "calibration.recorded",
             market_id=market_id,
@@ -209,6 +211,11 @@ class CalibrationTracker:
             SET actual_outcome = ?, resolved_at = datetime('now')
             WHERE market_id = ? AND actual_outcome IS NULL
             """,
+            (outcome_int, market_id),
+        )
+        await self._db.execute(
+            "UPDATE forecast_snapshots SET actual_outcome=?, resolved_at=datetime('now') "
+            "WHERE market_id=? AND actual_outcome IS NULL",
             (outcome_int, market_id),
         )
         await self._db.commit()

@@ -3,7 +3,10 @@
 from pathlib import Path
 from unittest.mock import patch
 
-from config.settings import Settings
+import pytest
+from pydantic import ValidationError
+
+from config.settings import IBKRConfig, Settings
 
 
 def test_live_gates_present():
@@ -153,6 +156,15 @@ def test_yaml_defaults_safe():
     assert kraken["directional_pairs"] == ["XBTUSDC", "ETHUSDC", "SOLUSDC"]
     assert raw["coinbase"]["paper_enabled"] is True
 
+    ibkr = raw["ibkr"]
+    assert ibkr["etf_paper_enabled"] is True
+    assert ibkr["options_enabled"] is False
+    assert ibkr["auto_fx_enabled"] is False
+    assert {"SPY", "QQQ", "IWM", "TLT", "GLD", "VEA"}.issubset(
+        ibkr["etf_symbols"])
+    assert 0 < ibkr["etf_max_entry_usd"] <= ibkr["etf_paper_budget_usd"]
+    assert [m["alias"] for m in ibkr["etf_models"]] == ["luna", "terra", "sol"]
+
 
 def test_hf_token_exported_to_environ(monkeypatch):
     """hf_token from .env/constructor must reach os.environ — huggingface_hub
@@ -176,3 +188,27 @@ def test_hf_token_empty_leaves_environ_untouched(monkeypatch):
     monkeypatch.delenv("HF_TOKEN", raising=False)
     Settings(hf_token="")
     assert "HF_TOKEN" not in os.environ
+
+
+@pytest.mark.parametrize("override", [
+    {"etf_symbols": ["SPY", "SPY"]},
+    {"etf_paper_budget_usd": 100, "etf_max_entry_usd": 101},
+    {"etf_max_asset_class_pct": 81, "etf_max_deployment_pct": 80},
+    {"etf_min_prob": .40, "etf_exit_prob": .47},
+    {"etf_openai_daily_call_limit": 2},
+])
+def test_ibkr_etf_config_rejects_invalid_experiments(override):
+    with pytest.raises(ValidationError):
+        IBKRConfig(**override)
+
+
+def test_ibkr_etf_config_rejects_duplicate_model_aliases():
+    arm = {"alias": "same", "model": "gpt-test", "effort": "low"}
+    with pytest.raises(ValidationError, match="aliases must be unique"):
+        IBKRConfig(etf_models=[arm, arm])
+
+
+def test_ibkr_etf_model_effort_is_strict():
+    with pytest.raises(ValidationError):
+        IBKRConfig(etf_models=[
+            {"alias": "test", "model": "gpt-test", "effort": "maximum"}])

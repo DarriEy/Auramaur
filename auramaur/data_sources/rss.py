@@ -96,6 +96,9 @@ class RSSSource:
                 published_at = parsedate_to_datetime(published_str)
             except Exception:
                 published_at = datetime.now(timezone.utc)
+                timestamp_quality = "unknown"
+            else:
+                timestamp_quality = "exact"
 
             item_id = hashlib.sha256(f"rss:{link}:{title}".encode()).hexdigest()[:16]
             items.append(
@@ -106,6 +109,7 @@ class RSSSource:
                     content=summary,
                     url=link,
                     published_at=published_at,
+                    timestamp_quality=timestamp_quality,
                 )
             )
 

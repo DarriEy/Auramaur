@@ -230,12 +230,12 @@ class TestIBKRConfig:
     def test_ibkr_config_defaults(self):
         from config.settings import Settings
         s = Settings()
-        # Ready-but-quiet: configured for the live port + paper-trade prep, but
-        # enabled stays false until OPRA data + funds land (~2026-06-08).
+        # Master IBKR venue remains quiet while the separate ETF task uses only
+        # its read-only paper-gateway quote connection.
         assert s.ibkr.enabled is False
         assert s.ibkr.environment == "live"
         assert s.ibkr.readonly is False
-        assert s.ibkr.paper_trade is False  # going straight to live once funded
+        assert s.ibkr.paper_trade is False
         assert s.ibkr.paper_budget_usd == 5000.0
         assert s.ibkr.paper_port == 7497
         assert s.ibkr.live_port == 7496

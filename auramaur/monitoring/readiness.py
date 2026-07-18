@@ -166,6 +166,48 @@ async def check_data_sources(
     since_24h: datetime,
     since_window: datetime,
 ) -> CriterionResult:
+    # v21 records every attempted fetch, including zero-result successes and
+    # errors. This is a real health signal; evidence counts alone cannot tell
+    # an irrelevant query from a dead provider.
+    fetch_rows = await db.fetchall(
+        "SELECT source,status,observed_at FROM source_fetches "
+        "WHERE observed_at >= ? ORDER BY source, observed_at DESC",
+        (since_window.isoformat(),),
+    )
+    if fetch_rows:
+        by_source: dict[str, list] = {}
+        for row in fetch_rows:
+            by_source.setdefault(row["source"], []).append(row)
+        stale = []
+        failing = []
+        for source, attempts in by_source.items():
+            if attempts[0]["observed_at"] < since_24h.isoformat():
+                stale.append(source)
+                continue
+            recent = [r for r in attempts if r["observed_at"] >= since_24h.isoformat()]
+            # Detect a fresh outage even when older successes exist: no success
+            # in the SLA window, or the latest three calls all failed.
+            if (not any(r["status"] == "ok" for r in recent)
+                    or (len(recent) >= 3
+                        and all(r["status"] == "error" for r in recent[:3]))):
+                failing.append(source)
+        if stale or failing:
+            detail = []
+            if stale:
+                detail.append("silent: " + ", ".join(sorted(stale)))
+            if failing:
+                detail.append("all attempts failed: " + ", ".join(sorted(failing)))
+            return CriterionResult(
+                name="data_sources", status="FAIL",
+                value=f"{len(stale) + len(failing)} unhealthy",
+                threshold="recent successful attempts", detail="; ".join(detail),
+            )
+        return CriterionResult(
+            name="data_sources", status="PASS", value=f"{len(by_source)} active",
+            threshold="recent successful attempts",
+        )
+
+    # Compatibility fallback for databases predating durable fetch telemetry.
     rows_window = await db.fetchall(
         "SELECT source, COUNT(*) AS n FROM news_items "
         "WHERE created_at >= ? GROUP BY source",

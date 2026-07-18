@@ -87,6 +87,50 @@ def pnl(paper: bool, backfill: bool):
 
     asyncio.run(_run())
 
+
+@main.command("ibkr-intelligence")
+def ibkr_intelligence():
+    """Compare Luna/Terra/Sol ETF forecast quality and paper P&L."""
+    async def _run():
+        db = Database()
+        await db.connect()
+        try:
+            rows = await db.fetchall(
+                """SELECT f.model_alias, MAX(f.model) AS model,
+                          COUNT(*) AS forecasts,
+                          SUM(CASE WHEN f.actual_outcome IS NOT NULL THEN 1 ELSE 0 END) AS resolved,
+                          AVG(CASE WHEN f.actual_outcome IS NOT NULL THEN
+                            (f.probability-f.actual_outcome)*(f.probability-f.actual_outcome)
+                          END) AS brier,
+                          AVG(CASE WHEN f.actual_outcome IS NOT NULL THEN
+                            CASE WHEN (f.probability >= .5) = (f.actual_outcome = 1)
+                                 THEN 1.0 ELSE 0.0 END END) AS accuracy,
+                          COALESCE((SELECT SUM(l.pnl) FROM pnl_ledger l
+                            WHERE l.strategy_source = 'ibkr_etf_' || f.model_alias
+                              AND l.is_paper = 1), 0) AS realized_pnl,
+                          COALESCE((SELECT COUNT(*) FROM portfolio p
+                            WHERE p.market_id LIKE 'ibkr-etf:' || f.model_alias || ':%'
+                              AND p.is_paper = 1), 0) AS open_positions
+                   FROM ibkr_etf_forecasts f GROUP BY f.model_alias
+                   ORDER BY f.model_alias""")
+            table = Table(title="IBKR ETF OpenAI intelligence comparison")
+            for name, justify in (("cell", "left"), ("model", "left"),
+                                  ("forecasts", "right"), ("resolved", "right"),
+                                  ("accuracy", "right"), ("Brier", "right"),
+                                  ("open", "right"), ("realized P&L", "right")):
+                table.add_column(name, justify=justify)
+            for row in rows:
+                table.add_row(
+                    row["model_alias"], row["model"], str(row["forecasts"]),
+                    str(row["resolved"]),
+                    f"{row['accuracy']:.1%}" if row["accuracy"] is not None else "—",
+                    f"{row['brier']:.3f}" if row["brier"] is not None else "—",
+                    str(row["open_positions"]), f"${row['realized_pnl']:+,.2f}")
+            console.print(table)
+        finally:
+            await db.close()
+    asyncio.run(_run())
+
 @main.command("agent-compare")
 @click.option("--agent-db", default="agent.db",
               help="The Hermes agent-trader's isolated ledger.")

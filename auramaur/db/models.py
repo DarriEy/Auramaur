@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 23
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -178,12 +178,156 @@ CREATE TABLE IF NOT EXISTS source_accuracy (
     updated_at TEXT
 );
 
+-- Durable data lineage.  One run represents one query fan-out; observations
+-- retain what was available at decision time without storing full articles.
+CREATE TABLE IF NOT EXISTS ingestion_runs (
+    id TEXT PRIMARY KEY,
+    query TEXT NOT NULL,
+    category TEXT DEFAULT '',
+    market_id TEXT DEFAULT '',
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    status TEXT NOT NULL DEFAULT 'running',
+    active_sources INTEGER NOT NULL DEFAULT 0,
+    raw_items INTEGER NOT NULL DEFAULT 0,
+    unique_items INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS source_fetches (
+    run_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    status TEXT NOT NULL,
+    item_count INTEGER NOT NULL DEFAULT 0,
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    error TEXT DEFAULT '',
+    observed_at TEXT NOT NULL,
+    PRIMARY KEY (run_id, source)
+);
+
+CREATE TABLE IF NOT EXISTS evidence_observations (
+    run_id TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    title TEXT NOT NULL,
+    url TEXT DEFAULT '',
+    content_hash TEXT NOT NULL,
+    excerpt TEXT DEFAULT '',
+    published_at TEXT,
+    observed_at TEXT NOT NULL,
+    timestamp_quality TEXT NOT NULL DEFAULT 'exact',
+    relevance_score REAL NOT NULL DEFAULT 0,
+    rank_position INTEGER,
+    market_id TEXT DEFAULT '',
+    information_mode TEXT NOT NULL DEFAULT 'production',
+    PRIMARY KEY (run_id, item_id)
+);
+
+CREATE TABLE IF NOT EXISTS information_strategies (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT '',
+    horizon TEXT NOT NULL DEFAULT '',
+    event_type TEXT NOT NULL DEFAULT '',
+    mode TEXT NOT NULL DEFAULT 'shadow',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(source, category, horizon, event_type)
+);
+
+CREATE TABLE IF NOT EXISTS information_trials (
+    id TEXT PRIMARY KEY,
+    strategy_id TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    assignment TEXT NOT NULL CHECK(assignment IN ('control','treatment')),
+    assignment_hash TEXT NOT NULL,
+    market_price REAL NOT NULL,
+    resolved_outcome INTEGER,
+    resolved_at TEXT,
+    UNIQUE(strategy_id, market_id, observed_at)
+);
+
+CREATE TABLE IF NOT EXISTS paired_forecasts (
+    trial_id TEXT NOT NULL,
+    arm TEXT NOT NULL CHECK(arm IN ('control','treatment')),
+    probability REAL NOT NULL CHECK(probability BETWEEN 0 AND 1),
+    forecast_id INTEGER,
+    net_paper_pnl REAL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY(trial_id, arm)
+);
+
+CREATE TABLE IF NOT EXISTS source_contributions (
+    trial_id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    control_brier REAL,
+    treatment_brier REAL,
+    control_log_loss REAL,
+    treatment_log_loss REAL,
+    incremental_brier REAL,
+    incremental_log_loss REAL,
+    incremental_pnl REAL,
+    computed_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS information_graduation_state (
+    strategy_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'registered',
+    influence_multiplier REAL NOT NULL DEFAULT 0,
+    resolved_trials INTEGER NOT NULL DEFAULT 0,
+    paired_forecasts INTEGER NOT NULL DEFAULT 0,
+    incremental_brier REAL,
+    incremental_log_loss REAL,
+    incremental_pnl REAL,
+    source_success_rate REAL,
+    reason TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS forecast_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id TEXT NOT NULL,
+    exchange TEXT NOT NULL,
+    category TEXT DEFAULT '',
+    forecast_purpose TEXT NOT NULL DEFAULT 'analysis',
+    forecast_horizon TEXT DEFAULT '',
+    raw_probability REAL NOT NULL CHECK(raw_probability BETWEEN 0 AND 1),
+    calibrated_probability REAL CHECK(calibrated_probability BETWEEN 0 AND 1),
+    market_yes_price REAL NOT NULL CHECK(market_yes_price BETWEEN 0 AND 1),
+    market_no_price REAL CHECK(market_no_price BETWEEN 0 AND 1),
+    observed_at TEXT NOT NULL,
+    evidence_run_ids TEXT NOT NULL DEFAULT '[]',
+    model TEXT DEFAULT '',
+    strategy_source TEXT DEFAULT 'llm',
+    config_fingerprint TEXT DEFAULT '',
+    actual_outcome INTEGER CHECK(actual_outcome IN (0, 1)),
+    resolved_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_ingestion_started ON ingestion_runs(started_at);
+CREATE INDEX IF NOT EXISTS idx_source_fetches_source_time ON source_fetches(source, observed_at);
+CREATE INDEX IF NOT EXISTS idx_evidence_market_time ON evidence_observations(market_id, observed_at);
+CREATE INDEX IF NOT EXISTS idx_forecast_market_time ON forecast_snapshots(market_id, observed_at);
+CREATE INDEX IF NOT EXISTS idx_forecast_resolved ON forecast_snapshots(actual_outcome, resolved_at);
+
 CREATE TABLE IF NOT EXISTS price_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     market_id TEXT NOT NULL,
     exchange TEXT DEFAULT 'polymarket',
     price REAL NOT NULL,
-    recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    snapshot_key TEXT
+);
+
+CREATE TABLE IF NOT EXISTS price_history_hourly (
+    exchange TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    hour TEXT NOT NULL,
+    open REAL NOT NULL,
+    high REAL NOT NULL,
+    low REAL NOT NULL,
+    close REAL NOT NULL,
+    samples INTEGER NOT NULL,
+    PRIMARY KEY (exchange, market_id, hour)
 );
 
 CREATE TABLE IF NOT EXISTS fills (
@@ -292,7 +436,6 @@ CREATE TABLE IF NOT EXISTS entailment_verdicts (
 
 CREATE INDEX IF NOT EXISTS idx_price_history_market ON price_history(market_id);
 CREATE INDEX IF NOT EXISTS idx_price_history_time ON price_history(recorded_at);
-
 CREATE TABLE IF NOT EXISTS orderbook_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     market_id TEXT NOT NULL,
@@ -333,6 +476,59 @@ CREATE TABLE IF NOT EXISTS ensemble_predictions (
 );
 CREATE INDEX IF NOT EXISTS idx_ensemble_model ON ensemble_predictions(model);
 CREATE INDEX IF NOT EXISTS idx_ensemble_market ON ensemble_predictions(market_id);
+
+CREATE TABLE IF NOT EXISTS ibkr_etf_forecasts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_alias TEXT NOT NULL,
+    model TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    probability REAL NOT NULL,
+    confidence TEXT NOT NULL,
+    thesis TEXT NOT NULL DEFAULT '',
+    risks_json TEXT NOT NULL DEFAULT '[]',
+    reference_price REAL NOT NULL,
+    final_price REAL,
+    actual_outcome INTEGER,
+    opened_at TEXT NOT NULL DEFAULT (datetime('now')),
+    opened_session_date TEXT NOT NULL,
+    horizon_sessions INTEGER NOT NULL,
+    sessions_elapsed INTEGER NOT NULL DEFAULT 0,
+    last_session_date TEXT,
+    due_at TEXT NOT NULL,
+    resolved_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ibkr_etf_forecast_arm
+    ON ibkr_etf_forecasts(model_alias, symbol, due_at);
+
+CREATE TABLE IF NOT EXISTS ibkr_etf_state (
+    model_alias TEXT PRIMARY KEY,
+    refresh_cursor INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS ibkr_etf_cooldowns (
+    model_alias TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    until_epoch REAL NOT NULL,
+    PRIMARY KEY (model_alias, symbol)
+);
+
+CREATE TABLE IF NOT EXISTS ibkr_etf_openai_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_alias TEXT NOT NULL,
+    model TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'started',
+    response_id TEXT DEFAULT '',
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    error TEXT DEFAULT '',
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ibkr_etf_attempt_arm_day
+    ON ibkr_etf_openai_attempts(model_alias, started_at);
 
 CREATE TABLE IF NOT EXISTS position_peaks (
     market_id TEXT PRIMARY KEY,

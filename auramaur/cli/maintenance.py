@@ -12,6 +12,89 @@ from config.settings import Settings
 
 from auramaur.cli._base import console, main
 
+
+@main.command("information-graduation")
+def information_graduation_report():
+    """Report source/category/horizon information graduation cells."""
+    async def _run():
+        from auramaur.information_graduation import InformationGraduation
+
+        db = Database()
+        await db.connect()
+        try:
+            rows = await InformationGraduation(db).report()
+            table = Table(title="Information graduation")
+            for name in ("Source", "Category", "Horizon", "Status", "Influence", "Reason"):
+                table.add_column(name)
+            for row in rows:
+                table.add_row(row["source"], row["category"], row["horizon"],
+                              row["status"], f"{row['influence_multiplier']:.2f}",
+                              row["reason"])
+            console.print(table)
+        finally:
+            await db.close()
+    asyncio.run(_run())
+
+
+@main.command("data-audit")
+def data_audit():
+    """Check point-in-time data contracts and ingestion health."""
+    async def _run():
+        from auramaur.data_quality import audit_data_contracts
+
+        db = Database()
+        await db.connect()
+        try:
+            violations = await audit_data_contracts(db)
+            if not violations:
+                console.print("[green]All data contracts pass.[/]")
+                return
+            table = Table(title="Data contract violations")
+            table.add_column("Contract")
+            table.add_column("Count", justify="right")
+            table.add_column("Detail")
+            for violation in violations:
+                table.add_row(violation.contract, str(violation.count), violation.detail)
+            console.print(table)
+            raise click.ClickException(f"{len(violations)} data contracts failed")
+        finally:
+            await db.close()
+
+    asyncio.run(_run())
+
+
+@main.command("rollup-prices")
+@click.option("--write", is_flag=True, help="Create rollups and prune expired raw rows.")
+@click.option("--raw-days", default=30, show_default=True, type=click.IntRange(min=8))
+@click.option("--rollup-after-days", default=7, show_default=True, type=click.IntRange(min=1))
+def rollup_prices(write: bool, raw_days: int, rollup_after_days: int):
+    """Roll old raw prices into hourly OHLC; defaults to a safe preview."""
+    async def _run():
+        if rollup_after_days > raw_days:
+            raise click.UsageError("--rollup-after-days must be <= --raw-days")
+        db = Database()
+        await db.connect()
+        try:
+            candidate = await db.fetchone(
+                "SELECT COUNT(*) n FROM price_history WHERE recorded_at < datetime('now', ?)",
+                (f"-{raw_days} days",),
+            )
+            n = candidate["n"] if candidate else 0
+            if not write:
+                console.print(f"[bold]DRY RUN[/] {n} raw rows are eligible for pruning; "
+                              f"rows older than {rollup_after_days} days would be rolled up first.")
+                return
+            from auramaur.data_quality import rollup_and_prune_prices
+            rolled, pruned = await rollup_and_prune_prices(
+                db, raw_retention_days=raw_days, rollup_after_days=rollup_after_days,
+            )
+            console.print(f"[green]Price maintenance complete:[/] {rolled} database changes, "
+                          f"{pruned} raw rows pruned.")
+        finally:
+            await db.close()
+
+    asyncio.run(_run())
+
 @main.command("repair-categories")
 @click.option("--write", is_flag=True,
               help="Persist classified categories (default is a dry-run).")
