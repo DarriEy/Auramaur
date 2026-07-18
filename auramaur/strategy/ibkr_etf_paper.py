@@ -411,4 +411,8 @@ class IBKRETFPaperPillar:
                          probability=round(prob, 3), confidence=confidence,
                          spread_bps=round(spread_bps, 2))
         await self._db.commit()
+        # Unconditional cycle log (repo convention, #285): a quiet log must be
+        # distinguishable from a dead task.
+        log.info("ibkr_etf.cycle", model_alias=self._alias,
+                 positions=position_count, entries=entries)
         return entries
