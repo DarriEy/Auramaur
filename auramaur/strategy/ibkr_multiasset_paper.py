@@ -159,7 +159,7 @@ class IBKRMultiAssetPaperBook:
         cfg = self.config
         if not self._settings.ibkr.multiasset_paper_enabled or not cfg.enabled:
             return 0
-        if not self.market_open():
+        if not hasattr(self._client, "is_market_open") and not self.market_open():
             return 0
         positions = await self._positions()
         state = await self._db.fetchone(
@@ -180,16 +180,24 @@ class IBKRMultiAssetPaperBook:
         for spec in selected:
             try:
                 held = positions.get(spec.key)
+                held_con_id = int(held["con_id"]) if held else 0
+                if hasattr(self._client, "is_market_open") and not await self._client.is_market_open(
+                        spec, con_id=held_con_id):
+                    continue
                 quote = (await self._client.get_quote_by_con_id(
-                    spec, int(held["con_id"])) if held
+                    spec, held_con_id) if held
                     else await self._client.get_quote(spec))
                 if quote is None or not self._quote_fresh(quote):
                     continue
+                if held and int(quote.con_id) != held_con_id:
+                    raise RuntimeError(
+                        f"held contract mismatch: expected {held_con_id}, got {quote.con_id}")
                 spread_bps = (quote.ask - quote.bid) / ((quote.ask + quote.bid) / 2) * 10_000
                 fx = await self._client.get_fx_to_usd(spec.currency)
                 if fx is None or spread_bps > cfg.max_spread_bps:
                     continue
-                bars = await self._client.get_daily_bars(spec)
+                bars = (await self._client.get_daily_bars_by_con_id(spec, held_con_id)
+                        if held else await self._client.get_daily_bars(spec))
                 momentum = self._momentum(bars)
                 if momentum is None:
                     continue

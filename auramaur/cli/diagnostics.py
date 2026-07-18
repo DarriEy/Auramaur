@@ -156,18 +156,23 @@ def ibkr_etf_preflight():
 
 
 @main.command("ibkr-multiasset-preflight")
-def ibkr_multiasset_preflight():
+@click.option("--book", "book_names", multiple=True,
+              type=click.Choice(("global_etf", "fx", "futures",
+                                 "international_equity", "options", "bonds")))
+def ibkr_multiasset_preflight(book_names):
     """Verify contract resolution, data, isolation, and schema for six books."""
     import sys
 
     async def _run() -> int:
         from auramaur.monitoring.ibkr_multiasset_preflight import preflight
+        from auramaur.exchange.ibkr_instruments import IBKRBook
 
         settings = Settings()
         db = Database()
         await db.connect()
         try:
-            report = await preflight(settings, db)
+            books = tuple(IBKRBook(name) for name in book_names) or None
+            report = await preflight(settings, db, books=books)
         finally:
             await db.close()
         colour = {"OK": "green", "WARN": "yellow", "BLOCK": "red"}

@@ -1,5 +1,6 @@
 import time
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,12 +26,17 @@ class FakeMarketData:
     async def get_fx_to_usd(self, currency):
         return 1.0
 
+    async def is_market_open(self, spec, *, con_id=0, now=None):
+        return True
+
+    async def get_daily_bars_by_con_id(self, spec, con_id, duration="3 M"):
+        return await self.get_daily_bars(spec, duration)
+
     async def get_quote_by_con_id(self, spec, con_id):
         self.con_ids_requested.append(con_id)
         quote = await self.get_quote(spec)
         return MarketDataQuote(quote.key, quote.bid, quote.ask, quote.timestamp,
-                               con_id, quote.currency, quote.multiplier,
-                               source="held_contract")
+                               con_id, quote.currency, quote.multiplier)
 
 
 @pytest.mark.asyncio
@@ -137,6 +143,9 @@ async def test_open_position_is_marked_by_original_contract_id():
     assert row is not None
     await pillar.run_once()
     assert int(row["con_id"]) in client.con_ids_requested
+    marked = await db.fetchone(
+        "SELECT updated_at, con_id FROM ibkr_paper_positions WHERE book='futures'")
+    assert int(marked["con_id"]) == int(row["con_id"])
     await db.close()
 
 
@@ -162,3 +171,36 @@ def test_futures_calendar_closes_friday_and_reopens_sunday_evening():
     assert not pillar.market_open(datetime(2026, 7, 17, 22, tzinfo=timezone.utc))
     assert not pillar.market_open(datetime(2026, 7, 19, 21, tzinfo=timezone.utc))
     assert pillar.market_open(datetime(2026, 7, 19, 23, tzinfo=timezone.utc))
+
+
+@pytest.mark.asyncio
+async def test_broker_calendar_honours_holiday_and_split_sessions():
+    from auramaur.exchange.ibkr_instruments import BY_BOOK
+    from auramaur.exchange.ibkr_market_data import IBKRReadOnlyMarketData
+
+    class FakeIB:
+        async def reqContractDetailsAsync(self, contract):
+            return [SimpleNamespace(
+                liquidHours=("20260720:CLOSED;"
+                             "20260721:0930-20260721:1130,"
+                             "20260721:1230-20260721:1600"),
+                tradingHours="", timeZoneId="America/New_York")]
+
+    client = IBKRReadOnlyMarketData(Settings())
+    client._ib = FakeIB()
+    client._connected = True
+    contract = SimpleNamespace(conId=123)
+
+    async def resolve(spec):
+        return contract
+
+    client.resolve = resolve
+    spec = BY_BOOK[IBKRBook.GLOBAL_ETF][0]
+    assert not await client.is_market_open(
+        spec, now=datetime(2026, 7, 20, 15, tzinfo=timezone.utc))
+    assert await client.is_market_open(
+        spec, now=datetime(2026, 7, 21, 14, tzinfo=timezone.utc))
+    assert not await client.is_market_open(
+        spec, now=datetime(2026, 7, 21, 16, tzinfo=timezone.utc))
+    assert await client.is_market_open(
+        spec, now=datetime(2026, 7, 21, 18, tzinfo=timezone.utc))
