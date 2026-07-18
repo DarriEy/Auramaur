@@ -12,6 +12,58 @@ from config.settings import Settings
 
 from auramaur.cli._base import console, main
 
+
+@main.command("data-audit")
+def data_audit():
+    """Check point-in-time data contracts without mutating data."""
+    async def _run():
+        from auramaur.data_quality import audit_data_contracts
+
+        db = Database()
+        await db.connect()
+        try:
+            violations = await audit_data_contracts(db)
+            if not violations:
+                console.print("[green]All data contracts pass.[/]")
+                return
+            table = Table(title="Data contract violations")
+            table.add_column("Contract")
+            table.add_column("Count", justify="right")
+            table.add_column("Detail")
+            for violation in violations:
+                table.add_row(violation.contract, str(violation.count), violation.detail)
+            console.print(table)
+            raise click.ClickException(f"{len(violations)} data contracts failed")
+        finally:
+            await db.close()
+
+    asyncio.run(_run())
+
+
+@main.command("information-graduation")
+def information_graduation_report():
+    """Report source/category/horizon information graduation cells."""
+    async def _run():
+        from auramaur.information_graduation import InformationGraduation
+
+        db = Database()
+        await db.connect()
+        try:
+            rows = await InformationGraduation(db).report()
+            table = Table(title="Information graduation")
+            for name in ("Source", "Category", "Horizon", "Status", "Influence", "Reason"):
+                table.add_column(name)
+            for row in rows:
+                table.add_row(
+                    row["source"], row["category"], row["horizon"], row["status"],
+                    f"{row['influence_multiplier']:.2f}", row["reason"],
+                )
+            console.print(table)
+        finally:
+            await db.close()
+
+    asyncio.run(_run())
+
 @main.command("repair-categories")
 @click.option("--write", is_flag=True,
               help="Persist classified categories (default is a dry-run).")

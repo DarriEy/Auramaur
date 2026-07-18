@@ -253,6 +253,63 @@ async def test_data_sources_fail_when_one_silent(db: Database):
     assert "Reddit" in result.detail
 
 
+@pytest.mark.asyncio
+async def test_data_sources_fail_on_three_fresh_errors_after_older_success(db: Database):
+    now = datetime.now(timezone.utc)
+    await db.execute(
+        "INSERT INTO ingestion_runs (id,query,started_at) VALUES ('run','q',?)",
+        ((now - timedelta(days=2)).isoformat(),),
+    )
+    rows = [
+        ("old-ok", "source", "ok", (now - timedelta(days=2)).isoformat()),
+        ("e1", "source", "error", (now - timedelta(minutes=30)).isoformat()),
+        ("e2", "source", "error", (now - timedelta(minutes=20)).isoformat()),
+        ("e3", "source", "error", (now - timedelta(minutes=10)).isoformat()),
+    ]
+    for run_id, source, status, observed in rows:
+        if run_id != "old-ok":
+            await db.execute(
+                "INSERT INTO ingestion_runs (id,query,started_at) VALUES (?, 'q', ?)",
+                (run_id, observed),
+            )
+        await db.execute(
+            "INSERT INTO source_fetches (run_id,source,status,observed_at) VALUES (?,?,?,?)",
+            (run_id if run_id != "old-ok" else "run", source, status, observed),
+        )
+    await db.commit()
+    result = await check_data_sources(
+        db, since_24h=now - timedelta(hours=24), since_window=now - timedelta(days=7),
+    )
+    assert result.status == "FAIL"
+    assert "all attempts failed" in result.detail
+
+
+@pytest.mark.asyncio
+async def test_data_sources_compare_timestamp_instants_not_lexical_strings(db: Database):
+    """A negative offset must be normalized before applying the SLA window."""
+    now = datetime.now(timezone.utc)
+    observed = (now - timedelta(minutes=30)).astimezone(
+        timezone(timedelta(hours=-6))
+    ).isoformat()
+    await db.execute(
+        "INSERT INTO ingestion_runs (id,query,started_at) VALUES ('offset-run','q',?)",
+        (observed,),
+    )
+    await db.execute(
+        "INSERT INTO source_fetches (run_id,source,status,observed_at) "
+        "VALUES ('offset-run','offset-source','ok',?)",
+        (observed,),
+    )
+    await db.commit()
+
+    result = await check_data_sources(
+        db,
+        since_24h=now - timedelta(hours=24),
+        since_window=now - timedelta(days=7),
+    )
+    assert result.status == "PASS"
+
+
 # ---------------------------------------------------------------------------
 # Pass rate
 # ---------------------------------------------------------------------------

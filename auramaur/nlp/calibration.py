@@ -120,7 +120,8 @@ class CalibrationTracker:
             log.warning("calibration.brier_window_load_failed", error=str(e))
 
     async def record_prediction(
-        self, market_id: str, predicted_prob: float, category: str = ""
+        self, market_id: str, predicted_prob: float, category: str = "",
+        *, commit: bool = True,
     ) -> None:
         """Record a new probability prediction for a market.
 
@@ -137,7 +138,8 @@ class CalibrationTracker:
             """,
             (market_id, predicted_prob, category),
         )
-        await self._db.commit()
+        if commit:
+            await self._db.commit()
         log.debug(
             "calibration.recorded",
             market_id=market_id,
@@ -211,8 +213,32 @@ class CalibrationTracker:
             """,
             (outcome_int, market_id),
         )
+        await self._db.execute(
+            "UPDATE forecast_snapshots SET actual_outcome=?, resolved_at=datetime('now') "
+            "WHERE market_id=? AND actual_outcome IS NULL",
+            (outcome_int, market_id),
+        )
         await self._db.commit()
         log.info("calibration.resolved", market_id=market_id, outcome=actual_outcome)
+
+        # Information trials are shadow/paper metadata and never affect the
+        # market resolution itself. Reconcile them after the core calibration
+        # transaction so a trial-accounting failure cannot block settlement.
+        try:
+            from auramaur.information_graduation import InformationGraduation
+            trials = await self._db.fetchall(
+                "SELECT id FROM information_trials "
+                "WHERE market_id=? AND resolved_outcome IS NULL",
+                (market_id,),
+            )
+            ladder = InformationGraduation(self._db)
+            for trial in trials:
+                await ladder.resolve(trial["id"], actual_outcome)
+        except Exception as exc:
+            log.warning(
+                "information_trials.resolve_failed", market_id=market_id,
+                error=str(exc)[:160],
+            )
 
         # Persist realized $ P&L from this market's fills + the outcome, so edge
         # is measurable in dollars (trades.pnl is never populated otherwise).

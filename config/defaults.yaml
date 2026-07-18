@@ -142,6 +142,13 @@ graduation:
   # doesn't get starved by bookkeeping repairs.
   max_unproven_positions: 175
 
+information_graduation:
+  # Shadow sources earn forecast influence, never capital directly.
+  min_resolved: 30
+  min_paired: 50
+  min_success_rate: 0.98
+  probation_multiplier: 0.25
+
 intervals:
   market_scan_seconds: 300
   news_poll_seconds: 120

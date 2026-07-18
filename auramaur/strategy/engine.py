@@ -568,12 +568,14 @@ class TradingEngine(CycleOrchestrationMixin):
         for query in queries:
             items = await self.aggregator.gather(
                 query, limit_per_source=per_query_limit, category=market.category or None,
+                market_id=market.id, market_price=market.outcome_yes_price,
             )
             for item in items:
                 if item.id not in seen_ids:
                     seen_ids.add(item.id)
                     all_evidence.append(item)
         evidence = all_evidence[:self.settings.nlp.evidence_per_source * 3]
+        evidence_run_ids = sorted({e.ingestion_run_id for e in evidence if e.ingestion_run_id})
         source_counts: dict[str, int] = {}
         for e in evidence:
             source_counts[e.source] = source_counts.get(e.source, 0) + 1
@@ -590,9 +592,47 @@ class TradingEngine(CycleOrchestrationMixin):
                 analysis.probability, market.category or ""
             )
             analysis.calibrated_probability = calibrated
-            await self.calibration.record_prediction(
-                market.id, analysis.probability, market.category or ""
+
+        # Store the model view, contemporaneous market benchmark, and legacy
+        # calibration row as one transaction. There can be no orphan forecast
+        # or calibration observation after a partial database failure.
+        import hashlib
+        import json
+        config_payload = self.settings.nlp.model_dump(mode="json")
+        config_fingerprint = hashlib.sha256(
+            json.dumps(config_payload, sort_keys=True, separators=(",", ":"))
+            .encode("utf-8")
+        ).hexdigest()[:16]
+        import uuid
+        savepoint = f"forecast_observation_{uuid.uuid4().hex}"
+        try:
+            await self.db.execute(f"SAVEPOINT {savepoint}")
+            await self.db.execute(
+                """INSERT INTO forecast_snapshots
+                   (market_id,exchange,category,forecast_purpose,raw_probability,
+                    calibrated_probability,market_yes_price,market_no_price,observed_at,
+                    evidence_run_ids,model,strategy_source,config_fingerprint)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (market.id, market.exchange or self.exchange_name or "polymarket",
+                 market.category or "", "analysis", analysis.probability,
+                 analysis.calibrated_probability, market.outcome_yes_price,
+                 market.outcome_no_price, datetime.now(timezone.utc).isoformat(),
+                 json.dumps(evidence_run_ids), getattr(self.analyzer, "_model", ""),
+                 strategy_source, config_fingerprint),
             )
+            if self.calibration is not None:
+                await self.calibration.record_prediction(
+                    market.id, analysis.probability, market.category or "", commit=False,
+                )
+            await self.db.execute(f"RELEASE SAVEPOINT {savepoint}")
+            await self.db.commit()
+        except Exception:
+            try:
+                await self.db.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                await self.db.execute(f"RELEASE SAVEPOINT {savepoint}")
+            except Exception:
+                await self.db.db.rollback()
+            raise
 
         # 2c. Order flow nudge
         if self.flow_tracker is not None:

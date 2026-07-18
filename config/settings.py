@@ -973,6 +973,15 @@ class GraduationConfig(BaseModel):
     max_unproven_positions: int = 100
 
 
+class InformationGraduationConfig(BaseModel):
+    """Evidence influence earned from paired source-ablation trials."""
+
+    min_resolved: int = 30
+    min_paired: int = 50
+    min_success_rate: float = 0.98
+    probation_multiplier: float = 0.25
+
+
 class BrokerConfig(BaseModel):
     sync_interval_seconds: int = 60
     use_limit_orders: bool = True
@@ -1374,6 +1383,10 @@ class Settings(BaseSettings):
     reddit_user_agent: str = "auramaur/0.1"
     twitter_bearer_token: str = ""
     fred_api_key: str = ""
+    bls_api_key: str = ""
+    bea_api_key: str = ""
+    congress_api_key: str = ""
+    eia_api_key: str = ""
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     discord_webhook_url: str = ""
@@ -1448,6 +1461,9 @@ class Settings(BaseSettings):
     technical: TechnicalConfig = Field(default_factory=lambda: TechnicalConfig(**_DEFAULTS.get("technical", {})))
     bias_harvest: BiasHarvestConfig = Field(default_factory=lambda: BiasHarvestConfig(**_DEFAULTS.get("bias_harvest", {})))
     graduation: GraduationConfig = Field(default_factory=lambda: GraduationConfig(**_DEFAULTS.get("graduation", {})))
+    information_graduation: InformationGraduationConfig = Field(
+        default_factory=lambda: InformationGraduationConfig(
+            **_DEFAULTS.get("information_graduation", {})))
     entailment_arb: EntailmentArbConfig = Field(default_factory=lambda: EntailmentArbConfig(**_DEFAULTS.get("entailment_arb", {})))
     cross_venue_arb: CrossVenueArbConfig = Field(default_factory=lambda: CrossVenueArbConfig(**_DEFAULTS.get("cross_venue_arb", {})))
     econ_indicator: EconIndicatorConfig = Field(default_factory=lambda: EconIndicatorConfig(**_DEFAULTS.get("econ_indicator", {})))
