@@ -26,7 +26,7 @@ def _settings(*, is_live=False, readonly=False, cap=50.0):
             readonly=readonly,
             environment="live",
             host="127.0.0.1",
-            paper_port=7497,
+            paper_port=4002,
             live_port=7496,
             equity_client_id=2,
             market_data_type=3,
@@ -49,7 +49,7 @@ async def test_forced_paper_quote_connection_ignores_shared_live_defaults(monkey
     monkeypatch.setitem(sys.modules, "ib_async", fake)
     client = IBKREquityClient(_settings(readonly=False), force_paper_readonly=True)
     await client._ensure_connected()
-    assert captured["port"] == 7497
+    assert captured["port"] == 4002
     assert captured["readonly"] is True
 
 
