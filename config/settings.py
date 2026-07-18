@@ -533,11 +533,17 @@ class LongHorizonConfig(BaseModel):
 class AgentTraderModel(BaseModel):
     """One experiment arm of the intelligence-cap A/B: a model identity plus
     the CLI effort it runs at. ``alias`` names the attribution cell
-    (``agent_trader_<alias>``) — keep it stable or the cell's history splits."""
+    (``agent_trader_<alias>``) — keep it stable or the cell's history splits.
+
+    ``provider``: 'claude' arms run through the Max+ CLI (zero marginal
+    cost); 'gemini' arms call the REST API (PAID per token — their usage is
+    metered into agent_trader_costs so each arm's record can be judged net
+    of its own intelligence bill; the operator's cost-inclusive rule)."""
 
     alias: str
     model: str
     effort: str = "medium"
+    provider: str = "claude"  # 'claude' | 'gemini'
 
 
 class AgentTraderConfig(BaseModel):
@@ -563,7 +569,23 @@ class AgentTraderConfig(BaseModel):
         AgentTraderModel(alias="haiku", model="claude-haiku-4-5"),
         AgentTraderModel(alias="sonnet", model="claude-sonnet-5"),
         AgentTraderModel(alias="opus", model="claude-opus-4-8"),
+        AgentTraderModel(alias="gflash", model="gemini-3.1-flash-preview",
+                         provider="gemini"),
+        AgentTraderModel(alias="g35flash", model="gemini-3.5-flash",
+                         provider="gemini"),
+        AgentTraderModel(alias="gpro", model="gemini-3.1-pro-preview",
+                         provider="gemini"),
     ]
+    # Gemini arms: daily REST-call ceiling across all gemini arms (paid API,
+    # independent of the Claude paced pool) and per-model $/1M-token prices
+    # [input, output] for the cost meter. Prices are config, not gospel —
+    # update from the current rate card.
+    gemini_daily_call_limit: int = 30
+    gemini_price_per_mtok: dict[str, list[float]] = {
+        "gemini-3.1-flash-preview": [0.30, 2.50],
+        "gemini-3.5-flash": [0.50, 3.50],
+        "gemini-3.1-pro-preview": [2.00, 12.00],
+    }
     scan_limit: int = 200
     markets_per_cycle: int = 10
     max_entries_per_cycle: int = 2
