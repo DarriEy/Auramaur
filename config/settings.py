@@ -571,6 +571,8 @@ class AgentTraderConfig(BaseModel):
         AgentTraderModel(alias="opus", model="claude-opus-4-8"),
         AgentTraderModel(alias="gflash", model="gemini-3.1-flash-preview",
                          provider="gemini"),
+        AgentTraderModel(alias="g35flash", model="gemini-3.5-flash",
+                         provider="gemini"),
         AgentTraderModel(alias="gpro", model="gemini-3.1-pro-preview",
                          provider="gemini"),
     ]
@@ -581,6 +583,7 @@ class AgentTraderConfig(BaseModel):
     gemini_daily_call_limit: int = 30
     gemini_price_per_mtok: dict[str, list[float]] = {
         "gemini-3.1-flash-preview": [0.30, 2.50],
+        "gemini-3.5-flash": [0.50, 3.50],
         "gemini-3.1-pro-preview": [2.00, 12.00],
     }
     scan_limit: int = 200

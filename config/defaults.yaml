@@ -581,6 +581,9 @@ agent_trader:
     - alias: gflash
       model: gemini-3.1-flash-preview
       provider: gemini
+    - alias: g35flash
+      model: gemini-3.5-flash
+      provider: gemini
     - alias: gpro
       model: gemini-3.1-pro-preview
       provider: gemini
@@ -600,6 +603,7 @@ agent_trader:
   gemini_daily_call_limit: 30   # across all gemini arms; independent of the Claude pool
   gemini_price_per_mtok:        # $/1M tokens [input, output] — update from the rate card
     gemini-3.1-flash-preview: [0.30, 2.50]
+    gemini-3.5-flash: [0.50, 3.50]
     gemini-3.1-pro-preview: [2.00, 12.00]
 
 term_structure:
