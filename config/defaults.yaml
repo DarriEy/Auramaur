@@ -275,7 +275,9 @@ kraken:
   max_order_usd: 30.0
   # Treasury pillar (always-on when enabled)
   treasury_interval_seconds: 300
-  auto_convert: true
+  # Keep the Kraken trial entirely observational/validate-only. Re-enable
+  # treasury conversion separately after the directional paper book graduates.
+  auto_convert: false
   target_usdc: 50.0
   fiat_assets: ["ZCAD", "ZUSD", "ZEUR"]
   refill_cash_floor: 20.0
@@ -289,15 +291,12 @@ kraken:
   # hold USDC, so USDC pairs are the fundable set; USD/USDT/EUR pairs need a
   # balance in that quote. Kraken spot is always 2-asset (base/quote) — no
   # multi-leg pairs. Budget caps exposure regardless of list length.
-  # De-risked set: liquid large-caps only for NEW entries. The thinner mid/meme
-  # names were dropped to cut churn-on-illiquidity. NOTE: pairs we currently still
-  # hold (XTZ, MANA, APE, VET, XDG, SHIB, TON) are kept in the list ON PURPOSE so
-  # they exit gracefully via the (now-enabled) take-profit / stop / momentum logic
-  # rather than being force-market-sold at a loss as orphans. They drop off once
-  # closed; the $150 budget keeps new exposure capped meanwhile.
-  directional_pairs: ["XBTUSDC", "ETHUSDC", "SOLUSDC", "XRPUSDC", "ADAUSDC", "AVAXUSDC",
-    "DOTUSDC", "LINKUSDC", "LTCUSDC", "BCHUSDC", "ATOMUSDC",
-    "TONUSDC", "XTZUSDC", "MANAUSDC", "APEUSDC", "VETUSDC", "XDGUSDC", "SHIBUSDC"]
+  # Paper allowlist: three liquid, well-covered large caps. Expand only after
+  # the calibration/PnL report shows a durable net-positive paper edge.
+  directional_pairs: ["XBTUSDC", "ETHUSDC", "SOLUSDC"]
+  # A reduced paper allowlist must never liquidate real legacy holdings that are
+  # outside it. Orphans remain visible in logs and can be handled deliberately.
+  directional_liquidate_orphans: false
   # Asymmetric long bias (more bullish): enter on a +2% up-move, exit only on a
   # -4% down-move so winners ride longer. (directional_momentum_pct kept as the
   # legacy symmetric fallback.)
@@ -311,21 +310,16 @@ kraken:
   # 0W/7L: every position decayed back into a momentum/stop loss. This re-enables
   # profit-taking so the book can actually close trades green.
   directional_take_profit_pct: 4.0
-  # Max total open speculative exposure. WIND-DOWN as of 2026-06-09: the live
-  # book went 0W/20L on round trips with fees ($14.70) exceeding gross edge.
-  # Budget 0 blocks ALL new entries (entries are budget-gated) while exits
-  # (take-profit/stop/momentum) stay LIVE, so the ~$480 of open positions close
-  # gracefully. Do NOT use directional_llm_paper for wind-down — the paper flag
-  # forces EXITS into validate-only too, which would strand the held coins while
-  # the tracker simulates closes. Re-fund only behind a redesigned, validated edge.
-  directional_budget_usd: 0.0
+  # Paper exposure ceiling: at most two $30 simulated positions. This is a
+  # measurement budget, not authorization to deploy live capital.
+  directional_budget_usd: 60.0
   # LLM/news-driven directional signal. Price-only momentum backtested net-negative
   # in every variant; this gates entries on the bot's proven news->LLM crypto read
   # (P(up) over a multi-day horizon) instead. OFF by default; PAPER-forced when on
   # (validate-only orders) until the paper record proves edge — then set
   # directional_llm_paper: false to go live. Inspect with `auramaur kraken signal`.
   directional_llm_enabled: true
-  directional_llm_paper: false   # LIVE — user-authorized 2026-06-06 (guardrails: $150 budget, $30/order, 12% stop)
+  directional_llm_paper: true    # force validate-only orders, even if other venues run live
   directional_llm_min_prob: 0.60
   directional_llm_exit_prob: 0.45
   directional_llm_min_confidence: "MEDIUM"
