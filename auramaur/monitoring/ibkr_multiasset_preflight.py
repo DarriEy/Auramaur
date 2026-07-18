@@ -66,8 +66,8 @@ async def preflight(settings, db, *, client=None, timeout_seconds: int = 30,
                 age = time.time() - float(quote.timestamp)
                 if age < 0 or age > cfg.multiasset_max_quote_age_seconds:
                     return f"{spec.key}: stale BBO ({age:.0f}s old)", None, None
-                source = getattr(quote, "source", "ibkr")
-                if source != "ibkr":
+                source = getattr(quote, "source", "ibkr_unknown")
+                if source != "ibkr_live":
                     return f"{spec.key}: non-executable {source} quote", source, None
                 return None, source, None
             except Exception as exc:  # noqa: BLE001

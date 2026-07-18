@@ -37,6 +37,11 @@ def test_gather_books_attribution_and_modes():
             "('p1', 'polymarket', 'BUY', 10, 0.50, 0.55, 0), "
             "('p2', 'polymarket', 'BUY', 10, 0.86, 0.86, 1), "
             "('XBTUSDC', 'kraken', 'BUY', 0.001, 70000, 70000, 0)")
+        await db.execute(
+            "INSERT INTO ibkr_paper_ledger (book, kind, pnl_usd, source_ref) VALUES "
+            "('fx', 'trade', 5, 'ibkr-win'), "
+            "('fx', 'trade', -2, 'ibkr-loss'), "
+            "('fx', 'commission', -1, 'ibkr-fee')")
         await db.commit()
 
         books = {b["book"]: b for b in await gather_books(db)}
@@ -44,6 +49,9 @@ def test_gather_books_attribution_and_modes():
         assert books["bias_harvest"]["open_paper_n"] == 1
         assert books["bias_harvest"]["paper_pnl"] == 2.0
         assert books["kraken_directional"]["open_n"] == 1  # via exchange, not signals
+        assert books["ibkr_fx"]["paper_n"] == 2
+        assert books["ibkr_fx"]["paper_pnl"] == 2
+        assert books["ibkr_fx"]["win_pct"] == 50
 
         # Renders without error.
         render_books_table(list(books.values()))

@@ -31,7 +31,7 @@ class MarketDataQuote:
     con_id: int
     currency: str
     multiplier: float
-    source: str = "ibkr"
+    source: str = "ibkr_live"
 
 
 class IBKRReadOnlyMarketData:
@@ -49,11 +49,12 @@ class IBKRReadOnlyMarketData:
         self._trading_hours: dict[int, tuple[str, str, float]] = {}
 
     async def _ensure_connected(self) -> None:
-        if self._connected and self._ib is not None:
+        if self._connection_alive():
             return
         async with self._connect_lock:
-            if self._connected and self._ib is not None:
+            if self._connection_alive():
                 return
+            self._connected = False
             if time.monotonic() < self._cooldown_until:
                 raise ConnectionError("IBKR multi-asset connection on cooldown")
             from ib_async import IB
@@ -61,6 +62,9 @@ class IBKRReadOnlyMarketData:
             cfg = self._settings.ibkr
             try:
                 self._ib = IB()
+                disconnected = getattr(self._ib, "disconnectedEvent", None)
+                if disconnected is not None:
+                    disconnected += self._on_disconnected
                 await self._ib.connectAsync(
                     host=cfg.host,
                     port=cfg.etf_quote_port,
@@ -77,6 +81,17 @@ class IBKRReadOnlyMarketData:
                 self._ib = None
                 self._cooldown_until = time.monotonic() + 300
                 raise
+
+    def _connection_alive(self) -> bool:
+        if not self._connected or self._ib is None:
+            return False
+        probe = getattr(self._ib, "isConnected", None)
+        return bool(probe()) if callable(probe) else True
+
+    def _on_disconnected(self, *_args: object) -> None:
+        self._connected = False
+        self._contracts.clear()
+        self._trading_hours.clear()
 
     async def close(self) -> None:
         if self._ib is not None:
@@ -317,9 +332,16 @@ class IBKRReadOnlyMarketData:
             if not math.isfinite(timestamp):
                 return None
             multiplier = spec.multiplier
+            market_data_type = int(getattr(ticker, "marketDataType", 0) or 0)
+            source = {
+                1: "ibkr_live",
+                2: "ibkr_frozen",
+                3: "ibkr_delayed",
+                4: "ibkr_delayed_frozen",
+            }.get(market_data_type, "ibkr_unknown")
             return MarketDataQuote(spec.key, bid, ask, timestamp,
                                    int(getattr(contract, "conId", 0)),
-                                   spec.currency, multiplier)
+                                   spec.currency, multiplier, source)
         except Exception as exc:  # noqa: BLE001
             if self._is_pacing_error(exc):
                 raise

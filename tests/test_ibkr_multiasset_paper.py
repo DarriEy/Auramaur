@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from auramaur.db.database import Database
-from auramaur.exchange.ibkr_instruments import ContractKind, IBKRBook
+from auramaur.exchange.ibkr_instruments import BY_BOOK, ContractKind, IBKRBook
 from auramaur.exchange.ibkr_market_data import MarketDataQuote
 from auramaur.strategy.ibkr_multiasset_paper import IBKRMultiAssetPaperBook
 from config.settings import Settings
@@ -58,7 +58,7 @@ async def test_all_six_books_write_only_isolated_paper_tables():
     assert {row["book"] for row in rows} == {book.value for book in IBKRBook}
     assert (await db.fetchone("SELECT COUNT(*) AS n FROM ibkr_paper_fills"))["n"] == 6
     assert (await db.fetchone(
-        "SELECT COUNT(*) AS n FROM ibkr_paper_fills WHERE price_source='ibkr'"))["n"] == 6
+        "SELECT COUNT(*) AS n FROM ibkr_paper_fills WHERE price_source='ibkr_live'"))["n"] == 6
     # The shared prediction-market wallet is not touched.
     assert (await db.fetchone("SELECT COUNT(*) AS n FROM cost_basis"))["n"] == 0
     assert (await db.fetchone("SELECT COUNT(*) AS n FROM pnl_ledger"))["n"] == 0
@@ -121,6 +121,80 @@ async def test_stale_quote_cannot_create_fill():
     pillar.market_open = lambda now=None: True
     assert await pillar.run_once() == 0
     assert (await db.fetchone("SELECT COUNT(*) AS n FROM ibkr_paper_fills"))["n"] == 0
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_delayed_quote_cannot_create_fill():
+    class DelayedMarketData(FakeMarketData):
+        async def get_quote(self, spec):
+            quote = await super().get_quote(spec)
+            return MarketDataQuote(quote.key, quote.bid, quote.ask, quote.timestamp,
+                                   quote.con_id, quote.currency, quote.multiplier,
+                                   "ibkr_delayed")
+
+    db = Database(":memory:")
+    await db.connect()
+    settings = Settings()
+    settings.ibkr.multiasset_paper_enabled = True
+    pillar = IBKRMultiAssetPaperBook(
+        settings, DelayedMarketData(), db, IBKRBook.GLOBAL_ETF)
+    assert await pillar.run_once() == 0
+    assert (await db.fetchone("SELECT COUNT(*) AS n FROM ibkr_paper_fills"))["n"] == 0
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_stop_executes_during_spread_and_history_dislocation():
+    class DislocatedMarketData(FakeMarketData):
+        async def get_quote_by_con_id(self, spec, con_id):
+            return MarketDataQuote(spec.key, 80, 120, time.time(), con_id,
+                                   spec.currency, spec.multiplier)
+
+        async def get_fx_to_usd(self, currency):
+            return None
+
+        async def get_daily_bars_by_con_id(self, spec, con_id, duration="3 M"):
+            raise AssertionError("hard stops must not wait for history")
+
+    db = Database(":memory:")
+    await db.connect()
+    settings = Settings()
+    settings.ibkr.multiasset_paper_enabled = True
+    spec = BY_BOOK[IBKRBook.GLOBAL_ETF][0]
+    seed = IBKRMultiAssetPaperBook(settings, FakeMarketData(), db, IBKRBook.GLOBAL_ETF)
+    quote = await FakeMarketData().get_quote(spec)
+    await seed._fill(spec, quote, "BUY", 1, 1.0)
+    pillar = IBKRMultiAssetPaperBook(
+        settings, DislocatedMarketData(), db, IBKRBook.GLOBAL_ETF)
+    await pillar.run_once()
+    assert await db.fetchone(
+        "SELECT 1 FROM ibkr_paper_positions WHERE instrument_key = ?", (spec.key,)) is None
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_disabled_held_instrument_is_still_managed_and_exited():
+    db = Database(":memory:")
+    await db.connect()
+    settings = Settings()
+    settings.ibkr.multiasset_paper_enabled = True
+    spec = BY_BOOK[IBKRBook.GLOBAL_ETF][0]
+    seed = IBKRMultiAssetPaperBook(settings, FakeMarketData(), db, IBKRBook.GLOBAL_ETF)
+    quote = await FakeMarketData().get_quote(spec)
+    await seed._fill(spec, quote, "BUY", 1, 1.0)
+    settings.ibkr.multiasset_disabled_instruments = [spec.key]
+
+    class StopMarketData(FakeMarketData):
+        async def get_quote_by_con_id(self, held_spec, con_id):
+            return MarketDataQuote(held_spec.key, 80, 81, time.time(), con_id,
+                                   held_spec.currency, held_spec.multiplier)
+
+    pillar = IBKRMultiAssetPaperBook(
+        settings, StopMarketData(), db, IBKRBook.GLOBAL_ETF)
+    await pillar.run_once()
+    assert await db.fetchone(
+        "SELECT 1 FROM ibkr_paper_positions WHERE instrument_key = ?", (spec.key,)) is None
     await db.close()
 
 

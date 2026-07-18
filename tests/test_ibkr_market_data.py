@@ -80,3 +80,53 @@ async def test_concurrent_probes_establish_only_one_socket(monkeypatch):
     client = IBKRReadOnlyMarketData(Settings(), client_id=97)
     await asyncio.gather(*(client._ensure_connected() for _ in range(20)))
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_stale_socket_reconnects(monkeypatch):
+    instances = []
+
+    class FakeIB:
+        def __init__(self):
+            self.alive = False
+            instances.append(self)
+
+        async def connectAsync(self, **kwargs):
+            self.alive = True
+
+        def isConnected(self):
+            return self.alive
+
+        def reqMarketDataType(self, value):
+            pass
+
+    module = types.ModuleType("ib_async")
+    module.IB = FakeIB
+    monkeypatch.setitem(sys.modules, "ib_async", module)
+    client = IBKRReadOnlyMarketData(Settings(), client_id=97)
+    await client._ensure_connected()
+    instances[0].alive = False
+    await client._ensure_connected()
+    assert len(instances) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("market_data_type,source", [
+    (1, "ibkr_live"), (2, "ibkr_frozen"), (3, "ibkr_delayed"),
+    (4, "ibkr_delayed_frozen"),
+])
+async def test_quote_provenance_comes_from_ibkr_market_data_type(
+        market_data_type, source):
+    now = datetime.now(timezone.utc)
+    ticker = SimpleNamespace(bid=100, ask=101, time=now,
+                             marketDataType=market_data_type)
+
+    class FakeIB:
+        async def reqTickersAsync(self, contract):
+            return [ticker]
+
+    client = IBKRReadOnlyMarketData(Settings())
+    client._ib = FakeIB()
+    spec = BY_BOOK[IBKRBook.GLOBAL_ETF][0]
+    quote = await client._quote_contract(spec, SimpleNamespace(conId=123))
+    assert quote.source == source
