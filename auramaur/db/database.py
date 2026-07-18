@@ -110,6 +110,8 @@ class Database:
             await self._migrate_v22_to_v23()
         if from_version < 24:
             await self._migrate_v23_to_v24()
+        if from_version < 25:
+            await self._migrate_v24_to_v25()
 
     async def _migrate_v1_to_v2(self) -> None:
         """Add category to calibration, add new tables."""
@@ -574,12 +576,33 @@ class Database:
             try:
                 await self._db.execute(
                     f"ALTER TABLE {table} ADD COLUMN price_source TEXT "
-                    "NOT NULL DEFAULT 'ibkr'")
-            except Exception:
-                pass
+                    "NOT NULL DEFAULT 'ibkr_unknown'")
+            except aiosqlite.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+        for table in ("ibkr_paper_positions", "ibkr_paper_fills"):
+            columns = await self.fetchall(f"PRAGMA table_info({table})")
+            if "price_source" not in {row["name"] for row in columns}:
+                raise RuntimeError(f"migration did not add {table}.price_source")
         await self._db.execute("UPDATE schema_version SET version = 24")
         await self._db.commit()
         log.info("database.migrated", from_version=23, to_version=24)
+
+    async def _migrate_v24_to_v25(self) -> None:
+        """Persist enough instrument identity to manage catalog orphans."""
+        try:
+            await self._db.execute(
+                "ALTER TABLE ibkr_paper_positions ADD COLUMN "
+                "instrument_spec_json TEXT NOT NULL DEFAULT ''")
+        except aiosqlite.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+        columns = await self.fetchall("PRAGMA table_info(ibkr_paper_positions)")
+        if "instrument_spec_json" not in {row["name"] for row in columns}:
+            raise RuntimeError("migration did not add instrument_spec_json")
+        await self._db.execute("UPDATE schema_version SET version = 25")
+        await self._db.commit()
+        log.info("database.migrated", from_version=24, to_version=25)
 
     async def _migrate_v11_to_v12(self) -> None:
         """Add strategy_source column to signals and trades for hybrid mode attribution."""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, time as wall_time, timezone
+import json
 import math
 import time
 from uuid import uuid4
@@ -10,7 +11,9 @@ from zoneinfo import ZoneInfo
 
 import structlog
 
-from auramaur.exchange.ibkr_instruments import BY_BOOK, ContractKind, IBKRBook
+from auramaur.exchange.ibkr_instruments import (
+    BY_BOOK, BY_KEY, ContractKind, IBKRBook, InstrumentSpec,
+)
 from auramaur.strategy.protocols import ExecutionMode
 
 log = structlog.get_logger()
@@ -86,8 +89,28 @@ class IBKRMultiAssetPaperBook:
 
     def _quote_fresh(self, quote) -> bool:
         age = time.time() - float(quote.timestamp)
-        return (getattr(quote, "source", "ibkr") == "ibkr"
+        return (getattr(quote, "source", "") == "ibkr_live"
                 and 0 <= age <= self._settings.ibkr.multiasset_max_quote_age_seconds)
+
+    @staticmethod
+    def _serialize_spec(spec: InstrumentSpec) -> str:
+        values = {name: getattr(spec, name) for name in spec.__dataclass_fields__}
+        values["book"] = spec.book.value
+        values["kind"] = spec.kind.value
+        return json.dumps(values, sort_keys=True)
+
+    @staticmethod
+    def _position_spec(row) -> InstrumentSpec | None:
+        known = BY_KEY.get(row["instrument_key"])
+        if known is not None:
+            return known
+        raw = row["instrument_spec_json"]
+        if not raw:
+            return None
+        values = json.loads(raw)
+        values["book"] = IBKRBook(values["book"])
+        values["kind"] = ContractKind(values["kind"])
+        return InstrumentSpec(**values)
 
     @staticmethod
     def _momentum(bars) -> float | None:
@@ -141,10 +164,12 @@ class IBKRMultiAssetPaperBook:
             await self._db.execute(
                 """INSERT INTO ibkr_paper_positions
                    (book, instrument_key, con_id, currency, quantity, multiplier,
-                    fx_to_usd, avg_cost, current_price, price_source)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    fx_to_usd, avg_cost, current_price, price_source,
+                    instrument_spec_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (self.book.value, spec.key, quote.con_id, spec.currency, quantity,
-                 quote.multiplier, fx, price, price, quote.source))
+                 quote.multiplier, fx, price, price, quote.source,
+                 self._serialize_spec(spec)))
         else:
             pnl = (price - float(entry_price)) * quantity * quote.multiplier * fx
             await self._db.execute(
@@ -159,19 +184,31 @@ class IBKRMultiAssetPaperBook:
         cfg = self.config
         if not self._settings.ibkr.multiasset_paper_enabled or not cfg.enabled:
             return 0
-        if not self.market_open():
+        if not hasattr(self._client, "is_market_open") and not self.market_open():
             return 0
         positions = await self._positions()
         state = await self._db.fetchone(
             "SELECT refresh_cursor FROM ibkr_paper_state WHERE book = ?",
             (self.book.value,))
         cursor = int(state["refresh_cursor"] or 0) if state else 0
-        universe = BY_BOOK[self.book]
+        disabled = set(self._settings.ibkr.multiasset_disabled_instruments)
+        universe = tuple(spec for spec in BY_BOOK[self.book]
+                         if spec.key not in disabled)
+        held_specs = {}
+        for key, row in positions.items():
+            spec = self._position_spec(row)
+            if spec is None:
+                log.error("ibkr_multiasset.unmanageable_orphan", book=self.book.value,
+                          key=key)
+                continue
+            held_specs[key] = spec
+        if not universe and not held_specs:
+            return 0
         count = min(len(universe), self._settings.ibkr.multiasset_refreshes_per_cycle)
         selected = [universe[(cursor + i) % len(universe)] for i in range(count)]
         # Open positions are always managed, even when outside the refresh slice.
         keys = {spec.key for spec in selected}
-        selected.extend(spec for spec in universe if spec.key in positions and spec.key not in keys)
+        selected.extend(spec for key, spec in held_specs.items() if key not in keys)
         # Mark/manage every held position before considering new risk.
         selected.sort(key=lambda spec: spec.key not in positions)
         unmarked_positions = set(positions)
@@ -180,34 +217,51 @@ class IBKRMultiAssetPaperBook:
         for spec in selected:
             try:
                 held = positions.get(spec.key)
+                held_con_id = int(held["con_id"]) if held else 0
+                if hasattr(self._client, "is_market_open") and not await self._client.is_market_open(
+                        spec, con_id=held_con_id):
+                    continue
                 quote = (await self._client.get_quote_by_con_id(
-                    spec, int(held["con_id"])) if held
+                    spec, held_con_id) if held
                     else await self._client.get_quote(spec))
                 if quote is None or not self._quote_fresh(quote):
                     continue
-                spread_bps = (quote.ask - quote.bid) / ((quote.ask + quote.bid) / 2) * 10_000
+                if held and int(quote.con_id) != held_con_id:
+                    raise RuntimeError(
+                        f"held contract mismatch: expected {held_con_id}, got {quote.con_id}")
                 fx = await self._client.get_fx_to_usd(spec.currency)
-                if fx is None or spread_bps > cfg.max_spread_bps:
-                    continue
-                bars = await self._client.get_daily_bars(spec)
-                momentum = self._momentum(bars)
-                if momentum is None:
-                    continue
                 if held:
+                    # Protective exits depend only on an executable live quote.
+                    # Use the entry FX snapshot if the cross is temporarily absent.
+                    mark_fx = float(fx if fx is not None else held["fx_to_usd"])
                     entry = float(held["avg_cost"])
                     gain_pct = (quote.bid / entry - 1) * 100
-                    pnl = (quote.bid - entry) * float(held["quantity"]) * quote.multiplier * fx
+                    pnl = ((quote.bid - entry) * float(held["quantity"])
+                           * quote.multiplier * mark_fx)
                     await self._db.execute(
                         """UPDATE ibkr_paper_positions SET current_price=?,
                            unrealized_pnl_usd=?, price_source=?, updated_at=datetime('now')
                            WHERE book=? AND instrument_key=?""",
                         (quote.bid, pnl, quote.source, self.book.value, spec.key))
                     unmarked_positions.discard(spec.key)
-                    if (gain_pct <= -cfg.stop_loss_pct or gain_pct >= cfg.take_profit_pct
-                            or momentum <= self._settings.ibkr.multiasset_exit_momentum_pct):
+                    hard_exit = (gain_pct <= -cfg.stop_loss_pct
+                                 or gain_pct >= cfg.take_profit_pct)
+                    momentum_exit = False
+                    if not hard_exit:
+                        bars = await self._client.get_daily_bars_by_con_id(spec, held_con_id)
+                        momentum = self._momentum(bars)
+                        momentum_exit = (momentum is not None and momentum <=
+                                         self._settings.ibkr.multiasset_exit_momentum_pct)
+                    if hard_exit or momentum_exit:
                         await self._fill(spec, quote, "SELL", float(held["quantity"]),
-                                         fx, entry_price=entry)
+                                         mark_fx, entry_price=entry)
                         positions.pop(spec.key, None)
+                    continue
+                spread_bps = (quote.ask - quote.bid) / ((quote.ask + quote.bid) / 2) * 10_000
+                if fx is None or spread_bps > cfg.max_spread_bps:
+                    continue
+                momentum = self._momentum(await self._client.get_daily_bars(spec))
+                if momentum is None:
                     continue
                 loss_exposure = await self._loss_exposure()
                 if (unmarked_positions or loss_exposure <= -cfg.daily_loss_limit_usd
@@ -217,7 +271,7 @@ class IBKRMultiAssetPaperBook:
                     continue
                 deployed = sum(
                     float(row["quantity"]) * self._capital_per_unit(
-                        next(item for item in universe if item.key == key),
+                        held_specs.get(key) or BY_KEY[key],
                         float(row["avg_cost"]), float(row["fx_to_usd"]))
                     for key, row in positions.items())
                 deployment_cap = cfg.budget_usd * cfg.max_deployment_pct / 100
@@ -234,7 +288,7 @@ class IBKRMultiAssetPaperBook:
                 error = str(exc)[:300]
                 log.warning("ibkr_multiasset.instrument_error", book=self.book.value,
                             key=spec.key, error=error)
-        next_cursor = (cursor + count) % len(universe)
+        next_cursor = (cursor + count) % len(universe) if universe else 0
         await self._db.execute(
             """INSERT INTO ibkr_paper_state
                (book, refresh_cursor, last_cycle_at, last_success_at, last_error)

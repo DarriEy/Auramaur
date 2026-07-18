@@ -7,11 +7,13 @@ simulator.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 import math
 import time
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import structlog
 
@@ -29,44 +31,67 @@ class MarketDataQuote:
     con_id: int
     currency: str
     multiplier: float
-    source: str = "ibkr"
+    source: str = "ibkr_live"
 
 
 class IBKRReadOnlyMarketData:
     """Resolve contracts and acquire BBO/history through a read-only socket."""
 
-    def __init__(self, settings):
+    def __init__(self, settings, *, client_id: int | None = None):
         self._settings = settings
+        self._client_id = client_id
         self.readonly = True
         self._ib = None
         self._connected = False
         self._cooldown_until = 0.0
+        self._connect_lock = asyncio.Lock()
         self._contracts: dict[str, tuple[Any, float | None]] = {}
+        self._trading_hours: dict[int, tuple[str, str, float]] = {}
 
     async def _ensure_connected(self) -> None:
-        if self._connected and self._ib is not None:
+        if self._connection_alive():
             return
-        if time.monotonic() < self._cooldown_until:
-            raise ConnectionError("IBKR multi-asset connection on cooldown")
-        from ib_async import IB
+        async with self._connect_lock:
+            if self._connection_alive():
+                return
+            self._connected = False
+            if time.monotonic() < self._cooldown_until:
+                raise ConnectionError("IBKR multi-asset connection on cooldown")
+            from ib_async import IB
 
-        cfg = self._settings.ibkr
-        try:
-            self._ib = IB()
-            await self._ib.connectAsync(
-                host=cfg.host,
-                port=cfg.etf_quote_port,
-                clientId=cfg.multiasset_client_id,
-                readonly=True,
-            )
-            self._ib.reqMarketDataType(cfg.market_data_type)
-            self._connected = True
-            log.info("ibkr_multiasset.connected", port=cfg.etf_quote_port,
-                     client_id=cfg.multiasset_client_id, readonly=True)
-        except Exception:
-            self._ib = None
-            self._cooldown_until = time.monotonic() + 300
-            raise
+            cfg = self._settings.ibkr
+            try:
+                self._ib = IB()
+                disconnected = getattr(self._ib, "disconnectedEvent", None)
+                if disconnected is not None:
+                    disconnected += self._on_disconnected
+                await self._ib.connectAsync(
+                    host=cfg.host,
+                    port=cfg.etf_quote_port,
+                    clientId=(self._client_id if self._client_id is not None
+                              else cfg.multiasset_client_id),
+                    readonly=True,
+                )
+                self._ib.reqMarketDataType(cfg.market_data_type)
+                self._connected = True
+                log.info("ibkr_multiasset.connected", port=cfg.etf_quote_port,
+                         client_id=(self._client_id if self._client_id is not None
+                                    else cfg.multiasset_client_id), readonly=True)
+            except Exception:
+                self._ib = None
+                self._cooldown_until = time.monotonic() + 300
+                raise
+
+    def _connection_alive(self) -> bool:
+        if not self._connected or self._ib is None:
+            return False
+        probe = getattr(self._ib, "isConnected", None)
+        return bool(probe()) if callable(probe) else True
+
+    def _on_disconnected(self, *_args: object) -> None:
+        self._connected = False
+        self._contracts.clear()
+        self._trading_hours.clear()
 
     async def close(self) -> None:
         if self._ib is not None:
@@ -127,6 +152,14 @@ class IBKRReadOnlyMarketData:
         candidates = []
         for detail in details or []:
             contract = detail.contract
+            try:
+                contract_multiplier = float(getattr(contract, "multiplier", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            expected_multiplier = spec.contract_multiplier or spec.multiplier
+            if contract_multiplier and not math.isclose(
+                    contract_multiplier, expected_multiplier, rel_tol=0, abs_tol=1e-9):
+                continue
             raw = str(getattr(contract, "lastTradeDateOrContractMonth", ""))[:8]
             try:
                 expiry = datetime.strptime(raw, "%Y%m%d").date()
@@ -150,6 +183,11 @@ class IBKRReadOnlyMarketData:
         underlying = await self._underlying(spec.symbol)
         ticker = (await self._ib.reqTickersAsync(underlying))[0]
         spot = float(ticker.marketPrice())
+        if not math.isfinite(spot) or spot <= 0:
+            bars = await self._ib.reqHistoricalDataAsync(
+                underlying, endDateTime="", durationStr="5 D",
+                barSizeSetting="1 day", whatToShow="TRADES", useRTH=True)
+            spot = float(bars[-1].close) if bars else float("nan")
         if not math.isfinite(spot) or spot <= 0:
             raise LookupError(f"no underlying price for {spec.key}")
         chains = await self._ib.reqSecDefOptParamsAsync(
@@ -200,7 +238,7 @@ class IBKRReadOnlyMarketData:
         subscription = ScannerSubscription(
             instrument="BOND" if corporate else "BOND.GOVT",
             locationCode="BOND.US" if corporate else "BOND.GOVT.US",
-            scanCode="LOW_BOND_ASK_YIELD_ALL" if corporate else "HIGH_BOND_ASK_YIELD_ALL",
+            scanCode="BOND_CUSIP_AZ" if corporate else "HIGH_BOND_ASK_YIELD_ALL",
             numberOfRows=50,
         )
         rows = await self._ib.reqScannerDataAsync(
@@ -224,11 +262,60 @@ class IBKRReadOnlyMarketData:
 
     async def get_quote_by_con_id(self, spec: InstrumentSpec, con_id: int):
         """Mark a held derivative using the exact contract originally filled."""
+        contract = await self._contract_by_con_id(spec, con_id)
+        return await self._quote_contract(spec, contract)
+
+    async def _contract_by_con_id(self, spec: InstrumentSpec, con_id: int):
         from ib_async import Contract
         await self._ensure_connected()
-        contract = await self._qualify_one(
-            Contract(conId=con_id, exchange=spec.exchange))
-        return await self._quote_contract(spec, contract)
+        cache_key = f"conid:{con_id}"
+        cached = self._contracts.get(cache_key)
+        if cached is not None:
+            return cached[0]
+        contract = await self._qualify_one(Contract(conId=con_id, exchange=spec.exchange))
+        self._contracts[cache_key] = (contract, None)
+        return contract
+
+    async def is_market_open(self, spec: InstrumentSpec, *, con_id: int = 0,
+                             now: datetime | None = None) -> bool:
+        """Use IBKR's dated liquid-hours schedule, including holidays and breaks."""
+        contract = (await self._contract_by_con_id(spec, con_id)
+                    if con_id else await self.resolve(spec))
+        contract_id = int(getattr(contract, "conId", 0))
+        cached = self._trading_hours.get(contract_id)
+        if cached is None or time.monotonic() >= cached[2]:
+            details = await self._ib.reqContractDetailsAsync(contract)
+            if not details:
+                return False
+            detail = details[0]
+            hours = str(getattr(detail, "liquidHours", "")
+                        or getattr(detail, "tradingHours", ""))
+            zone = str(getattr(detail, "timeZoneId", "") or "UTC")
+            cached = (hours, zone, time.monotonic()
+                      + self._settings.ibkr.multiasset_contract_cache_seconds)
+            self._trading_hours[contract_id] = cached
+        hours, zone_name, _ = cached
+        try:
+            zone = ZoneInfo(zone_name)
+        except ZoneInfoNotFoundError:
+            log.warning("ibkr_multiasset.unknown_timezone", key=spec.key, zone=zone_name)
+            return False
+        local_now = (now or datetime.now(timezone.utc)).astimezone(zone)
+        for day in hours.split(";"):
+            if not day or day.endswith(":CLOSED"):
+                continue
+            for session in day.split(","):
+                start_text, separator, end_text = session.partition("-")
+                if not separator:
+                    continue
+                try:
+                    start = datetime.strptime(start_text, "%Y%m%d:%H%M").replace(tzinfo=zone)
+                    end = datetime.strptime(end_text, "%Y%m%d:%H%M").replace(tzinfo=zone)
+                except ValueError:
+                    continue
+                if start <= local_now < end:
+                    return True
+        return False
 
     async def _quote_contract(self, spec: InstrumentSpec, contract):
         try:
@@ -244,14 +331,28 @@ class IBKRReadOnlyMarketData:
             timestamp = tick_time.timestamp()
             if not math.isfinite(timestamp):
                 return None
-            multiplier = float(getattr(contract, "multiplier", "") or spec.multiplier)
+            multiplier = spec.multiplier
+            market_data_type = int(getattr(ticker, "marketDataType", 0) or 0)
+            source = {
+                1: "ibkr_live",
+                2: "ibkr_frozen",
+                3: "ibkr_delayed",
+                4: "ibkr_delayed_frozen",
+            }.get(market_data_type, "ibkr_unknown")
             return MarketDataQuote(spec.key, bid, ask, timestamp,
                                    int(getattr(contract, "conId", 0)),
-                                   spec.currency, multiplier)
+                                   spec.currency, multiplier, source)
         except Exception as exc:  # noqa: BLE001
+            if self._is_pacing_error(exc):
+                raise
             log.warning("ibkr_multiasset.quote_error", key=spec.key,
                         error=str(exc)[:160])
             return await self._synthetic_option_quote(spec, contract)
+
+    @staticmethod
+    def _is_pacing_error(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return any(marker in text for marker in ("pacing", "error 162", "error 420"))
 
     @staticmethod
     def _normal_cdf(value: float) -> float:
@@ -285,6 +386,8 @@ class IBKRReadOnlyMarketData:
         ticker = (await self._ib.reqTickersAsync(underlying))[0]
         spot = float(ticker.marketPrice())
         closes = [float(bar.close) for bar in bars if float(bar.close or 0) > 0]
+        if (not math.isfinite(spot) or spot <= 0) and closes:
+            spot = closes[-1]
         if not math.isfinite(spot) or spot <= 0 or len(closes) < 21:
             return None
         returns = [math.log(b / a) for a, b in zip(closes, closes[1:])]
@@ -303,6 +406,15 @@ class IBKRReadOnlyMarketData:
 
     async def get_daily_bars(self, spec: InstrumentSpec, duration: str = "3 M"):
         contract = await self.resolve(spec)
+        return await self._daily_bars_contract(spec, contract, duration)
+
+    async def get_daily_bars_by_con_id(self, spec: InstrumentSpec, con_id: int,
+                                       duration: str = "3 M"):
+        """History for the exact contract held, never a newly rolled discovery."""
+        contract = await self._contract_by_con_id(spec, con_id)
+        return await self._daily_bars_contract(spec, contract, duration)
+
+    async def _daily_bars_contract(self, spec: InstrumentSpec, contract, duration: str):
         what = "MIDPOINT" if spec.kind in {ContractKind.FOREX, ContractKind.BOND} else "TRADES"
         bars = await self._ib.reqHistoricalDataAsync(
             contract, endDateTime="", durationStr=duration,
@@ -315,7 +427,6 @@ class IBKRReadOnlyMarketData:
             if close > 0 and math.isfinite(close):
                 out.append((day[:10], close))
         if not out and spec.kind is ContractKind.OPTION:
-            contract = await self.resolve(spec)
             _, underlying_bars = await self._underlying_history(spec.symbol)
             expiry = datetime.strptime(
                 contract.lastTradeDateOrContractMonth[:8], "%Y%m%d").date()

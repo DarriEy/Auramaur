@@ -257,6 +257,8 @@ ibkr:
   # Activated after read-only TWS contract/history preflight. Individual books
   # still fail closed without fresh native executable quotes.
   multiasset_client_id: 3
+  multiasset_preflight_client_id: 97
+  # Ship disabled; enable deliberately in defaults.local.yaml after preflight.
   multiasset_paper_enabled: false
   multiasset_cycle_seconds: 900
   multiasset_refreshes_per_cycle: 12
@@ -264,6 +266,13 @@ ibkr:
   multiasset_max_quote_age_seconds: 120
   # Re-discover futures/options/bonds during long-running sessions.
   multiasset_contract_cache_seconds: 21600
+  # Keep contract/history bursts below IBKR pacing thresholds.
+  multiasset_preflight_concurrency: 2
+  multiasset_preflight_pacing_retries: 2
+  multiasset_preflight_retry_seconds: 2.0
+  # TSEJ history/BBO is not entitled on the current IBKR username. Keep the
+  # contract in the catalog and re-enable it after preflight passes.
+  multiasset_disabled_instruments: ["7203.T"]
   multiasset_min_momentum_pct: 1.0
   multiasset_exit_momentum_pct: -0.5
   multiasset_books:

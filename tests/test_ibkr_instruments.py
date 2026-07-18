@@ -14,6 +14,10 @@ def test_derivatives_and_bonds_declare_discovery_policy():
         assert spec.kind is ContractKind.FUTURE
         assert spec.expiry_policy == "front_liquid"
         assert spec.multiplier > 1
+    grains = {spec.key: spec for spec in BY_BOOK[IBKRBook.FUTURES]
+              if spec.key in {"ZC", "ZW"}}
+    assert all(spec.contract_multiplier == 5000 and spec.multiplier == 50
+               for spec in grains.values())
     for spec in BY_BOOK[IBKRBook.OPTIONS]:
         assert spec.kind is ContractKind.OPTION
         assert 0 < spec.option_dte_min <= spec.option_dte_max

@@ -13,11 +13,15 @@ method. A live-account TWS login does not make these books live.
 | `futures` | micro equity index, rates, energy, metals and agriculture | nearest contract with >7 days to expiry; exact held `conId` retained | conservative per-contract capital plus multiplier P&L |
 | `international_equity` | Canada, UK, Europe, Japan, Hong Kong and Australia | native listing, exchange and currency | fractional shares, mark translated to USD |
 | `options` | 30–60 DTE ATM calls and puts on liquid ETFs | exact qualified chain contract; exact held `conId` retained | whole contracts, 100 multiplier |
-| `bonds` | US Treasury tenors and investment-grade corporates | maturity-bounded IBKR bond scanner, exact `conId` | $1,000 face-value units |
+| `bonds` | US Treasury tenors and a US corporate issue | maturity-bounded IBKR bond scanner, exact `conId` | $1,000 face-value units |
 
 The catalog is in `auramaur/exchange/ibkr_instruments.py`. Instrument keys are
 unique and every entry declares its security type, exchange, currency, calendar,
 multiplier and discovery policy.
+
+`multiasset_disabled_instruments` is the explicit entitlement quarantine. The
+current username lacks TSEJ data, so `7203.T` remains catalogued but does not
+enter runtime or paper evidence until its preflight succeeds.
 
 ## Isolation and risk
 
@@ -31,10 +35,26 @@ multiplier and discovery policy.
   limit, stop, take-profit and maximum spread.
 - Open positions are marked before new risk is allowed. Realized commissions
   and unrealized losses count toward the daily loss limit.
-- Quotes older than the configured age are rejected.
+- Only TWS quotes explicitly tagged `ibkr_live` (`marketDataType=1`) can create
+  marks or fills. Frozen, delayed, delayed-frozen, unknown, stale and synthetic
+  quotes fail closed.
+- A dropped TWS socket clears contract/session caches and reconnects under a
+  single connection lock; concurrent book cycles cannot create duplicate API
+  sessions.
 - Futures/options/bonds are periodically rediscovered, while held derivatives
   continue to be marked and exited using their original `conId`.
-- `price_source` is stored on every position and fill.
+- The complete instrument specification is persisted with an opened position.
+  Removing or disabling a catalog entry therefore cannot strand it: held
+  positions remain markable and exit-manageable.
+- Hard stops and take-profits run from a fresh executable BBO before entry-only
+  spread, FX-refresh, history and momentum gates. If a current FX cross is
+  temporarily missing, exits use the position's stored entry FX conversion.
+- `price_source` is stored on every position and fill. Monitoring counts only
+  closed `trade` rows in trade count and win rate, while commissions and
+  financing remain included in net P&L.
+- Schema migrations verify the required columns before advancing
+  `schema_version`; lock/busy errors are propagated and cannot leave a database
+  falsely stamped as migrated.
 
 ## Option-data limitation
 
@@ -54,6 +74,11 @@ API selected. Run:
 auramaur ibkr-multiasset-preflight
 ```
 
+The TWS username may be a live-account login when IBKR paper credentials are
+unavailable. This changes only the quote session: the socket is still opened
+with `readonly=True`, the adapter has no order method, and all simulated
+positions/fills remain in Auramaur's local database.
+
 The preflight checks structural isolation, schema, every configured contract,
 fresh BBOs, at least 21 daily bars, quote provenance, and per-book forward
 evidence. Run it during each venue's session when diagnosing BBO availability;
@@ -62,6 +87,18 @@ closed venues are expected to lack executable quotes.
 The startup books panel and periodic strategy table report each book separately.
 `ibkr_paper_state.last_cycle_at`, `last_success_at`, and `last_error` provide
 machine-readable health.
+
+Enable the experiment only in the machine-local override after the PR and
+preflight gates pass:
+
+```yaml
+ibkr:
+  multiasset_paper_enabled: true
+```
+
+The tracked default remains `false`, so a fresh checkout cannot start the six
+books accidentally. To stop new cycles, set the local override back to `false`;
+existing local paper positions remain in the isolated tables for inspection.
 
 ## Graduation
 

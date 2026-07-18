@@ -155,8 +155,10 @@ async def gather_books(db) -> list[dict]:
         }
 
     ibkr_rows = await db.fetchall(
-        """SELECT l.book, COUNT(*) AS n, SUM(l.pnl_usd) AS pnl,
-                  SUM(CASE WHEN l.pnl_usd > 0 THEN 1 ELSE 0 END) AS wins,
+        """SELECT l.book,
+                  SUM(CASE WHEN l.kind = 'trade' THEN 1 ELSE 0 END) AS n,
+                  SUM(l.pnl_usd) AS pnl,
+                  SUM(CASE WHEN l.kind = 'trade' AND l.pnl_usd > 0 THEN 1 ELSE 0 END) AS wins,
                   (SELECT COUNT(*) FROM ibkr_paper_positions p
                     WHERE p.book = l.book) AS open_n
              FROM ibkr_paper_ledger l GROUP BY l.book""")

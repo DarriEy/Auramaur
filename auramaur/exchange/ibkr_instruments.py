@@ -7,7 +7,7 @@ options, and bonds require discovery before a quoteable contract exists.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 
 
@@ -40,6 +40,7 @@ class InstrumentSpec:
     description: str
     primary_exchange: str = ""
     multiplier: float = 1.0
+    contract_multiplier: float = 0.0
     paper_capital_per_unit_usd: float = 0.0
     calendar: str = "US_EQUITY"
     # Discovery policies are resolved by the read-only client at runtime.
@@ -103,10 +104,18 @@ FUTURES = tuple(
         ("ZN", "ZN", "CBOT", "USD", "rates", "10-year US Treasury note", 1000, 3000),
         ("MCL", "MCL", "NYMEX", "USD", "energy", "Micro WTI crude oil", 100, 1500),
         ("MGC", "MGC", "COMEX", "USD", "metals", "Micro Gold", 10, 2000),
-        ("SIL", "SIL", "COMEX", "USD", "metals", "Micro Silver", 1000, 3000),
+        ("SIC", "SIC", "COMEX", "USD", "metals", "100-ounce Silver", 100, 1000),
         ("ZC", "ZC", "CBOT", "USD", "agriculture", "Corn", 50, 2500),
         ("ZW", "ZW", "CBOT", "USD", "agriculture", "Wheat", 50, 3000),
     )
+)
+
+# IBKR qualifies grains with the physical 5,000-bushel contract multiplier and
+# priceMagnifier=100. P&L per displayed price point is therefore $50.
+FUTURES = tuple(
+    replace(spec, contract_multiplier=5000.0)
+    if spec.key in {"ZC", "ZW"} else spec
+    for spec in FUTURES
 )
 
 INTERNATIONAL_EQUITIES = (
@@ -143,7 +152,7 @@ BONDS = tuple(
         ("UST_5Y", "government", "US Treasury near 5-year maturity", "UST:5Y"),
         ("UST_10Y", "government", "US Treasury near 10-year maturity", "UST:10Y"),
         ("UST_30Y", "government", "US Treasury near 30-year maturity", "UST:30Y"),
-        ("IG_CORP_5Y", "corporate", "Investment-grade corporate near 5-year maturity", "CORP:IG:5Y"),
+        ("CORP_5Y", "corporate", "US corporate bond near 5-year maturity", "CORP:5Y"),
     )
 )
 
