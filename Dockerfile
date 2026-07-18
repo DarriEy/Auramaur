@@ -1,6 +1,6 @@
-FROM node:22-bookworm-slim AS node_runtime
+FROM node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3 AS node_runtime
 
-FROM python:3.12-slim AS runtime
+FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS runtime
 
 ARG CLAUDE_CODE_VERSION=2.1.214
 
@@ -18,7 +18,7 @@ RUN apt-get update \
     && ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
     && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
-    && pip install --no-cache-dir uv \
+    && pip install --no-cache-dir "uv==0.8.15" \
     && rm -rf /var/lib/apt/lists/* /root/.cache
 
 WORKDIR /app

@@ -56,6 +56,51 @@ async def test_usd_notional_converts_quote():
     assert abs(await c.usd_notional("XEUR", 1.0, price=100.0) - 116.0) < 1e-9
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("explicit_dry_run", [False, None])
+async def test_spot_order_stays_validate_only_when_global_live_gates_closed(
+    explicit_dry_run,
+):
+    """The per-order flag cannot override AURAMAUR_LIVE/execution.live."""
+    settings = MagicMock()
+    settings.is_live = False
+    settings.kraken.directional_enabled = True
+    settings.kraken.max_order_usd = 100.0
+    client = KrakenSpotClient(settings)
+    client.get_pair_quote = AsyncMock(return_value="USDC")
+    client._private = AsyncMock(return_value={"error": [], "result": {}})
+
+    with patch("auramaur.exchange.kraken.kill_switch_present", return_value=False):
+        result = await client.place_spot_order(
+            "XBTUSDC", OrderSide.BUY, 0.001, price=50_000.0,
+            dry_run=explicit_dry_run,
+        )
+
+    assert result.is_paper is True
+    assert client._private.await_args.args[1]["validate"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_spot_order_can_execute_only_when_all_live_gates_open():
+    settings = MagicMock()
+    settings.is_live = True
+    settings.kraken.directional_enabled = True
+    settings.kraken.max_order_usd = 100.0
+    client = KrakenSpotClient(settings)
+    client.get_pair_quote = AsyncMock(return_value="USDC")
+    client._private = AsyncMock(
+        return_value={"error": [], "result": {"txid": ["live-order"]}}
+    )
+
+    with patch("auramaur.exchange.kraken.kill_switch_present", return_value=False):
+        result = await client.place_spot_order(
+            "XBTUSDC", OrderSide.BUY, 0.001, price=50_000.0, dry_run=False,
+        )
+
+    assert result.is_paper is False
+    assert "validate" not in client._private.await_args.args[1]
+
+
 def _pillar(*, holding: bool):
     s = MagicMock()
     s.risk_tolerance = 50.0

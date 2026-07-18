@@ -1005,8 +1005,8 @@ class BrokerConfig(BaseModel):
 
 class KalshiConfig(BaseModel):
     enabled: bool = False
-    api_key: str = ""
-    private_key_path: str = ""
+    api_key: str = Field(default="", repr=False, exclude=True)
+    private_key_path: str = Field(default="", repr=False, exclude=True)
     environment: str = "demo"  # "demo" | "prod"
 
 
@@ -1227,8 +1227,8 @@ class IBKRConfig(BaseModel):
 
 class CryptoComConfig(BaseModel):
     enabled: bool = False
-    api_key: str = ""
-    api_secret: str = ""
+    api_key: str = Field(default="", repr=False, exclude=True)
+    api_secret: str = Field(default="", repr=False, exclude=True)
     environment: str = "sandbox"  # "sandbox" | "prod"
 
 
@@ -1449,44 +1449,44 @@ class LoggingConfig(BaseModel):
 
 class Settings(BaseSettings):
     # API Keys
-    anthropic_api_key_primary: str = ""
-    anthropic_api_key_secondary: str = ""
-    openai_api_key: str = ""
-    polygon_private_key: str = ""
-    polymarket_api_key: str = ""
-    polymarket_api_secret: str = ""
-    polymarket_passphrase: str = ""
+    anthropic_api_key_primary: str = Field(default="", repr=False, exclude=True)
+    anthropic_api_key_secondary: str = Field(default="", repr=False, exclude=True)
+    openai_api_key: str = Field(default="", repr=False, exclude=True)
+    polygon_private_key: str = Field(default="", repr=False, exclude=True)
+    polymarket_api_key: str = Field(default="", repr=False, exclude=True)
+    polymarket_api_secret: str = Field(default="", repr=False, exclude=True)
+    polymarket_passphrase: str = Field(default="", repr=False, exclude=True)
     polymarket_proxy_address: str = ""
-    newsapi_key: str = ""
-    reddit_client_id: str = ""
-    reddit_client_secret: str = ""
+    newsapi_key: str = Field(default="", repr=False, exclude=True)
+    reddit_client_id: str = Field(default="", repr=False, exclude=True)
+    reddit_client_secret: str = Field(default="", repr=False, exclude=True)
     reddit_user_agent: str = "auramaur/0.1"
-    twitter_bearer_token: str = ""
-    fred_api_key: str = ""
-    bls_api_key: str = ""
-    bea_api_key: str = ""
-    congress_api_key: str = ""
-    eia_api_key: str = ""
-    telegram_bot_token: str = ""
+    twitter_bearer_token: str = Field(default="", repr=False, exclude=True)
+    fred_api_key: str = Field(default="", repr=False, exclude=True)
+    bls_api_key: str = Field(default="", repr=False, exclude=True)
+    bea_api_key: str = Field(default="", repr=False, exclude=True)
+    congress_api_key: str = Field(default="", repr=False, exclude=True)
+    eia_api_key: str = Field(default="", repr=False, exclude=True)
+    telegram_bot_token: str = Field(default="", repr=False, exclude=True)
     telegram_chat_id: str = ""
-    discord_webhook_url: str = ""
+    discord_webhook_url: str = Field(default="", repr=False, exclude=True)
 
     # Kalshi
-    kalshi_api_key: str = ""
-    kalshi_private_key_path: str = ""
+    kalshi_api_key: str = Field(default="", repr=False, exclude=True)
+    kalshi_private_key_path: str = Field(default="", repr=False, exclude=True)
 
     # Crypto.com
-    cryptodotcom_api_key: str = ""
-    cryptodotcom_api_secret: str = ""
+    cryptodotcom_api_key: str = Field(default="", repr=False, exclude=True)
+    cryptodotcom_api_secret: str = Field(default="", repr=False, exclude=True)
 
     # Kraken (spot). Used for read-only wallet/balance checks today; no trading
     # adapter is wired yet. Key needs only the "Query Funds" permission —
     # leave "Withdraw Funds" OFF.
-    kraken_api_key: str = ""
-    kraken_api_secret: str = ""
+    kraken_api_key: str = Field(default="", repr=False, exclude=True)
+    kraken_api_secret: str = Field(default="", repr=False, exclude=True)
 
     # Google Gemini — LLM fallback for off-hours / when Claude budget is low.
-    gemini_api_key: str = ""
+    gemini_api_key: str = Field(default="", repr=False, exclude=True)
 
     # Hugging Face Hub token — used by the sentence-transformers evidence
     # embedder (nlp/relevance.py). Anonymous downloads work but are
@@ -1494,7 +1494,7 @@ class Settings(BaseSettings):
     # reads HF_TOKEN from the process environment, not from our Settings, so
     # model_post_init exports it (pydantic-settings parses .env into fields
     # without touching os.environ).
-    hf_token: str = ""
+    hf_token: str = Field(default="", repr=False, exclude=True)
 
     # Global risk-tolerance lever: 0=most conservative, 50=neutral, 100=YOLO.
     # Scales the whole prob/stat/risk surface at the RiskManager gateway.

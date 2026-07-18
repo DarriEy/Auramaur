@@ -249,9 +249,9 @@ class KrakenSpotClient:
                                    is_paper=True,
                                    error_message=f"order ${notional:.2f} exceeds cap ${cap:.2f}")
 
-        # 4. Three-gate live decision → validate-only unless explicitly live.
-        if dry_run is None:
-            dry_run = not self._settings.is_live
+        # 4. Three-gate live decision.  ``dry_run=False`` opens only the
+        # per-order gate; it must never override either global live gate.
+        dry_run = bool(dry_run) or not self._settings.is_live
         validate = bool(dry_run)
 
         params = {"pair": pair, "type": side_str, "ordertype": ordertype, "volume": str(volume)}

@@ -137,10 +137,12 @@ class ToolUseAnalyzer:
         # operators who later switch to an API key.
 
         try:
+            from auramaur.subprocess_security import analysis_subprocess_env
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=analysis_subprocess_env(),
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
         except asyncio.TimeoutError:

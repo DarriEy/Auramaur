@@ -961,6 +961,7 @@ class StrategicAnalyzer:
                 ``nlp.effort_primary``.
         """
         import asyncio
+        from auramaur.subprocess_security import analysis_subprocess_env
 
         use_model = model or self._model
         use_effort = effort or self._settings.nlp.effort_primary
@@ -990,6 +991,7 @@ class StrategicAnalyzer:
                     *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    env=analysis_subprocess_env(),
                 )
                 # Longer timeout for deep reasoning (up to 8 min)
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=480)

@@ -354,6 +354,8 @@ class AgentAnalyzer:
         memory). The agent's sanctioned state is world_model.json, passed
         explicitly in the prompt; it needs nothing from the ambient context.
         """
+        from auramaur.subprocess_security import analysis_subprocess_env
+
         cmd = [
             "claude", "-p", prompt,
             "--output-format", "text",
@@ -380,6 +382,7 @@ class AgentAnalyzer:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=tempfile.gettempdir(),
+                    env=analysis_subprocess_env(),
                 )
                 stdout, stderr = await asyncio.wait_for(
                     proc.communicate(), timeout=self._timeout_seconds,

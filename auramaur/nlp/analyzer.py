@@ -158,6 +158,7 @@ class ClaudeAnalyzer:
 
         for attempt in range(1, max_attempts + 1):
             try:
+                from auramaur.subprocess_security import analysis_subprocess_env
                 proc = await asyncio.create_subprocess_exec(
                     "claude", "-p", prompt,
                     "--output-format", "text",
@@ -165,6 +166,7 @@ class ClaudeAnalyzer:
                     "--effort", use_effort,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    env=analysis_subprocess_env(),
                 )
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=180)
 
