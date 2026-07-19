@@ -186,9 +186,16 @@ class IBKRMultiAssetPaperBook:
                 (self.book.value, spec.key))
             entry_fee = float(position["entry_commission_usd"] or 0) if position else 0.0
             entry_fill_ref = str(position["entry_fill_ref"] or "") if position else ""
+            if position is None:
+                # Understates elapsed_days for the evidence contract; loud so a
+                # recurring miss is investigated rather than absorbed.
+                log.warning("ibkr_multiasset.round_trip_missing_entry",
+                            book=self.book.value, instrument=spec.key)
             opened_at = position["opened_at"] if position else datetime.now(timezone.utc).isoformat()
+            # OR IGNORE: exit_fill_ref is UNIQUE, so a crash-replayed exit books
+            # the round trip once instead of failing the cycle.
             await self._db.execute(
-                """INSERT INTO ibkr_paper_round_trips
+                """INSERT OR IGNORE INTO ibkr_paper_round_trips
                    (book, instrument_key, entry_fill_ref, exit_fill_ref, gross_pnl_usd,
                     entry_commission_usd, exit_commission_usd, net_pnl_usd,
                     opened_at)
