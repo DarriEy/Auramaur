@@ -26,6 +26,8 @@ mkdir -p "$HOME/Jts" "$vnc_runtime"
 x11vnc -storepasswd "$(cat "$password_file")" "$vnc_runtime/vnc.pass" >/dev/null
 chmod 0600 "$vnc_runtime/vnc.pass"
 
+# clear stale X locks from a previous run of this container
+rm -f "/tmp/.X${DISPLAY#:}-lock" "/tmp/.X11-unix/X${DISPLAY#:}"
 Xvfb "$DISPLAY" -screen 0 1280x800x24 -nolisten tcp &
 xvfb_pid=$!
 x_socket="/tmp/.X11-unix/X${DISPLAY#:}"
