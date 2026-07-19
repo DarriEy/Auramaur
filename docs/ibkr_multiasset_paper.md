@@ -110,7 +110,9 @@ fresh BBOs, at least 21 daily bars, quote provenance, and per-book forward
 evidence. Run it during each venue's session when diagnosing BBO availability;
 closed venues are expected to lack executable quotes.
 
-Set `IBKR_MARKET_DATA_TYPE=1` in the compose environment. Values 2–4 may still
+Set `IBKR_MARKET_DATA_TYPE=1` in the compose environment. Keep
+`IBKR_QUOTE_ENVIRONMENT=paper`; using a live-account quote login is a separate,
+explicit operational review. Values 2–4 may still
 qualify contracts and expose delayed/frozen data for diagnostics, but registry
 status becomes `qualified_no_live_data` and the runtime will not open risk.
 

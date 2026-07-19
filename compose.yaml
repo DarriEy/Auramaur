@@ -28,20 +28,20 @@ services:
       # The dedicated live account supplies quotes only. Auramaur execution
       # remains in its local paper ledger until the independent gates above
       # are deliberately armed at graduation.
-      AURAMAUR_IBKR_ENVIRONMENT: ${IBKR_QUOTE_ENVIRONMENT:-live}
+      AURAMAUR_IBKR_ENVIRONMENT: ${IBKR_QUOTE_ENVIRONMENT:-paper}
       AURAMAUR_IBKR_PORT: ${IBKR_QUOTE_PORT:-4002}
       IBKR__HOST: ibgateway
-      IBKR__ENABLED: ${IBKR_ENABLED:-true}
+      IBKR__ENABLED: ${IBKR_ENABLED:-false}
       IBKR__OPTIONS_ENABLED: "false"
       # Paper books reject delayed/frozen prices; request native live data.
       IBKR__MARKET_DATA_TYPE: ${IBKR_MARKET_DATA_TYPE:-1}
-      IBKR__ENVIRONMENT: ${IBKR_QUOTE_ENVIRONMENT:-live}
+      IBKR__ENVIRONMENT: ${IBKR_QUOTE_ENVIRONMENT:-paper}
       IBKR__PAPER_PORT: ${IBKR_QUOTE_PORT:-4002}
       IBKR__LIVE_PORT: ${IBKR_QUOTE_PORT:-4002}
       IBKR__ETF_QUOTE_PORT: ${IBKR_QUOTE_PORT:-4002}
       IBKR__READONLY: "true"
       IBKR__PAPER_TRADE: "true"
-      IBKR__MULTIASSET_PAPER_ENABLED: ${IBKR_MULTIASSET_PAPER_ENABLED:-true}
+      IBKR__MULTIASSET_PAPER_ENABLED: ${IBKR_MULTIASSET_PAPER_ENABLED:-false}
       IBKR__ETF_PAPER_ENABLED: "false"
       KALSHI_PRIVATE_KEY_PATH: /run/auramaur-kalshi-private.pem
       HOME: /home/auramaur

@@ -109,6 +109,36 @@ async def test_intracycle_commission_tightens_loss_gate():
 
 
 @pytest.mark.asyncio
+async def test_completed_position_records_one_net_round_trip():
+    db = Database(":memory:")
+    await db.connect()
+    settings = Settings()
+    book = IBKRMultiAssetPaperBook(
+        settings, FakeMarketData(), db, IBKRBook.GLOBAL_ETF)
+    spec = BY_BOOK[IBKRBook.GLOBAL_ETF][0]
+    buy = MarketDataQuote(spec.key, 99.0, 100.0, time.time(), 42,
+                          spec.currency, spec.multiplier)
+    await book._fill(spec, buy, "BUY", 1, 1.0, stop_price=95,
+                     initial_risk_usd=5)
+    position = await db.fetchone(
+        "SELECT * FROM ibkr_paper_positions WHERE book='global_etf'")
+    sell = MarketDataQuote(spec.key, 110.0, 111.0, time.time(), 42,
+                           spec.currency, spec.multiplier)
+    await book._fill(spec, sell, "SELL", 1, 1.0,
+                     entry_price=float(position["avg_cost"]))
+    result = await db.fetchone("SELECT * FROM ibkr_paper_round_trips")
+    assert result is not None
+    assert result["entry_fill_ref"]
+    assert result["exit_fill_ref"] != result["entry_fill_ref"]
+    assert result["net_pnl_usd"] == pytest.approx(
+        result["gross_pnl_usd"] - result["entry_commission_usd"]
+        - result["exit_commission_usd"])
+    assert (await db.fetchone(
+        "SELECT COUNT(*) AS n FROM ibkr_paper_round_trips"))["n"] == 1
+    await db.close()
+
+
+@pytest.mark.asyncio
 async def test_asset_class_risk_cap_bounds_correlated_entries():
     db = Database(":memory:")
     await db.connect()

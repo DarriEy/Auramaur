@@ -12,6 +12,7 @@ import structlog
 from auramaur.exchange.ibkr_instruments import BY_BOOK, IBKRBook
 from auramaur.exchange.ibkr_market_data import IBKRReadOnlyMarketData
 from auramaur.exchange.ibkr_registry import record_validation
+from auramaur.risk.ibkr_evidence import evaluate_ibkr_evidence
 
 log = structlog.get_logger()
 
@@ -115,7 +116,8 @@ async def preflight(settings, db, *, client=None, timeout_seconds: int = 30,
         add("isolation", "OK", "read-only client exposes no broker order method")
 
     required = {"ibkr_paper_positions", "ibkr_paper_fills",
-                "ibkr_paper_ledger", "ibkr_paper_state", "ibkr_contract_registry"}
+                "ibkr_paper_ledger", "ibkr_paper_round_trips",
+                "ibkr_paper_state", "ibkr_contract_registry"}
     rows = await db.fetchall("SELECT name FROM sqlite_master WHERE type='table'")
     missing = required - {row["name"] for row in rows}
     add("database", "BLOCK" if missing else "OK",
@@ -177,20 +179,25 @@ async def preflight(settings, db, *, client=None, timeout_seconds: int = 30,
             "OK" if set(counts) <= {"eligible"} else "WARN",
             ", ".join(f"{status}={count}" for status, count in counts.items()))
 
-        edge = await db.fetchone(
-            """SELECT SUM(CASE WHEN kind = 'trade' THEN 1 ELSE 0 END) AS n,
-                      COALESCE(SUM(pnl_usd), 0) AS pnl,
-                      COALESCE(SUM(CASE WHEN pnl_usd > 0 THEN pnl_usd ELSE 0 END), 0) AS gains,
-                      ABS(COALESCE(SUM(CASE WHEN pnl_usd < 0 THEN pnl_usd ELSE 0 END), 0)) AS losses
-                 FROM ibkr_paper_ledger WHERE book = ?""",
-            (book.value,))
-        n, pnl = int(edge["n"] or 0), float(edge["pnl"] or 0)
-        gains, losses = float(edge["gains"] or 0), float(edge["losses"] or 0)
+        observations = await db.fetchall(
+            "SELECT net_pnl_usd FROM ibkr_paper_round_trips "
+            "WHERE book = ? ORDER BY closed_at, id", (book.value,))
+        pnls = [float(row["net_pnl_usd"]) for row in observations]
+        age = await db.fetchone(
+            "SELECT CAST(julianday('now') - julianday(MIN(opened_at)) AS INTEGER) "
+            "AS elapsed FROM ibkr_paper_round_trips WHERE book = ?", (book.value,))
+        elapsed_days = max(0, int(age["elapsed"] or 0))
+        evidence = evaluate_ibkr_evidence(
+            pnls, elapsed_days=elapsed_days, budget_usd=book_cfg.budget_usd)
+        gains = sum(pnl for pnl in pnls if pnl > 0)
+        losses = abs(sum(pnl for pnl in pnls if pnl < 0))
         profit_factor = gains / losses if losses else (float("inf") if gains else 0.0)
-        proven = n >= 30 and pnl > 0 and profit_factor > 1.1
-        add(f"{book.value}:edge", "OK" if proven else "WARN",
-            f"forward paper evidence: {n} exits, ${pnl:.2f} net P&L, "
-            f"profit factor {profit_factor:.2f}")
+        status = "graduated" if evidence.ready else "not graduated"
+        reasons = "; ".join(evidence.reasons) if evidence.reasons else "contract passed"
+        add(f"{book.value}:edge", "OK" if evidence.ready else "WARN",
+            f"{status}: {evidence.observations} cost-adjusted round trips over "
+            f"{evidence.elapsed_days} days, ${evidence.net_pnl_usd:.2f} net P&L, "
+            f"profit factor {profit_factor:.2f}; {reasons}")
     if own_client:
         await client.close()
     return MultiAssetPreflightReport(tuple(results))

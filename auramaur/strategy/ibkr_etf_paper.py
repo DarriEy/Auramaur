@@ -96,6 +96,14 @@ class IBKRETFPaperPillar:
             return cached[1], cached[2]
         if not allow_refresh:
             return (cached[1], cached[2]) if cached else None
+        deterministic = getattr(self._analyzer, "analyze_symbol", None)
+        if deterministic is not None:
+            analysis = await deterministic(self._client, symbol)
+            if analysis is None:
+                return None
+            view = (float(analysis.probability), str(analysis.confidence))
+            self._views[symbol] = (time.time(), *view)
+            return view
         call_count = await self._db.fetchone(
             """SELECT COUNT(*) AS n FROM ibkr_etf_openai_attempts
                WHERE model_alias = ? AND date(started_at) = date('now')""",

@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 29
+SCHEMA_VERSION = 30
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -578,6 +578,8 @@ CREATE TABLE IF NOT EXISTS ibkr_paper_positions (
     unrealized_pnl_usd REAL NOT NULL DEFAULT 0,
     stop_price REAL NOT NULL DEFAULT 0,
     initial_risk_usd REAL NOT NULL DEFAULT 0,
+    entry_commission_usd REAL NOT NULL DEFAULT 0,
+    entry_fill_ref TEXT NOT NULL DEFAULT '',
     price_source TEXT NOT NULL DEFAULT 'ibkr_unknown',
     instrument_spec_json TEXT NOT NULL DEFAULT '',
     opened_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -614,6 +616,25 @@ CREATE TABLE IF NOT EXISTS ibkr_paper_ledger (
 );
 CREATE INDEX IF NOT EXISTS idx_ibkr_paper_ledger_book_day
     ON ibkr_paper_ledger(book, realized_at);
+
+CREATE TABLE IF NOT EXISTS ibkr_paper_round_trips (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    book TEXT NOT NULL, instrument_key TEXT NOT NULL,
+    entry_fill_ref TEXT NOT NULL DEFAULT '',
+    exit_fill_ref TEXT NOT NULL UNIQUE,
+    gross_pnl_usd REAL NOT NULL,
+    entry_commission_usd REAL NOT NULL DEFAULT 0,
+    exit_commission_usd REAL NOT NULL DEFAULT 0,
+    financing_usd REAL NOT NULL DEFAULT 0,
+    borrow_usd REAL NOT NULL DEFAULT 0,
+    roll_cost_usd REAL NOT NULL DEFAULT 0,
+    intelligence_cost_usd REAL NOT NULL DEFAULT 0,
+    net_pnl_usd REAL NOT NULL,
+    opened_at TEXT NOT NULL,
+    closed_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ibkr_round_trips_book_closed
+    ON ibkr_paper_round_trips(book, closed_at);
 
 CREATE TABLE IF NOT EXISTS ibkr_paper_state (
     book TEXT PRIMARY KEY,

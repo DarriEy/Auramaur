@@ -2,18 +2,19 @@
 
 The IBKR account holds real capital and two strategy families want to earn
 their way onto it. This is the ordered checklist from today's state
-(venue disabled, no API listener) to "a graduated strategy can trade it".
+(venue and experiments disabled by default) to "a graduated strategy can trade it".
 Everything below the operator steps is already built and tested.
 
-## Current state (verified 2026-07-18)
+## Tracked default state (verified 2026-07-19)
 
 - IBKR Desktop installed (~/Applications); `~/Jts` config exists from the
   June sessions; `ib_async` in the venv; equity client connects lazily
   (a down Gateway degrades gracefully, no crash loop).
-- `ibkr.enabled: false` — the venue is parked. No API port listening.
+- `ibkr.enabled: false` — Auramaur does not connect to the venue. A separately
+  launched TWS/Gateway may still listen, but no IBKR strategy task starts.
 - IBKR-bound strategies: `oddlot_tender` (paper, EDGAR-scan, manual
-  tendering by design) and the `ibkr_etf` paper experiment (#289 — ships
-  disabled; OpenAI-armed, cost-in-ledger, isolated tables).
+  tendering by design), the `ibkr_etf` paper experiment, and the multi-asset
+  paper books. All tracked strategy gates ship disabled.
 
 ## Operator steps (in order — each gates the next)
 
@@ -25,11 +26,15 @@ Everything below the operator steps is already built and tested.
    June CAD-hold and OPRA market-data subscription. Options stay off
    (`options_enabled: false`) until OPRA is active — without it the
    option scanner spams errors by design.
-3. **Enable the venue** in `config/defaults.local.yaml`:
-   `ibkr: {enabled: true}` (environment stays paper).
-4. **Smoke-test**: `python scripts/preflight_venues.py` (has an IBKR
-   probe) and, for the ETF experiment, `auramaur ibkr-etf-preflight`.
-5. Restart via `./scripts/restart_live.sh`.
+3. **Enable only the venue** in `config/defaults.local.yaml`:
+   `ibkr: {enabled: true}` (environment stays paper). In Docker, set
+   `IBKR_ENABLED=true`; do not change `IBKR_QUOTE_ENVIRONMENT` from `paper`.
+4. **Smoke-test**: `python scripts/preflight_venues.py` (has an IBKR probe),
+   then run the relevant `auramaur ibkr-etf-preflight` or
+   `auramaur ibkr-multiasset-preflight` command.
+5. **Enable exactly one paper experiment** in the local override
+   (`etf_paper_enabled: true` or `multiasset_paper_enabled: true`). For Docker,
+   use `IBKR_MULTIASSET_PAPER_ENABLED=true` only after preflight. Restart.
 
 ## The graduation paths
 

@@ -176,7 +176,9 @@ def test_yaml_defaults_safe():
     assert raw["coinbase"]["paper_enabled"] is True
 
     ibkr = raw["ibkr"]
-    assert ibkr["etf_paper_enabled"] is True
+    assert ibkr["enabled"] is False
+    assert ibkr["etf_paper_enabled"] is False
+    assert ibkr["multiasset_paper_enabled"] is False
     assert ibkr["options_enabled"] is False
     assert ibkr["auto_fx_enabled"] is False
     assert {"SPY", "QQQ", "IWM", "TLT", "GLD", "VEA"}.issubset(
