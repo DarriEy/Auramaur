@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import time
+from types import SimpleNamespace
 
 import structlog
 
 from auramaur.exchange.ibkr_instruments import BY_BOOK, IBKRBook
 from auramaur.exchange.ibkr_market_data import IBKRReadOnlyMarketData
+from auramaur.exchange.ibkr_registry import record_validation
 
 log = structlog.get_logger()
 
@@ -52,23 +54,44 @@ async def preflight(settings, db, *, client=None, timeout_seconds: int = 30,
         for attempt in range(attempts):
             try:
                 async with semaphore:
+                    contract = (await client.resolve(spec)
+                                if hasattr(client, "resolve") else None)
                     market_open = (await client.is_market_open(spec)
                                    if hasattr(client, "is_market_open") else True)
                     quote = await asyncio.wait_for(client.get_quote(spec), timeout_seconds)
                     bars = await asyncio.wait_for(client.get_daily_bars(spec), timeout_seconds)
+                if contract is None:
+                    contract = SimpleNamespace(
+                        conId=int(getattr(quote, "con_id", 0) or 0),
+                        exchange=spec.exchange, currency=spec.currency,
+                        multiplier=spec.multiplier)
                 if len(bars) < 21:
+                    await record_validation(db, spec, contract,
+                                            quote_source=getattr(quote, "source", "none"),
+                                            has_history=False, error="insufficient history")
                     return f"{spec.key}: only {len(bars)} daily bars", None, None
                 if not market_open:
                     source = getattr(quote, "source", "none") if quote else "none"
+                    await record_validation(db, spec, contract, quote_source=source,
+                                            has_history=True)
                     return None, source, f"{spec.key}: venue closed; contract/history ready"
                 if quote is None:
+                    await record_validation(db, spec, contract, quote_source="none",
+                                            has_history=True, error="no executable BBO")
                     return f"{spec.key}: no executable BBO", None, None
                 age = time.time() - float(quote.timestamp)
                 if age < 0 or age > cfg.multiasset_max_quote_age_seconds:
+                    await record_validation(db, spec, contract,
+                                            quote_source=getattr(quote, "source", "none"),
+                                            has_history=True, error="stale BBO")
                     return f"{spec.key}: stale BBO ({age:.0f}s old)", None, None
                 source = getattr(quote, "source", "ibkr_unknown")
                 if source != "ibkr_live":
+                    await record_validation(db, spec, contract, quote_source=source,
+                                            has_history=True)
                     return f"{spec.key}: non-executable {source} quote", source, None
+                await record_validation(db, spec, contract, quote_source=source,
+                                        has_history=True)
                 return None, source, None
             except Exception as exc:  # noqa: BLE001
                 if pacing_error(exc) and attempt + 1 < attempts:
@@ -79,6 +102,11 @@ async def preflight(settings, db, *, client=None, timeout_seconds: int = 30,
                     await asyncio.sleep(delay)
                     continue
                 prefix = "pacing exhausted" if pacing_error(exc) else "probe failed"
+                await record_validation(
+                    db, spec, SimpleNamespace(conId=0, exchange=spec.exchange,
+                                              currency=spec.currency,
+                                              multiplier=spec.multiplier),
+                    quote_source="none", has_history=False, error=str(exc))
                 return f"{spec.key}: {prefix}: {str(exc)[:140]}", None, None
         return f"{spec.key}: pacing retry exhausted", None, None  # pragma: no cover
     if not getattr(client, "readonly", False) or hasattr(client, "place_order"):
@@ -87,7 +115,7 @@ async def preflight(settings, db, *, client=None, timeout_seconds: int = 30,
         add("isolation", "OK", "read-only client exposes no broker order method")
 
     required = {"ibkr_paper_positions", "ibkr_paper_fills",
-                "ibkr_paper_ledger", "ibkr_paper_state"}
+                "ibkr_paper_ledger", "ibkr_paper_state", "ibkr_contract_registry"}
     rows = await db.fetchall("SELECT name FROM sqlite_master WHERE type='table'")
     missing = required - {row["name"] for row in rows}
     add("database", "BLOCK" if missing else "OK",
@@ -141,6 +169,13 @@ async def preflight(settings, db, *, client=None, timeout_seconds: int = 30,
                 f"sources={','.join(sorted(sources))}")
         log.info("ibkr_multiasset.preflight_book_complete", book=book.value,
                  passed=len(universe) - len(failures), failed=len(failures))
+        registry = await db.fetchall(
+            "SELECT status, COUNT(*) AS n FROM ibkr_contract_registry "
+            "WHERE book=? GROUP BY status ORDER BY status", (book.value,))
+        counts = {row["status"]: int(row["n"]) for row in registry}
+        add(f"{book.value}:registry",
+            "OK" if set(counts) <= {"eligible"} else "WARN",
+            ", ".join(f"{status}={count}" for status, count in counts.items()))
 
         edge = await db.fetchone(
             """SELECT SUM(CASE WHEN kind = 'trade' THEN 1 ELSE 0 END) AS n,

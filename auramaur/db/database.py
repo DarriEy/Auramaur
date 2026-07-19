@@ -112,6 +112,8 @@ class Database:
             await self._migrate_v23_to_v24()
         if from_version < 25:
             await self._migrate_v24_to_v25()
+        if from_version < 26:
+            await self._migrate_v25_to_v26()
 
     async def _migrate_v1_to_v2(self) -> None:
         """Add category to calibration, add new tables."""
@@ -603,6 +605,15 @@ class Database:
         await self._db.execute("UPDATE schema_version SET version = 25")
         await self._db.commit()
         log.info("database.migrated", from_version=24, to_version=25)
+
+    async def _migrate_v25_to_v26(self) -> None:
+        """Register the persistent IBKR qualified-contract registry."""
+        required = await self.fetchall("PRAGMA table_info(ibkr_contract_registry)")
+        if not required:
+            raise RuntimeError("migration did not create ibkr_contract_registry")
+        await self._db.execute("UPDATE schema_version SET version = 26")
+        await self._db.commit()
+        log.info("database.migrated", from_version=25, to_version=26)
 
     async def _migrate_v11_to_v12(self) -> None:
         """Add strategy_source column to signals and trades for hybrid mode attribution."""

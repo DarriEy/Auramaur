@@ -10,7 +10,7 @@ method. A live-account TWS login does not make these books live.
 |---|---|---|---|
 | `global_etf` | US-listed global equity, rates, credit, commodity, currency and real-estate ETFs | Qualified `STK` with primary exchange | fractional shares at ask/bid |
 | `fx` | ten liquid G10 crosses | `CASH` on `IDEALPRO` | 1,000-base-unit lots, USD translation |
-| `futures` | micro equity index, rates, energy, metals and agriculture | nearest contract with >7 days to expiry; exact held `conId` retained | conservative per-contract capital plus multiplier P&L |
+| `futures` | micro equity index, rates, energy, metals and agriculture | product-specific roll buffer, then highest reported volume among nearest valid expiries; exact held `conId` retained | conservative per-contract capital plus multiplier P&L |
 | `international_equity` | Canada, UK, Europe, Japan, Hong Kong and Australia | native listing, exchange and currency | fractional shares, mark translated to USD |
 | `options` | 30–60 DTE ATM calls and puts on liquid ETFs | exact qualified chain contract; exact held `conId` retained | whole contracts, 100 multiplier |
 | `bonds` | US Treasury tenors and a US corporate issue | maturity-bounded IBKR bond scanner, exact `conId` | $1,000 face-value units |
@@ -18,6 +18,32 @@ method. A live-account TWS login does not make these books live.
 The catalog is in `auramaur/exchange/ibkr_instruments.py`. Instrument keys are
 unique and every entry declares its security type, exchange, currency, calendar,
 multiplier and discovery policy.
+
+## Manifest and qualified registry
+
+The trading space is deliberately hybrid. The version-controlled catalog is the
+only authority allowed to introduce economic exposure. IBKR probing qualifies
+those declarations into exact broker identities; it never adds a ticker or
+scanner result to the universe by itself.
+
+Successful preflight writes `ibkr_contract_registry`, including the manifest
+hash, `conId`, local symbol, trading class, exchange, currency, multiplier,
+quote provenance, history availability, and validation time. With
+`multiasset_registry_required: true`, new entries require a current `eligible`
+row whose manifest hash still matches. A catalog edit therefore fails closed
+until the instrument is probed again. Existing positions remain manageable by
+their persisted specification and original `conId`.
+
+Static listings, FX, futures, options, and government bond policies become
+eligible after successful qualification. Corporate bond scanner results need an
+operator to approve the exact issue:
+
+```console
+auramaur ibkr-contract-approve CORP_5Y --reason "reviewed issuer, maturity and liquidity"
+```
+
+Changing the manifest invalidates prior approval. Failed probes are quarantined;
+disabled instruments remain outside probing and runtime eligibility.
 
 `multiasset_disabled_instruments` is the explicit entitlement quarantine. The
 current username lacks TSEJ data, so `7203.T` remains catalogued but does not
@@ -83,6 +109,10 @@ The preflight checks structural isolation, schema, every configured contract,
 fresh BBOs, at least 21 daily bars, quote provenance, and per-book forward
 evidence. Run it during each venue's session when diagnosing BBO availability;
 closed venues are expected to lack executable quotes.
+
+Set `IBKR_MARKET_DATA_TYPE=1` in the compose environment. Values 2–4 may still
+qualify contracts and expose delayed/frozen data for diagnostics, but registry
+status becomes `qualified_no_live_data` and the runtime will not open risk.
 
 The startup books panel and periodic strategy table report each book separately.
 `ibkr_paper_state.last_cycle_at`, `last_success_at`, and `last_error` provide

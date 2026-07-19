@@ -270,6 +270,9 @@ ibkr:
   multiasset_preflight_concurrency: 2
   multiasset_preflight_pacing_retries: 2
   multiasset_preflight_retry_seconds: 2.0
+  # Runtime universe = deterministic manifest intersected with this machine's
+  # qualified, approved broker registry. Run preflight before enabling books.
+  multiasset_registry_required: true
   # TSEJ history/BBO is not entitled on the current IBKR username. Keep the
   # contract in the catalog and re-enable it after preflight passes.
   multiasset_disabled_instruments: ["7203.T"]
@@ -282,13 +285,13 @@ ibkr:
     international_equity: {enabled: true, budget_usd: 5000, max_positions: 5, max_position_pct: 12, max_deployment_pct: 50, daily_loss_limit_usd: 100, stop_loss_pct: 6, take_profit_pct: 12, max_spread_bps: 50}
     options: {enabled: true, budget_usd: 3000, max_positions: 3, max_position_pct: 10, max_deployment_pct: 30, daily_loss_limit_usd: 100, stop_loss_pct: 35, take_profit_pct: 50, max_spread_bps: 300}
     bonds: {enabled: true, budget_usd: 10000, max_positions: 4, max_position_pct: 20, max_deployment_pct: 60, daily_loss_limit_usd: 75, stop_loss_pct: 3, take_profit_pct: 6, max_spread_bps: 100}
-  # Multi-asset ETF universe: broad US, sectors, international, rates, real
-  # assets, and defensives. Long-only instruments avoid leverage/inverse decay.
+  # Operator-visible mirror of the typed GLOBAL_ETFS manifest. A test enforces
+  # exact equality so the legacy intelligence experiment cannot drift.
   etf_symbols: ["SPY", "QQQ", "IWM", "DIA", "VTI",
     "XLK", "XLF", "XLV", "XLE", "XLI", "XLY", "XLP", "XLU", "XLB", "XLRE", "XLC",
-    "VEA", "VWO", "EWC", "EWJ",
-    "TLT", "IEF", "SHY", "TIP",
-    "GLD", "SLV", "DBC", "VNQ"]
+    "VEA", "VWO", "INDA", "MCHI", "EWJ", "EWC", "EWZ",
+    "TLT", "IEF", "SHY", "TIP", "LQD", "HYG", "EMB",
+    "GLD", "SLV", "DBC", "VNQ", "UUP"]
   etf_paper_budget_usd: 5000.0
   etf_max_entry_usd: 250.0
   etf_max_deployment_pct: 50.0
