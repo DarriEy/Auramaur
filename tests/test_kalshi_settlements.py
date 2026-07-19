@@ -111,6 +111,21 @@ async def test_sweep_falls_back_to_filled_trades_for_cost():
     assert out[0]["booked"] is False  # dry run
 
 
+@pytest.mark.asyncio
+async def test_sweep_parses_current_fixed_point_schema_and_fees():
+    """Current Kalshi fields must not silently become zero-sized, fee-free rows."""
+    settlement = SimpleNamespace(
+        ticker="KXFP-1", market_result="yes", yes_count_fp="10.25",
+        no_count_fp="0.00", yes_total_cost_dollars="6.1500",
+        revenue=1025, fee_cost="0.35", settled_time=SETTLED_AT,
+    )
+    db = _db(cost_row=None, trades_net=None)
+    out = await sweep_kalshi_settlements(db, _client([settlement]), dry_run=True)
+    assert out[0]["qty"] == pytest.approx(10.25)
+    assert out[0]["fees"] == pytest.approx(0.35)
+    assert out[0]["pnl"] == pytest.approx(10.25 - 6.15 - 0.35)
+
+
 # --- Resolution-tracker detection now actually works for Kalshi ---
 
 def test_kalshi_market_carries_status_and_result():

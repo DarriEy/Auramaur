@@ -1,8 +1,10 @@
 """Tests for exchange-specific prepare_order logic."""
 
+import pytest
+
 from auramaur.exchange.client import PolymarketClient
 from auramaur.exchange.models import (
-    Confidence, Market, OrderSide, Signal, TokenType,
+    Confidence, Market, OrderBook, OrderBookLevel, OrderSide, Signal, TokenType,
 )
 
 
@@ -94,6 +96,49 @@ class TestPolymarketPrepareOrder:
 
 
 class TestKalshiPrepareOrder:
+    def test_subpenny_market_uses_declared_tick(self):
+        from auramaur.exchange.kalshi import KalshiClient
+        client = KalshiClient.__new__(KalshiClient)
+        market = _make_market(yes_price=0.041)
+        market.spread = 0.002
+        market.exchange = "kalshi"
+        market.ticker = market.id
+        market.price_ranges = [{"start": "0", "end": "0.1", "step": "0.001"}]
+        order = client.prepare_order(_make_signal(OrderSide.BUY), market, 10, False)
+        assert order.price == pytest.approx(0.062)
+
+    @pytest.mark.asyncio
+    async def test_fresh_book_caps_paper_size_to_executable_depth(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from auramaur.exchange.kalshi import KalshiClient
+
+        client = KalshiClient.__new__(KalshiClient)
+        client._paper = SimpleNamespace(db=None)
+        client.get_order_book = AsyncMock(return_value=OrderBook(
+            bids=[OrderBookLevel(price=0.40, size=20)],
+            asks=[OrderBookLevel(price=0.42, size=3),
+                  OrderBookLevel(price=0.43, size=2)],
+        ))
+        market = _make_market(yes_price=0.41)
+        market.exchange = "kalshi"
+        market.ticker = market.id
+        order = await client.prepare_executable_order(
+            _make_signal(OrderSide.BUY), market, 25, False)
+        assert order is not None
+        assert order.size == 5
+        assert order.price == pytest.approx(0.43)
+
+    def test_non_fractional_market_builds_integral_count(self):
+        from auramaur.exchange.kalshi import KalshiClient
+        client = KalshiClient.__new__(KalshiClient)
+        market = _make_market(yes_price=0.41)
+        market.exchange = "kalshi"
+        market.ticker = market.id
+        market.fractional_trading_enabled = False
+        order = client.prepare_order(_make_signal(), market, 10, False)
+        assert order.size == int(order.size)
+
     def _make_client(self):
         from auramaur.exchange.kalshi import KalshiClient
         client = KalshiClient.__new__(KalshiClient)

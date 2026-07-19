@@ -280,6 +280,9 @@ class ExecutionGateway:
         try:
             if router:
                 order = await router.route(signal, market, size_dollars, is_live)
+            elif callable(getattr(type(exchange), "prepare_executable_order", None)):
+                order = await exchange.prepare_executable_order(
+                    signal, market, size_dollars, is_live)
             else:
                 order = exchange.prepare_order(signal, market, size_dollars, is_live)
         except UnmarketableSignal as skip:

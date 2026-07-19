@@ -321,7 +321,8 @@ class ExitExecutionMixin:
 
         # Never sell more than we hold
         order.size = min(order.size, pos.size)
-        if order.size < 1:
+        minimum = 0.01 if market.fractional_trading_enabled else 1.0
+        if order.size < minimum:
             return False
 
         order.source = "exit"

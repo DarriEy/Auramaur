@@ -298,7 +298,8 @@ class LongHorizonPillar:
                         status=res.status, error=res.reason)
             return False
 
-        await self._record_position(signal, market, res.order, res.result)
+        if res.status != "pending" and res.result.filled_size > 0:
+            await self._record_position(signal, market, res.order, res.result)
         log.info("long_horizon.entered", market_id=market.id,
                  token=res.order.token.value, price=res.order.price,
                  size=res.order.size, edge=round(edge_fav, 3),
@@ -351,6 +352,9 @@ class LongHorizonPillar:
                 continue
             token_id = r["token_id"] or (
                 r["clob_token_yes"] if token == "YES" else r["clob_token_no"]) or ""
+            exit_price = (max(0.001, min(0.999, round(mark, 4)))
+                          if self._venue == "kalshi"
+                          else max(0.01, min(0.99, round(mark, 2))))
             order = Order(
                 market_id=r["market_id"],
                 exchange=self._venue,
@@ -358,7 +362,7 @@ class LongHorizonPillar:
                 side=OrderSide.SELL,
                 token=TokenType(token),
                 size=float(r["size"]),
-                price=max(0.01, min(0.99, round(mark, 2))),
+                price=exit_price,
                 order_type=OrderType.LIMIT,
                 dry_run=bool(r["is_paper"]) or not self._settings.is_live,
                 source="exit",

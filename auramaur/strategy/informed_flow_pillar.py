@@ -183,7 +183,8 @@ class InformedFlowPillar:
                         status=res.status, error=res.reason)
             return False
 
-        await self._record_position(signal, market, res.order, res.result)
+        if res.status != "pending" and res.result.filled_size > 0:
+            await self._record_position(signal, market, res.order, res.result)
         log.info("informed_flow.entered", market_id=market.id,
                  side=signal.recommended_side.value, informed=flow.informed_side,
                  abnormal=flow.abnormal_count, paper=res.result.is_paper)
