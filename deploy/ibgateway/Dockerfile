@@ -10,7 +10,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        ca-certificates fluxbox gosu netcat-openbsd novnc openjdk-17-jre-headless \
-       procps websockify x11vnc xvfb \
+       procps websockify x11vnc xauth xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd --uid 10002 --create-home ibgateway \
@@ -25,7 +25,8 @@ COPY ${IB_GATEWAY_INSTALLER} /tmp/ibgateway-installer.sh
 RUN chown ibgateway:ibgateway /tmp/ibgateway-installer.sh \
     && chmod 0700 /tmp/ibgateway-installer.sh \
     && gosu ibgateway env HOME=/home/ibgateway \
-       /tmp/ibgateway-installer.sh -q -dir "${IB_GATEWAY_HOME}" \
+       xvfb-run -a /tmp/ibgateway-installer.sh -q -dir "${IB_GATEWAY_HOME}" \
+    && find "${IB_GATEWAY_HOME}" -type f -name ibgateway -perm -u+x | grep -q . \
     && rm -f /tmp/ibgateway-installer.sh
 
 COPY --chown=ibgateway:ibgateway entrypoint.sh healthcheck.sh /usr/local/bin/
