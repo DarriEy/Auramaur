@@ -1042,7 +1042,13 @@ class KrakenPillar:
                     if it.id not in seen:
                         seen.add(it.id)
                         evidence.append(it)
-            analysis = await analyzer.analyze(market, evidence, cache)
+            # pin_claude: the directional read is the trial's entire signal and
+            # flatlines at 0.5 on fallback models (2026-07-19: 114/114 gate
+            # evaluations in [0.50, 0.51] while the non-reserved budget was
+            # exhausted and everything routed to Gemini). Same treatment as the
+            # resolution lens: never let bulk consumers starve it.
+            analysis = await analyzer.analyze(market, evidence, cache,
+                                              pin_claude=True)
         except Exception as e:
             log.warning("kraken.llm_view_error", pair=pair, error=str(e))
             return None
