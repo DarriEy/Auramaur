@@ -12,6 +12,10 @@ import structlog
 
 from auramaur.exchange.models import Market, OrderSide
 from auramaur.strategy.protocols import ExecutionMode
+from auramaur.risk.ibkr_math import (
+    adverse_fill, annualized_volatility, normalized_momentum,
+    risk_quantity, stop_distance,
+)
 
 log = structlog.get_logger()
 _ET = ZoneInfo("America/New_York")
@@ -237,6 +241,14 @@ class IBKRETFPaperPillar:
             return 0.0
         return float(row["pnl"] or 0.0) if row else 0.0
 
+    async def _daily_equity_change(self) -> float:
+        """Realized and current open losses both consume the daily envelope."""
+        realized = await self._daily_realized()
+        row = await self._db.fetchone(
+            """SELECT COALESCE(SUM(unrealized_pnl), 0) AS pnl
+                 FROM ibkr_etf_positions WHERE model_alias = ?""", (self._alias,))
+        return realized + float(row["pnl"] or 0) if row else realized
+
     async def _positions(self) -> dict[str, tuple[float, float]]:
         rows = await self._db.fetchall(
             """SELECT symbol, quantity, avg_cost FROM ibkr_etf_positions
@@ -256,7 +268,8 @@ class IBKRETFPaperPillar:
                WHERE model_alias = ? AND symbol = ?""", (self._alias, symbol))
         return float(row["peak_pnl_pct"])
 
-    async def _fill(self, symbol: str, side: OrderSide, qty: float, price: float) -> None:
+    async def _fill(self, symbol: str, side: OrderSide, qty: float, price: float,
+                    *, stop_price: float = 0, initial_risk_usd: float = 0) -> None:
         fee = self._s.ibkr.etf_fee_per_order_usd
         fill_ref = f"ibkr-etf-paper-{self._alias}-{symbol}-{uuid4().hex}"
         await self._db.execute(
@@ -271,9 +284,10 @@ class IBKRETFPaperPillar:
         if side == OrderSide.BUY:
             await self._db.execute(
                 """INSERT INTO ibkr_etf_positions
-                   (model_alias, symbol, quantity, avg_cost, current_price)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (self._alias, symbol, qty, price, price))
+                    (model_alias, symbol, quantity, avg_cost, current_price,
+                     stop_price, initial_risk_usd)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (self._alias, symbol, qty, price, price, stop_price, initial_risk_usd))
         else:
             position = await self._db.fetchone(
                 """SELECT quantity, avg_cost FROM ibkr_etf_positions
@@ -310,7 +324,8 @@ class IBKRETFPaperPillar:
             asset_class = self._asset_class(symbol)
             class_allocated[asset_class] = class_allocated.get(asset_class, 0.0) + qty * entry
         position_count = len(positions)
-        daily_loss_hit = await self._daily_realized() <= -cfg.etf_daily_loss_limit_usd
+        daily_loss_hit = await self._daily_equity_change() <= -cfg.etf_daily_loss_limit_usd
+        unmarked_positions = set(positions)
 
         # Refresh only a bounded slice per cycle so a 28-instrument universe
         # cannot trigger 28 LLM calls at once. Held positions get first claim;
@@ -326,7 +341,8 @@ class IBKRETFPaperPillar:
         refresh_order = held_order + candidates
         refresh_set = set(refresh_order[:cfg.etf_max_signal_refreshes_per_cycle])
 
-        for symbol in symbols:
+        # Held positions must receive fresh marks before any new risk is opened.
+        for symbol in held_order + candidates:
             try:
                 quote = await self._client.get_quote(symbol)
             except Exception as exc:  # noqa: BLE001
@@ -353,7 +369,11 @@ class IBKRETFPaperPillar:
                 gain = (quote.bid - entry) / entry * 100
                 peak = await self._peak(symbol, gain)
                 reason = None
-                if gain <= -cfg.etf_stop_loss_pct:
+                risk_row = await self._db.fetchone(
+                    """SELECT stop_price FROM ibkr_etf_positions
+                         WHERE model_alias=? AND symbol=?""", (self._alias, symbol))
+                stored_stop = float(risk_row["stop_price"] or 0) if risk_row else 0
+                if (stored_stop > 0 and quote.bid <= stored_stop) or gain <= -cfg.etf_stop_loss_pct:
                     reason = "stop_loss"
                 elif gain >= cfg.etf_take_profit_pct:
                     reason = "take_profit"
@@ -362,7 +382,8 @@ class IBKRETFPaperPillar:
                 elif prob is not None and prob < cfg.etf_exit_prob:
                     reason = "llm_bearish"
                 if reason:
-                    await self._fill(symbol, OrderSide.SELL, qty, quote.bid)
+                    exit_price = adverse_fill(quote.bid, quote.ask, "SELL", cfg.etf_slippage_bps)
+                    await self._fill(symbol, OrderSide.SELL, qty, exit_price)
                     self._cooldown[symbol] = time.time() + (
                         cfg.etf_reentry_cooldown_hours * 3600)
                     await self._db.execute(
@@ -377,14 +398,18 @@ class IBKRETFPaperPillar:
                     class_allocated[asset_class] = max(
                         0.0, class_allocated.get(asset_class, 0.0) - cost)
                     position_count -= 1
+                    unmarked_positions.discard(symbol)
                     log.info("ibkr_etf.paper.exit", symbol=symbol, reason=reason,
                              model_alias=self._alias,
                              gain_pct=round(gain, 2),
                              probability=(round(prob, 3) if prob is not None else None))
                 else:
                     await self._mirror(symbol, qty, entry, quote.bid)
+                    unmarked_positions.discard(symbol)
+                daily_loss_hit = await self._daily_equity_change() <= -cfg.etf_daily_loss_limit_usd
             elif (view is not None and conf_ok and prob >= cfg.etf_min_prob
                   and not daily_loss_hit
+                  and not unmarked_positions
                   and position_count < cfg.etf_max_positions
                   and time.time() >= self._cooldown.get(symbol, 0)):
                 deployment_cap = cfg.etf_paper_budget_usd * cfg.etf_max_deployment_pct / 100.0
@@ -394,19 +419,43 @@ class IBKRETFPaperPillar:
                     deployment_cap - allocated,
                     class_cap - class_allocated.get(asset_class, 0.0),
                 )
+                closes_raw = await self._client.get_adjusted_daily_closes(symbol)
+                closes = [float(close) for _, close in closes_raw if close and close > 0]
+                annual_vol = annualized_volatility(closes)
+                momentum = normalized_momentum(closes)
+                if annual_vol is None or momentum is None or momentum <= 0:
+                    continue
                 notional = min(cfg.etf_max_entry_usd, remaining)
                 if notional <= cfg.etf_fee_per_order_usd:
                     continue
-                qty = (notional - cfg.etf_fee_per_order_usd) / quote.ask
-                await self._fill(symbol, OrderSide.BUY, qty, quote.ask)
-                entry = quote.ask
+                entry = adverse_fill(quote.bid, quote.ask, "BUY", cfg.etf_slippage_bps)
+                distance = stop_distance(entry, annual_vol, cfg.etf_stop_vol_multiple,
+                                         cfg.etf_min_stop_pct)
+                risk_budget = cfg.etf_paper_budget_usd * cfg.etf_risk_per_position_pct / 100
+                qty = min(
+                    (notional - cfg.etf_fee_per_order_usd) / entry,
+                    risk_quantity(risk_budget, distance, 1, 1, fractional=True),
+                )
+                if qty <= 0:
+                    continue
+                initial_risk = qty * distance
+                open_risk = await self._db.fetchone(
+                    """SELECT COALESCE(SUM(initial_risk_usd), 0) AS risk
+                         FROM ibkr_etf_positions WHERE model_alias=?""", (self._alias,))
+                max_risk = cfg.etf_paper_budget_usd * cfg.etf_max_portfolio_risk_pct / 100
+                if float(open_risk["risk"] or 0) + initial_risk > max_risk:
+                    continue
+                await self._fill(symbol, OrderSide.BUY, qty, entry,
+                                 stop_price=entry - distance,
+                                 initial_risk_usd=initial_risk)
                 await self._mirror(symbol, qty, entry, quote.bid)
-                allocated += notional
+                actual_cost = qty * entry + cfg.etf_fee_per_order_usd
+                allocated += actual_cost
                 class_allocated[asset_class] = (
-                    class_allocated.get(asset_class, 0.0) + notional)
+                    class_allocated.get(asset_class, 0.0) + actual_cost)
                 position_count += 1
                 entries += 1
-                log.info("ibkr_etf.paper.entry", symbol=symbol, usd=round(notional, 2),
+                log.info("ibkr_etf.paper.entry", symbol=symbol, usd=round(actual_cost, 2),
                          model_alias=self._alias,
                          probability=round(prob, 3), confidence=confidence,
                          spread_bps=round(spread_bps, 2))

@@ -31,9 +31,9 @@ async def test_v23_migration_adds_verified_columns(tmp_path):
     version = await db.fetchone("SELECT version FROM schema_version")
     position_columns = await db.fetchall("PRAGMA table_info(ibkr_paper_positions)")
     fill_columns = await db.fetchall("PRAGMA table_info(ibkr_paper_fills)")
-    assert version["version"] == 26
+    assert version["version"] == 27
     assert {row["name"] for row in position_columns} >= {
-        "price_source", "instrument_spec_json"}
+        "price_source", "instrument_spec_json", "stop_price", "initial_risk_usd"}
     assert "price_source" in {row["name"] for row in fill_columns}
     registry = await db.fetchall("PRAGMA table_info(ibkr_contract_registry)")
     assert {"instrument_key", "manifest_hash", "con_id", "status", "approved"} <= {

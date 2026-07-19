@@ -15,13 +15,14 @@ class FakeMarketData:
     con_ids_requested = []
 
     async def get_quote(self, spec):
-        price = 2.0 if spec.kind is ContractKind.OPTION else 100.0
+        price = (2.0 if spec.kind is ContractKind.OPTION else
+                 1.0 if spec.kind is ContractKind.FOREX else 100.0)
         return MarketDataQuote(spec.key, price, price * 1.0001, time.time(),
                                abs(hash(spec.key)) % 100000 + 1,
                                spec.currency, spec.multiplier)
 
     async def get_daily_bars(self, spec, duration="3 M"):
-        return [(f"2026-06-{day:02d}", 80 + day) for day in range(1, 22)]
+        return [(f"session-{day:03d}", 80 + day * 0.2) for day in range(121)]
 
     async def get_fx_to_usd(self, currency):
         return 1.0
@@ -48,6 +49,7 @@ async def test_all_six_books_write_only_isolated_paper_tables():
     settings.ibkr.multiasset_registry_required = False
     settings.ibkr.multiasset_refreshes_per_cycle = 1
     for cfg in settings.ibkr.multiasset_books.values():
+        cfg.enabled = True  # exercise isolation plumbing, including gated books
         cfg.max_position_pct = 40
         cfg.max_deployment_pct = 60
     for book in IBKRBook:
@@ -103,6 +105,30 @@ async def test_intracycle_commission_tightens_loss_gate():
     assert await pillar.run_once() == 1
     assert (await db.fetchone(
         "SELECT COUNT(*) AS n FROM ibkr_paper_positions"))["n"] == 1
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_asset_class_risk_cap_bounds_correlated_entries():
+    db = Database(":memory:")
+    await db.connect()
+    settings = Settings()
+    settings.ibkr.multiasset_paper_enabled = True
+    settings.ibkr.multiasset_registry_required = False
+    settings.ibkr.multiasset_refreshes_per_cycle = 2
+    cfg = settings.ibkr.multiasset_books["global_etf"]
+    cfg.max_positions = 2
+    cfg.max_position_pct = 40
+    cfg.max_deployment_pct = 80
+    cfg.risk_per_position_pct = 0.25
+    cfg.max_asset_class_risk_pct = 0.25
+    pillar = IBKRMultiAssetPaperBook(
+        settings, FakeMarketData(), db, IBKRBook.GLOBAL_ETF)
+    await pillar.run_once()
+    row = await db.fetchone(
+        "SELECT SUM(initial_risk_usd) AS risk FROM ibkr_paper_positions "
+        "WHERE book='global_etf'")
+    assert float(row["risk"] or 0) <= 12.5
     await db.close()
 
 
@@ -229,6 +255,8 @@ async def test_open_position_is_marked_by_original_contract_id():
 
 def test_books_declare_paper_simulated_mode_and_asset_calendars():
     settings = Settings()
+    assert not settings.ibkr.multiasset_books["options"].enabled
+    assert not settings.ibkr.multiasset_books["bonds"].enabled
     for book in IBKRBook:
         pillar = IBKRMultiAssetPaperBook(settings, None, None, book)
         assert pillar.execution_mode.value == "paper_simulated"

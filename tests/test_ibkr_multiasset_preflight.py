@@ -53,8 +53,8 @@ async def test_preflight_blocks_client_with_order_surface_and_missing_data():
     blocked = {result.book for result in report.results
                if result.severity == "BLOCK"}
     assert "isolation" in blocked
-    assert set(("global_etf", "fx", "futures", "international_equity",
-                "options", "bonds")) <= blocked
+    assert {"global_etf", "fx", "futures", "international_equity"} <= blocked
+    assert {"options", "bonds"}.isdisjoint(blocked)  # disabled books are not probed
     await db.close()
 
 
@@ -71,8 +71,8 @@ async def test_preflight_blocks_stale_quotes():
     settings.ibkr.enabled = True
     report = await preflight(settings, db, client=StaleClient())
     blocked = {result.book for result in report.results if result.severity == "BLOCK"}
-    assert {"global_etf", "fx", "futures", "international_equity",
-            "options", "bonds"} <= blocked
+    assert {"global_etf", "fx", "futures", "international_equity"} <= blocked
+    assert {"options", "bonds"}.isdisjoint(blocked)
     await db.close()
 
 
