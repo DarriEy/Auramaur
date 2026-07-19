@@ -51,10 +51,56 @@ def _kraken_balance(key: str, secret: str) -> str:
 
 
 async def _probe(name: str, client) -> str:
-    """Attempt a read-only market fetch; never raises."""
+    """Deep read-only probe: discovery latency, book quality, signed access.
+
+    Multi-line report; never raises. Grades each aspect independently so a
+    closed venue or missing entitlement reads as WARN, not FAIL.
+    """
+    lines = []
     try:
-        markets = await client.get_markets(active=True, limit=3)
-        return f"OK — fetched {len(markets)} market(s)"
+        t0 = time.monotonic()
+        markets = await client.get_markets(active=True, limit=25)
+        ms = (time.monotonic() - t0) * 1000
+        grade = "OK" if markets and ms < 5000 else "WARN"
+        lines.append(f"{grade} — {len(markets)} active market(s) in {ms:.0f}ms")
+
+        book_fn = getattr(client, "get_order_book", None)
+        if book_fn is not None and markets:
+            market = markets[0]
+            market_id = getattr(market, "id", None) or getattr(market, "ticker", None)
+            try:
+                t0 = time.monotonic()
+                book = await book_fn(market_id)
+                ms = (time.monotonic() - t0) * 1000
+                bids = getattr(book, "bids", None) or []
+                asks = getattr(book, "asks", None) or []
+                if bids and asks:
+                    best_bid = max(float(getattr(b, "price", 0.0) or 0.0) for b in bids)
+                    best_ask = min(float(getattr(a, "price", 1.0) or 1.0) for a in asks)
+                    lines.append(
+                        f"  book      : OK — {len(bids)}x{len(asks)} levels, "
+                        f"bbo {best_bid:.2f}/{best_ask:.2f} in {ms:.0f}ms "
+                        f"({market_id})")
+                else:
+                    lines.append(
+                        f"  book      : WARN — empty book on {market_id} "
+                        f"(venue quiet or closed)")
+            except Exception as e:  # noqa: BLE001
+                lines.append(f"  book      : WARN — {type(e).__name__}: {str(e)[:90]}")
+
+        balance_fn = getattr(client, "get_balance", None)
+        if balance_fn is not None:
+            try:
+                t0 = time.monotonic()
+                balance = await balance_fn()
+                ms = (time.monotonic() - t0) * 1000
+                note = " (instant: local paper value, not a venue call)" if ms < 5 else ""
+                lines.append(
+                    f"  signed api: OK — balance ${float(balance):,.2f} in {ms:.0f}ms{note}")
+            except Exception as e:  # noqa: BLE001
+                lines.append(
+                    f"  signed api: FAILED — {type(e).__name__}: {str(e)[:90]}")
+        return "\n".join(lines)
     except Exception as e:  # noqa: BLE001 — preflight must report, not crash
         return f"FAILED — {type(e).__name__}: {str(e)[:120]}"
     finally:
@@ -89,6 +135,35 @@ async def main() -> None:
     print(f"  POLYGON_PRIVATE_KEY : {_mask(bool(s.polygon_private_key))}")
     print(f"  POLYMARKET_API_KEY  : {_mask(bool(s.polymarket_api_key))}")
     print(f"  discovery           : {await _probe('polymarket', GammaClient())}")
+    if s.polygon_private_key:
+        try:
+            from auramaur.exchange.client import PolymarketClient
+            clob = PolymarketClient(settings=s, paper_trader=None)
+            gamma = GammaClient()
+            try:
+                sample = await gamma.get_markets(active=True, limit=1)
+                token = None
+                if sample:
+                    token = (getattr(sample[0], "clob_token_yes", None)
+                             or getattr(sample[0], "clob_token_no", None))
+                if token:
+                    t0 = time.monotonic()
+                    book = await clob.get_order_book(token)
+                    ms = (time.monotonic() - t0) * 1000
+                    depth = len(getattr(book, "bids", []) or [])
+                    print(f"  signed clob         : OK — book fetch ({depth} bid levels) in {ms:.0f}ms")
+                else:
+                    print("  signed clob         : WARN — no token id on sampled market")
+            finally:
+                for c in (clob, gamma):
+                    close = getattr(c, "close", None)
+                    if close is not None:
+                        try:
+                            await close()
+                        except Exception:
+                            pass
+        except Exception as e:  # noqa: BLE001
+            print(f"  signed clob         : FAILED — {type(e).__name__}: {str(e)[:90]}")
 
     # Kalshi
     print(f"\nkalshi  [enabled={s.kalshi.enabled}, env={s.kalshi.environment}]")
