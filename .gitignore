@@ -15,6 +15,9 @@ KILL_SWITCH
 venv/
 .pytest_cache/
 .ruff_cache/
+.isolated/
+.worktrees/
+.pytest-*/
 *.log
 *.log.*
 .DS_Store

@@ -109,7 +109,7 @@ risk:
   mispricing_audit_ttl_hours: 12.0
 
 kelly:
-  fraction: 0.30
+  fraction: 0.10
 
 graduation:
   # Graduation ladder: every (strategy x category) cell EARNS live capital
@@ -128,8 +128,10 @@ graduation:
   # ledger; arbitrage/market_maker stay live (exempt). Entries only — open
   # positions are never stranded (exits bypass the risk manager).
   mode: "enforce"
-  min_events: 20
+  min_events: 100
   window_days: 90
+  confidence_z: 1.645
+  min_mean_pnl_lower_bound: 0.0
   probation_multiplier: 0.5
   cache_seconds: 300
   # Structural/two-sided strategies bypass the ladder.
@@ -396,6 +398,8 @@ kraken:
   # 0W/7L: every position decayed back into a momentum/stop loss. This re-enables
   # profit-taking so the book can actually close trades green.
   directional_take_profit_pct: 4.0
+  # Adverse fill adjustment on top of executable bid/ask in the shadow book.
+  directional_paper_slippage_bps: 5.0
   # Paper exposure ceiling: at most two $30 simulated positions. This is a
   # measurement budget, not authorization to deploy live capital.
   directional_budget_usd: 60.0

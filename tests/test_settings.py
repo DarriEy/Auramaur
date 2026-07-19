@@ -60,7 +60,7 @@ def test_default_risk_params():
     # Kalshi gets a lower candidate liquidity floor than Polymarket (thinner book)
     assert s.risk.min_liquidity == 1000.0
     assert s.risk.kalshi_min_liquidity == 300.0
-    assert s.kelly.fraction == 0.30
+    assert s.kelly.fraction == 0.10
 
 
 # ---------------------------------------------------------------------------

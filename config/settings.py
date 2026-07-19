@@ -178,7 +178,8 @@ class RiskConfig(BaseModel):
 
 
 class KellyConfig(BaseModel):
-    fraction: float = 0.25
+    # Forecast error dominates theoretical Kelly in prediction markets.
+    fraction: float = 0.10
 
 
 class IntervalsConfig(BaseModel):
@@ -972,8 +973,10 @@ class GraduationConfig(BaseModel):
     """
 
     mode: str = "observe"
-    min_events: int = 20
+    min_events: int = 100
     window_days: int = 90
+    confidence_z: float = 1.645
+    min_mean_pnl_lower_bound: float = 0.0
     probation_multiplier: float = 0.5
     cache_seconds: int = 300
     exempt_strategies: list[str] = ["arbitrage", "market_maker", "order_monitor"]
@@ -1309,6 +1312,7 @@ class KrakenConfig(BaseModel):
     # paper/validate fills and is folded into the take-profit threshold so a TP
     # only fires once the move clears costs. Live fills use the actual fee.
     directional_fee_pct: float = 0.26
+    directional_paper_slippage_bps: float = 5.0
     # Take-profit: exit a winner up this much from entry, NET of round-trip fees.
     # 0 disables it (winners ride, protected only by the trailing stop) — but with
     # a wide trailing_stop a sub-(trailing)% rally can never be banked, so winners

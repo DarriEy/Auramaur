@@ -116,6 +116,18 @@ class Database:
             await self._migrate_v25_to_v26()
         if from_version < 27:
             await self._migrate_v26_to_v27()
+        if from_version < 28:
+            await self._migrate_v27_to_v28()
+        if from_version < 29:
+            await self._migrate_v28_to_v29()
+
+    async def _migrate_v28_to_v29(self) -> None:
+        """Add immutable strategy-research and CLV accounting tables."""
+        # TABLES has already created the additive tables; only advance the
+        # version so older live databases converge without destructive DDL.
+        await self._db.execute("UPDATE schema_version SET version = 29")
+        await self._db.commit()
+        log.info("database.migrated", from_version=28, to_version=29)
 
     async def _migrate_v1_to_v2(self) -> None:
         """Add category to calibration, add new tables."""
@@ -655,6 +667,24 @@ class Database:
         await self._db.execute("UPDATE schema_version SET version = 27")
         await self._db.commit()
         log.info("database.migrated", from_version=26, to_version=27)
+
+    async def _migrate_v27_to_v28(self) -> None:
+        """Add the restart-safe, wallet-independent Kraken paper book."""
+        await self._db.executescript("""
+            CREATE TABLE IF NOT EXISTS kraken_paper_positions (
+                strategy TEXT NOT NULL DEFAULT 'llm', pair TEXT NOT NULL,
+                quantity REAL NOT NULL, entry_price REAL NOT NULL,
+                peak_gain_pct REAL NOT NULL DEFAULT 0,
+                opened_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (strategy, pair)
+            );
+            CREATE INDEX IF NOT EXISTS idx_kraken_paper_positions_pair
+                ON kraken_paper_positions(pair);
+        """)
+        await self._db.execute("UPDATE schema_version SET version = 28")
+        await self._db.commit()
+        log.info("database.migrated", from_version=27, to_version=28)
 
     async def _migrate_v11_to_v12(self) -> None:
         """Add strategy_source column to signals and trades for hybrid mode attribution."""
