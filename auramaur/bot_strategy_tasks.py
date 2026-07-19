@@ -271,6 +271,29 @@ class StrategyTaskMixin:
                 log.error("econ_indicator.cycle_error", error=str(e))
             await asyncio.sleep(interval)
 
+    async def _task_interim_manager(self) -> None:
+        """Operator-proposed interim entries (docs/INTERIM_MANAGER.md)."""
+        from auramaur.strategy.interim_manager import InterimManagerPillar
+
+        pillar = InterimManagerPillar(
+            db=self._components.db,
+            settings=self.settings,
+            discoveries=self._components.discoveries,
+            exchanges=self._components.exchanges,
+            risk_manager=self._components.risk_manager,
+            pnl_tracker=self._components.pnl_tracker,
+            calibration=self._components.calibration,
+        )
+        interval = max(60, self.settings.interim_manager.interval_seconds)
+        while self._running:
+            if await self._check_kill_switch():
+                return
+            try:
+                await pillar.run_once()
+            except Exception as e:
+                log.error("interim_manager.cycle_error", error=str(e))
+            await asyncio.sleep(interval)
+
     async def _task_settlement_arb(self) -> None:
         """Settlement-lag / known-outcome arb over Polymarket econ markets,
         resolved deterministically against FRED (paper-forced, default off)."""
