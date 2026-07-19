@@ -1,5 +1,4 @@
 import sqlite3
-from pathlib import Path
 
 import aiosqlite
 import pytest
@@ -8,9 +7,8 @@ from auramaur.db.database import Database
 
 
 @pytest.mark.asyncio
-async def test_v23_migration_adds_verified_columns():
-    path = Path("runtime/test-v23-migration.db")
-    path.unlink(missing_ok=True)
+async def test_v23_migration_adds_verified_columns(tmp_path):
+    path = tmp_path / "v23.db"
     raw = sqlite3.connect(path)
     raw.executescript(
         """CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
@@ -41,7 +39,6 @@ async def test_v23_migration_adds_verified_columns():
     assert {"instrument_key", "manifest_hash", "con_id", "status", "approved"} <= {
         row["name"] for row in registry}
     await db.close()
-    path.unlink(missing_ok=True)
 
 
 @pytest.mark.asyncio
