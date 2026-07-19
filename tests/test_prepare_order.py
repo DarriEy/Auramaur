@@ -107,6 +107,19 @@ class TestKalshiPrepareOrder:
         order = client.prepare_order(_make_signal(OrderSide.BUY), market, 10, False)
         assert order.price == pytest.approx(0.062)
 
+    def test_numeric_price_range_values_do_not_drop_the_market(self):
+        """Kalshi sends strings today; numeric drift must not fail validation."""
+        from auramaur.exchange.kalshi import KalshiClient
+        market = _make_market(yes_price=0.041)
+        market.spread = 0.002
+        market.exchange = "kalshi"
+        market.ticker = market.id
+        market.price_ranges = [{"start": 0, "end": 0.1, "step": 0.001}]
+        assert Market.model_validate(market.model_dump()).price_ranges
+        client = KalshiClient.__new__(KalshiClient)
+        order = client.prepare_order(_make_signal(OrderSide.BUY), market, 10, False)
+        assert order.price == pytest.approx(0.062)
+
     @pytest.mark.asyncio
     async def test_fresh_book_caps_paper_size_to_executable_depth(self):
         from types import SimpleNamespace

@@ -116,7 +116,7 @@ class KalshiClient:
         the worker thread (body included), so a stall blocks only that thread,
         not the event loop.
         """
-        await self._throttle_read()
+        await self._throttle()
         async with self._semaphore:
             return await asyncio.to_thread(fn, *args, **kwargs)
 
@@ -138,12 +138,12 @@ class KalshiClient:
         def _run():
             return fn(*args, **kwargs).data
 
-        await self._throttle_read()
+        await self._throttle()
         async with self._semaphore:
             return await asyncio.to_thread(_run)
 
-    async def _throttle_read(self) -> None:
-        """Enforce a real per-second read budget."""
+    async def _throttle(self) -> None:
+        """Enforce a real per-second request budget (reads and writes)."""
         # A few protocol tests and lightweight adapters construct the client
         # with __new__; initialize these defensively without weakening runtime.
         if not hasattr(self, "_rate_lock"):
@@ -600,7 +600,7 @@ class KalshiClient:
                 )
                 return resp.read()
 
-            await self._throttle_read()
+            await self._throttle()
             async with self._semaphore:
                 raw = await asyncio.to_thread(_post)
             data = json.loads(raw) if raw else {}
@@ -786,7 +786,7 @@ class KalshiClient:
             )
 
         try:
-            await self._throttle_read()
+            await self._throttle()
             async with self._semaphore:
                 await asyncio.to_thread(_delete)
             log.info("order.cancelled", exchange="kalshi", order_id=order_id, via="v2")

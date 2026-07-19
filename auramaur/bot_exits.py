@@ -321,6 +321,10 @@ class ExitExecutionMixin:
 
         # Never sell more than we hold
         order.size = min(order.size, pos.size)
+        if not market.fractional_trading_enabled:
+            # Legacy holdings can carry fractional sizes; a non-fractional
+            # market rejects a fractional count at the API, stranding the exit.
+            order.size = float(int(order.size))
         minimum = 0.01 if market.fractional_trading_enabled else 1.0
         if order.size < minimum:
             return False

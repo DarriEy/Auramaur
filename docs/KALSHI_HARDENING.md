@@ -4,6 +4,24 @@ Kalshi remains paper-first. Live orders still require the environment gate,
 configuration gate, and per-order `dry_run=False`; the kill switch and risk
 gateway remain authoritative.
 
+## Endpoints
+
+Production uses `https://external-api.kalshi.com/trade-api/v2`, Kalshi's
+current API domain (migrated 2026-07 from `api.elections.kalshi.com`, which
+serves identical responses and remains a valid fallback). The demo host is
+unchanged: `https://demo-api.kalshi.co/trade-api/v2`. If Kalshi retires a
+domain, the host literal lives in `KalshiClient._init_api`.
+
+## Fill booking for resting live orders
+
+A live order that rests (`pending`) is not recorded as a position by the
+entering strategy. The single-booking contract is: the order monitor records
+the confirmed fill (`pnl_tracker.record_fill` → fills / cost basis), and the
+next `sync_positions` venue snapshot materializes the `portfolio` row from
+venue truth. Strategy-level re-entry is prevented meanwhile by the `signals`
+table guard. Do not "fix" the entry gates to record pending orders — that
+reintroduces phantom positions.
+
 ## Execution contract
 
 - Current fixed-point (`*_fp`, `*_dollars`) fields are canonical. Legacy fields

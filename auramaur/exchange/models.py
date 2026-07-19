@@ -79,9 +79,11 @@ class Market(BaseModel):
     strike_type: str = ""
     floor_strike: float | None = None
     cap_strike: float | None = None
-    # Kalshi fixed-point execution metadata.
+    # Kalshi fixed-point execution metadata. Range values are strings in the
+    # current API but tolerate numeric drift — a typing mismatch here would
+    # fail Market validation and silently drop the whole market.
     price_level_structure: str = "linear_cent"
-    price_ranges: list[dict[str, str]] = Field(default_factory=list)
+    price_ranges: list[dict[str, str | int | float]] = Field(default_factory=list)
     fractional_trading_enabled: bool = False
     # Polymarket UMA optimistic-oracle resolution state, surfaced by Gamma.
     # `uma_status` is the current stage ("" → no proposal yet, "proposed" →
