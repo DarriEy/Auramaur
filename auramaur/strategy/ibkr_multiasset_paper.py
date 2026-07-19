@@ -167,16 +167,41 @@ class IBKRMultiAssetPaperBook:
                 """INSERT INTO ibkr_paper_positions
                    (book, instrument_key, con_id, currency, quantity, multiplier,
                     fx_to_usd, avg_cost, current_price, price_source,
-                    instrument_spec_json, stop_price, initial_risk_usd)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    instrument_spec_json, stop_price, initial_risk_usd,
+                    entry_commission_usd, entry_fill_ref)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (self.book.value, spec.key, quote.con_id, spec.currency, quantity,
                  quote.multiplier, fx, price, price, quote.source,
-                 self._serialize_spec(spec), stop_price, initial_risk_usd))
+                 self._serialize_spec(spec), stop_price, initial_risk_usd, fee,
+                 fill_ref))
         else:
             pnl = (price - float(entry_price)) * quantity * quote.multiplier * fx
             await self._db.execute(
                 "INSERT INTO ibkr_paper_ledger (book, kind, pnl_usd, source_ref) VALUES (?, 'trade', ?, ?)",
                 (self.book.value, pnl, f"{fill_ref}:trade"))
+            position = await self._db.fetchone(
+                "SELECT entry_commission_usd, entry_fill_ref, opened_at "
+                "FROM ibkr_paper_positions "
+                "WHERE book = ? AND instrument_key = ?",
+                (self.book.value, spec.key))
+            entry_fee = float(position["entry_commission_usd"] or 0) if position else 0.0
+            entry_fill_ref = str(position["entry_fill_ref"] or "") if position else ""
+            if position is None:
+                # Understates elapsed_days for the evidence contract; loud so a
+                # recurring miss is investigated rather than absorbed.
+                log.warning("ibkr_multiasset.round_trip_missing_entry",
+                            book=self.book.value, instrument=spec.key)
+            opened_at = position["opened_at"] if position else datetime.now(timezone.utc).isoformat()
+            # OR IGNORE: exit_fill_ref is UNIQUE, so a crash-replayed exit books
+            # the round trip once instead of failing the cycle.
+            await self._db.execute(
+                """INSERT OR IGNORE INTO ibkr_paper_round_trips
+                   (book, instrument_key, entry_fill_ref, exit_fill_ref, gross_pnl_usd,
+                    entry_commission_usd, exit_commission_usd, net_pnl_usd,
+                    opened_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (self.book.value, spec.key, entry_fill_ref, fill_ref, pnl, entry_fee, fee,
+                 pnl - entry_fee - fee, opened_at))
             await self._db.execute(
                 "DELETE FROM ibkr_paper_positions WHERE book = ? AND instrument_key = ?",
                 (self.book.value, spec.key))

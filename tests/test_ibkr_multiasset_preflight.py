@@ -199,11 +199,38 @@ async def test_edge_evidence_is_net_of_commissions_and_financing():
         "('global_etf', 'trade', 10, 'trade-1'), "
         "('global_etf', 'commission', -1.5, 'fee-1'), "
         "('global_etf', 'financing', -0.5, 'finance-1')")
+    await db.execute(
+        """INSERT INTO ibkr_paper_round_trips
+           (book, instrument_key, exit_fill_ref, gross_pnl_usd,
+            entry_commission_usd, exit_commission_usd, financing_usd,
+            net_pnl_usd, opened_at)
+           VALUES ('global_etf', 'SPY', 'exit-1', 10, 1, .5, .5, 8,
+                   datetime('now', '-10 days'))""")
     await db.commit()
     settings = Settings()
     settings.ibkr.enabled = True
     report = await preflight(settings, db, client=ReadyClient())
     edge = next(result for result in report.results if result.book == "global_etf:edge")
-    assert "1 exits" in edge.detail
+    assert "1 cost-adjusted round trips" in edge.detail
     assert "$8.00 net P&L" in edge.detail
+    assert "not graduated" in edge.detail
+    assert "1/200 cost-adjusted observations" in edge.detail
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_edge_ignores_ambiguous_legacy_ledger_events():
+    db = Database(":memory:")
+    await db.connect()
+    await db.execute(
+        "INSERT INTO ibkr_paper_ledger (book, kind, pnl_usd, source_ref) "
+        "VALUES ('global_etf', 'trade', 999, 'legacy-trade'), "
+        "('global_etf', 'commission', -1, 'legacy-fee')")
+    await db.commit()
+    settings = Settings()
+    settings.ibkr.enabled = True
+    report = await preflight(settings, db, client=ReadyClient())
+    edge = next(result for result in report.results if result.book == "global_etf:edge")
+    assert "0 cost-adjusted round trips" in edge.detail
+    assert "$0.00 net P&L" in edge.detail
     await db.close()

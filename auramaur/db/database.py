@@ -120,6 +120,43 @@ class Database:
             await self._migrate_v27_to_v28()
         if from_version < 29:
             await self._migrate_v28_to_v29()
+        if from_version < 30:
+            await self._migrate_v29_to_v30()
+
+    async def _migrate_v29_to_v30(self) -> None:
+        """Add cost-adjusted IBKR round-trip observations."""
+        for column in (
+            "entry_commission_usd REAL NOT NULL DEFAULT 0",
+            "entry_fill_ref TEXT NOT NULL DEFAULT ''",
+        ):
+            try:
+                await self._db.execute(
+                    f"ALTER TABLE ibkr_paper_positions ADD COLUMN {column}")
+            except aiosqlite.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+        await self._db.executescript("""
+            CREATE TABLE IF NOT EXISTS ibkr_paper_round_trips (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                book TEXT NOT NULL, instrument_key TEXT NOT NULL,
+                entry_fill_ref TEXT NOT NULL DEFAULT '',
+                exit_fill_ref TEXT NOT NULL UNIQUE,
+                gross_pnl_usd REAL NOT NULL,
+                entry_commission_usd REAL NOT NULL DEFAULT 0,
+                exit_commission_usd REAL NOT NULL DEFAULT 0,
+                financing_usd REAL NOT NULL DEFAULT 0,
+                borrow_usd REAL NOT NULL DEFAULT 0,
+                roll_cost_usd REAL NOT NULL DEFAULT 0,
+                intelligence_cost_usd REAL NOT NULL DEFAULT 0,
+                net_pnl_usd REAL NOT NULL, opened_at TEXT NOT NULL,
+                closed_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_ibkr_round_trips_book_closed
+                ON ibkr_paper_round_trips(book, closed_at);
+        """)
+        await self._db.execute("UPDATE schema_version SET version = 30")
+        await self._db.commit()
+        log.info("database.migrated", from_version=29, to_version=30)
 
     async def _migrate_v28_to_v29(self) -> None:
         """Add immutable strategy-research and CLV accounting tables."""

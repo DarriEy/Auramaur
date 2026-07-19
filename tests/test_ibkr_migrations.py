@@ -43,7 +43,7 @@ async def test_v23_migration_adds_verified_columns(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_v27_migrates_directly_through_v29(tmp_path):
+async def test_v27_migrates_directly_through_latest(tmp_path):
     path = tmp_path / "v27.db"
     raw = sqlite3.connect(path)
     raw.executescript(
@@ -59,9 +59,34 @@ async def test_v27_migrates_directly_through_v29(tmp_path):
         "SELECT name FROM sqlite_master WHERE type='table' AND name='kraken_paper_positions'")
     decisions = await db.fetchone(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='decision_snapshots'")
-    assert version["version"] == 29
+    assert version["version"] == SCHEMA_VERSION
     assert kraken["name"] == "kraken_paper_positions"
     assert decisions["name"] == "decision_snapshots"
+    round_trips = await db.fetchone(
+        "SELECT name FROM sqlite_master WHERE type='table' "
+        "AND name='ibkr_paper_round_trips'")
+    assert round_trips["name"] == "ibkr_paper_round_trips"
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_v29_adds_round_trip_lineage_columns(tmp_path):
+    path = tmp_path / "v29.db"
+    raw = sqlite3.connect(path)
+    raw.executescript(
+        """CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+        INSERT INTO schema_version VALUES (29);
+        CREATE TABLE ibkr_paper_positions (
+          book TEXT, instrument_key TEXT, PRIMARY KEY (book, instrument_key));
+        """)
+    raw.close()
+    db = Database(str(path))
+    await db.connect()
+    columns = await db.fetchall("PRAGMA table_info(ibkr_paper_positions)")
+    assert {"entry_commission_usd", "entry_fill_ref"} <= {
+        row["name"] for row in columns}
+    version = await db.fetchone("SELECT version FROM schema_version")
+    assert version["version"] == SCHEMA_VERSION
     await db.close()
 
 

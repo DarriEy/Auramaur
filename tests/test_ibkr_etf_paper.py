@@ -108,7 +108,7 @@ def test_default_profile_is_small_readonly_paper_book():
     settings = Settings()
     assert {"SPY", "QQQ", "IWM", "TLT", "GLD", "VEA"}.issubset(
         settings.ibkr.etf_symbols)
-    assert settings.ibkr.etf_paper_enabled is True
+    assert settings.ibkr.etf_paper_enabled is False
     assert settings.ibkr.etf_paper_budget_usd == 5_000.0
     assert settings.ibkr.etf_max_entry_usd == 250.0
     assert settings.ibkr.etf_max_deployment_pct == 50.0

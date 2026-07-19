@@ -218,9 +218,9 @@ cryptodotcom:
   environment: "sandbox"
 
 ibkr:
-  # Shared IBKR operational defaults remain unchanged. The ETF experiment below
-  # forces its own paper-port, read-only quote connection in code, so it cannot
-  # silently alter or arm the independently configured options/odd-lot paths.
+  # Shared IBKR operational defaults are inert. The ETF experiment below forces
+  # its own paper-port, read-only quote connection in code, so it cannot silently
+  # alter or arm the independently configured options/odd-lot paths.
   #
   # PRE-REGISTERED EXPERIMENT (2026-06-09, Phase 6 of the edge-first redesign).
   # IBKR is an experiment, not a commitment. Criteria fixed BEFORE activation
@@ -237,7 +237,9 @@ ibkr:
   # NOTE: before scaling beyond the starter budget, expose the isolated IBKR
   # ledgers through a report that calls the evidence contract above.
   # Ports: TWS 7497 paper / 7496 live; IB Gateway 4002 / 4001.
-  enabled: true
+  # Deliberate operator opt-in only. A fresh checkout must not connect to IBKR
+  # or start an experiment merely because TWS/Gateway is reachable.
+  enabled: false
   # Master switch above just connects. The two books are gated independently
   # (both also need enabled:true): options_enabled = the option-chain scanner
   # (needs OPRA data; off = no Error 200/10091 scan spam); the odd-lot
@@ -258,7 +260,7 @@ ibkr:
   paper_budget_usd: 5000.0
   # Structurally paper-only ETF book. The quote session may use a live TWS
   # login, but the API connection stays read-only and fills remain local-only.
-  etf_paper_enabled: true
+  etf_paper_enabled: false
   # TWS is logged into the live account but exposes this read-only API socket.
   etf_quote_port: 7497
   # Six isolated local paper books. TWS supplies read-only market data only.

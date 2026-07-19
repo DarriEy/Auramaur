@@ -675,6 +675,7 @@ class AuramaurBot(
         """OpenAI intelligence-cap A/B over the paper-only ETF mandate."""
         from auramaur.exchange.ibkr_equity import IBKREquityClient
         from auramaur.nlp.openai_etf import OpenAIETFAnalyzer
+        from auramaur.strategy.ibkr_etf_controls import MomentumETFAnalyzer
         from auramaur.strategy.ibkr_etf_paper import IBKRETFPaperPillar
 
         client = IBKREquityClient(self.settings, force_paper_readonly=True)
@@ -692,6 +693,10 @@ class AuramaurBot(
             self._components.get("cache"), model_alias=spec.alias,
             evidence_cache=evidence_cache)
             for spec, analyzer in zip(self.settings.ibkr.etf_models, analyzers)]
+        pillars.append(IBKRETFPaperPillar(
+            self.settings, client, self._components.get("db"), None,
+            MomentumETFAnalyzer(), self._components.get("cache"),
+            model_alias="momentum_control"))
         try:
             while self._running:
                 if await self._check_kill_switch():
