@@ -88,6 +88,26 @@ def test_llm_view_returns_and_throttles():
     asyncio.run(run())
 
 
+def test_llm_view_pins_primary_to_claude():
+    """The directional read is worthless on fallback models (flatlines at 0.5),
+    so the pillar must request the pinned/reserved Claude path explicitly."""
+    agg = MagicMock()
+    agg.gather = AsyncMock(return_value=[])
+    analysis = SimpleNamespace(probability=0.61, confidence="HIGH", skipped_reason=None)
+    analyzer = MagicMock()
+    analyzer.analyze = AsyncMock(return_value=analysis)
+    bot = SimpleNamespace(_components=Components({
+        "aggregator": agg, "analyzer": analyzer, "cache": None, "calibration": None,
+    }))
+    p = _pillar(bot=bot)
+
+    async def run():
+        await p._llm_view("SOLUSDC")
+        assert analyzer.analyze.await_args.kwargs.get("pin_claude") is True
+
+    asyncio.run(run())
+
+
 def test_llm_view_unknown_pair_returns_none():
     bot = SimpleNamespace(_components=Components({}))
     p = _pillar(bot=bot)
