@@ -114,6 +114,11 @@ Set `IBKR_MARKET_DATA_TYPE=1` in the compose environment. Values 2–4 may still
 qualify contracts and expose delayed/frozen data for diagnostics, but registry
 status becomes `qualified_no_live_data` and the runtime will not open risk.
 
+The sector-ETF and OTM option additions roughly doubled the probed contract
+count, so preflight wall time scales accordingly at the pacing-safe
+concurrency of 2. That is deliberate: the cap protects the session from IBKR
+pacing violations; budget extra minutes rather than raising concurrency.
+
 The startup books panel and periodic strategy table report each book separately.
 `ibkr_paper_state.last_cycle_at`, `last_success_at`, and `last_error` provide
 machine-readable health.
