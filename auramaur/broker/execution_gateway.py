@@ -32,6 +32,8 @@ from auramaur.db.database import Database
 from auramaur.exchange.models import Fill, Market, Order, OrderResult, OrderSide, Signal
 from auramaur.exchange.protocols import ExchangeClient
 from auramaur.monitoring.display import show_order, show_order_dropped
+from auramaur.research.polymarket_strategies import DecisionTracker
+from auramaur.strategy.signals import taker_fee_rate
 from config.settings import Settings
 
 log = structlog.get_logger()
@@ -113,6 +115,7 @@ class ExecutionGateway:
         capped = await self._exceeds_market_cap(order, is_live=is_live)
         if capped is not None:
             return ExecutionResult(status="skipped", reason=capped)
+        await self._capture_decision(intent, order)
         return await self._place_and_record(
             order, strategy_source=intent.signal.strategy_source,
             signal_id=getattr(intent.signal, "id", None),
@@ -197,6 +200,30 @@ class ExecutionGateway:
             order, strategy_source=strategy_source, signal_id=None,
             exchange=exchange, exchange_name=exchange_name)
 
+    async def _capture_decision(self, intent: TradeIntent, order: Order) -> None:
+        """Persist the immutable executable decision before submission."""
+        try:
+            coefficient = 0.0 if order.post_only else taker_fee_rate(
+                order.exchange or self.exchange_name, intent.market.category)
+            fee = order.size * coefficient * order.price * (1.0 - order.price)
+            await DecisionTracker(self.db).capture(
+                market_id=order.market_id,
+                strategy_source=intent.signal.strategy_source or "llm",
+                signal_id=getattr(intent.signal, "id", None),
+                side=order.side.value,
+                fair_probability=intent.signal.claude_prob,
+                reference_price=intent.signal.market_prob,
+                executable_price=order.price,
+                best_bid=None,
+                best_ask=None,
+                requested_size=order.size * order.price,
+                fee_estimate=fee,
+            )
+        except Exception as exc:
+            # Research telemetry may never block an approved trade.
+            log.warning("gateway.decision_capture_failed",
+                        market_id=order.market_id, error=str(exc))
+
     async def submit_paired(
         self,
         a: TradeIntent,
@@ -239,6 +266,9 @@ class ExecutionGateway:
                 ExecutionResult(status="skipped", order=order_b,
                                 reason=cap_b or "paired leg blocked by market cap"),
             )
+
+        await self._capture_decision(a, order_a)
+        await self._capture_decision(b, order_b)
 
         res_a = await self._place_and_record(
             order_a, strategy_source=a.signal.strategy_source,

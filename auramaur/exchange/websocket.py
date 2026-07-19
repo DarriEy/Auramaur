@@ -12,6 +12,7 @@ import structlog
 log = structlog.get_logger()
 
 POLYMARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+POLYMARKET_USER_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
 
 # Seconds between application-level pings. If Cloudflare half-closes the socket
 # without sending a WS CLOSE frame, the `async for` read loop would otherwise
@@ -145,3 +146,60 @@ class PolymarketWebSocket:
         if self._session and not self._session.closed:
             await self._session.close()
         log.info("websocket.closed")
+
+
+class PolymarketUserWebSocket:
+    """Authenticated, reconnecting order/trade lifecycle stream.
+
+    It observes only; accounting remains idempotent in the order monitor.  The
+    callback receives the unmodified event so the monitor can reconcile it with
+    the authoritative order id and CONFIRMED lifecycle state.
+    """
+
+    def __init__(self, *, api_key: str, api_secret: str, passphrase: str,
+                 on_event: Callable[[dict], Awaitable[None]],
+                 max_reconnect_delay: float = 60.0) -> None:
+        self._auth = {"apiKey": api_key, "secret": api_secret,
+                      "passphrase": passphrase}
+        self._on_event = on_event
+        self._markets: set[str] = set()
+        self._running = False
+        self._max_reconnect_delay = max_reconnect_delay
+
+    def subscribe(self, condition_ids: list[str]) -> None:
+        self._markets.update(x for x in condition_ids if x)
+
+    async def run(self) -> None:
+        if not all(self._auth.values()):
+            raise RuntimeError("authenticated Polymarket user stream requires L2 credentials")
+        self._running = True
+        delay = 1.0
+        async with aiohttp.ClientSession(timeout=_WS_TIMEOUT) as session:
+            while self._running:
+                try:
+                    async with session.ws_connect(
+                        POLYMARKET_USER_WS_URL, heartbeat=_WS_HEARTBEAT,
+                    ) as ws:
+                        await ws.send_json({"auth": self._auth,
+                                            "markets": sorted(self._markets),
+                                            "type": "user"})
+                        delay = 1.0
+                        async for msg in ws:
+                            if msg.type == aiohttp.WSMsgType.TEXT:
+                                payload = json.loads(msg.data)
+                                events = payload if isinstance(payload, list) else [payload]
+                                for event in events:
+                                    if event.get("event_type") in ("order", "trade") or event.get("type") in ("order", "trade"):
+                                        await self._on_event(event)
+                            elif msg.type in (aiohttp.WSMsgType.ERROR,
+                                              aiohttp.WSMsgType.CLOSE,
+                                              aiohttp.WSMsgType.CLOSED):
+                                break
+                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+                    log.warning("websocket.user_disconnected", error=str(exc))
+                if self._running:
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, self._max_reconnect_delay)
+
+    async def close(self) -> None:
+        self._running = False

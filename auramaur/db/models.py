@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 29
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -391,6 +391,62 @@ CREATE TABLE IF NOT EXISTS orderbook_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_orderbook_market_time ON orderbook_snapshots(market_id, recorded_at);
 
+-- Immutable decision-time observations used for executable-price and
+-- closing-line-value evaluation.  These are separate from mutable signals so
+-- later analysis cannot rewrite the research record.
+CREATE TABLE IF NOT EXISTS decision_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id TEXT NOT NULL,
+    strategy_source TEXT NOT NULL,
+    signal_id INTEGER,
+    side TEXT NOT NULL,
+    fair_probability REAL NOT NULL,
+    reference_price REAL NOT NULL,
+    executable_price REAL,
+    best_bid REAL,
+    best_ask REAL,
+    requested_size REAL NOT NULL DEFAULT 0,
+    fee_estimate REAL NOT NULL DEFAULT 0,
+    filled INTEGER NOT NULL DEFAULT 0,
+    observed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(signal_id, strategy_source)
+);
+CREATE INDEX IF NOT EXISTS idx_decision_market_time
+    ON decision_snapshots(market_id, observed_at);
+
+CREATE TABLE IF NOT EXISTS decision_marks (
+    decision_id INTEGER NOT NULL,
+    horizon_seconds INTEGER NOT NULL,
+    bid REAL,
+    ask REAL,
+    mid REAL,
+    marked_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (decision_id, horizon_seconds)
+);
+
+CREATE TABLE IF NOT EXISTS maker_rebates (
+    date TEXT NOT NULL,
+    condition_id TEXT NOT NULL,
+    maker_address TEXT NOT NULL,
+    rebate_usdc REAL NOT NULL,
+    strategy_source TEXT NOT NULL DEFAULT 'market_maker',
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (date, condition_id, maker_address)
+);
+
+CREATE TABLE IF NOT EXISTS strategy_evaluations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy_source TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    mechanism TEXT NOT NULL,
+    score REAL NOT NULL,
+    expected_edge REAL NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    is_paper INTEGER NOT NULL DEFAULT 1,
+    observed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(strategy_source, market_id, mechanism, observed_at)
+);
+
 CREATE INDEX IF NOT EXISTS idx_signals_market ON signals(market_id);
 CREATE INDEX IF NOT EXISTS idx_trades_market ON trades(market_id);
 CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp);
@@ -567,6 +623,21 @@ CREATE TABLE IF NOT EXISTS ibkr_paper_state (
     last_error TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Authoritative shadow book for Kraken validate-only strategies. Paper orders
+-- do not alter the real wallet, so wallet reconciliation must not own this state.
+CREATE TABLE IF NOT EXISTS kraken_paper_positions (
+    strategy TEXT NOT NULL DEFAULT 'llm',
+    pair TEXT NOT NULL,
+    quantity REAL NOT NULL,
+    entry_price REAL NOT NULL,
+    peak_gain_pct REAL NOT NULL DEFAULT 0,
+    opened_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (strategy, pair)
+);
+CREATE INDEX IF NOT EXISTS idx_kraken_paper_positions_pair
+    ON kraken_paper_positions(pair);
 
 -- Broker-qualified identities for the deterministic IBKR manifest. Discovery
 -- may refresh these rows but cannot introduce an undeclared instrument.

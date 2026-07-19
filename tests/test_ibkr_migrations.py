@@ -4,6 +4,7 @@ import aiosqlite
 import pytest
 
 from auramaur.db.database import Database
+from auramaur.db.models import SCHEMA_VERSION
 
 
 @pytest.mark.asyncio
@@ -31,13 +32,36 @@ async def test_v23_migration_adds_verified_columns(tmp_path):
     version = await db.fetchone("SELECT version FROM schema_version")
     position_columns = await db.fetchall("PRAGMA table_info(ibkr_paper_positions)")
     fill_columns = await db.fetchall("PRAGMA table_info(ibkr_paper_fills)")
-    assert version["version"] == 27
+    assert version["version"] == SCHEMA_VERSION
     assert {row["name"] for row in position_columns} >= {
         "price_source", "instrument_spec_json", "stop_price", "initial_risk_usd"}
     assert "price_source" in {row["name"] for row in fill_columns}
     registry = await db.fetchall("PRAGMA table_info(ibkr_contract_registry)")
     assert {"instrument_key", "manifest_hash", "con_id", "status", "approved"} <= {
         row["name"] for row in registry}
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_v27_migrates_directly_through_v29(tmp_path):
+    path = tmp_path / "v27.db"
+    raw = sqlite3.connect(path)
+    raw.executescript(
+        """CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+        INSERT INTO schema_version VALUES (27);
+        """)
+    raw.close()
+
+    db = Database(str(path))
+    await db.connect()
+    version = await db.fetchone("SELECT version FROM schema_version")
+    kraken = await db.fetchone(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='kraken_paper_positions'")
+    decisions = await db.fetchone(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='decision_snapshots'")
+    assert version["version"] == 29
+    assert kraken["name"] == "kraken_paper_positions"
+    assert decisions["name"] == "decision_snapshots"
     await db.close()
 
 

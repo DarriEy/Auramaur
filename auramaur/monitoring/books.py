@@ -101,7 +101,7 @@ def render_books_panel(settings, ledger_live_total: float | None = None) -> Pane
 
     g = settings.graduation
     t.add_row("graduation", Text(g.mode, style="yellow" if g.mode == "observe" else "bold"),
-              f">= {g.min_events} events / {g.window_days}d to earn live")
+              f">= {g.min_markets} markets / {g.window_days}d to earn live")
     if ledger_live_total is not None:
         t.add_row("ledger", Text(f"${ledger_live_total:+,.2f}",
                                  style="green" if ledger_live_total >= 0 else "red"),

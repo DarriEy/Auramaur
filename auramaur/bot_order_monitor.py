@@ -291,7 +291,17 @@ class OrderMonitorMixin:
             if self._watchdog is not None:
                 self._watchdog.beat()
 
-            await asyncio.sleep(30)
+            # Private Polymarket WS events wake reconciliation immediately;
+            # timeout preserves the 30-second polling fallback.
+            wake = getattr(primary_exchange, "_user_event", None)
+            if wake is None:
+                await asyncio.sleep(30)
+            else:
+                try:
+                    await asyncio.wait_for(wake.wait(), timeout=30)
+                except asyncio.TimeoutError:
+                    pass
+                wake.clear()
 
     async def _reconcile_orphaned_pending_trades(self, live_clients) -> None:
         """Resolve live trades rows stuck in status='pending'.

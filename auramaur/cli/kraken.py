@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
 
 import click
 from rich.table import Table
@@ -78,6 +80,77 @@ def kraken_balance_cmd():
                 console.print(f"  [magenta]{a:8}[/] {v}")
         await k.close()
     asyncio.run(_run())
+
+
+@kraken.command("preflight")
+def kraken_preflight():
+    """Read-only API-key permissions/restrictions audit."""
+    async def _run():
+        from auramaur.exchange.kraken import KrakenSpotClient
+        client = KrakenSpotClient(Settings())
+        try:
+            info = await client.get_api_key_info()
+            if not info:
+                console.print("[red]Kraken key metadata unavailable.[/]")
+                return
+            permissions = set(info.get("permissions") or [])
+            ips = info.get("ipAllowlist") or []
+            dangerous = permissions & {"withdraw-funds", "add-withdraw-address", "update-withdraw-address"}
+            console.print(f"Key: {info.get('apiKeyName', 'unknown')}")
+            console.print(f"Permissions: {', '.join(sorted(permissions)) or 'none'}")
+            console.print(f"IP allowlist: {', '.join(ips) if ips else '[red]NONE[/]'}")
+            if dangerous:
+                console.print(f"[red]Trading key has transfer authority: {sorted(dangerous)}[/]")
+            else:
+                console.print("[green]No withdrawal/address-management permission detected.[/]")
+        finally:
+            await client.close()
+    asyncio.run(_run())
+
+
+@kraken.command("research")
+@click.option("--input", "input_path", required=True, type=click.Path(exists=True, dir_okay=False))
+@click.option("--elapsed-days", default=0, type=int)
+def kraken_research(input_path: str, elapsed_days: int):
+    """Evaluate challenger books from JSON OHLC data without placing orders.
+
+    Input maps pair to rows: [ts, open, high, low, close, volume,
+    bid?, ask?, event_score?, order_imbalance?].
+    """
+    from auramaur.research.kraken_eval import (
+        Bar, PortfolioEvaluator, graduation, relative_strength_signal,
+        fit_residual_betas, residual_mean_reversion_signal,
+        volatility_breakout_signal, event_confirmation_signal,
+    )
+    raw = json.loads(Path(input_path).read_text(encoding="utf-8"))
+    def parse(row):
+        if len(row) < 6:
+            raise click.ClickException("each OHLC row requires at least 6 fields")
+        extra = list(row[6:10]) + [None, None, 0.0, 0.0]
+        return Bar(int(row[0]), *map(float, row[1:6]),
+                   bid=None if extra[0] is None else float(extra[0]),
+                   ask=None if extra[1] is None else float(extra[1]),
+                   event_score=float(extra[2] or 0), order_imbalance=float(extra[3] or 0))
+    data = {pair: [parse(r) for r in rows] for pair, rows in raw.items()}
+    if "XBTUSDC" not in data:
+        raise click.ClickException("XBTUSDC is required as the residual market factor")
+    split = max(2, min(len(rows) for rows in data.values()) // 2)
+    training = {pair: rows[:split] for pair, rows in data.items()}
+    betas = fit_residual_betas(training)
+    evaluator = PortfolioEvaluator()
+    candidates = {
+        "relative_strength": relative_strength_signal(data),
+        "residual_mean_reversion": residual_mean_reversion_signal(data, betas),
+        "volatility_breakout": volatility_breakout_signal(),
+        "confirmed_events": event_confirmation_signal(),
+    }
+    for name, signal in candidates.items():
+        m = evaluator.run(name, data, signal)
+        gate = graduation(m, elapsed_days)
+        status = "[green]ELIGIBLE[/]" if gate["eligible"] else "[yellow]PAPER[/]"
+        console.print(f"{name:26} {status} trades={m.trades} pnl=${m.net_pnl:.2f} "
+                      f"return={m.return_pct:.1f}% dd={m.max_drawdown_pct:.1f}% "
+                      f"excess={m.excess_return_pct:.1f}%")
 
 @kraken.command("pnl")
 def kraken_pnl():

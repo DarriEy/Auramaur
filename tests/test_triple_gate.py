@@ -25,6 +25,8 @@ def _make_settings(auramaur_live: bool = False, execution_live: bool = False) ->
     settings = MagicMock()
     settings.auramaur_live = auramaur_live
     settings.execution.live = execution_live
+    settings.execution.polymarket_geoblock_mode = "advisory"
+    settings.execution.polymarket_geoblock_ttl_seconds = 300
     settings.kill_switch_active = False
     # is_live requires both env + config and no kill switch
     settings.is_live = auramaur_live and execution_live
@@ -151,14 +153,83 @@ async def test_all_gates_open_attempts_live(paper_trader):
         mock_clob = MagicMock()
         mock_clob.create_and_post_order.return_value = {"orderID": "LIVE-xyz"}
         client._clob_client = mock_clob
-
-        result = await client.place_order(order)
+        with patch.object(client, "_check_geoblock", return_value=True):
+            result = await client.place_order(order)
 
     # Paper trader must NOT have been called
     paper_trader.execute.assert_not_awaited()
     assert result.is_paper is False
     assert result.order_id == "LIVE-xyz"
     assert result.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_live_order_enforces_geoblock_when_operator_opts_in(paper_trader):
+    settings = _make_settings(auramaur_live=True, execution_live=True)
+    settings.execution.polymarket_geoblock_mode = "enforce"
+    client = PolymarketClient(settings, paper_trader)
+    order = _make_order(dry_run=False)
+    with patch.object(client, "_check_geoblock", return_value=False):
+        result = await client.place_order(order)
+    paper_trader.execute.assert_not_awaited()
+    assert result.is_paper is False
+    assert result.status == "rejected"
+    assert result.order_id == "GEOBLOCKED"
+
+
+@pytest.mark.asyncio
+async def test_live_order_treats_frontend_geoblock_as_advisory(paper_trader):
+    settings = _make_settings(auramaur_live=True, execution_live=True)
+    client = PolymarketClient(settings, paper_trader)
+    order = _make_order(dry_run=False)
+    order.token_id = "0xabc123"
+    mock_clob = MagicMock()
+    mock_clob.create_and_post_order.return_value = {"orderID": "LIVE-advisory"}
+    client._clob_client = mock_clob
+    with patch.object(client, "_check_geoblock", return_value=False):
+        result = await client.place_order(order)
+    paper_trader.execute.assert_not_awaited()
+    assert result.order_id == "LIVE-advisory"
+    assert result.is_paper is False
+
+
+@pytest.mark.asyncio
+async def test_live_exit_bypasses_geoblock_even_when_enforced(paper_trader):
+    settings = _make_settings(auramaur_live=True, execution_live=True)
+    settings.execution.polymarket_geoblock_mode = "enforce"
+    client = PolymarketClient(settings, paper_trader)
+    order = _make_order(dry_run=False)
+    order.side = OrderSide.SELL
+    order.source = "exit"
+    order.token_id = "0xabc123"
+    mock_clob = MagicMock()
+    mock_clob.create_and_post_order.return_value = {"orderID": "LIVE-exit"}
+    client._clob_client = mock_clob
+    client._approved_tokens = {order.token_id}
+    with patch.object(client, "_check_geoblock", return_value=False) as check:
+        result = await client.place_order(order)
+    check.assert_not_awaited()
+    assert result.order_id == "LIVE-exit"
+    assert result.is_paper is False
+
+
+@pytest.mark.asyncio
+async def test_geoblock_cache_expires_and_transient_failure_is_retryable(paper_trader):
+    settings = _make_settings()
+    client = PolymarketClient(settings, paper_trader)
+    client._geoblocked = True
+    client._geoblock_checked_at = 100.0
+
+    with patch("auramaur.exchange.client.time.monotonic", return_value=200.0), \
+         patch("auramaur.exchange.client.aiohttp.ClientSession") as session:
+        assert await client._check_geoblock() is False
+        session.assert_not_called()
+
+    with patch("auramaur.exchange.client.time.monotonic", return_value=500.0), \
+         patch("auramaur.exchange.client.aiohttp.ClientSession",
+               side_effect=RuntimeError("frontend unavailable")):
+        assert await client._check_geoblock() is None
+    assert client._geoblock_checked_at == 0.0
 
 
 # ---------------------------------------------------------------------------

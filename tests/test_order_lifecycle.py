@@ -51,7 +51,12 @@ def mock_paper():
 
 @pytest.fixture
 def client(mock_settings, mock_paper):
-    return PolymarketClient(settings=mock_settings, paper_trader=mock_paper)
+    client = PolymarketClient(settings=mock_settings, paper_trader=mock_paper)
+    # Geographic eligibility is tested in test_triple_gate; lifecycle tests
+    # isolate the CLOB accounting path and must not call the real endpoint.
+    client._geoblock_checked_at = float("inf")
+    client._geoblocked = False
+    return client
 
 
 async def _place_live_buy(client, size=10, price=0.5):

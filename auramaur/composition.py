@@ -504,6 +504,7 @@ async def assemble_components(
 
     # WebSocket & Ensemble (optional — only if ensemble enabled)
     ws = None
+    user_ws = None
     ensemble = None
     if s.ensemble.enabled:
         try:
@@ -516,6 +517,18 @@ async def assemble_components(
             ensemble = EnsembleEstimator(db=db)
         except ImportError:
             log.warning("optional.missing", component="EnsembleEstimator")
+
+    # Private lifecycle events wake the existing idempotent order monitor; the
+    # stream never writes fills itself, so REST reconciliation remains truth.
+    if (exchange is not None and s.is_live and s.polymarket_api_key
+            and s.polymarket_api_secret and s.polymarket_passphrase):
+        from auramaur.exchange.websocket import PolymarketUserWebSocket
+        user_ws = PolymarketUserWebSocket(
+            api_key=s.polymarket_api_key,
+            api_secret=s.polymarket_api_secret,
+            passphrase=s.polymarket_passphrase,
+            on_event=exchange.notify_user_event,
+        )
 
     # Market maker (optional, enabled by config — Polymarket only).
     # Intentionally not wired for Kalshi: the 7% fee on winnings eats
@@ -558,7 +571,7 @@ async def assemble_components(
         "depth_agent": depth_agent,
         "market_maker": market_maker,
         "alerts": alerts,
-        "websocket": ws, "ensemble": ensemble,
+        "websocket": ws, "user_websocket": user_ws, "ensemble": ensemble,
         "source_names": source_names,
         "exchange_filter": exchange_filter,
     })

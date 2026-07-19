@@ -55,6 +55,11 @@ class Market(BaseModel):
     volume: float = 0
     liquidity: float = 0
     spread: float = 0
+    # Venue truth for fees. None means legacy/unknown and falls back to the
+    # conservative category schedule; False means this specific market is free.
+    fees_enabled: bool | None = None
+    fee_rate: float | None = None
+    fee_exponent: float | None = None
     clob_token_yes: str = ""
     clob_token_no: str = ""
     # NegRisk grouping: Polymarket multi-outcome events (e.g. "who wins the

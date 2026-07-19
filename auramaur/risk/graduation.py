@@ -7,12 +7,10 @@ from its measured record in the pnl_ledger, and loses it again on decay.
 
 The ladder (mode=enforce):
 
-  * cell has >= min_events LIVE realizations in the window:
-      live P&L > 0  -> LIVE, full size
-      live P&L <= 0 -> PAPER (demoted — the live record is negative)
-  * else cell has >= min_events PAPER realizations:
-      paper P&L > 0 -> LIVE on probation (size * probation_multiplier)
-      paper P&L <= 0 -> PAPER (its paper record is negative)
+  * observations are aggregated by market before evaluation
+  * cell has >= min_markets independent LIVE markets in the window and its
+    one-sided mean-P&L lower confidence bound is positive -> LIVE, full size
+  * else the same evidence contract is applied to PAPER markets -> probation
   * else -> PAPER (unproven; exploration happens on paper)
 
 mode=observe computes and logs the same decision but never changes behavior —
@@ -31,6 +29,7 @@ Safety properties:
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 
@@ -47,7 +46,7 @@ class CellDecision:
     reason: str
 
 
-_LIVE_FULL = CellDecision(False, 1.0, "live", "live record positive")
+_LIVE_FULL = CellDecision(False, 1.0, "live", "live evidence lower bound positive")
 _EXEMPT = CellDecision(False, 1.0, "exempt", "strategy exempt from graduation")
 
 
@@ -91,22 +90,32 @@ class GraduationLadder:
     # ------------------------------------------------------------------
 
     async def _cell_stats(self, strategy: str, category: str) -> dict:
-        row = await self._db.fetchone(
-            """SELECT
-                 SUM(CASE WHEN is_paper = 0 THEN 1 ELSE 0 END) AS live_n,
-                 COALESCE(SUM(CASE WHEN is_paper = 0 THEN pnl ELSE 0 END), 0) AS live_pnl,
-                 SUM(CASE WHEN is_paper = 1 THEN 1 ELSE 0 END) AS paper_n,
-                 COALESCE(SUM(CASE WHEN is_paper = 1 THEN pnl ELSE 0 END), 0) AS paper_pnl
+        rows = await self._db.fetchall(
+            """SELECT market_id, is_paper, SUM(pnl) AS pnl
                FROM pnl_ledger
                WHERE strategy_source = ? AND category = ?
-                 AND realized_at >= datetime('now', ?)""",
+                 AND realized_at >= datetime('now', ?)
+               GROUP BY market_id, is_paper""",
             (strategy, category, f"-{int(self._settings.graduation.window_days)} days"),
         )
+        live = [float(r["pnl"] or 0.0) for r in rows or [] if not r["is_paper"]]
+        paper = [float(r["pnl"] or 0.0) for r in rows or [] if r["is_paper"]]
+
+        def lower_bound(values: list[float]) -> float:
+            if len(values) < 2:
+                # Sample variance is undefined below two independent markets;
+                # -inf prevents a single outcome from claiming evidence.
+                return float("-inf")
+            mean = sum(values) / len(values)
+            variance = sum((x - mean) ** 2 for x in values) / (len(values) - 1)
+            return mean - self._settings.graduation.confidence_z * math.sqrt(
+                variance / len(values))
+
         return {
-            "live_n": int(row["live_n"] or 0) if row else 0,
-            "live_pnl": float(row["live_pnl"] or 0.0) if row else 0.0,
-            "paper_n": int(row["paper_n"] or 0) if row else 0,
-            "paper_pnl": float(row["paper_pnl"] or 0.0) if row else 0.0,
+            "live_n": len(live), "live_pnl": sum(live),
+            "live_lcb": lower_bound(live),
+            "paper_n": len(paper), "paper_pnl": sum(paper),
+            "paper_lcb": lower_bound(paper),
         }
 
     async def _paper_breadth(self) -> int:
@@ -128,20 +137,23 @@ class GraduationLadder:
         cfg = self._settings.graduation
         s = await self._cell_stats(strategy, category)
 
-        if s["live_n"] >= cfg.min_events:
-            if s["live_pnl"] > 0:
+        if s["live_n"] >= cfg.min_markets:
+            if s["live_lcb"] > cfg.min_mean_pnl_lower_bound:
                 return _LIVE_FULL
             return CellDecision(
                 True, 1.0, "demoted",
-                f"live record negative (${s['live_pnl']:+.2f} over {s['live_n']} events)")
-        if s["paper_n"] >= cfg.min_events:
-            if s["paper_pnl"] > 0:
+                f"live evidence insufficient (mean-P&L LCB ${s['live_lcb']:+.3f}; "
+                f"${s['live_pnl']:+.2f} over {s['live_n']} independent markets)")
+        if s["paper_n"] >= cfg.min_markets:
+            if s["paper_lcb"] > cfg.min_mean_pnl_lower_bound:
                 return CellDecision(
                     False, cfg.probation_multiplier, "probation",
-                    f"graduated from paper (${s['paper_pnl']:+.2f} over {s['paper_n']} events)")
+                    f"graduated from paper (mean-P&L LCB ${s['paper_lcb']:+.3f}; "
+                    f"${s['paper_pnl']:+.2f} over {s['paper_n']} independent markets)")
             return CellDecision(
                 True, 1.0, "paper_negative",
-                f"paper record negative (${s['paper_pnl']:+.2f} over {s['paper_n']} events)")
+                f"paper evidence insufficient (mean-P&L LCB ${s['paper_lcb']:+.3f}; "
+                f"${s['paper_pnl']:+.2f} over {s['paper_n']} independent markets)")
         # Unproven (still exploring). Restrict the spray: if the open paper book is
         # already at the breadth cap, skip NEW unproven entries (size x0) so
         # exploration concentrates instead of spraying. Restriction only — proven/
@@ -155,7 +167,7 @@ class GraduationLadder:
         return CellDecision(
             True, 1.0, "unproven",
             f"insufficient record (live {s['live_n']}, paper {s['paper_n']} "
-            f"< {cfg.min_events} events in {cfg.window_days}d)")
+            f"< {cfg.min_markets} markets in {cfg.window_days}d)")
 
     # ------------------------------------------------------------------
     # Reporting (CLI)

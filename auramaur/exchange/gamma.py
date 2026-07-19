@@ -289,6 +289,12 @@ class GammaClient:
                 or (uma_statuses[-1] if uma_statuses else "")
             )
 
+            fee_schedule = data.get("feeSchedule") or {}
+            if not isinstance(fee_schedule, dict):
+                fee_schedule = {}
+            raw_fee_rate = fee_schedule.get("rate", fee_schedule.get("r"))
+            raw_fee_exponent = fee_schedule.get("exponent", fee_schedule.get("e"))
+
             return Market(
                 id=str(data.get("id", data.get("conditionId", ""))),
                 exchange="polymarket",
@@ -304,6 +310,11 @@ class GammaClient:
                 volume=float(data.get("volume", 0) or 0),
                 liquidity=float(data.get("liquidity", 0) or 0),
                 spread=spread,
+                fees_enabled=(bool(data["feesEnabled"])
+                              if "feesEnabled" in data else None),
+                fee_rate=(float(raw_fee_rate) if raw_fee_rate is not None else None),
+                fee_exponent=(float(raw_fee_exponent)
+                              if raw_fee_exponent is not None else None),
                 clob_token_yes=clob_yes,
                 clob_token_no=clob_no,
                 neg_risk=neg_risk,

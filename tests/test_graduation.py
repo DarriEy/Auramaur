@@ -20,9 +20,9 @@ from auramaur.risk.graduation import GraduationLadder
 from config.settings import GraduationConfig
 
 
-def _settings(mode="enforce", min_events=5, **kw):
+def _settings(mode="enforce", min_markets=5, **kw):
     s = MagicMock()
-    s.graduation = GraduationConfig(mode=mode, min_events=min_events, **kw)
+    s.graduation = GraduationConfig(mode=mode, min_markets=min_markets, **kw)
     return s
 
 
@@ -72,7 +72,7 @@ def test_ladder_states():
         d = await ladder.decide("s_new", "tech")
         assert d.force_paper is True and d.status == "unproven"
 
-        # live wins over paper when both have >= min_events
+        # live wins over paper when both have >= min_markets
         await _seed(db, "s_mixed", "tech", n=5, pnl_each=-1.0, is_paper=0)
         await _seed(db, "s_mixed", "tech", n=5, pnl_each=1.0, is_paper=1)
         d = await ladder.decide("s_mixed", "tech")
@@ -142,7 +142,7 @@ def test_risk_manager_integration():
         await db.connect()
 
         settings = _make_settings()
-        settings.graduation = GraduationConfig(mode="enforce", min_events=5)
+        settings.graduation = GraduationConfig(mode="enforce", min_markets=5)
 
         with patch("auramaur.risk.manager.check_kill_switch") as mock_kill:
             mock_kill.return_value = CheckResult(
@@ -278,7 +278,7 @@ async def test_ladder_cell_uses_classified_category_when_label_missing():
     await db.connect()
 
     settings = _make_settings()
-    settings.graduation = GraduationConfig(mode="enforce", min_events=5)
+    settings.graduation = GraduationConfig(mode="enforce", min_markets=5)
     # 'crypto' is on the default live allowlist in _make_settings-land;
     # earn probation for llm x crypto on paper.
     await _seed(db, "llm", "crypto", n=5, pnl_each=1.0, is_paper=1)

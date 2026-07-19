@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import math
 import time
+import uuid
 
 import structlog
 
@@ -85,6 +86,59 @@ class KrakenPillar:
     def _db(self):
         return self._bot._components.get("db") if self._bot else None
 
+    def _paper_strategy(self) -> str:
+        return "llm" if getattr(self._s.kraken, "directional_llm_enabled", False) else "momentum"
+
+    async def _save_paper_position(self, pair: str, quantity: float, entry: float) -> None:
+        db = self._db()
+        if db is None:
+            return
+        await db.execute(
+            """INSERT INTO kraken_paper_positions
+               (strategy, pair, quantity, entry_price, peak_gain_pct, opened_at, updated_at)
+               VALUES (?, ?, ?, ?, 0, datetime('now'), datetime('now'))
+               ON CONFLICT(strategy, pair) DO UPDATE SET
+                   quantity=excluded.quantity, entry_price=excluded.entry_price,
+                   peak_gain_pct=0,
+                   updated_at=excluded.updated_at""",
+            (self._paper_strategy(), pair, quantity, entry),
+        )
+        await db.commit()
+
+    async def _delete_paper_position(self, pair: str) -> None:
+        db = self._db()
+        if db is not None:
+            await db.execute(
+                "DELETE FROM kraken_paper_positions WHERE strategy=? AND pair=?",
+                (self._paper_strategy(), pair),
+            )
+            await db.commit()
+
+    async def _reconcile_paper_positions(
+        self, managed: list[str],
+    ) -> dict[str, tuple[float, float, float]]:
+        """Restore validate-only positions without consulting the real wallet."""
+        db = self._db()
+        if db is None:
+            rows = [(p, 0.0, entry) for p, entry in self._dir_long.items()]
+        else:
+            found = await db.fetchall(
+                "SELECT pair, quantity, entry_price FROM kraken_paper_positions WHERE strategy=?",
+                (self._paper_strategy(),),
+            )
+            rows = [(r["pair"], float(r["quantity"]), float(r["entry_price"])) for r in found]
+        held_prices: dict[str, tuple[float, float, float]] = {}
+        self._dir_long.clear()
+        for pair, qty, entry in rows:
+            price = await self._k.get_price(pair)
+            if price and price > 0:
+                self._dir_long[pair] = entry
+                held_prices[pair] = (entry, price, qty)
+                if pair not in managed:
+                    managed.append(pair)
+        await self._mirror_to_portfolio(held_prices, [], is_paper=True)
+        return held_prices
+
     def _in_cooldown(self, pair: str) -> bool:
         return self._cooldown_until.get(pair, 0.0) > time.monotonic()
 
@@ -101,17 +155,34 @@ class KrakenPillar:
         if db is None:
             return gain_pct
         try:
+            paper = (not self._s.is_live) or (
+                getattr(self._s.kraken, "directional_llm_enabled", False)
+                and getattr(self._s.kraken, "directional_llm_paper", True))
+            if paper:
+                await db.execute(
+                    """UPDATE kraken_paper_positions
+                       SET peak_gain_pct=MAX(peak_gain_pct, ?), updated_at=datetime('now')
+                       WHERE strategy=? AND pair=?""",
+                    (gain_pct, self._paper_strategy(), pair),
+                )
+                await db.commit()
+                row = await db.fetchone(
+                    "SELECT peak_gain_pct FROM kraken_paper_positions WHERE strategy=? AND pair=?",
+                    (self._paper_strategy(), pair),
+                )
+                return float(row["peak_gain_pct"]) if row else gain_pct
+            peak_key = f"kraken-live:{pair}"
             await db.execute(
                 """INSERT INTO position_peaks (market_id, peak_pnl_pct, updated_at)
                    VALUES (?, ?, datetime('now'))
                    ON CONFLICT(market_id) DO UPDATE SET
                        peak_pnl_pct = MAX(excluded.peak_pnl_pct, position_peaks.peak_pnl_pct),
                        updated_at = excluded.updated_at""",
-                (pair, gain_pct),
+                (peak_key, gain_pct),
             )
             await db.commit()
             row = await db.fetchone(
-                "SELECT peak_pnl_pct FROM position_peaks WHERE market_id = ?", (pair,))
+                "SELECT peak_pnl_pct FROM position_peaks WHERE market_id = ?", (peak_key,))
             return float(row["peak_pnl_pct"]) if row else gain_pct
         except Exception:  # noqa: BLE001
             return gain_pct
@@ -121,7 +192,7 @@ class KrakenPillar:
         if db is None:
             return
         try:
-            await db.execute("DELETE FROM position_peaks WHERE market_id = ?", (pair,))
+            await db.execute("DELETE FROM position_peaks WHERE market_id = ?", (f"kraken-live:{pair}",))
             await db.commit()
         except Exception:  # noqa: BLE001
             pass
@@ -248,6 +319,13 @@ class KrakenPillar:
             pnl = self._pnl_tracker()
             if pnl is not None:
                 fee_pct = (getattr(self._s.kraken, "directional_fee_pct", 0.26) or 0.0) / 100.0
+                # Last trade is not executable. Prefer top-of-book and stress it
+                # by configured adverse slippage for a less flattering shadow fill.
+                book = await self._k.get_bid_ask(pair) if hasattr(self._k, "get_bid_ask") else None
+                if book:
+                    est_price = book[1] if side == OrderSide.BUY else book[0]
+                bps = float(getattr(self._s.kraken, "directional_paper_slippage_bps", 5.0) or 0.0)
+                est_price *= 1 + bps / 10_000 if side == OrderSide.BUY else 1 - bps / 10_000
                 fill = Fill(
                     order_id=str(getattr(res, "order_id", "")) or f"paper-{pair}",
                     market_id=pair, token_id=pair, side=side, token=TokenType.YES,
@@ -557,13 +635,17 @@ class KrakenPillar:
 
     async def _mirror_to_portfolio(
         self, held_prices: dict[str, tuple[float, float, float]], closed: list[str],
+        is_paper: bool | None = None,
     ) -> None:
         db = self._bot._components.get("db") if self._bot else None
         if db is None:
             return
-        is_paper = 0 if self._s.is_live else 1
+        is_paper = (not self._s.is_live) if is_paper is None else is_paper
+        paper_strategy = self._paper_strategy()
+        is_paper = 1 if is_paper else 0
         try:
             for pair, (entry, current, qty) in held_prices.items():
+                market_id = f"kraken-paper:{paper_strategy}:{pair}" if is_paper else pair
                 await db.execute(
                     """INSERT INTO portfolio
                        (market_id, exchange, side, size, avg_price, current_price,
@@ -575,7 +657,7 @@ class KrakenPillar:
                            current_price = excluded.current_price,
                            unrealized_pnl = excluded.unrealized_pnl,
                            updated_at = excluded.updated_at""",
-                    (pair, qty, entry, current, (current - entry) * qty, pair, is_paper),
+                    (market_id, qty, entry, current, (current - entry) * qty, pair, is_paper),
                 )
             # Reconcile the mirror against WALLET truth, not in-memory state:
             # `closed` only sees pairs tracked by THIS process, so positions
@@ -587,8 +669,12 @@ class KrakenPillar:
                 "SELECT market_id FROM portfolio WHERE exchange = 'kraken' AND is_paper = ?",
                 (is_paper,),
             )
+            expected = ({f"kraken-paper:{paper_strategy}:{p}" for p in held_prices}
+                        if is_paper else set(held_prices))
+            scope = f"kraken-paper:{paper_strategy}:" if is_paper else None
             stale = [r["market_id"] for r in (rows or [])
-                     if r["market_id"] not in held_prices]
+                     if r["market_id"] not in expected
+                     and (scope is None or r["market_id"].startswith(scope))]
             for pair in stale:
                 await db.execute(
                     "DELETE FROM portfolio WHERE market_id = ? AND exchange = 'kraken' AND is_paper = ?",
@@ -602,6 +688,9 @@ class KrakenPillar:
 
     async def _directional(self) -> None:
         kcfg = self._s.kraken
+        llm_on = bool(getattr(kcfg, "directional_llm_enabled", False))
+        llm_paper = llm_on and bool(getattr(kcfg, "directional_llm_paper", True))
+        effective_paper = (not self._s.is_live) or llm_paper
         # Free (tradable) balances: total minus anything reserved by open orders.
         # Sizing exits/entries off the free amount avoids requesting more than is
         # actually sellable/spendable (which Kraken rejects as insufficient funds).
@@ -611,7 +700,11 @@ class KrakenPillar:
         # Evaluate the UNION of configured pairs and everything we actually hold,
         # so a position whose pair was pruned/de-configured still gets exited.
         managed = self._managed_pairs(bal)
-        held_prices = await self._reconcile_positions(bal, managed)
+        # Test/minimal embeddings without a DB retain legacy in-memory behavior;
+        # production paper mode uses the durable shadow book exclusively.
+        held_prices = (await self._reconcile_paper_positions(managed)
+                       if effective_paper and self._db() is not None
+                       else await self._reconcile_positions(bal, managed))
         valid_set = set(self._valid_pairs or kcfg.directional_pairs)
         liquidate_orphans = getattr(kcfg, "directional_liquidate_orphans", True)
 
@@ -625,9 +718,6 @@ class KrakenPillar:
         # paper-forced: orders go in validate-only and positions are simulated +
         # booked as paper fills, so `kraken pnl` measures it without risking
         # capital even when the bot runs live for other venues.
-        llm_on = bool(getattr(kcfg, "directional_llm_enabled", False))
-        llm_paper = llm_on and bool(getattr(kcfg, "directional_llm_paper", True))
-        effective_paper = (not self._s.is_live) or llm_paper
 
         # LLM-eligible pairs (those the news/LLM pipeline can reason about).
         # Drives both the calibration feedback loop and the conviction-weighted
@@ -699,7 +789,8 @@ class KrakenPillar:
                 res = await self._k.place_spot_order(
                     pair, OrderSide.SELL, volume=vol, ordertype="market",
                     purpose="directional", max_usd=max(notional, kcfg.max_order_usd) * 1.1,
-                    dry_run=True if effective_paper else None)
+                    dry_run=True if effective_paper else None,
+                    client_order_id=f"aur-s-{uuid.uuid4().hex}"[:32])
                 placed = res.order_id not in ("ERROR", "BLOCKED")
                 fill_price = None
                 if placed:
@@ -719,6 +810,8 @@ class KrakenPillar:
                 closed = placed and (effective_paper or fill_price is not None)
                 if closed:
                     self._dir_long.pop(pair, None)
+                    if effective_paper:
+                        await self._delete_paper_position(pair)
                     await self._clear_peak(pair)
                     self._set_cooldown(pair)   # damp whipsaw re-entry
                 elif placed:   # live, but the fill never confirmed
@@ -808,7 +901,8 @@ class KrakenPillar:
                         continue
                 res = await self._k.place_spot_order(
                     pair, OrderSide.BUY, volume=vol, ordertype="market", purpose="directional",
-                    dry_run=True if effective_paper else None)
+                    dry_run=True if effective_paper else None,
+                    client_order_id=f"aur-b-{uuid.uuid4().hex}"[:32])
                 if res.order_id not in ("ERROR", "BLOCKED"):
                     # Record the fill and anchor the entry to the actual fill price
                     # so cost basis + the stops use real numbers. Paper books a
@@ -819,7 +913,9 @@ class KrakenPillar:
                         await self._paper_comparator.record_shadow_fill(
                             pair, OrderSide.BUY, vol)
                     if effective_paper:
-                        self._dir_long[pair] = price          # paper: simulate the entry
+                        basis = fill_price or price
+                        self._dir_long[pair] = basis
+                        await self._save_paper_position(pair, vol, basis)
                     elif fill_price is not None:
                         self._dir_long[pair] = fill_price     # live: track only a CONFIRMED buy
                     else:
