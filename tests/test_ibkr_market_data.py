@@ -111,6 +111,59 @@ async def test_stale_socket_reconnects(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_atm_option_picks_a_strike_listed_for_the_chosen_expiry(monkeypatch):
+    from datetime import date, timedelta
+
+    # CI installs without --extra ibkr, so provide the two lazily imported
+    # contract constructors instead of importing the real ib_async.
+    module = types.ModuleType("ib_async")
+    module.Stock = lambda symbol, exchange, currency, primaryExchange="": (
+        SimpleNamespace(symbol=symbol, secType="STK", exchange=exchange,
+                        currency=currency, conId=0))
+    module.Option = (
+        lambda symbol, expiry, strike, right, exchange, multiplier="",
+        currency="", tradingClass="": SimpleNamespace(
+            symbol=symbol, lastTradeDateOrContractMonth=expiry, strike=strike,
+            right=right, exchange=exchange, multiplier=multiplier,
+            currency=currency, tradingClass=tradingClass))
+    monkeypatch.setitem(sys.modules, "ib_async", module)
+
+    expiry = (date.today() + timedelta(days=45)).strftime("%Y%m%d")
+    probes = []
+
+    class FakeIB:
+        async def qualifyContractsAsync(self, contract):
+            contract.conId = 1
+            return [contract]
+
+        async def reqTickersAsync(self, *contracts):
+            return [SimpleNamespace(marketPrice=lambda: 672.4)]
+
+        async def reqSecDefOptParamsAsync(self, symbol, fut_fop, sec_type, con_id):
+            # The union chain advertises 672, but that strike is only listed
+            # on other expiries — the chosen expiry trades 670/675 increments.
+            return [SimpleNamespace(
+                exchange="SMART", tradingClass="SPY", multiplier="100",
+                expirations=[expiry], strikes=[670.0, 672.0, 675.0])]
+
+        async def reqContractDetailsAsync(self, contract):
+            probes.append(contract)
+            return [
+                SimpleNamespace(contract=SimpleNamespace(conId=2, strike=670.0)),
+                SimpleNamespace(contract=SimpleNamespace(conId=3, strike=675.0)),
+            ]
+
+    client = IBKRReadOnlyMarketData(Settings())
+    client._ib = FakeIB()
+    client._connected = True
+    spec = next(s for s in BY_BOOK[IBKRBook.OPTIONS] if s.key == "SPY_ATM_C")
+    contract = await client._atm_option(spec)
+    assert float(contract.strike) == 670.0
+    assert int(contract.conId) == 2
+    assert float(probes[-1].strike) == 0.0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("market_data_type,source", [
     (1, "ibkr_live"), (2, "ibkr_frozen"), (3, "ibkr_delayed"),
     (4, "ibkr_delayed_frozen"),
