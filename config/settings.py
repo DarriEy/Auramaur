@@ -1059,6 +1059,12 @@ class IBKRMultiAssetBookConfig(BaseModel):
         return self
 
 
+def _canonical_ibkr_etf_symbols() -> list[str]:
+    """Keep the legacy ETF experiment on the typed multi-asset manifest."""
+    from auramaur.exchange.ibkr_instruments import GLOBAL_ETFS
+    return [spec.symbol for spec in GLOBAL_ETFS]
+
+
 class IBKRConfig(BaseModel):
     enabled: bool = False
     # `enabled` is the master switch (connect to IBKR at all). The two books
@@ -1104,6 +1110,10 @@ class IBKRConfig(BaseModel):
     multiasset_preflight_concurrency: int = 2
     multiasset_preflight_pacing_retries: int = 2
     multiasset_preflight_retry_seconds: float = 2.0
+    # Require a current broker-qualified identity before opening new risk.
+    # Kept false in model defaults so isolated test/library users can opt in;
+    # tracked deployment defaults enable it.
+    multiasset_registry_required: bool = False
     multiasset_disabled_instruments: list[str] = []
     multiasset_min_momentum_pct: float = 1.0
     multiasset_exit_momentum_pct: float = -0.5
@@ -1111,7 +1121,7 @@ class IBKRConfig(BaseModel):
         name: IBKRMultiAssetBookConfig() for name in (
             "global_etf", "fx", "futures", "international_equity", "options", "bonds")
     })
-    etf_symbols: list[str] = ["SPY", "QQQ", "IWM"]
+    etf_symbols: list[str] = Field(default_factory=_canonical_ibkr_etf_symbols)
     etf_paper_budget_usd: float = 5_000.0
     etf_max_entry_usd: float = 250.0
     etf_max_deployment_pct: float = 50.0

@@ -148,7 +148,7 @@ class IBKRReadOnlyMarketData:
         from ib_async import Future
         seed = Future(spec.symbol, exchange=spec.exchange, currency=spec.currency)
         details = await self._ib.reqContractDetailsAsync(seed)
-        cutoff = date.today() + timedelta(days=7)
+        cutoff = date.today() + timedelta(days=spec.roll_days_before_expiry)
         candidates = []
         for detail in details or []:
             contract = detail.contract
@@ -172,7 +172,24 @@ class IBKRReadOnlyMarketData:
                 candidates.append((expiry, contract))
         if not candidates:
             raise LookupError(f"no non-expiring front future found for {spec.key}")
-        return await self._qualify_one(min(candidates, key=lambda item: item[0])[1])
+        candidates.sort(key=lambda item: item[0])
+        # Compare only the nearest valid expiries. Volume confirms the active
+        # contract without allowing discovery to leave the declared product.
+        shortlist = candidates[:3]
+        request = getattr(self._ib, "reqTickersAsync", None)
+        if callable(request) and len(shortlist) > 1:
+            try:
+                tickers = await request(*(contract for _, contract in shortlist))
+                volumes = {int(getattr(t.contract, "conId", 0) or 0):
+                           float(getattr(t, "volume", 0) or 0) for t in tickers}
+                chosen = max(shortlist, key=lambda item: (
+                    volumes.get(int(getattr(item[1], "conId", 0) or 0), 0),
+                    -item[0].toordinal()))[1]
+                return await self._qualify_one(chosen)
+            except Exception as exc:  # noqa: BLE001 - deterministic fallback
+                log.warning("ibkr_multiasset.future_volume_fallback",
+                            key=spec.key, error=str(exc)[:120])
+        return await self._qualify_one(shortlist[0][1])
 
     async def _underlying(self, symbol: str):
         from ib_async import Stock
@@ -220,7 +237,9 @@ class IBKRReadOnlyMarketData:
         strikes = [float(s) for s in chain.strikes if float(s) > 0]
         if not strikes:
             raise LookupError(f"no strikes for {spec.key}")
-        strike = min(strikes, key=lambda value: abs(value - spot))
+        direction = 1 if spec.option_right == "C" else -1
+        target_strike = spot * (1 + direction * spec.option_moneyness_pct / 100)
+        strike = min(strikes, key=lambda value: abs(value - target_strike))
         contract = Option(spec.symbol, expiry, strike, spec.option_right,
                           "SMART", multiplier=str(int(spec.multiplier)),
                           currency=spec.currency,
@@ -252,9 +271,17 @@ class IBKRReadOnlyMarketData:
                       if getattr(row.contractDetails.contract, "secType", "") == "BOND"]
         if not candidates:
             raise LookupError(f"bond scanner found no match for {spec.key}")
-        # Scanner ordering provides the requested yield ranking; conId makes the
-        # selected issue unambiguous even when descriptive fields are sparse.
-        return await self._qualify_one(candidates[0])
+        def rank(contract):
+            raw = str(getattr(contract, "lastTradeDateOrContractMonth", "")
+                      or getattr(contract, "maturity", ""))[:8]
+            try:
+                maturity_distance = abs((datetime.strptime(raw, "%Y%m%d").date()
+                                         - target).days)
+            except ValueError:
+                maturity_distance = 999_999
+            # Stable tie-break avoids depending on scanner ordering.
+            return maturity_distance, int(getattr(contract, "conId", 0) or 0)
+        return await self._qualify_one(min(candidates, key=rank))
 
     async def get_quote(self, spec: InstrumentSpec) -> MarketDataQuote | None:
         contract = await self.resolve(spec)

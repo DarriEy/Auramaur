@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -563,6 +563,34 @@ CREATE TABLE IF NOT EXISTS ibkr_paper_state (
     last_error TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Broker-qualified identities for the deterministic IBKR manifest. Discovery
+-- may refresh these rows but cannot introduce an undeclared instrument.
+CREATE TABLE IF NOT EXISTS ibkr_contract_registry (
+    instrument_key TEXT PRIMARY KEY,
+    book TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    manifest_hash TEXT NOT NULL,
+    con_id INTEGER NOT NULL,
+    local_symbol TEXT NOT NULL DEFAULT '',
+    trading_class TEXT NOT NULL DEFAULT '',
+    exchange TEXT NOT NULL DEFAULT '',
+    currency TEXT NOT NULL DEFAULT '',
+    multiplier REAL NOT NULL DEFAULT 1,
+    status TEXT NOT NULL CHECK(status IN
+        ('eligible', 'qualified_no_live_data', 'pending_approval',
+         'quarantined', 'drifted')),
+    approved INTEGER NOT NULL DEFAULT 0,
+    approval_reason TEXT NOT NULL DEFAULT '',
+    quote_source TEXT NOT NULL DEFAULT 'ibkr_unknown',
+    has_history INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    qualified_at TEXT NOT NULL DEFAULT (datetime('now')),
+    validated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    approved_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ibkr_contract_registry_status
+    ON ibkr_contract_registry(book, status, approved);
 
 CREATE TABLE IF NOT EXISTS position_peaks (
     market_id TEXT PRIMARY KEY,

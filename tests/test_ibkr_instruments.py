@@ -7,6 +7,9 @@ def test_catalog_has_unique_typed_keys_and_all_six_books():
     assert len(BY_KEY) == len(CATALOG)
     assert set(BY_BOOK) == set(IBKRBook)
     assert all(BY_BOOK[book] for book in IBKRBook)
+    broad = {spec.key for spec in BY_BOOK[IBKRBook.GLOBAL_ETF]}
+    assert {"DIA", "VTI", "XLK", "XLF", "XLV", "XLE", "SHY", "EWC"} <= broad
+    assert len({spec.manifest_hash() for spec in CATALOG}) == len(CATALOG)
 
 
 def test_derivatives_and_bonds_declare_discovery_policy():
@@ -14,6 +17,7 @@ def test_derivatives_and_bonds_declare_discovery_policy():
         assert spec.kind is ContractKind.FUTURE
         assert spec.expiry_policy == "front_liquid"
         assert spec.multiplier > 1
+        assert spec.roll_days_before_expiry >= 7
     grains = {spec.key: spec for spec in BY_BOOK[IBKRBook.FUTURES]
               if spec.key in {"ZC", "ZW"}}
     assert all(spec.contract_multiplier == 5000 and spec.multiplier == 50
@@ -23,9 +27,11 @@ def test_derivatives_and_bonds_declare_discovery_policy():
         assert 0 < spec.option_dte_min <= spec.option_dte_max
         assert spec.option_right in {"C", "P"}
         assert spec.multiplier == 100
+        assert spec.option_moneyness_pct in {0, 5}
     for spec in BY_BOOK[IBKRBook.BONDS]:
         assert spec.kind is ContractKind.BOND
         assert spec.bond_query
+    assert BY_KEY["CORP_5Y"].approval_required
 
 
 def test_fx_uses_idealpro_and_native_equities_are_not_usd_only():

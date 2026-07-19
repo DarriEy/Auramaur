@@ -186,6 +186,33 @@ def ibkr_multiasset_preflight(book_names):
 
     sys.exit(asyncio.run(_run()))
 
+
+@main.command("ibkr-contract-approve")
+@click.argument("instrument_key")
+@click.option("--reason", required=True,
+              help="Operator rationale recorded with this contract identity.")
+def ibkr_contract_approve(instrument_key, reason):
+    """Approve a pending discovered identity (currently corporate bonds)."""
+    import asyncio
+    import sys
+    from auramaur.db.database import Database
+    from auramaur.exchange.ibkr_registry import approve
+
+    async def _run() -> int:
+        db = Database()
+        await db.connect()
+        try:
+            changed = await approve(db, instrument_key, reason)
+        finally:
+            await db.close()
+        if not changed:
+            console.print("[bold red]NOT APPROVED[/] — no pending current identity")
+            return 1
+        console.print(f"[bold green]APPROVED[/] {instrument_key}")
+        return 0
+
+    sys.exit(asyncio.run(_run()))
+
 @main.command()
 @click.option("--exchange", default=None, help="Exchange to evaluate (e.g. kalshi)")
 @click.option("--days", default=7, help="Window in days (default 7)")

@@ -192,8 +192,13 @@ class IBKRMultiAssetPaperBook:
             (self.book.value,))
         cursor = int(state["refresh_cursor"] or 0) if state else 0
         disabled = set(self._settings.ibkr.multiasset_disabled_instruments)
+        eligible = None
+        if self._settings.ibkr.multiasset_registry_required:
+            from auramaur.exchange.ibkr_registry import eligible_keys
+            eligible = await eligible_keys(self._db)
         universe = tuple(spec for spec in BY_BOOK[self.book]
-                         if spec.key not in disabled)
+                         if spec.key not in disabled
+                         and (eligible is None or spec.key in eligible))
         held_specs = {}
         for key, row in positions.items():
             spec = self._position_spec(row)

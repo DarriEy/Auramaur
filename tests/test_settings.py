@@ -162,6 +162,8 @@ def test_yaml_defaults_safe():
     assert ibkr["auto_fx_enabled"] is False
     assert {"SPY", "QQQ", "IWM", "TLT", "GLD", "VEA"}.issubset(
         ibkr["etf_symbols"])
+    from auramaur.exchange.ibkr_instruments import GLOBAL_ETFS
+    assert ibkr["etf_symbols"] == [spec.symbol for spec in GLOBAL_ETFS]
     assert 0 < ibkr["etf_max_entry_usd"] <= ibkr["etf_paper_budget_usd"]
     assert [m["alias"] for m in ibkr["etf_models"]] == ["luna", "terra", "sol"]
 

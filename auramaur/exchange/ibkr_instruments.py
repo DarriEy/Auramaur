@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import Enum
+import hashlib
+import json
 
 
 class IBKRBook(str, Enum):
@@ -48,7 +50,21 @@ class InstrumentSpec:
     option_right: str = ""
     option_dte_min: int = 0
     option_dte_max: int = 0
+    option_moneyness_pct: float = 0.0
     bond_query: str = ""
+    # Futures roll before expiry by this many calendar days. Discovery may use
+    # volume to choose between valid contracts, but never expands the product.
+    roll_days_before_expiry: int = 7
+    # Corporate bond discoveries require an explicit operator approval.
+    approval_required: bool = False
+
+    def manifest_hash(self) -> str:
+        """Stable identity for drift detection in the qualified registry."""
+        values = {name: getattr(self, name) for name in self.__dataclass_fields__}
+        values["book"] = self.book.value
+        values["kind"] = self.kind.value
+        payload = json.dumps(values, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def _stk(key: str, book: IBKRBook, symbol: str, exchange: str, currency: str,
@@ -65,14 +81,32 @@ GLOBAL_ETFS = (
     _stk("SPY", IBKRBook.GLOBAL_ETF, "SPY", "SMART", "USD", "us_equity", "S&P 500", primary="ARCA"),
     _stk("QQQ", IBKRBook.GLOBAL_ETF, "QQQ", "SMART", "USD", "us_equity", "Nasdaq-100", primary="NASDAQ"),
     _stk("IWM", IBKRBook.GLOBAL_ETF, "IWM", "SMART", "USD", "us_equity", "Russell 2000", primary="ARCA"),
+    _stk("DIA", IBKRBook.GLOBAL_ETF, "DIA", "SMART", "USD", "us_equity", "Dow Jones Industrial Average", primary="ARCA"),
+    _stk("VTI", IBKRBook.GLOBAL_ETF, "VTI", "SMART", "USD", "us_equity", "Total US stock market", primary="ARCA"),
+    *tuple(_stk(symbol, IBKRBook.GLOBAL_ETF, symbol, "SMART", "USD", asset,
+                description, primary="ARCA") for symbol, asset, description in (
+        ("XLK", "sector_technology", "US technology sector"),
+        ("XLF", "sector_financials", "US financial sector"),
+        ("XLV", "sector_healthcare", "US healthcare sector"),
+        ("XLE", "sector_energy", "US energy sector"),
+        ("XLI", "sector_industrials", "US industrial sector"),
+        ("XLY", "sector_discretionary", "US consumer discretionary sector"),
+        ("XLP", "sector_staples", "US consumer staples sector"),
+        ("XLU", "sector_utilities", "US utilities sector"),
+        ("XLB", "sector_materials", "US materials sector"),
+        ("XLRE", "sector_real_estate", "US real-estate sector"),
+        ("XLC", "sector_communications", "US communications sector"),
+    )),
     _stk("VEA", IBKRBook.GLOBAL_ETF, "VEA", "SMART", "USD", "international", "Developed markets ex-US", primary="ARCA"),
     _stk("VWO", IBKRBook.GLOBAL_ETF, "VWO", "SMART", "USD", "international", "Emerging markets", primary="ARCA"),
     _stk("INDA", IBKRBook.GLOBAL_ETF, "INDA", "SMART", "USD", "international", "India equities", primary="CBOE"),
     _stk("MCHI", IBKRBook.GLOBAL_ETF, "MCHI", "SMART", "USD", "international", "China equities", primary="NASDAQ"),
     _stk("EWJ", IBKRBook.GLOBAL_ETF, "EWJ", "SMART", "USD", "international", "Japan equities", primary="ARCA"),
+    _stk("EWC", IBKRBook.GLOBAL_ETF, "EWC", "SMART", "USD", "international", "Canada equities", primary="ARCA"),
     _stk("EWZ", IBKRBook.GLOBAL_ETF, "EWZ", "SMART", "USD", "international", "Brazil equities", primary="ARCA"),
     _stk("TLT", IBKRBook.GLOBAL_ETF, "TLT", "SMART", "USD", "rates", "Long US Treasuries", primary="NASDAQ"),
     _stk("IEF", IBKRBook.GLOBAL_ETF, "IEF", "SMART", "USD", "rates", "Intermediate US Treasuries", primary="NASDAQ"),
+    _stk("SHY", IBKRBook.GLOBAL_ETF, "SHY", "SMART", "USD", "rates", "Short US Treasuries", primary="NASDAQ"),
     _stk("TIP", IBKRBook.GLOBAL_ETF, "TIP", "SMART", "USD", "rates", "US inflation-linked Treasuries", primary="ARCA"),
     _stk("LQD", IBKRBook.GLOBAL_ETF, "LQD", "SMART", "USD", "credit", "Investment-grade credit", primary="ARCA"),
     _stk("HYG", IBKRBook.GLOBAL_ETF, "HYG", "SMART", "USD", "credit", "High-yield credit", primary="ARCA"),
@@ -96,17 +130,17 @@ FUTURES = tuple(
     InstrumentSpec(key, IBKRBook.FUTURES, ContractKind.FUTURE, symbol, exchange,
                    currency, asset, description, multiplier=multiplier,
                    paper_capital_per_unit_usd=capital, calendar="FUTURES",
-                   expiry_policy="front_liquid")
-    for key, symbol, exchange, currency, asset, description, multiplier, capital in (
-        ("MES", "MES", "CME", "USD", "equity_index", "Micro E-mini S&P 500", 5, 2500),
-        ("MNQ", "MNQ", "CME", "USD", "equity_index", "Micro E-mini Nasdaq-100", 2, 3500),
-        ("M2K", "M2K", "CME", "USD", "equity_index", "Micro E-mini Russell 2000", 5, 1500),
-        ("ZN", "ZN", "CBOT", "USD", "rates", "10-year US Treasury note", 1000, 3000),
-        ("MCL", "MCL", "NYMEX", "USD", "energy", "Micro WTI crude oil", 100, 1500),
-        ("MGC", "MGC", "COMEX", "USD", "metals", "Micro Gold", 10, 2000),
-        ("SIC", "SIC", "COMEX", "USD", "metals", "100-ounce Silver", 100, 1000),
-        ("ZC", "ZC", "CBOT", "USD", "agriculture", "Corn", 50, 2500),
-        ("ZW", "ZW", "CBOT", "USD", "agriculture", "Wheat", 50, 3000),
+                   expiry_policy="front_liquid", roll_days_before_expiry=roll_days)
+    for key, symbol, exchange, currency, asset, description, multiplier, capital, roll_days in (
+        ("MES", "MES", "CME", "USD", "equity_index", "Micro E-mini S&P 500", 5, 2500, 7),
+        ("MNQ", "MNQ", "CME", "USD", "equity_index", "Micro E-mini Nasdaq-100", 2, 3500, 7),
+        ("M2K", "M2K", "CME", "USD", "equity_index", "Micro E-mini Russell 2000", 5, 1500, 7),
+        ("ZN", "ZN", "CBOT", "USD", "rates", "10-year US Treasury note", 1000, 3000, 10),
+        ("MCL", "MCL", "NYMEX", "USD", "energy", "Micro WTI crude oil", 100, 1500, 10),
+        ("MGC", "MGC", "COMEX", "USD", "metals", "Micro Gold", 10, 2000, 10),
+        ("SIC", "SIC", "COMEX", "USD", "metals", "100-ounce Silver", 100, 1000, 10),
+        ("ZC", "ZC", "CBOT", "USD", "agriculture", "Corn", 50, 2500, 20),
+        ("ZW", "ZW", "CBOT", "USD", "agriculture", "Wheat", 50, 3000, 20),
     )
 )
 
@@ -131,12 +165,15 @@ INTERNATIONAL_EQUITIES = (
 )
 
 OPTIONS = tuple(
-    InstrumentSpec(f"{symbol}_ATM_{right}", IBKRBook.OPTIONS,
+    InstrumentSpec(f"{symbol}_{bucket}_{right}", IBKRBook.OPTIONS,
                    ContractKind.OPTION, symbol, "SMART", "USD", "options",
-                   f"{symbol} 30-60 DTE ATM {right}", multiplier=100,
+                   f"{symbol} 30-60 DTE {bucket} {right}", multiplier=100,
                    paper_capital_per_unit_usd=0,
-                   option_right=right, option_dte_min=30, option_dte_max=60)
-    for symbol in ("SPY", "QQQ", "IWM", "TLT", "GLD")
+                   option_right=right, option_dte_min=30, option_dte_max=60,
+                   option_moneyness_pct=moneyness)
+    for symbol in ("SPY", "QQQ", "IWM", "DIA", "VTI", "XLF", "XLE",
+                   "XLV", "TLT", "GLD")
+    for bucket, moneyness in (("ATM", 0.0), ("OTM5", 5.0))
     for right in ("C", "P")
 )
 
@@ -146,7 +183,7 @@ BONDS = tuple(
     InstrumentSpec(key, IBKRBook.BONDS, ContractKind.BOND, "", "SMART", "USD",
                    asset, description, multiplier=10,
                    paper_capital_per_unit_usd=1000, calendar="US_BOND",
-                   bond_query=query)
+                   bond_query=query, approval_required=key.startswith("CORP_"))
     for key, asset, description, query in (
         ("UST_2Y", "government", "US Treasury near 2-year maturity", "UST:2Y"),
         ("UST_5Y", "government", "US Treasury near 5-year maturity", "UST:5Y"),

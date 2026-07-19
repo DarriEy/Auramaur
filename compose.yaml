@@ -33,6 +33,8 @@ services:
       IBKR__HOST: ibgateway
       IBKR__ENABLED: ${IBKR_ENABLED:-true}
       IBKR__OPTIONS_ENABLED: "false"
+      # Paper books reject delayed/frozen prices; request native live data.
+      IBKR__MARKET_DATA_TYPE: ${IBKR_MARKET_DATA_TYPE:-1}
       IBKR__ENVIRONMENT: ${IBKR_QUOTE_ENVIRONMENT:-live}
       IBKR__PAPER_PORT: ${IBKR_QUOTE_PORT:-4002}
       IBKR__LIVE_PORT: ${IBKR_QUOTE_PORT:-4002}

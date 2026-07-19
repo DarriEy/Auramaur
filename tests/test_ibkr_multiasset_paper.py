@@ -45,6 +45,7 @@ async def test_all_six_books_write_only_isolated_paper_tables():
     await db.connect()
     settings = Settings()
     settings.ibkr.multiasset_paper_enabled = True
+    settings.ibkr.multiasset_registry_required = False
     settings.ibkr.multiasset_refreshes_per_cycle = 1
     for cfg in settings.ibkr.multiasset_books.values():
         cfg.max_position_pct = 40
@@ -71,6 +72,7 @@ async def test_daily_loss_gate_blocks_entries():
     await db.connect()
     settings = Settings()
     settings.ibkr.multiasset_paper_enabled = True
+    settings.ibkr.multiasset_registry_required = False
     await db.execute(
         "INSERT INTO ibkr_paper_ledger (book, kind, pnl_usd, source_ref) "
         "VALUES ('global_etf', 'trade', -101, 'loss')")
@@ -90,6 +92,7 @@ async def test_intracycle_commission_tightens_loss_gate():
     await db.connect()
     settings = Settings()
     settings.ibkr.multiasset_paper_enabled = True
+    settings.ibkr.multiasset_registry_required = False
     settings.ibkr.multiasset_refreshes_per_cycle = 2
     cfg = settings.ibkr.multiasset_books["global_etf"]
     cfg.daily_loss_limit_usd = 0.5
@@ -204,6 +207,7 @@ async def test_open_position_is_marked_by_original_contract_id():
     await db.connect()
     settings = Settings()
     settings.ibkr.multiasset_paper_enabled = True
+    settings.ibkr.multiasset_registry_required = False
     settings.ibkr.multiasset_refreshes_per_cycle = 1
     client = FakeMarketData()
     client.con_ids_requested = []
