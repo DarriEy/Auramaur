@@ -234,17 +234,27 @@ class IBKRReadOnlyMarketData:
         if not expiries:
             raise LookupError(f"no option expiry in DTE window for {spec.key}")
         expiry = min(expiries, key=lambda item: item[0])[1]
-        strikes = [float(s) for s in chain.strikes if float(s) > 0]
-        if not strikes:
-            raise LookupError(f"no strikes for {spec.key}")
         direction = 1 if spec.option_right == "C" else -1
         target_strike = spot * (1 + direction * spec.option_moneyness_pct / 100)
-        strike = min(strikes, key=lambda value: abs(value - target_strike))
-        contract = Option(spec.symbol, expiry, strike, spec.option_right,
-                          "SMART", multiplier=str(int(spec.multiplier)),
-                          currency=spec.currency,
-                          tradingClass=getattr(chain, "tradingClass", ""))
-        return await self._qualify_one(contract)
+        # reqSecDefOptParams reports the union of strikes across every expiry
+        # (and mixes weekly/monthly trading classes), so an (expiry, strike)
+        # pair assembled from it may not be listed. Enumerate the contracts
+        # that actually exist for the chosen expiry and pick from those.
+        probe = Option(spec.symbol, expiry, 0.0, spec.option_right, "SMART",
+                       multiplier=str(int(spec.multiplier)),
+                       currency=spec.currency)
+        listed: dict[float, object] = {}
+        for detail in await self._ib.reqContractDetailsAsync(probe) or []:
+            candidate = detail.contract
+            strike_value = float(getattr(candidate, "strike", 0) or 0)
+            if strike_value > 0:
+                listed.setdefault(strike_value, candidate)
+        if not listed:
+            raise LookupError(
+                f"no listed {spec.option_right} option for {spec.key} expiry {expiry}")
+        # Contract-details contracts are fully specified (conId set) — no
+        # further qualification round-trip needed.
+        return listed[min(listed, key=lambda value: abs(value - target_strike))]
 
     async def _bond(self, spec: InstrumentSpec):
         """Discover an exact bond contract from IBKR's US bond scanner."""
