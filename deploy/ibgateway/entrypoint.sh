@@ -49,6 +49,26 @@ x11vnc -display "$DISPLAY" -rfbauth "$vnc_runtime/vnc.pass" \
     -localhost -forever -shared >/tmp/x11vnc.log 2>&1 &
 websockify --web=/usr/share/novnc/ 6080 localhost:5900 >/tmp/novnc.log 2>&1 &
 
+# The 2FA dialog opens underneath the larger "Authenticating..." window and
+# loses any restacking fight with it, so park each new dialog top-left where
+# nothing overlaps it.
+(
+    last=""
+    while :; do
+        w=$(xdotool search --onlyvisible --name 'Second Factor' 2>/dev/null | head -1)
+        if [ -n "$w" ]; then
+            if [ "$w" != "$last" ]; then
+                xdotool windowmove "$w" 10 20 windowraise "$w" \
+                    windowactivate "$w" 2>/dev/null || true
+                last=$w
+            fi
+        else
+            last=""
+        fi
+        sleep 3
+    done
+) >/tmp/2fa-watch.log 2>&1 &
+
 gateway=$(find "${IB_GATEWAY_HOME:-/opt/ibgateway}" -type f -name ibgateway -perm -u+x | head -1)
 if [ -z "$gateway" ]; then
     echo "IB Gateway executable not found" >&2

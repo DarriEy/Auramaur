@@ -10,7 +10,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        ca-certificates fluxbox gosu netcat-openbsd novnc openjdk-17-jre-headless \
-       procps websockify x11vnc xauth xvfb \
+       procps websockify x11vnc xauth xdotool xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd --uid 10002 --create-home ibgateway \
