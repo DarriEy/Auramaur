@@ -26,13 +26,14 @@ from pathlib import Path
 import structlog
 
 from auramaur.db.database import Database
+from auramaur.runtime import state_dir
 from auramaur.exchange.models import Confidence, Market, OrderSide, Signal
 from auramaur.strategy.protocols import TradeCandidate
 
 log = structlog.get_logger()
 
 _MAX_MARKETS_PER_CALL = 15
-_WORLD_MODEL_PATH = Path("world_model.json")
+_WORLD_MODEL_PATH = state_dir() / "world_model.json"
 
 # Only allow web search + fetch — no file system, no code execution
 _ALLOWED_TOOLS = "WebSearch,WebFetch"
