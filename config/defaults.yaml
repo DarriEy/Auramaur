@@ -565,6 +565,15 @@ interim_manager:
   max_open_positions: 10
   proposal_ttl_hours: 48.0
   sunset_after_live_cells: 3
+  # Robust-edge gate: fair - executable - uncertainty - fees - slippage -
+  # liquidity - correlation must clear this. Conservative about apparent
+  # edges built on weak estimates (docs/INTERIM_MANAGER.md).
+  min_robust_edge: 0.05
+  default_uncertainty_buffer: 0.04
+  slippage_buffer: 0.01
+  thin_liquidity_usd: 200.0
+  liquidity_penalty: 0.02
+  correlation_penalty_per_position: 0.01
 
 econ_indicator:
   # Data-driven Kalshi econ-indicator bin pricing: price "Above X" ladders from

@@ -124,6 +124,8 @@ class Database:
             await self._migrate_v29_to_v30()
         if from_version < 31:
             await self._migrate_v30_to_v31()
+        if from_version < 32:
+            await self._migrate_v31_to_v32()
 
     async def _migrate_v29_to_v30(self) -> None:
         """Add cost-adjusted IBKR round-trip observations."""
@@ -182,6 +184,27 @@ class Database:
         await self._db.execute("UPDATE schema_version SET version = 31")
         await self._db.commit()
         log.info("database.migrated", from_version=30, to_version=31)
+
+    async def _migrate_v31_to_v32(self) -> None:
+        """Structured thesis columns for the interim-manager compiler contract."""
+        for column in (
+            "thesis_class TEXT NOT NULL DEFAULT 'unclassified'",
+            "confidence_lo REAL", "confidence_hi REAL", "max_entry_price REAL",
+            "catalyst TEXT NOT NULL DEFAULT ''",
+            "invalidation TEXT NOT NULL DEFAULT ''",
+            "sunset_at TEXT", "robust_edge REAL", "decision_price REAL",
+        ):
+            try:
+                await self._db.execute(
+                    f"ALTER TABLE manager_proposals ADD COLUMN {column}")
+            except Exception:  # noqa: BLE001 — column already present
+                pass
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_manager_proposals_class "
+            "ON manager_proposals(thesis_class, status)")
+        await self._db.execute("UPDATE schema_version SET version = 32")
+        await self._db.commit()
+        log.info("database.migrated", from_version=31, to_version=32)
 
     async def _migrate_v28_to_v29(self) -> None:
         """Add immutable strategy-research and CLV accounting tables."""

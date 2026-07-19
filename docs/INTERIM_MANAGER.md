@@ -59,6 +59,56 @@ writes proposals.
    graduate, stakes are evidence-gathering stakes (config-capped), not
    P&L-maximizing stakes.
 
+## The generalized decision rule (enforced)
+
+The manager's trade condition is not `fair > market`. It is:
+
+    robust_edge = fair_probability
+                  − executable_probability
+                  − uncertainty_buffer      (CI half-width, or the default)
+                  − taker_fees
+                  − slippage_buffer
+                  − thin_liquidity_penalty
+                  − correlation_penalty     (per open manager position in category)
+
+    execute only if robust_edge ≥ min_robust_edge
+                 and entry price ≤ the proposal's max_entry_price
+                 and the thesis sunset has not passed
+                 and (charter, human-judged) the thesis is falsifiable,
+                     resolution is objective, and a catalyst exists
+
+The arithmetic gates are computed and recorded per proposal (`robust_edge`,
+`decision_price`, and the full haircut breakdown in the skip reason) — the
+manager is deliberately conservative about apparent edges built on weak
+estimates. Falsifiability and resolution-objectivity remain human judgments;
+the schema records catalyst, invalidation, and sunset so post-mortems can
+score whether the judgment was honest.
+
+## Thesis classes (evaluated separately)
+
+Every proposal declares its anchor class; `auramaur manager report` scores
+each class independently, because a manager that only picks good classes is
+learnable even when individual trades lose:
+
+| class | independent anchor | typical divergence cause |
+|---|---|---|
+| forecast_divergence | weather/polling/econ forecasts | stale prices, headline anchoring |
+| cross_venue | equivalent contracts elsewhere | fragmented liquidity |
+| conditional_inconsistency | related markets' implied probabilities | contracts priced independently |
+| timeline | known process and deadlines | procedural-timing confusion |
+| base_rate | historical reference class | vivid-recent-event attention |
+| resolution_language | contract rules vs public reading | ambiguous wording |
+| information_lag | newly released official data | slow repricing |
+| exclusive_basket | sum of outcome probabilities | bucket-level imbalance |
+
+Priority for the interim period: forecast_divergence,
+conditional_inconsistency, exclusive_basket — legible evidence, useful
+feedback even in losses.
+
+The mandate, compiled: **find short-lived, falsifiable probability
+discrepancies with an external anchor, an explainable mispricing mechanism,
+and enough robust edge to survive uncertainty and execution costs.**
+
 ## Evaluation contract (pre-registered)
 
 - `strategy_source = "interim_manager"`; **not** in `exempt_strategies` — the
@@ -68,6 +118,11 @@ writes proposals.
 - Proposals the pillar skips (delegation, sunset, thesis, expiry, risk
   rejection) are recorded with their reason — the queue is an auditable
   decision log, not just an order channel.
+- The scorecard judges reasoning, not only money: fair-value calibration
+  (every executed proposal records its prediction), whether the claimed
+  mechanism was real, whether invalidation occurred before execution,
+  whether the price limit protected the edge, and whether the manager
+  selected good thesis classes — variance and bad reasoning are separable.
 - Review cadence: alongside the normal graduation review. The manager's
   record is compared per category against the strategies it stands in for;
   if a manager cell and a strategy cell both hold records in a category, the
