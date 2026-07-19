@@ -15,6 +15,10 @@ from auramaur.exchange.ibkr_instruments import (
     BY_BOOK, BY_KEY, ContractKind, IBKRBook, InstrumentSpec,
 )
 from auramaur.strategy.protocols import ExecutionMode
+from auramaur.risk.ibkr_math import (
+    adverse_fill, annualized_volatility, closes_from_bars,
+    normalized_momentum, risk_quantity, stop_distance,
+)
 
 log = structlog.get_logger()
 
@@ -114,10 +118,7 @@ class IBKRMultiAssetPaperBook:
 
     @staticmethod
     def _momentum(bars) -> float | None:
-        closes = [float(close) for _, close in bars if close and close > 0]
-        if len(closes) < 21:
-            return None
-        return (closes[-1] / closes[-21] - 1) * 100
+        return normalized_momentum(closes_from_bars(bars))
 
     @staticmethod
     def _commission(spec, quantity: float, notional_usd: float) -> float:
@@ -145,8 +146,9 @@ class IBKRMultiAssetPaperBook:
         return float(math.floor(raw))
 
     async def _fill(self, spec, quote, side: str, quantity: float,
-                    fx: float, entry_price: float | None = None) -> None:
-        price = quote.ask if side == "BUY" else quote.bid
+                    fx: float, entry_price: float | None = None,
+                    stop_price: float = 0, initial_risk_usd: float = 0) -> None:
+        price = adverse_fill(quote.bid, quote.ask, side, self.config.slippage_bps)
         capital = quantity * self._capital_per_unit(spec, price, fx)
         fee = self._commission(spec, quantity, capital)
         fill_ref = f"ibkr-{self.book.value}-paper-{uuid4().hex}"
@@ -165,11 +167,11 @@ class IBKRMultiAssetPaperBook:
                 """INSERT INTO ibkr_paper_positions
                    (book, instrument_key, con_id, currency, quantity, multiplier,
                     fx_to_usd, avg_cost, current_price, price_source,
-                    instrument_spec_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    instrument_spec_json, stop_price, initial_risk_usd)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (self.book.value, spec.key, quote.con_id, spec.currency, quantity,
                  quote.multiplier, fx, price, price, quote.source,
-                 self._serialize_spec(spec)))
+                 self._serialize_spec(spec), stop_price, initial_risk_usd))
         else:
             pnl = (price - float(entry_price)) * quantity * quote.multiplier * fx
             await self._db.execute(
@@ -249,14 +251,16 @@ class IBKRMultiAssetPaperBook:
                            WHERE book=? AND instrument_key=?""",
                         (quote.bid, pnl, quote.source, self.book.value, spec.key))
                     unmarked_positions.discard(spec.key)
-                    hard_exit = (gain_pct <= -cfg.stop_loss_pct
+                    stored_stop = float(held["stop_price"] or 0)
+                    hard_exit = ((stored_stop > 0 and quote.bid <= stored_stop)
+                                 or gain_pct <= -cfg.stop_loss_pct
                                  or gain_pct >= cfg.take_profit_pct)
                     momentum_exit = False
                     if not hard_exit:
                         bars = await self._client.get_daily_bars_by_con_id(spec, held_con_id)
                         momentum = self._momentum(bars)
                         momentum_exit = (momentum is not None and momentum <=
-                                         self._settings.ibkr.multiasset_exit_momentum_pct)
+                                         self._settings.ibkr.multiasset_exit_normalized_momentum)
                     if hard_exit or momentum_exit:
                         await self._fill(spec, quote, "SELL", float(held["quantity"]),
                                          mark_fx, entry_price=entry)
@@ -265,14 +269,17 @@ class IBKRMultiAssetPaperBook:
                 spread_bps = (quote.ask - quote.bid) / ((quote.ask + quote.bid) / 2) * 10_000
                 if fx is None or spread_bps > cfg.max_spread_bps:
                     continue
-                momentum = self._momentum(await self._client.get_daily_bars(spec))
-                if momentum is None:
+                bars = await self._client.get_daily_bars(spec)
+                closes = closes_from_bars(bars)
+                momentum = normalized_momentum(closes)
+                annual_vol = annualized_volatility(closes)
+                if momentum is None or annual_vol is None:
                     continue
                 loss_exposure = await self._loss_exposure()
                 if (unmarked_positions or loss_exposure <= -cfg.daily_loss_limit_usd
                         or len(positions) >= cfg.max_positions):
                     continue
-                if momentum < self._settings.ibkr.multiasset_min_momentum_pct:
+                if momentum < self._settings.ibkr.multiasset_min_normalized_momentum:
                     continue
                 deployed = sum(
                     float(row["quantity"]) * self._capital_per_unit(
@@ -283,10 +290,29 @@ class IBKRMultiAssetPaperBook:
                 target = min(cfg.budget_usd * cfg.max_position_pct / 100,
                              deployment_cap - deployed)
                 unit_capital = self._capital_per_unit(spec, quote.ask, fx)
-                quantity = self._quantity(spec, target, unit_capital)
+                entry_price = adverse_fill(
+                    quote.bid, quote.ask, "BUY", cfg.slippage_bps)
+                distance = stop_distance(entry_price, annual_vol,
+                                         cfg.stop_vol_multiple, cfg.min_stop_pct)
+                risk_budget = cfg.budget_usd * cfg.risk_per_position_pct / 100
+                class_risk = sum(
+                    float(row["initial_risk_usd"] or 0)
+                    for key, row in positions.items()
+                    if (held_specs.get(key) or BY_KEY[key]).asset_class == spec.asset_class
+                )
+                class_risk_cap = cfg.budget_usd * cfg.max_asset_class_risk_pct / 100
+                risk_budget = min(risk_budget, class_risk_cap - class_risk)
+                quantity = min(
+                    self._quantity(spec, target, unit_capital),
+                    risk_quantity(risk_budget, distance, quote.multiplier, fx,
+                                  fractional=spec.kind is ContractKind.STOCK),
+                )
                 if quantity <= 0:
                     continue
-                await self._fill(spec, quote, "BUY", quantity, fx)
+                initial_risk = quantity * distance * quote.multiplier * fx
+                await self._fill(spec, quote, "BUY", quantity, fx,
+                                 stop_price=entry_price - distance,
+                                 initial_risk_usd=initial_risk)
                 positions = await self._positions()
                 entries += 1
             except Exception as exc:  # noqa: BLE001

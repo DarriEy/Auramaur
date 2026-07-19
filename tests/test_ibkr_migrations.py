@@ -1,4 +1,5 @@
 import sqlite3
+from pathlib import Path
 
 import aiosqlite
 import pytest
@@ -7,8 +8,9 @@ from auramaur.db.database import Database
 
 
 @pytest.mark.asyncio
-async def test_v23_migration_adds_verified_columns(tmp_path):
-    path = tmp_path / "v23.db"
+async def test_v23_migration_adds_verified_columns():
+    path = Path("runtime/test-v23-migration.db")
+    path.unlink(missing_ok=True)
     raw = sqlite3.connect(path)
     raw.executescript(
         """CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
@@ -31,14 +33,15 @@ async def test_v23_migration_adds_verified_columns(tmp_path):
     version = await db.fetchone("SELECT version FROM schema_version")
     position_columns = await db.fetchall("PRAGMA table_info(ibkr_paper_positions)")
     fill_columns = await db.fetchall("PRAGMA table_info(ibkr_paper_fills)")
-    assert version["version"] == 26
+    assert version["version"] == 27
     assert {row["name"] for row in position_columns} >= {
-        "price_source", "instrument_spec_json"}
+        "price_source", "instrument_spec_json", "stop_price", "initial_risk_usd"}
     assert "price_source" in {row["name"] for row in fill_columns}
     registry = await db.fetchall("PRAGMA table_info(ibkr_contract_registry)")
     assert {"instrument_key", "manifest_hash", "con_id", "status", "approved"} <= {
         row["name"] for row in registry}
     await db.close()
+    path.unlink(missing_ok=True)
 
 
 @pytest.mark.asyncio

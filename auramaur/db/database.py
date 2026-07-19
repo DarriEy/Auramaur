@@ -114,6 +114,8 @@ class Database:
             await self._migrate_v24_to_v25()
         if from_version < 26:
             await self._migrate_v25_to_v26()
+        if from_version < 27:
+            await self._migrate_v26_to_v27()
 
     async def _migrate_v1_to_v2(self) -> None:
         """Add category to calibration, add new tables."""
@@ -614,6 +616,20 @@ class Database:
         await self._db.execute("UPDATE schema_version SET version = 26")
         await self._db.commit()
         log.info("database.migrated", from_version=25, to_version=26)
+
+    async def _migrate_v26_to_v27(self) -> None:
+        """Persist immutable entry risk for IBKR paper positions."""
+        for table in ("ibkr_paper_positions", "ibkr_etf_positions"):
+            for name in ("stop_price", "initial_risk_usd"):
+                try:
+                    await self._db.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {name} REAL NOT NULL DEFAULT 0")
+                except aiosqlite.OperationalError as exc:
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
+        await self._db.execute("UPDATE schema_version SET version = 27")
+        await self._db.commit()
+        log.info("database.migrated", from_version=26, to_version=27)
 
     async def _migrate_v11_to_v12(self) -> None:
         """Add strategy_source column to signals and trades for hybrid mode attribution."""

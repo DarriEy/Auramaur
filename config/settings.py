@@ -1045,6 +1045,11 @@ class IBKRMultiAssetBookConfig(BaseModel):
     stop_loss_pct: float = 5.0
     take_profit_pct: float = 10.0
     max_spread_bps: float = 40.0
+    risk_per_position_pct: float = 0.25
+    max_asset_class_risk_pct: float = 0.50
+    stop_vol_multiple: float = 2.0
+    min_stop_pct: float = 0.50
+    slippage_bps: float = 2.0
 
     @model_validator(mode="after")
     def validate_risk(self):
@@ -1056,6 +1061,10 @@ class IBKRMultiAssetBookConfig(BaseModel):
             raise ValueError("IBKR paper book loss limits must be positive")
         if self.take_profit_pct <= 0 or self.max_spread_bps <= 0:
             raise ValueError("IBKR paper book exit/spread limits must be positive")
+        if not 0 < self.risk_per_position_pct <= self.max_asset_class_risk_pct <= 5:
+            raise ValueError("IBKR paper risk percentages are inconsistent")
+        if self.stop_vol_multiple <= 0 or self.min_stop_pct <= 0 or self.slippage_bps < 0:
+            raise ValueError("IBKR paper volatility/execution inputs are invalid")
         return self
 
 
@@ -1117,6 +1126,8 @@ class IBKRConfig(BaseModel):
     multiasset_disabled_instruments: list[str] = []
     multiasset_min_momentum_pct: float = 1.0
     multiasset_exit_momentum_pct: float = -0.5
+    multiasset_min_normalized_momentum: float = 0.25
+    multiasset_exit_normalized_momentum: float = -0.10
     multiasset_books: dict[str, IBKRMultiAssetBookConfig] = Field(default_factory=lambda: {
         name: IBKRMultiAssetBookConfig() for name in (
             "global_etf", "fx", "futures", "international_equity", "options", "bonds")
@@ -1141,6 +1152,11 @@ class IBKRConfig(BaseModel):
     etf_take_profit_pct: float = 8.0
     etf_trailing_stop_pct: float = 3.0
     etf_reentry_cooldown_hours: float = 24.0
+    etf_risk_per_position_pct: float = 0.25
+    etf_stop_vol_multiple: float = 2.0
+    etf_min_stop_pct: float = 1.0
+    etf_slippage_bps: float = 2.0
+    etf_max_portfolio_risk_pct: float = 1.0
     etf_models: list[OpenAIETFModel] = [
         OpenAIETFModel(alias="luna", model="gpt-5.6-luna", effort="low"),
         OpenAIETFModel(alias="terra", model="gpt-5.6-terra", effort="medium"),
@@ -1197,6 +1213,10 @@ class IBKRConfig(BaseModel):
             raise ValueError("IBKR ETF position and refresh limits must be positive")
         if self.etf_daily_loss_limit_usd <= 0 or self.etf_fee_per_order_usd < 0:
             raise ValueError("IBKR ETF loss limit must be positive and fees non-negative")
+        if not 0 < self.etf_risk_per_position_pct <= self.etf_max_portfolio_risk_pct <= 5:
+            raise ValueError("IBKR ETF risk percentages are inconsistent")
+        if self.etf_stop_vol_multiple <= 0 or self.etf_min_stop_pct <= 0 or self.etf_slippage_bps < 0:
+            raise ValueError("IBKR ETF volatility/execution inputs are invalid")
         if not 0 <= self.etf_exit_prob < self.etf_min_prob <= 1:
             raise ValueError("IBKR ETF probability thresholds must satisfy exit < entry")
         if self.etf_openai_daily_call_limit < len(self.etf_models):
