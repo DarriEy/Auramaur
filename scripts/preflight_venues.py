@@ -46,8 +46,26 @@ def _kraken_balance(key: str, secret: str) -> str:
         return f"FAILED — {type(e).__name__}: {str(e)[:100]}"
     if body.get("error"):
         return f"FAILED — {body['error']}"
-    nonzero = sum(1 for v in body.get("result", {}).values() if float(v) != 0)
-    return f"OK — wallet reachable, {nonzero} non-zero asset(s)"
+    assets = {k: float(v) for k, v in body.get("result", {}).items() if float(v) != 0}
+    detail = ", ".join(f"{k}={v:.4f}" for k, v in sorted(assets.items()))
+    return f"OK — wallet reachable, {len(assets)} non-zero asset(s): {detail}"
+
+
+def _kraken_ticker(pairs: tuple[str, ...]) -> str:
+    """Public ticker probe — proves the market-data path, no auth needed."""
+    url = "https://api.kraken.com/0/public/Ticker?pair=" + ",".join(pairs)
+    t0 = time.monotonic()
+    try:
+        with urllib.request.urlopen(url, timeout=20) as r:
+            body = json.load(r)
+    except Exception as e:  # noqa: BLE001
+        return f"FAILED — {type(e).__name__}: {str(e)[:90]}"
+    ms = (time.monotonic() - t0) * 1000
+    if body.get("error"):
+        return f"FAILED — {body['error']}"
+    quotes = {name: result["c"][0] for name, result in body.get("result", {}).items()}
+    detail = ", ".join(f"{name}={price}" for name, price in sorted(quotes.items()))
+    return f"OK — {len(quotes)} pair(s) in {ms:.0f}ms: {detail}"
 
 
 async def _probe(name: str, client) -> str:
@@ -162,8 +180,39 @@ async def main() -> None:
                             await close()
                         except Exception:
                             pass
+            try:
+                free = await clob._free_collateral_usd()  # noqa: SLF001 — preflight-only introspection
+                if free is None:
+                    print("  collateral (cash)   : WARN — balance/allowance returned no data")
+                else:
+                    print(f"  collateral (cash)   : OK — ${free:,.2f} free USDC collateral"
+                          " (compare with venue UI cash)")
+            except Exception as e:  # noqa: BLE001
+                print(f"  collateral (cash)   : FAILED — {type(e).__name__}: {str(e)[:90]}")
         except Exception as e:  # noqa: BLE001
             print(f"  signed clob         : FAILED — {type(e).__name__}: {str(e)[:90]}")
+    proxy_addr = getattr(s, "polymarket_proxy_address", "") or ""
+    if proxy_addr:
+        t0 = time.monotonic()
+        try:
+            req = urllib.request.Request(
+                "https://data-api.polymarket.com/value?user=" + proxy_addr,
+                headers={"User-Agent": "auramaur-preflight/1.0", "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                body = json.load(r)
+            ms = (time.monotonic() - t0) * 1000
+            value = None
+            if isinstance(body, list) and body:
+                value = body[0].get("value")
+            elif isinstance(body, dict):
+                value = body.get("value")
+            if value is None:
+                print("  portfolio (public)  : WARN — no value in data-api response")
+            else:
+                print(f"  portfolio (public)  : OK — ${float(value):,.2f} position value"
+                      f" in {ms:.0f}ms (compare with venue UI portfolio)")
+        except Exception as e:  # noqa: BLE001
+            print(f"  portfolio (public)  : FAILED — {type(e).__name__}: {str(e)[:90]}")
 
     # Kalshi
     print(f"\nkalshi  [enabled={s.kalshi.enabled}, env={s.kalshi.environment}]")
@@ -202,6 +251,7 @@ async def main() -> None:
     print(f"  KRAKEN_API_SECRET       : {_mask(bool(s.kraken_api_secret))}")
     if s.kraken_api_key and s.kraken_api_secret:
         print(f"  wallet                  : {_kraken_balance(s.kraken_api_key, s.kraken_api_secret)}")
+        print(f"  market data             : {_kraken_ticker(('POLUSD', 'AVAXUSD', 'USDCUSD'))}")
     else:
         print("  wallet                  : skipped (no key)")
 
