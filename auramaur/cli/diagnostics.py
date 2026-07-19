@@ -216,7 +216,9 @@ def ibkr_contract_approve(instrument_key, reason):
 @main.command()
 @click.option("--exchange", default=None, help="Exchange to evaluate (e.g. kalshi)")
 @click.option("--days", default=7, help="Window in days (default 7)")
-@click.option("--log-file", default="auramaur.log", help="Path to structlog output file")
+@click.option("--log-file", default=None,
+              help="Path to structlog output file (default: the configured "
+                   "logging.file / LOGGING__FILE setting)")
 @click.option("--json-output", is_flag=True, default=False, help="Emit JSON instead of table")
 def readiness(exchange, days, log_file, json_output):
     """Evaluate live-trading readiness criteria.
@@ -239,7 +241,7 @@ def readiness(exchange, days, log_file, json_output):
         try:
             return await evaluate_readiness(
                 db,
-                log_file=Path(log_file),
+                log_file=Path(log_file) if log_file else None,
                 exchange=exchange,
                 days=days,
                 fee_rate=fee_rate,

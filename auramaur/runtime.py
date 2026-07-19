@@ -26,5 +26,20 @@ def log_dir() -> Path:
     return _path_from_env("AURAMAUR_LOG_DIR", REPO_ROOT / "logs")
 
 
+def log_file_path() -> Path:
+    """Structlog file location — where the running bot actually writes.
+
+    Resolved exactly the way logging setup does: the ``logging.file`` setting
+    (``LOGGING__FILE`` env var, then local/tracked YAML, then the pydantic
+    default ``auramaur.log``). Readers such as the readiness checks must use
+    this instead of hardcoding a repo-root/CWD default, or a container run
+    (which sets ``LOGGING__FILE=/app/logs/auramaur.log``) looks in the wrong
+    place.
+    """
+    from config.settings import Settings  # local import keeps this module light
+
+    return Path(Settings().logging.file).expanduser()
+
+
 def kill_switch_path() -> Path:
     return _path_from_env("AURAMAUR_KILL_SWITCH_PATH", state_dir() / "KILL_SWITCH")

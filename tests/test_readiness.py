@@ -518,3 +518,40 @@ async def test_evaluate_readiness_aggregates_all_eight_criteria(db: Database, tm
         "pnl_after_fees",
         "divergence",
     ]
+
+
+@pytest.mark.asyncio
+async def test_evaluate_readiness_defaults_to_configured_log_file(
+    db: Database, tmp_path, monkeypatch
+):
+    """With no explicit log_file, cycle_health must read the configured
+    logging path (LOGGING__FILE / logging.file) — the container sets it to
+    /app/logs/auramaur.log, not CWD/auramaur.log."""
+    log_file = tmp_path / "logs" / "auramaur.log"
+    log_file.parent.mkdir()
+    now = datetime.now(timezone.utc)
+    log_file.write_text(
+        json.dumps(
+            {"level": "info", "timestamp": now.isoformat(), "event": "cycle.ok"}
+        )
+        + "\n"
+    )
+    monkeypatch.setenv("LOGGING__FILE", str(log_file))
+    report = await evaluate_readiness(db, exchange="kalshi", days=7)
+    cycle = report.criteria[0]
+    assert cycle.name == "cycle_health"
+    assert cycle.status == "PASS"
+    assert cycle.detail == "1 entries in window"
+
+
+@pytest.mark.asyncio
+async def test_evaluate_readiness_explicit_log_file_wins(
+    db: Database, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("LOGGING__FILE", str(tmp_path / "ignored.log"))
+    explicit = tmp_path / "explicit.log"
+    explicit.write_text("")
+    report = await evaluate_readiness(db, log_file=explicit, exchange="kalshi", days=7)
+    cycle = report.criteria[0]
+    assert cycle.status == "INSUFFICIENT_DATA"
+    assert cycle.detail == "log file is empty"

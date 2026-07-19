@@ -29,3 +29,23 @@ def test_runtime_paths_are_environment_overridable(tmp_path, monkeypatch):
 def test_explicit_database_path_wins(tmp_path, monkeypatch):
     monkeypatch.setenv("AURAMAUR_DB_PATH", str(tmp_path / "runtime.db"))
     assert Database(":memory:").db_path == ":memory:"
+
+
+def test_log_file_path_follows_logging_setting(tmp_path, monkeypatch):
+    # Container deployments point the structlog file elsewhere via the
+    # LOGGING__FILE env override; log_file_path must follow it.
+    override = tmp_path / "logs" / "auramaur.log"
+    monkeypatch.setenv("LOGGING__FILE", str(override))
+    assert runtime.log_file_path() == override
+
+
+def test_log_file_path_matches_settings_default(monkeypatch):
+    from pathlib import Path
+
+    from config.settings import Settings
+
+    monkeypatch.delenv("LOGGING__FILE", raising=False)
+    # Whatever the effective logging.file setting is (defaults.yaml or local
+    # overrides), log_file_path must agree with it — that is where the bot
+    # actually writes.
+    assert runtime.log_file_path() == Path(Settings().logging.file).expanduser()

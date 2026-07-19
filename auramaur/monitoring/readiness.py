@@ -578,7 +578,14 @@ async def evaluate_readiness(
     now = datetime.now(timezone.utc)
     since_window = now - timedelta(days=days)
     since_24h = now - timedelta(hours=24)
-    log_file = log_file or Path("auramaur.log")
+    if log_file is None:
+        # Follow the configured logging path (LOGGING__FILE / logging.file) so
+        # cycle_health reads the file the bot actually writes — in a container
+        # that is /app/logs/auramaur.log, not CWD/auramaur.log. Falls back to
+        # the setting's default ("auramaur.log") for native runs.
+        from auramaur.runtime import log_file_path
+
+        log_file = log_file_path()
     fee_rate = 0.07 if fee_rate is None else fee_rate
 
     criteria = [
