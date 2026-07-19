@@ -1092,6 +1092,55 @@ class AuramaurBot(
         except Exception as e:
             log.error("price_monitor.error", error=str(e))
 
+    async def _task_decision_marks(self) -> None:
+        """Attach executable 1m/5m/1h/24h marks to immutable decisions."""
+        from auramaur.research.polymarket_strategies import DecisionTracker
+
+        db = self._components.db
+        tracker = DecisionTracker(db)
+        horizons = (60, 300, 3600, 86400)
+        while True:
+            try:
+                for horizon in horizons:
+                    rows = await db.fetchall(
+                        """SELECT d.id, d.market_id, o.best_bid, o.best_ask
+                           FROM decision_snapshots d
+                           JOIN orderbook_snapshots o ON o.market_id = d.market_id
+                           WHERE unixepoch('now') - unixepoch(d.observed_at) >= ?
+                             AND NOT EXISTS (
+                                 SELECT 1 FROM decision_marks x
+                                 WHERE x.decision_id = d.id
+                                   AND x.horizon_seconds = ?)
+                             AND o.recorded_at = (
+                                 SELECT MIN(o2.recorded_at)
+                                 FROM orderbook_snapshots o2
+                                 WHERE o2.market_id = d.market_id
+                                   AND unixepoch(o2.recorded_at) >=
+                                       unixepoch(d.observed_at) + ?)
+                           LIMIT 250""",
+                        (horizon, horizon, horizon),
+                    )
+                    for row in rows:
+                        await tracker.mark(
+                            row["id"], horizon, bid=row["best_bid"],
+                            ask=row["best_ask"])
+            except Exception as exc:
+                log.warning("decision_marks.error", error=str(exc))
+            await asyncio.sleep(60)
+
+    async def _task_user_websocket(self) -> None:
+        """Run the authenticated lifecycle stream as a monitor wake-up lane."""
+        stream = self._components.user_websocket
+        if stream is None:
+            return
+        discovery = self._components.discovery
+        try:
+            markets = await discovery.get_markets(limit=100)
+            stream.subscribe([m.condition_id for m in markets if m.condition_id])
+            await stream.run()
+        except Exception as exc:
+            log.error("websocket.user_error", error=str(exc))
+
     async def _task_source_weights_update(self) -> None:
         """Periodically update ensemble source weights."""
         ensemble = self._components.ensemble
@@ -1451,6 +1500,11 @@ class AuramaurBot(
             tasks.append(asyncio.create_task(self._task_correlation_scan(), name="correlation"))
         if self._components.websocket:
             tasks.append(asyncio.create_task(self._task_price_monitor(), name="price_monitor"))
+        if self._components.user_websocket:
+            tasks.append(asyncio.create_task(
+                self._task_user_websocket(), name="user_websocket"))
+        tasks.append(asyncio.create_task(
+            self._task_decision_marks(), name="decision_marks"))
         if self._components.ensemble:
             tasks.append(asyncio.create_task(self._task_source_weights_update(), name="source_weights"))
         if self._components.feedback:

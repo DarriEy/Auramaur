@@ -189,3 +189,11 @@ def test_taker_fee_rate_per_category_and_venue():
     # Non-poly venues use the flat coefficient from the fees map.
     assert taker_fee_rate("kalshi", "crypto") == 0.07
     assert taker_fee_rate("kalshi", None, {"kalshi": 0.03}) == 0.03
+
+
+def test_polymarket_market_level_fee_truth_overrides_category_fallback():
+    from auramaur.strategy.signals import taker_fee_rate
+
+    assert taker_fee_rate("polymarket", "crypto", fees_enabled=False) == 0.0
+    assert taker_fee_rate("polymarket", "other", actual_fee_rate=0.031,
+                          fees_enabled=True) == pytest.approx(0.031)

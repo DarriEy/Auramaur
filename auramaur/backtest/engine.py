@@ -10,7 +10,7 @@ import structlog
 
 from auramaur.db.database import Database
 from auramaur.risk.kelly import KellySizer
-from auramaur.strategy.signals import POLYMARKET_FEE_PCT
+from auramaur.strategy.signals import taker_fee_rate
 from config.settings import Settings
 
 log = structlog.get_logger()
@@ -25,6 +25,8 @@ class BacktestResult:
     max_drawdown_pct: float = 0.0
     sharpe_ratio: float = 0.0
     brier_score: float = 0.0
+    market_brier_score: float = 0.0
+    brier_improvement: float = 0.0
     accuracy: float = 0.0  # % of directional calls correct
     avg_edge: float = 0.0
     best_trade: float = 0.0
@@ -79,7 +81,9 @@ class BacktestEngine:
         edge_threshold = min_edge_pct if min_edge_pct is not None else self.settings.risk.min_edge_pct
         kf = kelly_fraction if kelly_fraction is not None else self.settings.kelly.fraction
         bank = bankroll if bankroll is not None else self.settings.execution.paper_initial_balance
-        stake_cap = max_stake if max_stake is not None else self.settings.risk.max_stake_per_market
+        configured_cap = max_stake if max_stake is not None else self.settings.risk.max_stake_per_market
+        stake_cap = bank * configured_cap if configured_cap <= 1.0 else configured_cap
+        stake_cap = min(stake_cap, self.settings.risk.max_stake_abs_ceiling)
 
         sizer = KellySizer(fraction=kf)
 
@@ -100,7 +104,8 @@ class BacktestEngine:
                 c.predicted_prob,
                 c.resolved_at,
                 c.category,
-                m.question
+                m.question,
+                COALESCE(m.exchange, s.exchange, 'polymarket') AS exchange
             FROM signals s
             INNER JOIN calibration c ON s.market_id = c.market_id
             LEFT JOIN markets m ON s.market_id = m.id
@@ -121,19 +126,19 @@ class BacktestEngine:
         max_dd = 0.0
         pnl_returns: list[float] = []
         brier_sum = 0.0
+        market_brier_sum = 0.0
         brier_count = 0
         correct_calls = 0
         total_edge = 0.0
         category_stats: dict[str, dict] = {}
 
-        seen_signals: set[int] = set()
+        # One decision per independent market. Repeated re-analysis of the same
+        # resolved contract is not independent evidence and must not multiply P&L.
+        seen_forecasts: set[str] = set()
+        traded_markets: set[str] = set()
 
         for row in rows:
             signal_id = row["signal_id"]
-            if signal_id in seen_signals:
-                continue
-            seen_signals.add(signal_id)
-
             claude_prob = row["claude_prob"]
             market_prob = row["market_prob"]
             edge_pct = row["edge"]  # stored as percentage
@@ -141,19 +146,25 @@ class BacktestEngine:
             category = row["category"] or "unknown"
             question = row["question"] or row["market_id"]
 
-            # Brier score: (predicted - actual)^2
-            brier_sum += (claude_prob - actual_outcome) ** 2
-            brier_count += 1
-
-            # Directional accuracy: did Claude correctly predict the direction?
-            predicted_yes = claude_prob > 0.5
-            actual_yes = actual_outcome == 1
-            if predicted_yes == actual_yes:
-                correct_calls += 1
+            # Forecast metrics use the first timestamped estimate per market.
+            if row["market_id"] not in seen_forecasts:
+                seen_forecasts.add(row["market_id"])
+                brier_sum += (claude_prob - actual_outcome) ** 2
+                market_brier_sum += (market_prob - actual_outcome) ** 2
+                brier_count += 1
+                predicted_yes = claude_prob > 0.5
+                actual_yes = actual_outcome == 1
+                if predicted_yes == actual_yes:
+                    correct_calls += 1
 
             # Check edge threshold
             if abs(edge_pct) < edge_threshold:
                 continue
+            # Trade the first actionable decision only. An earlier forecast
+            # below the edge bar must not suppress a later eligible signal.
+            if row["market_id"] in traded_markets:
+                continue
+            traded_markets.add(row["market_id"])
 
             # Simulate the trade
             trade_pnl = self._simulate_trade(
@@ -163,6 +174,8 @@ class BacktestEngine:
                 sizer=sizer,
                 bankroll=bank,
                 max_stake=stake_cap,
+                exchange=row["exchange"],
+                category=category,
             )
 
             result.total_trades += 1
@@ -231,18 +244,21 @@ class BacktestEngine:
 
         if brier_count > 0:
             result.brier_score = brier_sum / brier_count
+            result.market_brier_score = market_brier_sum / brier_count
+            result.brier_improvement = result.market_brier_score - result.brier_score
             result.accuracy = correct_calls / brier_count * 100
 
         if result.total_trades > 0:
             result.avg_edge = total_edge / result.total_trades
 
-        # Sharpe ratio (annualized, assuming ~1 trade per day)
+        # Per-trade signal-to-noise. Do not pretend irregular, overlapping
+        # prediction-market trades are 252 independent daily returns.
         if len(pnl_returns) >= 2:
             mean_ret = sum(pnl_returns) / len(pnl_returns)
             variance = sum((r - mean_ret) ** 2 for r in pnl_returns) / (len(pnl_returns) - 1)
             std_ret = math.sqrt(variance) if variance > 0 else 0
             if std_ret > 0:
-                result.sharpe_ratio = (mean_ret / std_ret) * math.sqrt(252)
+                result.sharpe_ratio = mean_ret / std_ret
 
         # Category breakdown — compute averages
         for cat_name, cat in category_stats.items():
@@ -289,6 +305,8 @@ class BacktestEngine:
                 "sharpe_ratio": round(result_a.sharpe_ratio, 2),
                 "max_drawdown_pct": round(result_a.max_drawdown_pct, 1),
                 "brier_score": round(result_a.brier_score, 4),
+                "market_brier_score": round(result_a.market_brier_score, 4),
+                "brier_improvement": round(result_a.brier_improvement, 4),
                 "avg_edge": round(result_a.avg_edge, 1),
                 "best_trade": round(result_a.best_trade, 2),
                 "worst_trade": round(result_a.worst_trade, 2),
@@ -301,6 +319,8 @@ class BacktestEngine:
                 "sharpe_ratio": round(result_b.sharpe_ratio, 2),
                 "max_drawdown_pct": round(result_b.max_drawdown_pct, 1),
                 "brier_score": round(result_b.brier_score, 4),
+                "market_brier_score": round(result_b.market_brier_score, 4),
+                "brier_improvement": round(result_b.brier_improvement, 4),
                 "avg_edge": round(result_b.avg_edge, 1),
                 "best_trade": round(result_b.best_trade, 2),
                 "worst_trade": round(result_b.worst_trade, 2),
@@ -318,6 +338,8 @@ class BacktestEngine:
         sizer: KellySizer | None = None,
         bankroll: float = 1000.0,
         max_stake: float = 25.0,
+        exchange: str = "polymarket",
+        category: str = "",
     ) -> float:
         """Simulate a single trade and return PnL.
 
@@ -345,15 +367,13 @@ class BacktestEngine:
         if stake <= 0:
             return 0.0
 
-        # Apply fee
-        fee = stake * (POLYMARKET_FEE_PCT / 100)
+        # Replay uses taker execution unless a strategy-specific simulator has
+        # captured a real maker fill. Fees use the same quadratic production
+        # schedule; executable-book replays should override this method.
+        fee_coefficient = taker_fee_rate(exchange, category)
 
-        # Model slippage: larger orders move price more
-        # Assume ~0.5% slippage per $10 of order size (based on typical PM liquidity)
-        slippage_pct = min(0.03, stake * 0.0005)  # Cap at 3%
-
-        # Model partial fills: larger orders have lower fill probability
-        # Orders >$15 may only partially fill
+        # Conservative fallback when historical depth is unavailable.
+        slippage_pct = min(0.03, stake * 0.0005)
         fill_rate = min(1.0, 15.0 / max(stake, 1.0))
         effective_stake = stake * fill_rate
 
@@ -364,6 +384,7 @@ class BacktestEngine:
             # BUY YES — slippage worsens our entry price
             entry_price = min(0.99, market_prob * (1 + slippage_pct))
             shares = effective_stake / entry_price
+            fee = shares * fee_coefficient * entry_price * (1.0 - entry_price)
             if actual_outcome == 1:
                 pnl = shares * (1.0 - entry_price) - fee
             else:
@@ -375,6 +396,7 @@ class BacktestEngine:
                 return 0.0
             entry_price = min(0.99, no_price * (1 + slippage_pct))
             shares = effective_stake / entry_price
+            fee = shares * fee_coefficient * entry_price * (1.0 - entry_price)
             if actual_outcome == 0:
                 pnl = shares * (1.0 - entry_price) - fee
             else:

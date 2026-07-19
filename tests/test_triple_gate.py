@@ -151,14 +151,27 @@ async def test_all_gates_open_attempts_live(paper_trader):
         mock_clob = MagicMock()
         mock_clob.create_and_post_order.return_value = {"orderID": "LIVE-xyz"}
         client._clob_client = mock_clob
-
-        result = await client.place_order(order)
+        with patch.object(client, "_check_geoblock", return_value=True):
+            result = await client.place_order(order)
 
     # Paper trader must NOT have been called
     paper_trader.execute.assert_not_awaited()
     assert result.is_paper is False
     assert result.order_id == "LIVE-xyz"
     assert result.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_live_order_fails_closed_when_geoblock_denies(paper_trader):
+    settings = _make_settings(auramaur_live=True, execution_live=True)
+    client = PolymarketClient(settings, paper_trader)
+    order = _make_order(dry_run=False)
+    with patch.object(client, "_check_geoblock", return_value=False):
+        result = await client.place_order(order)
+    paper_trader.execute.assert_not_awaited()
+    assert result.is_paper is False
+    assert result.status == "rejected"
+    assert result.order_id == "GEOBLOCKED"
 
 
 # ---------------------------------------------------------------------------

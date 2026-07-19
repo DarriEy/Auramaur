@@ -630,7 +630,8 @@ class CycleOrchestrationMixin:
             # percentage. Polymarket is per-category (see taker_fee_rate); this
             # is a crossing execution path so the taker rate is the right one.
             fee_rate = taker_fee_rate(
-                market.exchange or self.exchange_name, market.category, exchange_fees)
+                market.exchange or self.exchange_name, market.category, exchange_fees,
+                actual_fee_rate=market.fee_rate, fees_enabled=market.fees_enabled)
             edge = abs(raw_edge) - fee_rate * market_prob * (1.0 - market_prob)
 
             signal = Signal(

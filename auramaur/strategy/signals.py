@@ -46,6 +46,8 @@ def taker_fee_rate(
     exchange: str | None,
     category: str | None = None,
     exchange_fees: dict[str, float] | None = None,
+    actual_fee_rate: float | None = None,
+    fees_enabled: bool | None = None,
 ) -> float:
     """Per-share TAKER fee coefficient for the ``rate * p*(1-p)`` formula.
 
@@ -54,6 +56,10 @@ def taker_fee_rate(
     net a fee). Other venues use the flat per-exchange coefficient.
     """
     if (exchange or "polymarket") == "polymarket":
+        if fees_enabled is False:
+            return 0.0
+        if actual_fee_rate is not None:
+            return max(0.0, actual_fee_rate)
         return POLYMARKET_TAKER_FEES.get(
             (category or "").lower(), POLYMARKET_DEFAULT_TAKER_FEE)
     fees = exchange_fees if exchange_fees is not None else EXCHANGE_FEES
@@ -228,7 +234,9 @@ def detect_edge(
     # Crossing (taker) execution: net the per-category Polymarket taker fee (or
     # the flat per-exchange coefficient elsewhere). Maker-only strategies don't
     # reach this path, so this conservatively assumes the edge will be taken.
-    fee_rate = taker_fee_rate(market.exchange, market.category, exchange_fees)
+    fee_rate = taker_fee_rate(
+        market.exchange, market.category, exchange_fees,
+        actual_fee_rate=market.fee_rate, fees_enabled=market.fees_enabled)
     net_edge = edge - fee_rate * market_prob * (1.0 - market_prob)
 
     if net_edge <= 0:

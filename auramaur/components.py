@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from auramaur.exchange.paper import PaperTrader
     from auramaur.exchange.protocols import ExchangeClient, MarketDiscovery
     from auramaur.exchange.websocket import PolymarketWebSocket
+    from auramaur.exchange.websocket import PolymarketUserWebSocket
     from auramaur.monitoring.alerts import AlertManager
     from auramaur.monitoring.attribution import PerformanceAttributor
     from auramaur.nlp.analyzer import ClaudeAnalyzer
@@ -155,6 +156,9 @@ class Components(dict):
 
     @property
     def websocket(self) -> PolymarketWebSocket | None: return self.get("websocket")
+
+    @property
+    def user_websocket(self) -> PolymarketUserWebSocket | None: return self.get("user_websocket")
 
     @property
     def ensemble(self) -> EnsembleEstimator | None: return self.get("ensemble")
