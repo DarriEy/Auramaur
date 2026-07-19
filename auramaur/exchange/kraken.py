@@ -143,9 +143,26 @@ class KrakenSpotClient:
             return None
         info = next(iter(result.values()))
         try:
-            return float(info["c"][0])  # 'c' = last trade closed [price, lot volume]
-        except (KeyError, IndexError, TypeError):
+            return float(info["c"][0])
+        except (KeyError, IndexError, TypeError, ValueError):
             return None
+
+    async def get_bid_ask(self, pair: str) -> tuple[float, float] | None:
+        """Executable top-of-book prices for shadow fills and cost checks."""
+        result = await self._public("Ticker", {"pair": pair})
+        if not result:
+            return None
+        info = next(iter(result.values()))
+        try:
+            bid, ask = float(info["b"][0]), float(info["a"][0])
+            return (bid, ask) if 0 < bid <= ask else None
+        except (KeyError, IndexError, TypeError, ValueError):
+            return None
+
+    async def get_api_key_info(self) -> dict:
+        """Return Kraken's permission/restriction metadata for startup audits."""
+        resp = await self._private("GetApiKeyInfo")
+        return {} if resp.get("error") else dict(resp.get("result") or {})
 
     async def get_pair_quote(self, pair: str) -> str | None:
         """Quote-currency asset code for a pair (e.g. PAXGUSD -> 'ZUSD')."""
@@ -213,6 +230,7 @@ class KrakenSpotClient:
         purpose: str = "treasury",
         dry_run: bool | None = None,
         max_usd: float | None = None,
+        client_order_id: str | None = None,
     ) -> OrderResult:
         """Place a spot order on Kraken.
 
@@ -255,6 +273,8 @@ class KrakenSpotClient:
         validate = bool(dry_run)
 
         params = {"pair": pair, "type": side_str, "ordertype": ordertype, "volume": str(volume)}
+        if client_order_id:
+            params["cl_ord_id"] = str(client_order_id)[:32]
         if price is not None and ordertype != "market":
             params["price"] = str(price)
         if validate:
@@ -270,7 +290,10 @@ class KrakenSpotClient:
 
         result = resp.get("result", {})
         txids = result.get("txid") or []
-        order_id = txids[0] if txids else ("VALIDATED" if validate else "unknown")
+        # Validate-only responses have no exchange txid. Preserve the caller's
+        # unique id so distinct paper fills remain independently idempotent.
+        order_id = txids[0] if txids else (
+            client_order_id or ("VALIDATED" if validate else "unknown"))
         log.info("kraken.order_placed", pair=pair, order_id=order_id, validate=validate,
                  descr=result.get("descr"))
         return OrderResult(
