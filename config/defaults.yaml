@@ -218,16 +218,17 @@ ibkr:
   # PRE-REGISTERED EXPERIMENT (2026-06-09, Phase 6 of the edge-first redesign).
   # IBKR is an experiment, not a commitment. Criteria fixed BEFORE activation
   # so the decision can't drift:
-  #   * Success bar: >= 20 closed trades with positive realized P&L within 90
-  #     days of activation (the same bar the graduation ladder uses).
-  #   * Kill criteria: realized <= -$50 at any point, OR 90 days post-
-  #     activation without meeting the success bar -> set enabled:false and
+  #   * Success bar: the IBKR-specific evidence contract requires >=200
+  #     cost-adjusted observations over >=180 days, positive 95% lower bound on
+  #     mean P&L, bounded drawdown, and (for forecasts) Brier improvement over
+  #     the base rate. See risk/ibkr_evidence.py.
+  #   * Kill criteria: realized <= -$50 at any point, OR failure of the
+  #     pre-registered evidence contract at review -> set enabled:false and
   #     redesign before re-funding. No threshold-moving after the fact.
-  #   * Review date: 90 days after enabled flips true (record the date here
+  #   * Review date: 180 days after enabled flips true (record the date here
   #     when it does).
-  # NOTE: before scaling beyond the starter budget, wire IBKR fills through
-  # the pnl_ledger venue/category context so `auramaur pnl` and the
-  # graduation ladder can actually score it.
+  # NOTE: before scaling beyond the starter budget, expose the isolated IBKR
+  # ledgers through a report that calls the evidence contract above.
   # Ports: TWS 7497 paper / 7496 live; IB Gateway 4002 / 4001.
   enabled: true
   # Master switch above just connects. The two books are gated independently
@@ -278,13 +279,20 @@ ibkr:
   multiasset_disabled_instruments: ["7203.T"]
   multiasset_min_momentum_pct: 1.0
   multiasset_exit_momentum_pct: -0.5
+  # Cross-asset signals are volatility-standardized; raw percentage momentum is
+  # retained above only for old local overrides and is no longer used.
+  multiasset_min_normalized_momentum: 0.25
+  multiasset_exit_normalized_momentum: -0.10
   multiasset_books:
     global_etf: {enabled: true, budget_usd: 5000, max_positions: 6, max_position_pct: 12, max_deployment_pct: 60, daily_loss_limit_usd: 100, stop_loss_pct: 5, take_profit_pct: 10, max_spread_bps: 25}
     fx: {enabled: true, budget_usd: 5000, max_positions: 4, max_position_pct: 10, max_deployment_pct: 40, daily_loss_limit_usd: 75, stop_loss_pct: 2, take_profit_pct: 4, max_spread_bps: 15}
     futures: {enabled: true, budget_usd: 10000, max_positions: 3, max_position_pct: 15, max_deployment_pct: 40, daily_loss_limit_usd: 150, stop_loss_pct: 3, take_profit_pct: 6, max_spread_bps: 30}
     international_equity: {enabled: true, budget_usd: 5000, max_positions: 5, max_position_pct: 12, max_deployment_pct: 50, daily_loss_limit_usd: 100, stop_loss_pct: 6, take_profit_pct: 12, max_spread_bps: 50}
-    options: {enabled: true, budget_usd: 3000, max_positions: 3, max_position_pct: 10, max_deployment_pct: 30, daily_loss_limit_usd: 100, stop_loss_pct: 35, take_profit_pct: 50, max_spread_bps: 300}
-    bonds: {enabled: true, budget_usd: 10000, max_positions: 4, max_position_pct: 20, max_deployment_pct: 60, daily_loss_limit_usd: 75, stop_loss_pct: 3, take_profit_pct: 6, max_spread_bps: 100}
+    # Fail closed until option Greeks/expiry/assignment and bond duration/accrual
+    # are part of both sizing and the paper ledger. Generic price volatility is
+    # not sufficient evidence for either asset class.
+    options: {enabled: false, budget_usd: 3000, max_positions: 3, max_position_pct: 10, max_deployment_pct: 30, daily_loss_limit_usd: 100, stop_loss_pct: 35, take_profit_pct: 50, max_spread_bps: 300}
+    bonds: {enabled: false, budget_usd: 10000, max_positions: 4, max_position_pct: 20, max_deployment_pct: 60, daily_loss_limit_usd: 75, stop_loss_pct: 3, take_profit_pct: 6, max_spread_bps: 100}
   # Operator-visible mirror of the typed GLOBAL_ETFS manifest. A test enforces
   # exact equality so the legacy intelligence experiment cannot drift.
   etf_symbols: ["SPY", "QQQ", "IWM", "DIA", "VTI",
@@ -311,6 +319,11 @@ ibkr:
   etf_take_profit_pct: 8.0
   etf_trailing_stop_pct: 3.0
   etf_reentry_cooldown_hours: 24.0
+  etf_risk_per_position_pct: 0.25
+  etf_stop_vol_multiple: 2.0
+  etf_min_stop_pct: 1.0
+  etf_slippage_bps: 2.0
+  etf_max_portfolio_risk_pct: 1.0
   # Intelligence-cap experiment: identical evidence/prompt/risk across three
   # independent, isolated paper cells. Only model tier/reasoning effort changes.
   etf_models:

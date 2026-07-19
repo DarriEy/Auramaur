@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -477,6 +477,8 @@ CREATE TABLE IF NOT EXISTS ibkr_etf_positions (
     current_price REAL,
     unrealized_pnl REAL NOT NULL DEFAULT 0,
     peak_pnl_pct REAL NOT NULL DEFAULT 0,
+    stop_price REAL NOT NULL DEFAULT 0,
+    initial_risk_usd REAL NOT NULL DEFAULT 0,
     opened_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (model_alias, symbol)
@@ -518,6 +520,8 @@ CREATE TABLE IF NOT EXISTS ibkr_paper_positions (
     avg_cost REAL NOT NULL,
     current_price REAL,
     unrealized_pnl_usd REAL NOT NULL DEFAULT 0,
+    stop_price REAL NOT NULL DEFAULT 0,
+    initial_risk_usd REAL NOT NULL DEFAULT 0,
     price_source TEXT NOT NULL DEFAULT 'ibkr_unknown',
     instrument_spec_json TEXT NOT NULL DEFAULT '',
     opened_at TEXT NOT NULL DEFAULT (datetime('now')),
