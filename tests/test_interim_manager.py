@@ -2,6 +2,8 @@
 
 import asyncio
 from types import SimpleNamespace
+
+import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 
@@ -150,3 +152,90 @@ def test_disabled_by_default_in_tracked_config():
     assert s.interim_manager.enabled is False
     assert s.interim_manager.paper is True
     assert "interim_manager" not in set(s.graduation.exempt_strategies)
+
+
+# ---- v2: the generalized decision rule ----
+
+async def _propose_row(db, **overrides):
+    fields = dict(venue="kalshi", market_id="M1", side="BUY", fair_prob=0.55,
+                  stake_usd=10.0, thesis=THESIS, status="pending",
+                  thesis_class="forecast_divergence")
+    fields.update(overrides)
+    cols = ", ".join(fields)
+    marks = ", ".join("?" for _ in fields)
+    await db.execute(
+        f"INSERT INTO manager_proposals ({cols}) VALUES ({marks})",
+        tuple(fields.values()))
+    await db.commit()
+
+
+def test_max_entry_price_gate_blocks_expensive_fills():
+    async def run():
+        pillar, db, gateway, _ = await _pillar()
+        await _propose_row(db, max_entry_price=0.35)  # market mid is 0.40
+        assert await pillar.run_once() == 0
+        gateway.submit.assert_not_awaited()
+        row = await db.fetchone("SELECT status, reason FROM manager_proposals")
+        assert row["status"] == "skipped"
+        assert "above limit" in row["reason"]
+        await db.close()
+    asyncio.run(run())
+
+
+def test_robust_edge_gate_rejects_thin_edges():
+    async def run():
+        pillar, db, gateway, _ = await _pillar()
+        # fair 0.47 vs mid 0.40: gross 0.07 − default buffers ≈ below 0.05 gate
+        await _propose_row(db, fair_prob=0.47)
+        assert await pillar.run_once() == 0
+        gateway.submit.assert_not_awaited()
+        row = await db.fetchone(
+            "SELECT status, reason, robust_edge FROM manager_proposals")
+        assert row["status"] == "skipped"
+        assert "robust edge" in row["reason"]
+        assert row["robust_edge"] is not None
+        await db.close()
+    asyncio.run(run())
+
+
+def test_wide_robust_edge_executes_and_records_decision_price():
+    async def run():
+        pillar, db, gateway, _ = await _pillar()
+        # fair 0.72 vs mid 0.40 with a tight CI: survives every haircut
+        await _propose_row(db, fair_prob=0.72, confidence_lo=0.70,
+                           confidence_hi=0.74)
+        assert await pillar.run_once() == 1
+        row = await db.fetchone(
+            "SELECT status, robust_edge, decision_price FROM manager_proposals")
+        assert row["status"] == "executed"
+        assert row["robust_edge"] > 0.05
+        assert row["decision_price"] == pytest.approx(0.40)
+        await db.close()
+    asyncio.run(run())
+
+
+def test_thesis_sunset_expires_before_execution():
+    async def run():
+        pillar, db, gateway, _ = await _pillar()
+        await _propose_row(db, fair_prob=0.72, sunset_at="2020-01-01T00:00:00+00:00")
+        assert await pillar.run_once() == 0
+        gateway.submit.assert_not_awaited()
+        row = await db.fetchone("SELECT status, reason FROM manager_proposals")
+        assert row["status"] == "expired"
+        assert "sunset" in row["reason"]
+        await db.close()
+    asyncio.run(run())
+
+
+def test_ci_half_width_is_the_uncertainty_haircut():
+    async def run():
+        pillar, db, gateway, _ = await _pillar()
+        # A modest edge with a sloppy CI (±0.15) must die where the same
+        # edge with a tight CI would survive — the haircut is the CI width.
+        await _propose_row(db, fair_prob=0.55, confidence_lo=0.40,
+                           confidence_hi=0.70)
+        assert await pillar.run_once() == 0
+        row = await db.fetchone("SELECT status, reason FROM manager_proposals")
+        assert row["status"] == "skipped" and "robust edge" in row["reason"]
+        await db.close()
+    asyncio.run(run())

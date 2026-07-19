@@ -144,12 +144,43 @@ class InterimManagerPillar:
             await self._resolve(pid, "skipped", f"delegated to {owned[category]}")
             return False
 
+        # Machine-checkable sunset: an information/time bound the proposer set.
+        sunset = self._parse_ts(p.get("sunset_at"))
+        if sunset is not None and datetime.now(timezone.utc) >= sunset:
+            await self._resolve(pid, "expired", "thesis sunset reached")
+            return False
+
         open_now = await self._open_positions()
         if open_now >= cfg.max_open_positions:
             log.info("interim_manager.position_cap", open=open_now)
             return False  # stays pending; retried next cycle
 
         side = OrderSide.BUY if str(p["side"]).upper() == "BUY" else OrderSide.SELL
+
+        # Entry-price limit: the mechanical guard that protects the edge.
+        # Expressed as the max price PAID for the side taken (BUY pays the
+        # YES price; SELL pays the NO price).
+        entry_price = (market.outcome_yes_price if side == OrderSide.BUY
+                       else 1.0 - market.outcome_yes_price)
+        max_entry = p.get("max_entry_price")
+        if max_entry is not None and entry_price > float(max_entry) + 1e-9:
+            await self._resolve(
+                pid, "skipped",
+                f"entry {entry_price:.3f} above limit {float(max_entry):.3f}")
+            return False
+
+        # Robust-edge gate: the edge must survive every haircut. Conservative
+        # about apparent edges built on weak estimates (charter decision rule).
+        robust, detail = await self._robust_edge(p, market, category, side)
+        await self._db.execute(
+            "UPDATE manager_proposals SET robust_edge = ?, decision_price = ? "
+            "WHERE id = ?", (round(robust, 4), entry_price, pid))
+        await self._db.commit()
+        if robust < cfg.min_robust_edge:
+            await self._resolve(
+                pid, "skipped",
+                f"robust edge {robust:+.3f} < {cfg.min_robust_edge:.3f} ({detail})")
+            return False
         signal = Signal(
             market_id=market.id,
             market_question=market.question,
@@ -189,6 +220,39 @@ class InterimManagerPillar:
         return True
 
     # ------------------------------------------------------------------
+
+    async def _robust_edge(self, p: dict, market, category: str,
+                           side: OrderSide) -> tuple[float, str]:
+        """fair − executable − uncertainty − fees − slippage − liquidity −
+        correlation. Returns (edge, haircut breakdown for the audit trail)."""
+        from auramaur.strategy.signals import taker_fee_rate
+        cfg = self._settings.interim_manager
+        fair = float(p["fair_prob"])
+        mid = market.outcome_yes_price
+        gross = (fair - mid) if side == OrderSide.BUY else (mid - fair)
+
+        lo, hi = p.get("confidence_lo"), p.get("confidence_hi")
+        if lo is not None and hi is not None and float(hi) >= float(lo):
+            uncertainty = (float(hi) - float(lo)) / 2.0
+        else:
+            uncertainty = cfg.default_uncertainty_buffer
+        fee = taker_fee_rate(market.exchange or "kalshi", category) * mid * (1.0 - mid)
+        liq = (cfg.liquidity_penalty
+               if float(market.liquidity or 0) < cfg.thin_liquidity_usd else 0.0)
+        corr = (cfg.correlation_penalty_per_position
+                * await self._open_positions_in_category(category))
+        edge = gross - uncertainty - fee - cfg.slippage_buffer - liq - corr
+        detail = (f"gross {gross:+.3f} − unc {uncertainty:.3f} − fee {fee:.3f} "
+                  f"− slip {cfg.slippage_buffer:.3f} − liq {liq:.3f} − corr {corr:.3f}")
+        return edge, detail
+
+    async def _open_positions_in_category(self, category: str) -> int:
+        row = await self._db.fetchone(
+            """SELECT COUNT(DISTINCT s.market_id) AS n FROM signals s
+               JOIN portfolio p ON p.market_id = s.market_id AND p.size > 0
+               WHERE s.strategy_source = ? AND p.category = ?""",
+            (self.name, category))
+        return int(row["n"] or 0) if row else 0
 
     async def _open_positions(self) -> int:
         row = await self._db.fetchone(

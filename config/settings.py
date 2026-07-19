@@ -711,6 +711,17 @@ class InterimManagerConfig(BaseModel):
     max_open_positions: int = 10
     proposal_ttl_hours: float = 48.0
     sunset_after_live_cells: int = 3
+    # Robust-edge gate (docs/INTERIM_MANAGER.md "decision rule"): the edge that
+    # must survive after subtracting every cost and uncertainty haircut.
+    min_robust_edge: float = 0.05
+    # Haircut when no confidence interval is supplied (else CI half-width).
+    default_uncertainty_buffer: float = 0.04
+    slippage_buffer: float = 0.01
+    # Markets with less liquidity than this get the thin-liquidity haircut.
+    thin_liquidity_usd: float = 200.0
+    liquidity_penalty: float = 0.02
+    # Haircut per already-open manager position in the same category.
+    correlation_penalty_per_position: float = 0.01
 
 
 class EconIndicatorConfig(BaseModel):
