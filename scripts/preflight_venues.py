@@ -48,7 +48,46 @@ def _kraken_balance(key: str, secret: str) -> str:
         return f"FAILED — {body['error']}"
     assets = {k: float(v) for k, v in body.get("result", {}).items() if float(v) != 0}
     detail = ", ".join(f"{k}={v:.4f}" for k, v in sorted(assets.items()))
-    return f"OK — wallet reachable, {len(assets)} non-zero asset(s): {detail}"
+    return (f"OK — wallet reachable, {len(assets)} non-zero asset(s): {detail}"
+            f"\n  total (USD)             : {_kraken_total_usd(assets)}")
+
+
+def _kraken_total_usd(assets: dict[str, float]) -> str:
+    """Value non-zero balances in USD via public tickers. Fiat CAD converts
+    through USDCAD; unknown assets are listed rather than silently dropped."""
+    total = 0.0
+    unpriced = []
+    pairs = {}
+    for asset, qty in assets.items():
+        if asset in ("ZUSD", "USD"):
+            total += qty
+        elif asset == "ZCAD":
+            pairs[asset] = "USDCAD"
+        else:
+            name = asset[1:] if asset.startswith("X") and len(asset) == 4 else asset
+            pairs[asset] = f"{name}USD"
+    if pairs:
+        url = ("https://api.kraken.com/0/public/Ticker?pair="
+               + ",".join(sorted(set(pairs.values()))))
+        try:
+            with urllib.request.urlopen(url, timeout=20) as r:
+                body = json.load(r)
+        except Exception as e:  # noqa: BLE001
+            return f"WARN — ticker fetch failed: {type(e).__name__}"
+        quotes = {name: float(res["c"][0])
+                  for name, res in (body.get("result") or {}).items()}
+        for asset, pair in pairs.items():
+            base, quote = pair[:-3], pair[-3:]
+            price = next((v for k, v in quotes.items()
+                          if base in k and quote in k), None)
+            if price is None:
+                unpriced.append(asset)
+            elif pair == "USDCAD":
+                total += assets[asset] / price
+            else:
+                total += assets[asset] * price
+    note = f" (unpriced: {','.join(unpriced)})" if unpriced else ""
+    return f"OK — ${total:,.2f} total wallet value{note}"
 
 
 def _kraken_ticker(pairs: tuple[str, ...]) -> str:
@@ -121,6 +160,38 @@ async def _probe(name: str, client) -> str:
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001 — preflight must report, not crash
         return f"FAILED — {type(e).__name__}: {str(e)[:120]}"
+    finally:
+        close = getattr(client, "close", None)
+        if close is not None:
+            try:
+                await close()
+            except Exception:
+                pass
+
+
+async def _probe_ibkr_account(s) -> str:
+    """Read-only account summary through the authenticated Gateway session."""
+    from auramaur.exchange.ibkr import IBKRClient
+    client = IBKRClient(settings=s, paper_trader=None)
+    try:
+        await client._ensure_connected()  # noqa: SLF001 — preflight-only introspection
+        ib = client._ib  # noqa: SLF001
+        if ib is None or not getattr(client, "_connected", False):
+            return "skipped — gateway not reachable from this host (run in container)"
+        t0 = time.monotonic()
+        summary = {v.tag: (v.value, v.currency)
+                   for v in await ib.accountSummaryAsync()}
+        positions = await ib.reqPositionsAsync()
+        ms = (time.monotonic() - t0) * 1000
+        net, cur = summary.get("NetLiquidation", (None, ""))
+        cash, _ = summary.get("TotalCashValue", (None, ""))
+        if net is None:
+            return "WARN — connected but no NetLiquidation in account summary"
+        return (f"OK — net liq {float(net):,.2f} {cur}, cash {float(cash):,.2f}, "
+                f"{len(positions)} position(s) in {ms:.0f}ms "
+                "(compare with venue UI)")
+    except Exception as e:  # noqa: BLE001
+        return f"FAILED — {type(e).__name__}: {str(e)[:90]}"
     finally:
         close = getattr(client, "close", None)
         if close is not None:
@@ -240,6 +311,7 @@ async def main() -> None:
     if s.ibkr.enabled:
         from auramaur.exchange.ibkr import IBKRClient
         print(f"  discovery               : {await _probe('ibkr', IBKRClient(settings=s, paper_trader=None))}")
+        print(f"  account                 : {await _probe_ibkr_account(s)}")
         print("  (a FAILED here usually means TWS / IB Gateway is not running)")
     else:
         print("  discovery               : skipped (disabled)")
