@@ -106,6 +106,12 @@ class BatchAnalysisResult(BaseModel):
     reasoning: str = ""
     key_factors: list[str] = Field(default_factory=list)
     cross_market_notes: str = ""
+    # Adversarial (red-team) second opinion — populated by
+    # analyze_batch_with_adversarial so the divergence can persist to the
+    # signals table (readiness criterion 8) instead of living only in the
+    # cross_market_notes display string.
+    second_opinion_prob: float | None = None
+    divergence: float | None = None
 
 
 class StrategicAnalysis(BaseModel):
@@ -706,7 +712,13 @@ class StrategicAnalyzer:
             for primary_market in primary.markets:
                 adv = adversarial_map.get(primary_market.market_id)
                 if adv:
-                    # Store adversarial as cross-market notes
+                    # Persist the red-team estimate structurally (feeds the
+                    # signals table -> readiness divergence criterion) ...
+                    primary_market.second_opinion_prob = adv.probability
+                    primary_market.divergence = abs(
+                        primary_market.probability - adv.probability
+                    )
+                    # ... and keep the human-readable note.
                     primary_market.cross_market_notes += (
                         f" [Red team: {adv.probability:.0%} — {adv.reasoning[:100]}]"
                     )

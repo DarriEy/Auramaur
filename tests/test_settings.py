@@ -102,6 +102,25 @@ def test_intensity_explicit_override_wins():
     assert cfg.evidence_per_source == 10  # from preset
 
 
+def test_intensity_explicit_value_equal_to_medium_default_wins():
+    """Regression: an explicit value that HAPPENS to equal the medium default
+    must still beat the preset. defaults.yaml sets api_intensity: "low" with
+    skip_second_opinion: false — the old heuristic read the explicit false as
+    "unset" and flipped it to True, silently disabling the adversarial second
+    opinion (readiness divergence criterion starved at 0 samples)."""
+    from config.settings import NLPConfig
+    cfg = NLPConfig(api_intensity="low", skip_second_opinion=False)
+    assert cfg.skip_second_opinion is False  # explicit override kept
+    assert cfg.daily_claude_call_budget == 50  # unset field still gets preset
+
+
+def test_yaml_defaults_keep_second_opinion_enabled():
+    """The deployed defaults.yaml pairs api_intensity: "low" with an explicit
+    skip_second_opinion: false; the loaded settings must honor it."""
+    s = Settings()
+    assert s.nlp.skip_second_opinion is False
+
+
 def test_kalshi_config_defaults():
     s = Settings()
     assert s.kalshi.enabled is True

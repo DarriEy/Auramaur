@@ -312,14 +312,16 @@ class NLPConfig(BaseModel):
 
     def model_post_init(self, __context) -> None:
         """Apply intensity preset as defaults — explicit overrides win."""
-        # We only apply the preset when the individual values match
-        # the "medium" defaults, meaning the user didn't set them explicitly.
+        # Only fill fields the caller did NOT set explicitly. The old
+        # heuristic ("current == medium default means unset") clobbered
+        # explicit values that happened to equal the medium default — e.g.
+        # defaults.yaml's api_intensity: "low" + skip_second_opinion: false
+        # silently ran with skip_second_opinion=True, so no second opinions
+        # (adversarial pass) ever ran and readiness's divergence criterion
+        # starved at 0 samples.
         preset = _INTENSITY_PRESETS.get(self.api_intensity, {})
-        medium = _INTENSITY_PRESETS["medium"]
         for key, preset_val in preset.items():
-            current = getattr(self, key)
-            default = medium[key]
-            if current == default and preset_val != default:
+            if key not in self.model_fields_set:
                 object.__setattr__(self, key, preset_val)
 
 

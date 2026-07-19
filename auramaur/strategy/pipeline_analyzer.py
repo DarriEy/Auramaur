@@ -138,13 +138,16 @@ class PipelineAnalyzer:
                 claude_confidence=Confidence(batch_result.confidence),
                 market_prob=market_prob,
                 edge=edge * 100,
+                second_opinion_prob=batch_result.second_opinion_prob,
+                divergence=batch_result.divergence,
                 evidence_summary=batch_result.reasoning[:500],
                 recommended_side=side,
             )
 
             show_analysis(
                 signal.claude_prob, signal.market_prob, signal.edge,
-                batch_result.confidence, None, None,
+                batch_result.confidence, signal.second_opinion_prob,
+                signal.divergence,
             )
 
             candidates.append(TradeCandidate(market=market, signal=signal))

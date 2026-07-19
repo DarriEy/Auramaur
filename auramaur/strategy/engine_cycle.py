@@ -407,10 +407,12 @@ class CycleOrchestrationMixin:
             # Store signal
             await self.db.execute(
                 """INSERT INTO signals (market_id, claude_prob, claude_confidence, market_prob,
-                                         edge, evidence_summary, action, strategy_source)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                                         edge, second_opinion_prob, divergence,
+                                         evidence_summary, action, strategy_source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (tc.signal.market_id, tc.signal.claude_prob, tc.signal.claude_confidence.value,
-                 tc.signal.market_prob, tc.signal.edge, tc.signal.evidence_summary,
+                 tc.signal.market_prob, tc.signal.edge, tc.signal.second_opinion_prob,
+                 tc.signal.divergence, tc.signal.evidence_summary,
                  tc.signal.recommended_side.value if tc.signal.recommended_side else None,
                  tc.signal.strategy_source),
             )
@@ -638,6 +640,8 @@ class CycleOrchestrationMixin:
                 claude_confidence=Confidence(batch_result.confidence),
                 market_prob=market_prob,
                 edge=edge * 100,
+                second_opinion_prob=batch_result.second_opinion_prob,
+                divergence=batch_result.divergence,
                 evidence_summary=batch_result.reasoning[:500],
                 recommended_side=side,
             )
@@ -645,7 +649,8 @@ class CycleOrchestrationMixin:
             from auramaur.monitoring.display import show_analysis
             show_analysis(
                 signal.claude_prob, signal.market_prob, signal.edge,
-                batch_result.confidence, None, None,
+                batch_result.confidence, signal.second_opinion_prob,
+                signal.divergence,
             )
 
             # Ensure market exists in DB (FK requirement for signals table)
@@ -664,10 +669,12 @@ class CycleOrchestrationMixin:
             # Store signal
             await self.db.execute(
                 """INSERT INTO signals (market_id, claude_prob, claude_confidence, market_prob,
-                                         edge, evidence_summary, action, strategy_source)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                                         edge, second_opinion_prob, divergence,
+                                         evidence_summary, action, strategy_source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (signal.market_id, signal.claude_prob, signal.claude_confidence.value,
-                 signal.market_prob, signal.edge, signal.evidence_summary,
+                 signal.market_prob, signal.edge, signal.second_opinion_prob,
+                 signal.divergence, signal.evidence_summary,
                  signal.recommended_side.value if signal.recommended_side else None,
                  "llm"),
             )
