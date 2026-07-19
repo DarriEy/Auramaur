@@ -12,7 +12,7 @@ from auramaur.cli._base import console, log, main  # noqa: F401
 
 # Importing these registers their commands onto `main` (side effect).
 from auramaur.cli import (  # noqa: E402,F401
-    diagnostics, intel, kraken, maintenance, redeem, reporting, run,
+    diagnostics, intel, kraken, maintenance, manager, redeem, reporting, run,
 )
 
 if __name__ == "__main__":

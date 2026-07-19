@@ -1556,6 +1556,10 @@ class AuramaurBot(
         if self.settings.econ_indicator.enabled:
             tasks.append(asyncio.create_task(self._task_econ_indicator(), name="econ_indicator"))
 
+        # Operator-proposed interim book management (ladder-evaluated; default off).
+        if self.settings.interim_manager.enabled:
+            tasks.append(asyncio.create_task(self._task_interim_manager(), name="interim_manager"))
+
         # Settlement-lag / known-outcome arb (FRED-first). Paper-forced; default off.
         if self.settings.settlement_arb.enabled:
             tasks.append(asyncio.create_task(self._task_settlement_arb(), name="settlement_arb"))

@@ -122,6 +122,8 @@ class Database:
             await self._migrate_v28_to_v29()
         if from_version < 30:
             await self._migrate_v29_to_v30()
+        if from_version < 31:
+            await self._migrate_v30_to_v31()
 
     async def _migrate_v29_to_v30(self) -> None:
         """Add cost-adjusted IBKR round-trip observations."""
@@ -157,6 +159,29 @@ class Database:
         await self._db.execute("UPDATE schema_version SET version = 30")
         await self._db.commit()
         log.info("database.migrated", from_version=29, to_version=30)
+
+    async def _migrate_v30_to_v31(self) -> None:
+        """Add the interim-manager proposal queue."""
+        await self._db.execute(
+            """CREATE TABLE IF NOT EXISTS manager_proposals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                venue TEXT NOT NULL,
+                market_id TEXT NOT NULL,
+                side TEXT NOT NULL,
+                fair_prob REAL NOT NULL,
+                stake_usd REAL NOT NULL,
+                thesis TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                reason TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                decided_at TEXT
+            )""")
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_manager_proposals_status "
+            "ON manager_proposals(status, created_at)")
+        await self._db.execute("UPDATE schema_version SET version = 31")
+        await self._db.commit()
+        log.info("database.migrated", from_version=30, to_version=31)
 
     async def _migrate_v28_to_v29(self) -> None:
         """Add immutable strategy-research and CLV accounting tables."""
