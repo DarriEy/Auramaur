@@ -298,6 +298,10 @@ class LongHorizonPillar:
                         status=res.status, error=res.reason)
             return False
 
+        # A resting live order is deliberately NOT recorded here: the order
+        # monitor books its confirmed fill and the next sync_positions venue
+        # snapshot materializes the portfolio row (see docs/KALSHI_HARDENING.md,
+        # "Fill booking for resting live orders").
         if res.status != "pending" and res.result.filled_size > 0:
             await self._record_position(signal, market, res.order, res.result)
         log.info("long_horizon.entered", market_id=market.id,
