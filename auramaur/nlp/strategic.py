@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timezone
-from pathlib import Path
 
 import structlog
 from pydantic import BaseModel, Field
@@ -28,11 +27,14 @@ from auramaur.db.database import Database
 from auramaur.exchange.models import Market
 from auramaur.nlp.cache import NLPCache, coarse_evidence_digest, make_cache_key
 from auramaur.nlp.prompts import format_evidence
+from auramaur.runtime import state_dir
 
 log = structlog.get_logger()
 
-# Persistent world model lives on disk
-_WORLD_MODEL_PATH = Path("world_model.json")
+# Persistent world model lives on disk, anchored to the state dir — a bare
+# relative path resolves against the container's read-only CWD (agent_analyzer
+# learned this the same way).
+_WORLD_MODEL_PATH = state_dir() / "world_model.json"
 
 # Maximum calibration history to include in context
 _MAX_CALIBRATION_ENTRIES = 50
