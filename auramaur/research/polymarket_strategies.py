@@ -221,6 +221,9 @@ class DecisionTracker:
              reference_price, executable_price, best_bid, best_ask,
              requested_size, fee_estimate, int(filled)),
         )
+        # Deliberately durable at the decision boundary. This path is currently
+        # low-volume; if capture moves into a high-frequency scanner, batch it
+        # behind a non-blocking writer rather than adding latency here.
         await self.db.commit()
 
     async def mark(self, decision_id: int, horizon_seconds: int, *,

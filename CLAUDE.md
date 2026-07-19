@@ -32,7 +32,7 @@ When making git commits, use `Assisted-by: Claude (Anthropic)` in the commit mes
 - Daily loss limit: $200
 - Max open positions: 500
 - Minimum edge: 5% after fees
-- Kelly fraction: 40%
+- Kelly fraction: 30%
 - Confidence floor: LOW
 - Category exposure cap: 60%
 - Second opinion divergence max: 0.25

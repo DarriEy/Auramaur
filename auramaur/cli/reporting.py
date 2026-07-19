@@ -174,7 +174,7 @@ def graduation():
             cfg = settings.graduation
             console.print(
                 f"[bold]Graduation ladder[/] — mode [cyan]{cfg.mode}[/], "
-                f"min {cfg.min_events} events / {cfg.window_days}d window, "
+                f"min {cfg.min_markets} markets / {cfg.window_days}d window, "
                 f"probation x{cfg.probation_multiplier}"
             )
             if not cells:

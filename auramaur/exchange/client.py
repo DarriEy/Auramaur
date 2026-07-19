@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
 import aiohttp
 from auramaur.killswitch import kill_switch_present
 
@@ -48,8 +49,8 @@ class PolymarketClient:
         # Cache of real on-chain positions: asset_id -> net token balance
         self._real_positions: dict[str, dict] = {}
         self._positions_loaded = False
-        self._geoblocked = False  # Set on first 403 geoblock; routes to paper for session
-        self._geoblock_checked = False
+        self._geoblocked = False
+        self._geoblock_checked_at = 0.0
         # market_id -> set of CLOB token ids. Initialized here (not lazily) so
         # get_sellable_token_id() can read it safely even before any market
         # tokens have been registered.
@@ -191,15 +192,13 @@ class PolymarketClient:
         """Check the two global gates (env var + config)."""
         return self._settings.is_live
 
-    async def _check_geoblock(self) -> bool:
-        """Return True only after Polymarket explicitly permits this IP.
-
-        Network errors fail closed for live entries.  The result is cached for
-        the process lifetime; exits still use their existing close path.
-        """
-        if self._geoblock_checked:
+    async def _check_geoblock(self) -> bool | None:
+        """Return frontend eligibility telemetry, refreshed on a bounded TTL."""
+        now = time.monotonic()
+        ttl = max(0, int(getattr(
+            self._settings.execution, "polymarket_geoblock_ttl_seconds", 300)))
+        if self._geoblock_checked_at and now - self._geoblock_checked_at < ttl:
             return not self._geoblocked
-        self._geoblock_checked = True
         try:
             timeout = aiohttp.ClientTimeout(total=8)
             async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -208,12 +207,14 @@ class PolymarketClient:
                         raise RuntimeError(f"geoblock HTTP {response.status}")
                     payload = await response.json()
             self._geoblocked = bool(payload.get("blocked", True))
+            self._geoblock_checked_at = now
             log.info("polymarket.geoblock_checked", blocked=self._geoblocked,
                      country=payload.get("country", ""), region=payload.get("region", ""))
         except Exception as exc:
-            self._geoblocked = True
-            log.error("polymarket.geoblock_unavailable", error=str(exc),
-                      action="live_entries_fail_closed")
+            # A transient frontend failure must not become process-lifetime state.
+            self._geoblock_checked_at = 0.0
+            log.warning("polymarket.geoblock_unavailable", error=str(exc))
+            return None
         return not self._geoblocked
 
     def _init_clob_client(self):
@@ -362,16 +363,6 @@ class PolymarketClient:
                 is_paper=True,
             )
 
-        # Geoblock: once detected, reject live intent for this session. Do not
-        # fabricate a paper fill while the operator believes live execution was
-        # requested.
-        if self._geoblocked:
-            return OrderResult(
-                order_id="GEOBLOCKED", market_id=order.market_id,
-                status="rejected", is_paper=False,
-                error_message="Polymarket geographic eligibility denied",
-            )
-
         # Paper trade if ANY gate is closed
         if order.dry_run or not self._is_live_enabled():
             result = await self._paper.execute(order)
@@ -384,14 +375,23 @@ class PolymarketClient:
             )
             return result
 
-        # Fail closed before the first live order.  A reactive 403 is too late:
-        # builders are required to check geographic eligibility explicitly.
-        if not await self._check_geoblock():
-            return OrderResult(
-                order_id="GEOBLOCKED", market_id=order.market_id,
-                status="rejected", is_paper=False,
-                error_message="Polymarket geographic eligibility denied or unavailable",
-            )
+        # The frontend probe must never strand a position. For entries it is
+        # advisory by default; operators can deliberately choose enforcement.
+        is_exit = order.source == "exit"
+        if not is_exit:
+            eligibility = await self._check_geoblock()
+            mode = getattr(self._settings.execution, "polymarket_geoblock_mode", "advisory")
+            mode = mode if mode in {"advisory", "enforce"} else "advisory"
+            if eligibility is not True:
+                log.warning("polymarket.geoblock_advisory",
+                            result="blocked" if eligibility is False else "unavailable",
+                            mode=mode)
+                if mode == "enforce":
+                    return OrderResult(
+                        order_id="GEOBLOCKED", market_id=order.market_id,
+                        status="rejected", is_paper=False,
+                        error_message="Polymarket geographic eligibility denied or unavailable",
+                    )
 
         # === LIVE ORDER PATH ===
         log.warning(
@@ -502,13 +502,12 @@ class PolymarketClient:
             err_str = str(e)
             if "restricted in your region" in err_str or "geoblock" in err_str.lower():
                 self._geoblocked = True
+                self._geoblock_checked_at = time.monotonic()
                 log.warning(
                     "order.geoblocked",
                     market_id=order.market_id,
-                    msg="Polymarket trading geoblocked — routing to paper for this session",
+                    msg="Polymarket CLOB rejected geographic eligibility",
                 )
-                order.dry_run = True
-                return await self._paper.execute(order)
             # "not enough balance / allowance" is an expected capital constraint
             # (the live book is fully deployed), not a fault — log it at warning
             # like paper.insufficient_balance, reserving error for real failures.

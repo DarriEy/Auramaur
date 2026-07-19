@@ -51,6 +51,11 @@ _DEFAULTS = _load_defaults()
 
 class ExecutionConfig(BaseModel):
     live: bool = False
+    # The public frontend eligibility endpoint is not authoritative for CLOB
+    # access. Advisory records its answer and lets the authenticated API decide;
+    # enforce blocks new entries. Explicit exits always bypass this check.
+    polymarket_geoblock_mode: Literal["advisory", "enforce"] = "advisory"
+    polymarket_geoblock_ttl_seconds: int = 300
     # Paper book capital. Sized for headroom, not realism: the provisional
     # paper-forced strategies must hold enough concurrent positions across
     # (strategy x category) cells to accrue the graduation sample. Sized so
@@ -178,8 +183,7 @@ class RiskConfig(BaseModel):
 
 
 class KellyConfig(BaseModel):
-    # Forecast error dominates theoretical Kelly in prediction markets.
-    fraction: float = 0.10
+    fraction: float = 0.25
 
 
 class IntervalsConfig(BaseModel):
@@ -973,7 +977,7 @@ class GraduationConfig(BaseModel):
     """
 
     mode: str = "observe"
-    min_events: int = 100
+    min_markets: int = 100
     window_days: int = 90
     confidence_z: float = 1.645
     min_mean_pnl_lower_bound: float = 0.0

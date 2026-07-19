@@ -8,7 +8,7 @@ from its measured record in the pnl_ledger, and loses it again on decay.
 The ladder (mode=enforce):
 
   * observations are aggregated by market before evaluation
-  * cell has >= min_events independent LIVE markets in the window and its
+  * cell has >= min_markets independent LIVE markets in the window and its
     one-sided mean-P&L lower confidence bound is positive -> LIVE, full size
   * else the same evidence contract is applied to PAPER markets -> probation
   * else -> PAPER (unproven; exploration happens on paper)
@@ -103,6 +103,8 @@ class GraduationLadder:
 
         def lower_bound(values: list[float]) -> float:
             if len(values) < 2:
+                # Sample variance is undefined below two independent markets;
+                # -inf prevents a single outcome from claiming evidence.
                 return float("-inf")
             mean = sum(values) / len(values)
             variance = sum((x - mean) ** 2 for x in values) / (len(values) - 1)
@@ -135,14 +137,14 @@ class GraduationLadder:
         cfg = self._settings.graduation
         s = await self._cell_stats(strategy, category)
 
-        if s["live_n"] >= cfg.min_events:
+        if s["live_n"] >= cfg.min_markets:
             if s["live_lcb"] > cfg.min_mean_pnl_lower_bound:
                 return _LIVE_FULL
             return CellDecision(
                 True, 1.0, "demoted",
                 f"live evidence insufficient (mean-P&L LCB ${s['live_lcb']:+.3f}; "
                 f"${s['live_pnl']:+.2f} over {s['live_n']} independent markets)")
-        if s["paper_n"] >= cfg.min_events:
+        if s["paper_n"] >= cfg.min_markets:
             if s["paper_lcb"] > cfg.min_mean_pnl_lower_bound:
                 return CellDecision(
                     False, cfg.probation_multiplier, "probation",
@@ -165,7 +167,7 @@ class GraduationLadder:
         return CellDecision(
             True, 1.0, "unproven",
             f"insufficient record (live {s['live_n']}, paper {s['paper_n']} "
-            f"< {cfg.min_events} events in {cfg.window_days}d)")
+            f"< {cfg.min_markets} markets in {cfg.window_days}d)")
 
     # ------------------------------------------------------------------
     # Reporting (CLI)

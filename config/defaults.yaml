@@ -11,6 +11,11 @@ execution:
   # flipping this to true alone never arms real orders — but the tracked
   # default must match the docs (README: paper is default).
   live: false
+  # The frontend geoblock endpoint is telemetry, not authoritative CLOB
+  # eligibility. Set to "enforce" only as an explicit operator policy.
+  # Exits always bypass it.
+  polymarket_geoblock_mode: "advisory"
+  polymarket_geoblock_ttl_seconds: 300
   paper_initial_balance: 111.0
   limit_order_ttl_seconds: 120
   # Max cents above the reference price the router may pay to lift the ask;
@@ -109,18 +114,18 @@ risk:
   mispricing_audit_ttl_hours: 12.0
 
 kelly:
-  fraction: 0.10
+  fraction: 0.30
 
 graduation:
   # Graduation ladder: every (strategy x category) cell EARNS live capital
-  # from its measured pnl_ledger record (>= min_events in window_days, P&L
+  # from its measured pnl_ledger record (>= min_markets in window_days, P&L
   # positive), and is demoted back to paper on decay. Entries only — exits
   # never pass through the risk manager, so demotion can't strand positions.
-  # ROLLOUT: "observe" logs what enforce would do without changing behavior.
-  # Read `auramaur graduation`, then flip to "enforce" deliberately. NOTE:
-  # on current data enforce would paper-force most of the llm book (cells
-  # are unproven at n<20 or negative) — that is the redesign's intent, but
-  # flip it consciously.
+  # "observe" logs what enforce would do without changing behavior. This
+  # deployment intentionally remains enforce: raising the evidence contract
+  # to 100 independent markets plus a positive lower confidence bound can
+  # immediately demote cells that met the old 20-market/positive-total rule.
+  # Operators should inspect `auramaur graduation` before changing this bar.
   # FLIPPED to enforce 2026-06-15: the ledger showed an unproven, 0-for-15
   # (-$3.86 live) news_speed cell sizing a $40 live entry under observe. No
   # directional cell has a proven positive live record yet, so enforce
@@ -128,7 +133,7 @@ graduation:
   # ledger; arbitrage/market_maker stay live (exempt). Entries only — open
   # positions are never stranded (exits bypass the risk manager).
   mode: "enforce"
-  min_events: 100
+  min_markets: 100
   window_days: 90
   confidence_z: 1.645
   min_mean_pnl_lower_bound: 0.0

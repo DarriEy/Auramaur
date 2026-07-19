@@ -43,6 +43,29 @@ async def test_v23_migration_adds_verified_columns(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_v27_migrates_directly_through_v29(tmp_path):
+    path = tmp_path / "v27.db"
+    raw = sqlite3.connect(path)
+    raw.executescript(
+        """CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+        INSERT INTO schema_version VALUES (27);
+        """)
+    raw.close()
+
+    db = Database(str(path))
+    await db.connect()
+    version = await db.fetchone("SELECT version FROM schema_version")
+    kraken = await db.fetchone(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='kraken_paper_positions'")
+    decisions = await db.fetchone(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='decision_snapshots'")
+    assert version["version"] == 29
+    assert kraken["name"] == "kraken_paper_positions"
+    assert decisions["name"] == "decision_snapshots"
+    await db.close()
+
+
+@pytest.mark.asyncio
 async def test_v23_migration_does_not_stamp_version_after_busy_error():
     db = Database(":memory:")
     await db.connect()
