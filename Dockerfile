@@ -23,13 +23,20 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* /root/.cache
 
 WORKDIR /app
-COPY pyproject.toml uv.lock README.md ./
-COPY auramaur ./auramaur
-COPY config ./config
-RUN uv sync --frozen --no-dev --extra kalshi --extra ibkr \
+# Dependencies first, in their own layer: source edits must not invalidate
+# the expensive torch/sentence-transformers install. The cache mount keeps
+# downloaded wheels across builds even when uv.lock changes.
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-install-project --extra kalshi --extra ibkr \
     && uv pip install --python .venv/bin/python \
        --index-url https://download.pytorch.org/whl/cpu "torch==2.12.0" \
     && uv pip install --python .venv/bin/python "sentence-transformers==5.5.1"
+COPY README.md ./
+COPY auramaur ./auramaur
+COPY config ./config
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --extra kalshi --extra ibkr
 
 RUN groupadd --gid 10001 auramaur \
     && useradd --uid 10001 --gid 10001 --create-home auramaur \
