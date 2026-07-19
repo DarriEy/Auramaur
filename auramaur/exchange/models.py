@@ -79,6 +79,10 @@ class Market(BaseModel):
     strike_type: str = ""
     floor_strike: float | None = None
     cap_strike: float | None = None
+    # Kalshi fixed-point execution metadata.
+    price_level_structure: str = "linear_cent"
+    price_ranges: list[dict[str, str]] = Field(default_factory=list)
+    fractional_trading_enabled: bool = False
     # Polymarket UMA optimistic-oracle resolution state, surfaced by Gamma.
     # `uma_status` is the current stage ("" → no proposal yet, "proposed" →
     # outcome proposed and in the liveness window, "disputed" → actively

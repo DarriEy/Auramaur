@@ -636,6 +636,28 @@ CREATE TABLE IF NOT EXISTS slippage_log (
     timestamp TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Decision-time Kalshi book snapshots. These separate forecasting edge from
+-- execution edge and make paper graduation auditable against live liquidity.
+CREATE TABLE IF NOT EXISTS kalshi_execution_samples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id TEXT NOT NULL,
+    strategy_source TEXT DEFAULT '',
+    token TEXT NOT NULL,
+    side TEXT NOT NULL,
+    requested_size REAL NOT NULL,
+    fillable_size REAL NOT NULL,
+    best_bid REAL,
+    best_ask REAL,
+    vwap REAL,
+    marginal_price REAL,
+    fair_probability REAL,
+    market_probability REAL,
+    is_live INTEGER NOT NULL DEFAULT 0,
+    observed_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_kalshi_execution_samples_market_time
+    ON kalshi_execution_samples(market_id, observed_at);
+
 CREATE TABLE IF NOT EXISTS redemptions (
     condition_id TEXT PRIMARY KEY,
     asset_id TEXT DEFAULT '',

@@ -417,6 +417,19 @@ class TestKalshiV2CreateOrder:
             "/portfolio/events/orders")
 
     @pytest.mark.asyncio
+    async def test_subpenny_and_fractional_values_survive_submission(self):
+        """The v2 fixed-point migration must survive the final HTTP boundary."""
+        client = self._client({"order_id": "ord-fp"})
+        order = Order(market_id="KXFP", exchange="kalshi", side=OrderSide.BUY,
+                      token=TokenType.YES, token_id="KXFP", size=0.25,
+                      price=0.004, dry_run=False)
+        result = await client.place_order(order)
+        assert result.status == "pending"
+        body = self._body_sent(client)
+        assert body["price"] == "0.0040"
+        assert body["count"] == "0.25"
+
+    @pytest.mark.asyncio
     async def test_response_without_order_id_rejects(self):
         """A body lacking order_id (soft rejection) → rejected, no ghost order."""
         client = self._client({"error": "too_few_contracts"})

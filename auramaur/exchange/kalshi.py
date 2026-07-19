@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
+from collections import deque
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from datetime import datetime
 from auramaur.killswitch import kill_switch_present
 
@@ -64,6 +67,8 @@ class KalshiClient:
         self._markets_api = None
         self._portfolio_api = None
         self._semaphore = asyncio.Semaphore(_RATE_LIMIT)
+        self._rate_lock = asyncio.Lock()
+        self._read_times: deque[float] = deque()
         # order_id -> Order for live order tracking. The order monitor polls
         # this dict to reconcile fills and TTL-cancel resting orders; its
         # presence is also the duck-typed signal that tells the monitor this
@@ -84,7 +89,7 @@ class KalshiClient:
         host = (
             "https://demo-api.kalshi.co/trade-api/v2"
             if cfg.environment == "demo"
-            else "https://api.elections.kalshi.com/trade-api/v2"
+            else "https://external-api.kalshi.com/trade-api/v2"
         )
 
         configuration = Configuration(host=host)
@@ -111,6 +116,7 @@ class KalshiClient:
         the worker thread (body included), so a stall blocks only that thread,
         not the event loop.
         """
+        await self._throttle_read()
         async with self._semaphore:
             return await asyncio.to_thread(fn, *args, **kwargs)
 
@@ -132,8 +138,27 @@ class KalshiClient:
         def _run():
             return fn(*args, **kwargs).data
 
+        await self._throttle_read()
         async with self._semaphore:
             return await asyncio.to_thread(_run)
+
+    async def _throttle_read(self) -> None:
+        """Enforce a real per-second read budget."""
+        # A few protocol tests and lightweight adapters construct the client
+        # with __new__; initialize these defensively without weakening runtime.
+        if not hasattr(self, "_rate_lock"):
+            self._rate_lock = asyncio.Lock()
+            self._read_times = deque()
+        while True:
+            async with self._rate_lock:
+                now = time.monotonic()
+                while self._read_times and now - self._read_times[0] >= 1.0:
+                    self._read_times.popleft()
+                if len(self._read_times) < _RATE_LIMIT:
+                    self._read_times.append(now)
+                    return
+                delay = max(0.001, 1.0 - (now - self._read_times[0]))
+            await asyncio.sleep(delay)
 
     # ------------------------------------------------------------------
     # MarketDiscovery protocol
@@ -342,10 +367,12 @@ class KalshiClient:
                 token = TokenType.NO
                 exec_price = market.outcome_no_price + market.spread / 2 + aggression
 
-        exec_price = max(0.01, min(0.99, round(exec_price, 2)))
+        exec_price = self._quantize_price(exec_price, market, side)
 
         # Kalshi contracts are $1 notional; position_size in dollars = number of contracts
-        contract_count = round(position_size / exec_price, 2) if exec_price > 0 else 0
+        raw_count = position_size / exec_price if exec_price > 0 else 0
+        contract_count = (round(raw_count, 2) if market.fractional_trading_enabled
+                          else float(int(raw_count)))
         if contract_count < 1:
             # Bump a risk-approved sub-minimum order up to 1 contract rather
             # than dropping it. One contract is at most $0.99 of notional.
@@ -366,6 +393,73 @@ class KalshiClient:
             price=exec_price,
             dry_run=not is_live,
         )
+
+    async def prepare_executable_order(
+        self, signal: Signal, market: Market, position_size: float, is_live: bool,
+    ) -> Order | None:
+        """Build against a fresh book and cap size to executable depth.
+
+        This runs for paper too: a paper cell must not graduate on quantity or
+        price that the live book could not have filled at decision time.
+        """
+        order = self.prepare_order(signal, market, position_size, is_live)
+        if order is None:
+            return None
+        book = await self.get_order_book(order.market_id)
+        if order.token == TokenType.NO:
+            book = OrderBook(
+                bids=[OrderBookLevel(price=round(1 - x.price, 4), size=x.size)
+                      for x in book.asks],
+                asks=[OrderBookLevel(price=round(1 - x.price, 4), size=x.size)
+                      for x in book.bids],
+            )
+        fillable, vwap, marginal = book.fill_to_size(
+            order.size, is_buy=order.side == OrderSide.BUY)
+        try:
+            db = getattr(self._paper, "db", None)
+            if db is not None:
+                await db.execute(
+                    """INSERT INTO kalshi_execution_samples
+                       (market_id, strategy_source, token, side, requested_size,
+                        fillable_size, best_bid, best_ask, vwap, marginal_price,
+                        fair_probability, market_probability, is_live)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (market.id, signal.strategy_source, order.token.value,
+                     order.side.value, order.size, fillable, book.best_bid,
+                     book.best_ask, vwap, marginal, signal.claude_prob,
+                     signal.market_prob, 1 if is_live else 0),
+                )
+                await db.commit()
+        except Exception as e:
+            log.debug("kalshi.execution_sample_error", error=str(e))
+        if fillable <= 0 or marginal <= 0:
+            log.info("kalshi.order_unmarketable", market_id=market.id,
+                     reason="no executable book depth")
+            return None
+        order.size = round(min(order.size, fillable), 2)
+        if not market.fractional_trading_enabled:
+            order.size = float(int(order.size))
+        if order.size < (0.01 if market.fractional_trading_enabled else 1.0):
+            log.info("kalshi.order_unmarketable", market_id=market.id,
+                     reason="executable depth below contract minimum")
+            return None
+        order.price = self._quantize_price(marginal, market, order.side)
+        return order
+
+    @staticmethod
+    def _quantize_price(price: float, market: Market, side: OrderSide) -> float:
+        value = Decimal(str(max(0.001, min(0.999, price))))
+        step = Decimal("0.01")
+        for raw in market.price_ranges or []:
+            try:
+                if Decimal(str(raw.get("start", "0"))) <= value <= Decimal(str(raw.get("end", "1"))):
+                    step = Decimal(str(raw.get("step", "0.01")))
+                    break
+            except Exception:
+                continue
+        rounding = ROUND_UP if side == OrderSide.BUY else ROUND_DOWN
+        value = (value / step).to_integral_value(rounding=rounding) * step
+        return float(max(Decimal("0.001"), min(Decimal("0.999"), value)))
 
     @staticmethod
     def _v2_book_side(token: TokenType, side: OrderSide) -> str:
@@ -468,13 +562,13 @@ class KalshiClient:
             # (a NO order carries the NO price, so 1 - price is the YES price.)
             v2_side = self._v2_book_side(order.token, order.side)
             yes_price = order.price if order.token == TokenType.YES else 1.0 - order.price
-            yes_price = max(0.01, min(0.99, yes_price))
-            count = int(order.size)
-            if count < 1:
+            yes_price = max(0.001, min(0.999, yes_price))
+            count = round(order.size, 2)
+            if count < 0.01:
                 return OrderResult(
                     order_id="SKIP_ZERO", market_id=order.market_id,
                     status="rejected", is_paper=False,
-                    error_message="order size < 1 contract")
+                    error_message="order size < 0.01 contract")
 
             body = {
                 "ticker": order.token_id,
@@ -506,6 +600,7 @@ class KalshiClient:
                 )
                 return resp.read()
 
+            await self._throttle_read()
             async with self._semaphore:
                 raw = await asyncio.to_thread(_post)
             data = json.loads(raw) if raw else {}
@@ -652,7 +747,7 @@ class KalshiClient:
 
             # Price in terms of the outcome leg we hold (v2 prices are dollars;
             # legacy yes_price is cents → /100).
-            outcome = str(od.get("side") or od.get("outcome_side") or "yes").lower()
+            outcome = str(od.get("outcome_side") or od.get("side") or "yes").lower()
             if outcome == "no":
                 price = _num("no_price_dollars")
             else:
@@ -691,6 +786,7 @@ class KalshiClient:
             )
 
         try:
+            await self._throttle_read()
             async with self._semaphore:
                 await asyncio.to_thread(_delete)
             log.info("order.cancelled", exchange="kalshi", order_id=order_id, via="v2")
@@ -740,20 +836,21 @@ class KalshiClient:
             if not oid or oid in self._live_pending:
                 continue
             try:
-                side = (
-                    OrderSide.BUY
-                    if str(o.get("action", "")).lower() == "buy"
-                    else OrderSide.SELL
-                )
-                token = (
-                    TokenType.NO
-                    if str(o.get("side", "")).lower() == "no"
-                    else TokenType.YES
-                )
+                outcome = str(o.get("outcome_side") or o.get("side") or "yes").lower()
+                token = TokenType.NO if outcome == "no" else TokenType.YES
+                book_side = str(o.get("book_side") or "").lower()
+                if book_side:
+                    side = (OrderSide.BUY if (book_side == "bid") == (token == TokenType.YES)
+                            else OrderSide.SELL)
+                else:
+                    side = (OrderSide.BUY if str(o.get("action", "")).lower() == "buy"
+                            else OrderSide.SELL)
                 ticker = str(o.get("ticker") or "")
                 # Kalshi quotes everything as a yes_price in cents; a NO order's
                 # own price is the complement.
-                yes_price = float(o.get("yes_price", 0) or 0) / 100
+                yes_price = float(o.get("yes_price_dollars", 0) or 0)
+                if yes_price <= 0:
+                    yes_price = float(o.get("yes_price", 0) or 0) / 100
                 price = (1 - yes_price) if token == TokenType.NO else yes_price
                 created_raw = o.get("created_time") or o.get("created_ts")
                 try:
@@ -764,9 +861,8 @@ class KalshiClient:
                     )
                 except (TypeError, ValueError):
                     created = datetime.now(timezone.utc)
-                remaining = float(
-                    o.get("remaining_count", o.get("count", 0)) or 0
-                )
+                remaining = float(o.get("remaining_count_fp") or
+                                  o.get("remaining_count") or o.get("count") or 0)
                 self._live_pending[oid] = Order(
                     market_id=ticker,
                     exchange="kalshi",
@@ -810,11 +906,21 @@ class KalshiClient:
 
         self._init_api()
         try:
-            raw = await self._call_raw(
-                self._portfolio_api.get_positions_without_preload_content,
-            )
-            data = _json.loads(raw)
-            positions = data.get("market_positions", [])
+            positions = []
+            cursor = None
+            while True:
+                kwargs = {"limit": 1000}
+                if cursor:
+                    kwargs["cursor"] = cursor
+                raw = await self._call_raw(
+                    self._portfolio_api.get_positions_without_preload_content,
+                    **kwargs,
+                )
+                data = _json.loads(raw)
+                positions.extend(data.get("market_positions", []))
+                cursor = data.get("cursor")
+                if not cursor:
+                    break
 
             synced = 0
             synced_ids: list[str] = []
@@ -1097,6 +1203,9 @@ class KalshiClient:
                 strike_type=str(_get("strike_type", "") or "").lower(),
                 floor_strike=_opt_float(_get("floor_strike")),
                 cap_strike=_opt_float(_get("cap_strike")),
+                price_level_structure=str(_get("price_level_structure", "linear_cent") or "linear_cent"),
+                price_ranges=list(_get("price_ranges", []) or []),
+                fractional_trading_enabled=bool(_get("fractional_trading_enabled", False)),
             )
         except Exception as e:
             log.warning("kalshi.parse_error", error=str(e))

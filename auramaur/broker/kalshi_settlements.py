@@ -34,6 +34,15 @@ log = structlog.get_logger()
 _MAX_PAGES = 25  # 200/page → up to 5000 settlements; far beyond current history
 
 
+def _field(obj, *names, default=None):
+    """Read the current fixed-point field first, with legacy compatibility."""
+    for name in names:
+        value = obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
+        if value not in (None, ""):
+            return value
+    return default
+
+
 async def sweep_kalshi_settlements(
     db: Database, kalshi_client, *, dry_run: bool = False,
     max_pages: int = _MAX_PAGES,
@@ -49,12 +58,13 @@ async def sweep_kalshi_settlements(
 
     results: list[dict] = []
     for st in settlements:
-        ticker = getattr(st, "ticker", "") or ""
-        settled_time = getattr(st, "settled_time", None)
-        result = (getattr(st, "result", "") or "").lower()
-        revenue_cents = getattr(st, "revenue", 0) or 0
-        yes_count = float(getattr(st, "yes_count", 0) or 0)
-        no_count = float(getattr(st, "no_count", 0) or 0)
+        ticker = str(_field(st, "ticker", default="") or "")
+        settled_time = _field(st, "settled_time")
+        result = str(_field(st, "market_result", "result", default="") or "").lower()
+        revenue_cents = float(_field(st, "revenue", default=0) or 0)
+        yes_count = float(_field(st, "yes_count_fp", "yes_count", default=0) or 0)
+        no_count = float(_field(st, "no_count_fp", "no_count", default=0) or 0)
+        fee = float(_field(st, "fee_cost", default=0) or 0)
         if not ticker or settled_time is None:
             continue
 
@@ -67,8 +77,24 @@ async def sweep_kalshi_settlements(
         token = "YES" if yes_count >= no_count else "NO"
         qty = max(yes_count, no_count)
         revenue = revenue_cents / 100.0
+        if qty <= 0 or result not in ("yes", "no"):
+            log.error("kalshi_settlements.schema_mismatch", ticker=ticker,
+                      result=result, yes_count=yes_count, no_count=no_count)
+            results.append({
+                "ticker": ticker, "result": result, "qty": qty,
+                "revenue": revenue, "pnl": None, "settled": settled_iso,
+                "booked": False, "reason": "invalid settlement schema",
+            })
+            continue
 
+        venue_cost = float(_field(
+            st,
+            "yes_total_cost_dollars" if token == "YES" else "no_total_cost_dollars",
+            default=0,
+        ) or 0)
         cost = await _cost_basis(db, ticker)
+        if cost is None and venue_cost > 0:
+            cost = venue_cost
         if cost is None:
             log.warning("kalshi_settlements.no_cost_basis", ticker=ticker,
                         revenue=revenue, settled=settled_iso)
@@ -79,10 +105,10 @@ async def sweep_kalshi_settlements(
             })
             continue
 
-        pnl = round(revenue - cost, 4)
+        pnl = round(revenue - cost - fee, 4)
         results.append({
             "ticker": ticker, "result": result, "qty": qty,
-            "revenue": revenue, "pnl": pnl, "settled": settled_iso,
+            "revenue": revenue, "fees": fee, "pnl": pnl, "settled": settled_iso,
             "booked": not dry_run, "reason": "",
         })
         if dry_run:
@@ -90,7 +116,7 @@ async def sweep_kalshi_settlements(
 
         await record_ledger_event(
             db, market_id=ticker, kind="settlement", token=token, qty=qty,
-            pnl=pnl, fees=0.0, is_paper=False, source_ref=source_ref,
+            pnl=pnl, fees=fee, is_paper=False, source_ref=source_ref,
             realized_at=settled_iso,
         )
         # Close out our records the way _settle_position does, minus

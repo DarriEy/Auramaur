@@ -202,7 +202,8 @@ class EconIndicatorPillar:
             log.warning("econ_indicator.order_rejected", market_id=market.id,
                         status=res.status, error=res.reason)
             return False
-        await self._record_position(signal, market, res.order, res.result)
+        if res.status != "pending" and res.result.filled_size > 0:
+            await self._record_position(signal, market, res.order, res.result)
         log.info("econ_indicator.entered", market_id=market.id, side=side.value,
                  model_p=round(model_p, 3), market_p=round(market_p, 3),
                  paper=res.result.is_paper)
