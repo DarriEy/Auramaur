@@ -2,8 +2,14 @@
 
 Planned 2026-07-20 after a live investigation (~300 locked errors across 13
 subsystems over 2 days; `/proc/locks` evidence; per-subsystem counts in the
-git history of the web-dashboard branch). Status: **planned, not implemented**.
-Phases are independently shippable; rollback for each is "revert the commit".
+git history of the web-dashboard branch).
+
+Status: **implemented 2026-07-20** — core cd24872, phase 1 7833c34, phases
+2+3 0897132, phase 4 73bca76, phase 5 3d44cb9. Each phase is its own commit;
+rollback is "revert the commit". Deployment: phases 1–4 are low-risk; phase 5
+(record_fill/gateway) wants the 48h paper soak below before the live image
+picks it up. Verification metric (locked-errors/day per subsystem, 7-day
+soak) still applies post-deploy.
 
 ## Root-cause model (verified in code)
 

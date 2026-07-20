@@ -229,43 +229,48 @@ class OddLotTenderPillar:
         fill_size = result.filled_size if result.filled_size > 0 else float(qty)
         fill_price = result.filled_price if result.filled_price > 0 else price
         is_paper = bool(result.is_paper)
-        await self._db.execute(
-            """INSERT OR IGNORE INTO markets (id, exchange, question, category,
-               active, outcome_yes_price, outcome_no_price, last_updated)
-               VALUES (?, 'ibkr', ?, 'ibkr_equity', 1, 0.5, 0.5, datetime('now'))""",
-            (ticker, f"Odd-lot tender: {f.company} ({f.form} {f.filed_at})"),
-        )
-        await self._db.execute(
-            """INSERT INTO signals (market_id, claude_prob, claude_confidence,
-               market_prob, edge, evidence_summary, action, strategy_source)
-               VALUES (?, 0.5, 'HIGH', 0.5, 0, ?, 'BUY', 'oddlot_tender')""",
-            (ticker, f"odd-lot tender {f.accession}"),
-        )
-        await self._db.execute(
-            """INSERT INTO trades (market_id, timestamp, side, size, price,
-               is_paper, order_id, status, strategy_source, exchange)
-               VALUES (?, datetime('now'), 'BUY', ?, ?, ?, ?, ?,
-                       'oddlot_tender', 'ibkr')""",
-            (ticker, fill_size, fill_price, 1 if is_paper else 0,
-             result.order_id,
-             "filled" if result.status in ("filled", "paper") else result.status),
-        )
+        # Our own entry rows land as one atomic transaction. record_fill runs
+        # AFTER, not in the middle: it owns its own transaction() (BEGIN
+        # IMMEDIATE cannot nest), and its old mid-burst position meant its
+        # internal commit was landing this function's half-written rows — the
+        # exact bleed Database.transaction() exists to remove.
+        async with self._db.transaction():
+            await self._db.execute(
+                """INSERT OR IGNORE INTO markets (id, exchange, question, category,
+                   active, outcome_yes_price, outcome_no_price, last_updated)
+                   VALUES (?, 'ibkr', ?, 'ibkr_equity', 1, 0.5, 0.5, datetime('now'))""",
+                (ticker, f"Odd-lot tender: {f.company} ({f.form} {f.filed_at})"),
+            )
+            await self._db.execute(
+                """INSERT INTO signals (market_id, claude_prob, claude_confidence,
+                   market_prob, edge, evidence_summary, action, strategy_source)
+                   VALUES (?, 0.5, 'HIGH', 0.5, 0, ?, 'BUY', 'oddlot_tender')""",
+                (ticker, f"odd-lot tender {f.accession}"),
+            )
+            await self._db.execute(
+                """INSERT INTO trades (market_id, timestamp, side, size, price,
+                   is_paper, order_id, status, strategy_source, exchange)
+                   VALUES (?, datetime('now'), 'BUY', ?, ?, ?, ?, ?,
+                           'oddlot_tender', 'ibkr')""",
+                (ticker, fill_size, fill_price, 1 if is_paper else 0,
+                 result.order_id,
+                 "filled" if result.status in ("filled", "paper") else result.status),
+            )
+            await self._db.execute(
+                """INSERT INTO portfolio (market_id, exchange, side, size, avg_price,
+                   current_price, unrealized_pnl, category, token, is_paper, updated_at)
+                   VALUES (?, 'ibkr', 'BUY', ?, ?, ?, 0, 'ibkr_equity', 'YES', ?,
+                           datetime('now'))
+                   ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
+                       size = excluded.size, avg_price = excluded.avg_price,
+                       current_price = excluded.current_price,
+                       updated_at = excluded.updated_at""",
+                (ticker, fill_size, fill_price, fill_price, 1 if is_paper else 0),
+            )
         if self._pnl is not None and result.status in ("filled", "paper", "partial"):
             await self._pnl.record_fill(Fill(
                 order_id=result.order_id, market_id=ticker, side=OrderSide.BUY,
                 size=fill_size, price=fill_price, is_paper=is_paper,
             ))
-        await self._db.execute(
-            """INSERT INTO portfolio (market_id, exchange, side, size, avg_price,
-               current_price, unrealized_pnl, category, token, is_paper, updated_at)
-               VALUES (?, 'ibkr', 'BUY', ?, ?, ?, 0, 'ibkr_equity', 'YES', ?,
-                       datetime('now'))
-               ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
-                   size = excluded.size, avg_price = excluded.avg_price,
-                   current_price = excluded.current_price,
-                   updated_at = excluded.updated_at""",
-            (ticker, fill_size, fill_price, fill_price, 1 if is_paper else 0),
-        )
-        await self._db.commit()
         log.info("oddlot.entered", ticker=ticker, qty=qty, price=fill_price,
                  paper=is_paper)
