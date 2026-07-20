@@ -169,7 +169,7 @@ def test_platform_consensus_triggers_buy_yes():
                 id="man-1",
                 source="manifold",
                 title="[Manifold: 75%] Will SpaceX launch Starship in July?",
-                content="Community forecast is 75%",
+                content="Community forecast is 75%\nUnique bettors: 80\nLiquidity: $5,000",
                 url="https://manifold.markets/space",
             )
 
@@ -267,7 +267,7 @@ def test_platform_consensus_triggers_buy_no():
                 id="meta-1",
                 source="metaculus",
                 title="[Metaculus: 25%] Will SpaceX launch Starship in July?",
-                content="Community forecast is 25%",
+                content="Community forecast is 25%\nForecasters: 40",
                 url="https://metaculus.com/space",
             )
 
@@ -363,7 +363,7 @@ def test_platform_consensus_insufficient_edge():
                 id="man-1",
                 source="manifold",
                 title="[Manifold: 52%] Will SpaceX launch Starship in July?",
-                content="Community forecast is 52%",
+                content="Community forecast is 52%\nUnique bettors: 80\nLiquidity: $5,000",
                 url="https://manifold.markets/space",
             )
 
@@ -379,3 +379,24 @@ def test_platform_consensus_insufficient_edge():
             await db.close()
 
     asyncio.run(run())
+
+
+def test_platform_consensus_quality_thresholds_fail_closed():
+    cfg = _settings().platform_consensus
+    thin = NewsItem(
+        id="thin",
+        source="manifold",
+        title="[Manifold: 75%] Example",
+        content="Unique bettors: 2\nLiquidity: $20",
+        url="https://example.test",
+    )
+    missing = NewsItem(
+        id="missing",
+        source="metaculus",
+        title="[Metaculus: 75%] Example",
+        content="Community probability: 75%",
+        url="https://example.test",
+    )
+
+    assert not PlatformConsensusPillar._quality_ok(thin, "Manifold", cfg)
+    assert not PlatformConsensusPillar._quality_ok(missing, "Metaculus", cfg)

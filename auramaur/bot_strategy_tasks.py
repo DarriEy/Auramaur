@@ -508,12 +508,18 @@ class StrategyTaskMixin:
             calibration=self._components.calibration,
         )
         interval = max(60, self.settings.platform_consensus.interval_seconds)
-        while self._running:
-            if await self._check_kill_switch():
-                return
+        try:
+            while self._running:
+                if await self._check_kill_switch():
+                    return
+                try:
+                    await pillar.run_once()
+                except Exception as e:
+                    log.error("platform_consensus.cycle_error", error=str(e))
+                await asyncio.sleep(interval)
+        finally:
             try:
-                await pillar.run_once()
+                await pillar.close()
             except Exception as e:
-                log.error("platform_consensus.cycle_error", error=str(e))
-            await asyncio.sleep(interval)
+                log.warning("platform_consensus.close_error", error=str(e))
 

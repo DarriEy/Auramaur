@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import re
-import time
 from datetime import datetime, timezone
 
 import structlog
@@ -180,6 +178,25 @@ class PlatformConsensusPillar:
             return float(m.group(1)) / 100.0
         return None
 
+    @staticmethod
+    def _quality_ok(item, source_name: str, cfg) -> bool:
+        """Fail closed when a crowd forecast lacks the configured sample depth."""
+        content = item.content or ""
+        if source_name == "Manifold":
+            bettors = re.search(r"Unique bettors:\s*([\d,]+)", content)
+            liquidity = re.search(r"Liquidity:\s*\$([\d,]+(?:\.\d+)?)", content)
+            if bettors is None or liquidity is None:
+                return False
+            return (
+                int(bettors.group(1).replace(",", "")) >= cfg.min_manifold_bettors
+                and float(liquidity.group(1).replace(",", ""))
+                >= cfg.min_manifold_liquidity
+            )
+        forecasters = re.search(r"Forecasters:\s*([\d,]+)", content)
+        if forecasters is None:
+            return False
+        return int(forecasters.group(1).replace(",", "")) >= cfg.min_metaculus_forecasters
+
     async def _try_enter(self, market: Market, cfg) -> bool:
         # Search Manifold
         manifold_items = []
@@ -209,6 +226,8 @@ class PlatformConsensusPillar:
 
         # Process Manifold matches
         for item in manifold_items:
+            if not self._quality_ok(item, "Manifold", cfg):
+                continue
             clean_title = self._get_clean_title(item.title)
             overlap = _word_overlap_score(market.question, clean_title)
             if overlap > best_overlap:
@@ -218,6 +237,8 @@ class PlatformConsensusPillar:
 
         # Process Metaculus matches
         for item in metaculus_items:
+            if not self._quality_ok(item, "Metaculus", cfg):
+                continue
             clean_title = self._get_clean_title(item.title)
             overlap = _word_overlap_score(market.question, clean_title)
             if overlap > best_overlap:
@@ -293,7 +314,7 @@ class PlatformConsensusPillar:
                 market.exchange or "polymarket",
                 market.condition_id,
                 market.question,
-                market.description[:500],
+                (market.description or "")[:500],
                 ensure_category(market.question, market.description, market.category),
                 market.outcome_yes_price,
                 market.outcome_no_price,
@@ -341,20 +362,31 @@ class PlatformConsensusPillar:
                 pnl_tracker=self._pnl,
             )
 
+        size = min(decision.position_size, cfg.stake_usd)
+        force_paper = cfg.paper or getattr(decision, "force_paper", False)
         res = await self._gateway.submit(
             TradeIntent(
                 signal=signal,
                 market=market,
-                size_dollars=decision.position_size,
-                force_paper=cfg.paper,
+                size_dollars=size,
+                force_paper=force_paper,
             )
         )
+
+        if res.status not in ("filled", "paper", "partial", "pending"):
+            log.warning(
+                "platform_consensus.order_rejected",
+                market_id=market.id,
+                status=res.status,
+                reason=res.reason,
+            )
+            return False
 
         log.info(
             "platform_consensus.executed",
             market_id=market.id,
             status=res.status,
-            size=decision.position_size,
+            size=size,
             is_paper=res.result.is_paper if res.result else None,
         )
         return True
