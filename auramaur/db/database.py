@@ -118,7 +118,17 @@ class Database:
                 await self.db.execute("ROLLBACK")
                 raise
             else:
-                await self.db.execute("COMMIT")
+                try:
+                    await self.db.execute("COMMIT")
+                except Exception as exc:  # noqa: BLE001 — narrow handling
+                    if "no transaction is active" not in str(exc).lower():
+                        raise
+                    # A legacy writer's commit() landed mid-transaction and
+                    # ended it early: the batch's rows ARE durable, but its
+                    # atomicity was violated. Log loudly (this is the bleed
+                    # phase 5 exists to retire) without failing the writer —
+                    # failing here reports durable writes as failures.
+                    log.warning("database.transaction_commit_bled")
             finally:
                 self._txn_task = None
                 held = time.monotonic() - started
@@ -975,7 +985,18 @@ class Database:
         return await cursor.fetchall()
 
     async def commit(self) -> None:
-        await self.db.commit()
+        try:
+            await self.db.commit()
+        except Exception as exc:  # noqa: BLE001 — narrow re-raise below
+            if "no transaction is active" in str(exc).lower():
+                # A transaction() adopter's COMMIT already landed these rows
+                # (legacy commit interleaved with an explicit transaction on
+                # the shared connection). The data is durable; only this
+                # caller's notion of "its own" commit was stale. Full adopter
+                # migration (contention plan phase 5) retires this path.
+                log.debug("database.commit_already_landed")
+                return
+            raise
 
     async def rollback(self) -> None:
         await self.db.rollback()
