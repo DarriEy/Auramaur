@@ -172,10 +172,14 @@ async def test_requote_cancels_previous_legs_before_replacing():
         bids=[OrderBookLevel(price=0.40, size=100)],
         asks=[OrderBookLevel(price=0.46, size=100)],
     )
+    moved_book = OrderBook(
+        bids=[OrderBookLevel(price=0.42, size=100)],
+        asks=[OrderBookLevel(price=0.48, size=100)],
+    )
     mm._exchange = SimpleNamespace(
         place_order=place_order,
         cancel_order=cancel_order,
-        get_order_book=AsyncMock(return_value=book),
+        get_order_book=AsyncMock(side_effect=[book, moved_book]),
     )
     market = Market(
         id="m1",
@@ -193,6 +197,73 @@ async def test_requote_cancels_previous_legs_before_replacing():
     assert result2 and result2.get("success")
     # The first quote's two legs were cancelled before the new pair posted.
     assert cancelled == first_legs
+    assert len(placed) == 4
+
+
+@pytest.mark.asyncio
+async def test_unchanged_quote_keeps_resting_legs():
+    """An identical requote must KEEP the resting pair, not cancel+replace.
+
+    Cancel+replace of an unchanged quote forfeits book time-priority every
+    refresh cycle (observed live 2026-07-20: identical 0.46/0.48 requoted
+    every ~34s on three markets, zero fills). The guard only holds while
+    both legs are still tracked as pending — a filled/cancelled leg falls
+    back to the normal cancel/replace path."""
+    from unittest.mock import AsyncMock
+
+    mm = _maker()
+    mm._settings = SimpleNamespace(is_live=True, market_maker=mm._settings.market_maker)
+
+    placed: list[str] = []
+    counter = {"n": 0}
+
+    async def place_order(order):
+        counter["n"] += 1
+        oid = f"live-{counter['n']}"
+        placed.append(oid)
+        return SimpleNamespace(order_id=oid, status="pending", is_paper=False)
+
+    cancelled: list[str] = []
+
+    async def cancel_order(order_id):
+        cancelled.append(order_id)
+        return True
+
+    book = OrderBook(
+        bids=[OrderBookLevel(price=0.40, size=100)],
+        asks=[OrderBookLevel(price=0.46, size=100)],
+    )
+    mm._exchange = SimpleNamespace(
+        place_order=place_order,
+        cancel_order=cancel_order,
+        get_order_book=AsyncMock(return_value=book),
+    )
+    market = Market(
+        id="m1",
+        question="Will this happen?",
+        clob_token_yes="yes",
+        clob_token_no="no",
+    )
+
+    result1, _ = await mm._quote_market(market)
+    assert result1 and result1.get("success")
+    stamp_before = mm._active_quotes["m1"].placed_at
+
+    # Same book -> same computed quote -> resting pair kept untouched.
+    result2, reason = await mm._quote_market(market)
+    assert result2 is None
+    assert reason == "quote_unchanged"
+    assert cancelled == []
+    assert len(placed) == 2
+    assert mm._active_quotes["m1"].placed_at >= stamp_before  # stale-reaper reset
+
+    # One leg leaves pending tracking (filled/venue-cancelled) -> guard must
+    # fail and the survivor is cancelled before a fresh pair posts.
+    lost_leg = placed[0]
+    mm._pending_orders.pop(lost_leg)
+    result3, _ = await mm._quote_market(market)
+    assert result3 and result3.get("success")
+    assert placed[1] in cancelled  # surviving leg cancelled
     assert len(placed) == 4
 
 
