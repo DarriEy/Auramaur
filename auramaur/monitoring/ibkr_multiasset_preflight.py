@@ -12,7 +12,8 @@ import structlog
 from auramaur.exchange.ibkr_instruments import BY_BOOK, IBKRBook
 from auramaur.exchange.ibkr_market_data import IBKRReadOnlyMarketData
 from auramaur.exchange.ibkr_registry import record_validation
-from auramaur.risk.ibkr_evidence import evaluate_ibkr_evidence
+from auramaur.risk.ibkr_evidence import (evaluate_ibkr_daily_evidence,
+                                         evaluate_ibkr_evidence)
 
 log = structlog.get_logger()
 
@@ -179,24 +180,40 @@ async def preflight(settings, db, *, client=None, timeout_seconds: int = 30,
             "OK" if set(counts) <= {"eligible"} else "WARN",
             ", ".join(f"{status}={count}" for status, count in counts.items()))
 
+        # PRIMARY contract (pre-registered 2026-07-20): daily marked-to-market
+        # returns. The round-trip count is a SECONDARY cost-realism check —
+        # slow-turnover books physically cannot produce 200 trips in 180 days,
+        # and holding brackets must never be shortened to manufacture them.
+        marks = await db.fetchall(
+            "SELECT equity_usd FROM ibkr_paper_daily_marks "
+            "WHERE book = ? ORDER BY mark_date", (book.value,))
+        equities = [float(row["equity_usd"]) for row in marks]
+        daily = [b - a for a, b in zip(equities, equities[1:])]
+        mark_age = await db.fetchone(
+            "SELECT CAST(julianday('now') - julianday(MIN(mark_date)) AS INTEGER) "
+            "AS elapsed FROM ibkr_paper_daily_marks WHERE book = ?", (book.value,))
+        elapsed_days = max(0, int(mark_age["elapsed"] or 0))
+        evidence = evaluate_ibkr_daily_evidence(
+            daily, elapsed_days=elapsed_days, budget_usd=book_cfg.budget_usd)
+
         observations = await db.fetchall(
             "SELECT net_pnl_usd FROM ibkr_paper_round_trips "
             "WHERE book = ? ORDER BY closed_at, id", (book.value,))
         pnls = [float(row["net_pnl_usd"]) for row in observations]
-        age = await db.fetchone(
-            "SELECT CAST(julianday('now') - julianday(MIN(opened_at)) AS INTEGER) "
-            "AS elapsed FROM ibkr_paper_round_trips WHERE book = ?", (book.value,))
-        elapsed_days = max(0, int(age["elapsed"] or 0))
-        evidence = evaluate_ibkr_evidence(
-            pnls, elapsed_days=elapsed_days, budget_usd=book_cfg.budget_usd)
+        trips = evaluate_ibkr_evidence(
+            pnls, elapsed_days=elapsed_days, budget_usd=book_cfg.budget_usd,
+            min_observations=30)
         gains = sum(pnl for pnl in pnls if pnl > 0)
         losses = abs(sum(pnl for pnl in pnls if pnl < 0))
         profit_factor = gains / losses if losses else (float("inf") if gains else 0.0)
-        status = "graduated" if evidence.ready else "not graduated"
-        reasons = "; ".join(evidence.reasons) if evidence.reasons else "contract passed"
-        add(f"{book.value}:edge", "OK" if evidence.ready else "WARN",
-            f"{status}: {evidence.observations} cost-adjusted round trips over "
-            f"{evidence.elapsed_days} days, ${evidence.net_pnl_usd:.2f} net P&L, "
+        ready = evidence.ready and trips.ready
+        status = "graduated" if ready else "not graduated"
+        reasons = "; ".join(evidence.reasons + trips.reasons) or "contract passed"
+        add(f"{book.value}:edge", "OK" if ready else "WARN",
+            f"{status}: {evidence.observations} daily marks over "
+            f"{evidence.elapsed_days} days (mean lower bound "
+            f"${evidence.mean_lower_95_usd:.2f}/day), {len(pnls)} cost-adjusted "
+            f"round trips, ${trips.net_pnl_usd:.2f} trip P&L, "
             f"profit factor {profit_factor:.2f}; {reasons}")
     if own_client:
         await client.close()

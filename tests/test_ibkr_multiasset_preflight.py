@@ -212,9 +212,9 @@ async def test_edge_evidence_is_net_of_commissions_and_financing():
     report = await preflight(settings, db, client=ReadyClient())
     edge = next(result for result in report.results if result.book == "global_etf:edge")
     assert "1 cost-adjusted round trips" in edge.detail
-    assert "$8.00 net P&L" in edge.detail
+    assert "$8.00 trip P&L" in edge.detail
     assert "not graduated" in edge.detail
-    assert "1/200 cost-adjusted observations" in edge.detail
+    assert "1/30 cost-adjusted observations" in edge.detail
     await db.close()
 
 
@@ -232,5 +232,5 @@ async def test_edge_ignores_ambiguous_legacy_ledger_events():
     report = await preflight(settings, db, client=ReadyClient())
     edge = next(result for result in report.results if result.book == "global_etf:edge")
     assert "0 cost-adjusted round trips" in edge.detail
-    assert "$0.00 net P&L" in edge.detail
+    assert "$0.00 trip P&L" in edge.detail
     await db.close()
