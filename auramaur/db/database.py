@@ -60,6 +60,12 @@ class Database:
             current_version = row[0] if isinstance(row[0], int) else row["version"]
             if current_version < SCHEMA_VERSION:
                 await self._run_migrations(current_version)
+        # Indexes on migration-added columns must be created HERE, after both
+        # paths guarantee the column exists (fresh DDL or just-run migration) —
+        # never in TABLES, which executes before migrations.
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_manager_proposals_class "
+            "ON manager_proposals(thesis_class, status)")
         await self._db.commit()
 
     async def _run_migrations(self, from_version: int) -> None:

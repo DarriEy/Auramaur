@@ -239,3 +239,40 @@ def test_ci_half_width_is_the_uncertainty_haircut():
         assert row["status"] == "skipped" and "robust edge" in row["reason"]
         await db.close()
     asyncio.run(run())
+
+
+def test_startup_migrates_an_existing_v31_database(tmp_path):
+    """The v32 rollout crashed production: the base DDL indexed a column the
+    pre-migration table lacked. Startup against a v31 DB must succeed."""
+    import sqlite3 as sq
+
+    db_file = tmp_path / "v31.db"
+    conn = sq.connect(db_file)
+    conn.executescript(
+        """CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+           INSERT INTO schema_version (version) VALUES (31);
+           CREATE TABLE manager_proposals (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               venue TEXT NOT NULL, market_id TEXT NOT NULL, side TEXT NOT NULL,
+               fair_prob REAL NOT NULL, stake_usd REAL NOT NULL,
+               thesis TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending',
+               reason TEXT NOT NULL DEFAULT '',
+               created_at TEXT NOT NULL DEFAULT (datetime('now')),
+               decided_at TEXT);""")
+    conn.commit()
+    conn.close()
+
+    async def run():
+        db = Database(str(db_file))
+        await db.connect()  # crashed before the fix
+        row = await db.fetchone("SELECT version FROM schema_version")
+        assert row["version"] >= 32
+        cols = {r["name"] for r in await db.fetchall(
+            "SELECT name FROM pragma_table_info('manager_proposals')")}
+        assert "thesis_class" in cols and "robust_edge" in cols
+        idx = await db.fetchone(
+            "SELECT 1 AS x FROM sqlite_master WHERE type='index' "
+            "AND name='idx_manager_proposals_class'")
+        assert idx is not None
+        await db.close()
+    asyncio.run(run())
