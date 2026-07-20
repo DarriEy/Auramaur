@@ -958,6 +958,25 @@ bias_harvest:
   maker_min_spread: 0.02
   paper_maker_fill_rate: 0.5
 
+platform_consensus:
+  # Platform consensus follower — compares Polymarket/Kalshi prices with
+  # community forecasting consensus on Manifold Markets and Metaculus.
+  enabled: false
+  paper: true
+  min_edge: 0.06
+  stake_usd: 10.0
+  max_open: 40
+  max_entries_per_cycle: 5
+  scan_limit: 200
+  min_liquidity: 1000.0
+  min_hours_to_resolution: 6.0
+  max_days_to_resolution: 45.0
+  match_threshold: 0.65
+  min_manifold_bettors: 30
+  min_manifold_liquidity: 1000.0
+  min_metaculus_forecasters: 15
+  interval_seconds: 600
+
 analysis:
   mode: "strategic"   # "pipeline", "strategic", or "agent"
 
