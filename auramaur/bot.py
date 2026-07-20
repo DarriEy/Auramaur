@@ -735,6 +735,23 @@ class AuramaurBot(
         finally:
             await client.close()
 
+    async def _task_balance_recorder(self) -> None:
+        """Record venue cash to the ``venue_balances`` table so read-only
+        consumers (the web dashboard) can show balances without ever holding
+        venue credentials. IBKR runs on a slower cadence: its fetch is a real
+        gateway session, not a REST call."""
+        from auramaur.monitoring.balances import record_venue_balances
+        cycle = 0
+        while self._running:
+            try:
+                await record_venue_balances(
+                    self._components.db, self.settings,
+                    include_ibkr=(cycle % 5 == 0))
+            except Exception as e:  # noqa: BLE001 — monitoring must not die
+                log.debug("balance_recorder.error", error=str(e))
+            cycle += 1
+            await asyncio.sleep(60)
+
     async def _task_momentum_coupling(self) -> None:
         """Fast path: spot->prediction momentum-coupling pillar (gated, detect-only).
 
@@ -1456,6 +1473,12 @@ class AuramaurBot(
         # Resolution checker and order monitor work with any exchange
         tasks.append(asyncio.create_task(self._task_resolution_checker(), name="resolution_checker"))
         tasks.append(asyncio.create_task(self._task_order_monitor(), name="order_monitor"))
+
+        # Balance recorder: feeds the read-only dashboard's venue panel.
+        if (self.settings.kalshi.enabled or self.settings.kraken.enabled
+                or self.settings.ibkr.enabled):
+            tasks.append(asyncio.create_task(
+                self._task_balance_recorder(), name="balance_recorder"))
 
         # Loop watchdog: a daemon thread that screams when the asyncio loop
         # stops beating (blocking sync call). Runs outside the loop so it can

@@ -766,4 +766,10 @@ CREATE TABLE IF NOT EXISTS redemptions (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_redemptions_status ON redemptions(status);
+
+CREATE TABLE IF NOT EXISTS venue_balances (
+    venue TEXT PRIMARY KEY,
+    detail TEXT NOT NULL,
+    fetched_at TEXT NOT NULL
+);
 """

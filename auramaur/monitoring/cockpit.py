@@ -277,30 +277,24 @@ async def gather_state(db, settings, cache: dict | None = None,
 
 
 async def venue_balances(settings) -> dict:
-    """Fetch live venue balances. Public: the web dashboard's broker refreshes
-    these on its own cadence so they never block a state request."""
-    import asyncio
+    """Fetch live venue balances for the TUI/status views (which run on the
+    bot host with credentials). The web dashboard instead reads the
+    ``venue_balances`` table the bot's recorder maintains — it never holds
+    venue credentials. The fetchers are shared so the strings can't diverge.
+
+    IBKR is deliberately absent here: its fetch opens a gateway session on the
+    recorder's dedicated clientId, and a 20s-cadence cockpit refresh would
+    collide with the running bot's recorder on the same id."""
+    from auramaur.monitoring import balances
     out: dict[str, str] = {}
     if settings.kalshi.enabled:
         try:
-            from auramaur.exchange.kalshi import KalshiClient
-            kc = KalshiClient(settings=settings, paper_trader=None)
-            # wait_for guards against the SDK blocking the whole cockpit.
-            out["kalshi"] = f"${await asyncio.wait_for(kc.get_balance(), 8):.2f}"
-            await kc.close()
+            out["kalshi"] = await balances.kalshi_balance(settings)
         except Exception:
             out["kalshi"] = "—"
     if settings.kraken.enabled:
         try:
-            from auramaur.exchange.kraken import KrakenSpotClient
-            kk = KrakenSpotClient(settings)
-            bal = await asyncio.wait_for(kk.get_balance(), 8)
-            usdc = bal.get("USDC", 0.0)
-            cad = bal.get("ZCAD", 0.0)
-            crypto = [a for a, v in bal.items() if v > 0 and a != "USDC" and not a.startswith("Z")]
-            out["kraken"] = (f"${usdc:.0f} USDC + {cad:.0f} CAD"
-                             + (f" | spec: {','.join(crypto)}" if crypto else ""))
-            await kk.close()
+            out["kraken"] = await balances.kraken_balance(settings)
         except Exception:
             out["kraken"] = "—"
     return out

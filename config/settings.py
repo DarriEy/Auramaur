@@ -1120,6 +1120,9 @@ class IBKRConfig(BaseModel):
     etf_quote_port: int = 7497
     multiasset_client_id: int = 3
     multiasset_preflight_client_id: int = 97
+    # Short-lived read-only connection the balance recorder uses; its own id so
+    # it can never bump a trading/quote session off the gateway.
+    balance_client_id: int = 98
     multiasset_paper_enabled: bool = False
     multiasset_cycle_seconds: int = 900
     multiasset_refreshes_per_cycle: int = 12
@@ -1183,8 +1186,9 @@ class IBKRConfig(BaseModel):
         if set(self.multiasset_books) != expected_books:
             raise ValueError("IBKR multi-asset config must define exactly six books")
         client_ids = {self.client_id, self.equity_client_id,
-                      self.multiasset_client_id, self.multiasset_preflight_client_id}
-        if len(client_ids) != 4:
+                      self.multiasset_client_id, self.multiasset_preflight_client_id,
+                      self.balance_client_id}
+        if len(client_ids) != 5:
             raise ValueError("IBKR API client ids must be unique")
         if self.multiasset_cycle_seconds <= 0 or self.multiasset_refreshes_per_cycle <= 0:
             raise ValueError("IBKR multi-asset cycle and refresh limits must be positive")

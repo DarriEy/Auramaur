@@ -20,11 +20,6 @@ from auramaur.web.db import ReadOnlyDatabase
 from auramaur.web.serialize import serialize_state
 from config.settings import Settings
 
-# Kept under gather_state's 20s venue-cache staleness check so the state loop
-# never fetches venue balances inline (those calls carry 8s timeouts each and
-# would stall first paint).
-VENUE_REFRESH_SECONDS = 15.0
-
 
 class StateBroker:
     def __init__(
@@ -40,8 +35,10 @@ class StateBroker:
         self.latest: dict | None = None
         self.error: str | None = None
         self.updated_at: str | None = None
-        # Primed bal_ts: gather_state must never see a stale cache and fetch
-        # venue balances on the request path; _venue_loop owns that entirely.
+        # Primed bal_ts (re-stamped every cycle): gather_state must never see
+        # a stale cache and fetch venue balances itself — this process holds
+        # no venue credentials. Balances come from the venue_balances table
+        # the bot's recorder maintains.
         self._cache: dict = {"bal_ts": time.time(), "venues": {}}
         self._first_tick = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
@@ -49,10 +46,7 @@ class StateBroker:
     # -- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
-        self._tasks = [
-            asyncio.create_task(self._state_loop()),
-            asyncio.create_task(self._venue_loop()),
-        ]
+        self._tasks = [asyncio.create_task(self._state_loop())]
 
     async def stop(self) -> None:
         for task in self._tasks:
@@ -107,11 +101,21 @@ class StateBroker:
         # as the queries themselves.
         while True:
             try:
+                # Re-stamp so gather_state's 20s staleness check can never
+                # trigger an inline venue fetch from this credential-less
+                # process.
+                self._cache["bal_ts"] = time.time()
                 await self.db.connect()
-                self.latest = {
+                books = {
                     "paper": await self._gather_book("paper"),
                     "live": await self._gather_book("live"),
                 }
+                # Venue cash is book-independent: recorded by the bot,
+                # served on both views with its age.
+                venues = await queries.venue_balances(self.db)
+                for state in books.values():
+                    state["venues"] = venues
+                self.latest = books
                 self.error = None
                 self.updated_at = datetime.now(timezone.utc).isoformat()
             except Exception as exc:
@@ -122,18 +126,6 @@ class StateBroker:
                 await self.db.close()
             self._first_tick.set()
             await asyncio.sleep(self.refresh_seconds)
-
-    async def _venue_loop(self) -> None:
-        while True:
-            # Stamp BEFORE fetching too: even a slow fetch keeps the cache age
-            # under gather_state's threshold, so it never fetches inline.
-            self._cache["bal_ts"] = time.time()
-            try:
-                self._cache["venues"] = await cockpit.venue_balances(self.settings)
-            except Exception:
-                pass  # keep the previous balances; state must not depend on venues
-            self._cache["bal_ts"] = time.time()
-            await asyncio.sleep(VENUE_REFRESH_SECONDS)
 
     def _describe(self, exc: Exception) -> str:
         msg = str(exc)

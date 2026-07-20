@@ -301,6 +301,43 @@ async def test_two_sided_position_not_duplicated_by_cost_basis_join(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_venue_balances_come_from_db_rows_with_age(tmp_path):
+    """Venue cash reaches the dashboard via the rows the bot's balance
+    recorder writes — the web process never calls a venue API (it holds no
+    credentials). Both book views serve the same rows, each with an age so a
+    stopped recorder shows as staleness, not as a fresh-looking number."""
+    from datetime import datetime, timedelta, timezone
+
+    db_path = str(tmp_path / "auramaur.db")
+    await _seed_bot_db(db_path)
+
+    db = Database(db_path)
+    await db.connect()
+    try:
+        now = datetime.now(timezone.utc)
+        for venue, detail, age_s in (
+            ("ibkr", "$1,000.00 avail | $2,000.00 net", 30),
+            ("kraken", "$500 USDC + 100 CAD", 7200),
+        ):
+            await db.execute(
+                "INSERT INTO venue_balances (venue, detail, fetched_at) VALUES (?, ?, ?)",
+                (venue, detail, (now - timedelta(seconds=age_s)).isoformat()),
+            )
+        await db.commit()
+    finally:
+        await db.close()
+
+    with _client(tmp_path, db_path) as client:
+        env = client.get("/api/state").json()
+        assert env["ok"] is True
+        for book in ("paper", "live"):
+            venues = env["books"][book]["venues"]
+            assert venues["ibkr"]["detail"] == "$1,000.00 avail | $2,000.00 net"
+            assert 30 <= venues["ibkr"]["age_seconds"] < 300
+            assert venues["kraken"]["age_seconds"] >= 7200
+
+
+@pytest.mark.asyncio
 async def test_readonly_database_cannot_write(tmp_path):
     """The safety property phase-4 control work must not erode: the dashboard's
     DB handle rejects writes at the SQLite layer, not by convention."""

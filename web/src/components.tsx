@@ -124,6 +124,10 @@ export function StatTiles({ s }: { s: DashboardState }) {
   );
 }
 
+// The recorder writes every 60s (IBKR every 300s); past this, the bot or its
+// recorder has stopped and the number should read as suspect.
+const BALANCE_STALE_S = 900;
+
 export function VenuesPanel({ s }: { s: DashboardState }) {
   // Per-exchange position counts from the actual book — Kalshi paper
   // positions share the portfolio table and deserve their own line.
@@ -147,10 +151,13 @@ export function VenuesPanel({ s }: { s: DashboardState }) {
         {byExchange.size === 0 && (
           <div className="row"><span className="k">book</span><span className="v">empty</span></div>
         )}
-        {Object.entries(s.venues).map(([name, val]) => (
+        {Object.entries(s.venues).map(([name, bal]) => (
           <div className="row" key={`bal-${name}`}>
             <span className="k">{name}</span>
-            <span className="v">{val}</span>
+            <span className="v">{bal.detail}</span>
+            <span className={`age${(bal.age_seconds ?? Infinity) > BALANCE_STALE_S ? " stale" : ""}`}>
+              {ago(bal.age_seconds)}
+            </span>
           </div>
         ))}
       </div>

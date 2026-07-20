@@ -277,6 +277,8 @@ td.dim, .dim { color: var(--ink-muted); }
 .kv .row { display: flex; gap: 10px; }
 .kv .k { color: var(--ink-2); min-width: 84px; }
 .kv .v { color: var(--ink); overflow-wrap: anywhere; }
+.kv .age { color: var(--ink-muted); margin-left: auto; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.kv .age.stale { color: var(--warning); }
 
 .health-counts { display: flex; gap: 14px; margin-bottom: 8px; font-size: 13px; }
 .health-counts .n { font-weight: 600; }

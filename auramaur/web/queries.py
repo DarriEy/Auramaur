@@ -7,7 +7,34 @@ headline numbers can never diverge between the two views.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from auramaur.web.db import ReadOnlyDatabase
+
+
+async def venue_balances(db: ReadOnlyDatabase) -> dict[str, dict]:
+    """Venue cash as recorded by the bot's balance recorder, with an honest
+    age. The dashboard never asks the venues itself — it holds no credentials
+    by construction — so a stopped bot shows as a growing age, not a lie.
+
+    Degrades to ``{}`` when the table doesn't exist yet (bot not restarted
+    since the schema gained ``venue_balances``): the panel just omits balances
+    rather than taking the whole envelope into the error path.
+    """
+    try:
+        rows = await db.fetchall(
+            "SELECT venue, detail, fetched_at FROM venue_balances ORDER BY venue")
+    except Exception:
+        return {}
+    now = datetime.now(timezone.utc)
+    out: dict[str, dict] = {}
+    for r in rows:
+        try:
+            age = max(0.0, (now - datetime.fromisoformat(r["fetched_at"])).total_seconds())
+        except (ValueError, TypeError):  # unparseable or naive timestamp
+            age = None
+        out[r["venue"]] = {"detail": r["detail"], "age_seconds": age}
+    return out
 
 
 async def strategy_breakdown(db: ReadOnlyDatabase, is_paper_flag: int) -> list[dict]:

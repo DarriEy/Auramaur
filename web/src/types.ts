@@ -70,12 +70,19 @@ export interface Signal {
   strategy_source: string;
 }
 
+/** Venue cash as recorded bot-side into the DB; age is how old the row is —
+ *  the dashboard holds no venue credentials, so staleness is shown, not hidden. */
+export interface VenueBalance {
+  detail: string;
+  age_seconds: number | null;
+}
+
 export interface DashboardState {
   now: string;
   is_live: boolean;
   transfers_armed: boolean;
   kill_switch: boolean;
-  venues: Record<string, string>;
+  venues: Record<string, VenueBalance>;
   pillars: Pillar[];
   activity: ActivityItem[];
   health: Health;
