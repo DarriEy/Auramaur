@@ -227,20 +227,20 @@ def kalshi_settlements(write: bool):
             t.add_column("Ticker", max_width=30)
             t.add_column("Result", width=6)
             t.add_column("Qty", justify="right")
-            t.add_column("Revenue", justify="right")
+            t.add_column("Payout", justify="right")
             t.add_column("P&L", justify="right")
             total, skipped = 0.0, 0
             for r in sorted(rows, key=lambda x: x["settled"]):
                 if r["pnl"] is None:
                     skipped += 1
                     t.add_row(r["settled"][:10], r["ticker"][:30], r["result"],
-                              f"{r['qty']:.0f}", f"${r['revenue']:.2f}",
-                              "[yellow]skip: no cost[/]")
+                              f"{r['qty']:.0f}", "—",
+                              f"[yellow]skip: {r['reason']}[/]")
                     continue
                 total += r["pnl"]
                 color = "green" if r["pnl"] >= 0 else "red"
                 t.add_row(r["settled"][:10], r["ticker"][:30], r["result"],
-                          f"{r['qty']:.0f}", f"${r['revenue']:.2f}",
+                          f"{r['qty']:.0f}", f"${r['payout']:.2f}",
                           f"[{color}]{r['pnl']:+.2f}[/]")
             console.print(t)
             color = "green" if total >= 0 else "red"

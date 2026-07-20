@@ -116,6 +116,31 @@ class TestKalshiPositionSyncerPaperSync:
 
 class TestKalshiLivePositionAccounting:
     @pytest.mark.asyncio
+    async def test_sync_positions_page_size_within_sdk_cap(self):
+        """kalshi-python caps `limit` at 200 CLIENT-SIDE (Field(le=200)): a
+        larger page size fails pydantic validation before any HTTP call, which
+        silently killed live position sync for a day (#314 regression). The
+        mocked _call_raw here can't catch that, so pin the kwarg itself."""
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            client = KalshiClient.__new__(KalshiClient)
+            client._init_api = MagicMock()
+            client._portfolio_api = MagicMock()
+            seen: list[dict] = []
+
+            async def _raw(fn, **kwargs):
+                seen.append(kwargs)
+                return json.dumps({"market_positions": []})
+
+            client._call_raw = _raw
+            await client.sync_positions(db)
+            assert seen, "sync_positions never fetched"
+            assert all(1 <= k.get("limit", 0) <= 200 for k in seen)
+        finally:
+            await db.close()
+
+    @pytest.mark.asyncio
     async def test_sync_positions_writes_portfolio_and_cost_basis(self):
         db = Database(":memory:")
         await db.connect()
