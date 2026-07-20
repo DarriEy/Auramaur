@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 32
+SCHEMA_VERSION = 33
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -752,6 +752,33 @@ CREATE INDEX IF NOT EXISTS idx_kalshi_execution_samples_market_time
 
 -- Interim-manager proposal queue: operator-proposed entries awaiting the
 -- pillar's charter/risk/ladder gauntlet. Terminal rows are the audit log.
+-- Daily marked-to-market equity per IBKR paper book: the observation
+-- stream for the daily evidence contract (evaluate_ibkr_daily_evidence).
+CREATE TABLE IF NOT EXISTS ibkr_paper_daily_marks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    book TEXT NOT NULL,
+    mark_date TEXT NOT NULL,
+    equity_usd REAL NOT NULL,
+    realized_cum_usd REAL NOT NULL DEFAULT 0,
+    unrealized_usd REAL NOT NULL DEFAULT 0,
+    marked_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(book, mark_date)
+);
+
+-- Execution-free research signal recordings (fx carry+trend et al) so the
+-- comparative record accrues before anything is wired into entries.
+CREATE TABLE IF NOT EXISTS ibkr_research_signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    instrument_key TEXT NOT NULL,
+    signal_date TEXT NOT NULL,
+    signal_name TEXT NOT NULL,
+    direction INTEGER NOT NULL,
+    strength REAL NOT NULL DEFAULT 0,
+    detail TEXT NOT NULL DEFAULT '',
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(instrument_key, signal_date, signal_name)
+);
+
 CREATE TABLE IF NOT EXISTS manager_proposals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     venue TEXT NOT NULL,

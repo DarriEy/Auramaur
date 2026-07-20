@@ -28,12 +28,14 @@ class IBKRMultiAssetPaperBook:
 
     execution_mode = ExecutionMode.PAPER_SIMULATED
 
-    def __init__(self, settings, client, db, book: IBKRBook):
+    def __init__(self, settings, client, db, book: IBKRBook,
+                 rates_provider=None):
         self._settings = settings
         self._client = client
         self._db = db
         self.book = book
         self.name = f"ibkr_{book.value}_paper"
+        self._rates_provider = rates_provider
 
     @property
     def config(self):
@@ -246,6 +248,7 @@ class IBKRMultiAssetPaperBook:
         unmarked_positions = set(positions)
         entries = 0
         error = ""
+        candidates: list = []
         for spec in selected:
             try:
                 held = positions.get(spec.key)
@@ -300,12 +303,24 @@ class IBKRMultiAssetPaperBook:
                 annual_vol = annualized_volatility(closes)
                 if momentum is None or annual_vol is None:
                     continue
+                if momentum < self._settings.ibkr.multiasset_min_normalized_momentum:
+                    continue
+                # Qualifiers are COLLECTED, not entered: with more qualifying
+                # signals than slots, entry order must be strongest-first, not
+                # rotation-cursor order (audit 2026-07-20).
+                candidates.append((momentum, spec, quote, fx, annual_vol))
+            except Exception as exc:  # noqa: BLE001
+                error = str(exc)[:300]
+                log.warning("ibkr_multiasset.instrument_error", book=self.book.value,
+                            key=spec.key, error=error)
+
+        candidates.sort(key=lambda item: -item[0])
+        for momentum, spec, quote, fx, annual_vol in candidates:
+            try:
                 loss_exposure = await self._loss_exposure()
                 if (unmarked_positions or loss_exposure <= -cfg.daily_loss_limit_usd
                         or len(positions) >= cfg.max_positions):
-                    continue
-                if momentum < self._settings.ibkr.multiasset_min_normalized_momentum:
-                    continue
+                    break
                 deployed = sum(
                     float(row["quantity"]) * self._capital_per_unit(
                         held_specs.get(key) or BY_KEY[key],
@@ -356,7 +371,104 @@ class IBKRMultiAssetPaperBook:
                  last_error=excluded.last_error, updated_at=datetime('now')""",
             (self.book.value, next_cursor, error))
         await self._db.commit()
+        await self._record_daily_mark()
+        await self._record_research_signals()
         loss_exposure = await self._loss_exposure()
         log.info("ibkr_multiasset.cycle", book=self.book.value, entries=entries,
                  positions=len(positions), loss_exposure=round(loss_exposure, 2))
         return entries
+
+    async def _record_daily_mark(self) -> None:
+        """Upsert the current UTC date's marked-to-market equity.
+
+        Idempotent per (book, date); the last cycle of the day wins, so the
+        mark reflects end-of-day state without any scheduler. This is the
+        observation stream for evaluate_ibkr_daily_evidence.
+        """
+        if self._db is None:
+            return
+        try:
+            realized = await self._db.fetchone(
+                "SELECT COALESCE(SUM(pnl_usd), 0) AS pnl FROM ibkr_paper_ledger "
+                "WHERE book = ?", (self.book.value,))
+            unrealized = await self._db.fetchone(
+                "SELECT COALESCE(SUM(unrealized_pnl_usd), 0) AS pnl "
+                "FROM ibkr_paper_positions WHERE book = ?", (self.book.value,))
+            r = float(realized["pnl"] or 0)
+            u = float(unrealized["pnl"] or 0)
+            await self._db.execute(
+                """INSERT INTO ibkr_paper_daily_marks
+                   (book, mark_date, equity_usd, realized_cum_usd, unrealized_usd)
+                   VALUES (?, date('now'), ?, ?, ?)
+                   ON CONFLICT(book, mark_date) DO UPDATE SET
+                     equity_usd=excluded.equity_usd,
+                     realized_cum_usd=excluded.realized_cum_usd,
+                     unrealized_usd=excluded.unrealized_usd,
+                     marked_at=datetime('now')""",
+                (self.book.value, r + u, r, u))
+            await self._db.commit()
+        except Exception as e:  # noqa: BLE001 - bookkeeping must not break the cycle
+            log.debug("ibkr_multiasset.mark_error", book=self.book.value,
+                      error=str(e)[:120])
+
+    async def _record_research_signals(self) -> None:
+        """Once daily for the FX book: record execution-free comparator signals.
+
+        Records carry+trend (when a rates provider is wired and both legs
+        resolve) beside the live book's own trend signal, so the comparative
+        record exists BEFORE anything is wired into entries — the
+        pre-registered upgrade path (docs/ibkr_multiasset_paper.md).
+        """
+        if self._db is None or self.book is not IBKRBook.FX:
+            return
+        try:
+            row = await self._db.fetchone(
+                "SELECT 1 AS x FROM ibkr_research_signals "
+                "WHERE signal_date = date('now') LIMIT 1")
+            if row is not None:
+                return  # today already recorded
+            from datetime import datetime, timedelta, timezone
+
+            from auramaur.research.ibkr_signals import PricePoint, fx_carry_trend
+            now = datetime.now(timezone.utc)
+            for spec in BY_BOOK[self.book]:
+                try:
+                    bars = await self._client.get_daily_bars(spec)
+                    closes = closes_from_bars(bars)
+                    momentum = normalized_momentum(closes)
+                    if momentum is not None:
+                        await self._db.execute(
+                            """INSERT OR IGNORE INTO ibkr_research_signals
+                               (instrument_key, signal_date, signal_name,
+                                direction, strength, detail)
+                               VALUES (?, date('now'), 'trend_normalized', ?, ?, ?)""",
+                            (spec.key,
+                             1 if momentum > 0 else -1 if momentum < 0 else 0,
+                             abs(momentum), f"normalized_momentum={momentum:.4f}"))
+                    if self._rates_provider is None or len(spec.key) < 6:
+                        continue
+                    base_rate = await self._rates_provider.rate(spec.key[:3])
+                    quote_rate = await self._rates_provider.rate(spec.key[3:6])
+                    if base_rate is None or quote_rate is None:
+                        continue
+                    window = closes[-121:]
+                    points = [
+                        PricePoint(
+                            observed_at=now - timedelta(days=len(window) - 1 - i),
+                            value=c)
+                        for i, c in enumerate(window)]
+                    signal = fx_carry_trend(points, as_of=now, base_rate=base_rate,
+                                            quote_rate=quote_rate)
+                    await self._db.execute(
+                        """INSERT OR IGNORE INTO ibkr_research_signals
+                           (instrument_key, signal_date, signal_name,
+                            direction, strength, detail)
+                           VALUES (?, date('now'), 'fx_carry_trend', ?, ?, ?)""",
+                        (spec.key, signal.direction, signal.score,
+                         signal.rationale[:200]))
+                except Exception as e:  # noqa: BLE001 - one pair must not stop the sweep
+                    log.debug("ibkr_multiasset.research_signal_error",
+                              key=spec.key, error=str(e)[:100])
+            await self._db.commit()
+        except Exception as e:  # noqa: BLE001 - research-only
+            log.debug("ibkr_multiasset.research_error", error=str(e)[:120])
