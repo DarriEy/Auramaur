@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
+from contextlib import asynccontextmanager
+
 import aiosqlite
 import structlog
 
@@ -15,8 +19,18 @@ class Database:
     def __init__(self, db_path: str | None = None):
         self.db_path = str(runtime_db_path()) if db_path is None else db_path
         self._db: aiosqlite.Connection | None = None
+        self._txn_lock = asyncio.Lock()
 
-    async def connect(self) -> None:
+    async def connect(self, ensure_schema: bool = True) -> None:
+        """Open the connection.
+
+        ``ensure_schema=False`` is the fast path for CLI/tooling callers: when
+        the stored schema_version already matches SCHEMA_VERSION, the DDL
+        executescript is skipped entirely, so a routine CLI invocation takes
+        NO write locks against the live bot's database. A behind/fresh
+        database still gets the full init — the flag can never leave a caller
+        on a stale schema.
+        """
         self._db = await aiosqlite.connect(self.db_path)
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("PRAGMA journal_mode=WAL")
@@ -38,8 +52,65 @@ class Database:
         # the lock WAIT is the safe fix). 30s covers transient bursts; a lock
         # beyond it would signal sustained write saturation, a capacity problem.
         await self._db.execute("PRAGMA busy_timeout=30000")
-        await self._init_schema()
+        # WAL-safe fsync reduction: NORMAL syncs the WAL at checkpoint, not on
+        # every commit. Durability loss is bounded to the last commit(s) on
+        # POWER FAILURE only (app crashes lose nothing) — an accepted trade
+        # for shorter write-lock hold times in a contended single-writer file.
+        await self._db.execute("PRAGMA synchronous=NORMAL")
+        if ensure_schema or not await self._schema_is_current():
+            await self._init_schema()
         log.info("database.connected", path=self.db_path)
+
+    async def _schema_is_current(self) -> bool:
+        try:
+            cursor = await self._db.execute(
+                "SELECT version FROM schema_version LIMIT 1")
+            row = await cursor.fetchone()
+        except aiosqlite.OperationalError:
+            return False  # fresh file — no schema_version table yet
+        if row is None:
+            return False
+        current = row[0] if isinstance(row[0], int) else row["version"]
+        return current >= SCHEMA_VERSION
+
+    @asynccontextmanager
+    async def transaction(self):
+        """Serialized, atomic write transaction on the shared connection.
+
+        ~30 pillar tasks share ONE aiosqlite connection with implicit
+        deferred transactions. Without serialization, task B's ``commit()``
+        lands task A's half-written rows, and an error-path ``rollback()``
+        can discard ANOTHER task's uncommitted writes — the reason
+        record_fill has never been retry-safe. ``BEGIN IMMEDIATE`` under an
+        asyncio.Lock gives each adopter a private, atomic write that claims
+        the file's write lock up front.
+
+        NEVER await network I/O while holding this — the >250ms warning
+        exists to catch exactly that regression.
+        """
+        async with self._txn_lock:
+            # A legacy autocommit-style writer may be mid-flight (implicit
+            # txn open, its commit() imminent). Wait it out rather than
+            # committing on its behalf — that would be the exact bleed this
+            # context manager exists to remove. Bounded: proceed after 2s so
+            # a wedged writer fails loudly in BEGIN rather than hanging us.
+            deadline = time.monotonic() + 2.0
+            while self._db._conn.in_transaction and time.monotonic() < deadline:
+                await asyncio.sleep(0.005)
+            started = time.monotonic()
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                yield self
+            except BaseException:
+                await self.db.execute("ROLLBACK")
+                raise
+            else:
+                await self.db.execute("COMMIT")
+            finally:
+                held = time.monotonic() - started
+                if held > 0.25:
+                    log.warning("database.transaction_held_long",
+                                seconds=round(held, 3))
 
     async def close(self) -> None:
         if self._db:
