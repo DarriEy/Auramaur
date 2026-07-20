@@ -1239,8 +1239,17 @@ class AuramaurBot(
                             placeholders = ",".join("?" * len(live_ids))
                             # Live-mode reconciliation must only delete live rows;
                             # paper rows (is_paper=1) live in their own namespace.
+                            # ONLY Polymarket rows: this reconciler's universe
+                            # is CLOB trade history, so without the exchange scope
+                            # it deleted every live KALSHI cost_basis row each
+                            # ~75s pass — Kalshi sells then found size=0 and
+                            # booked $0.00 realized P&L into the ledger that
+                            # feeds the live daily-loss gate (found 2026-07-20;
+                            # the portfolio delete below always had the filter).
                             cb_cur = await self._components.db.execute(
-                                f"DELETE FROM cost_basis WHERE size > 0 AND is_paper = 0 AND market_id NOT IN ({placeholders})",
+                                f"""DELETE FROM cost_basis WHERE size > 0 AND is_paper = 0
+                                    AND market_id NOT IN ({placeholders})
+                                    AND market_id IN (SELECT id FROM markets WHERE exchange = 'polymarket')""",
                                 live_ids,
                             )
                             pf_cur = await self._components.db.execute(
