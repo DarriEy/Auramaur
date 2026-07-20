@@ -961,7 +961,11 @@ bias_harvest:
 platform_consensus:
   # Platform consensus follower — compares Polymarket/Kalshi prices with
   # community forecasting consensus on Manifold Markets and Metaculus.
-  enabled: false
+  # PAPER SPIKE STARTED 2026-07-20. Review after 30 settled positions or
+  # 2026-08-17, whichever is later. Keep only if net paper P&L is positive,
+  # Brier score beats the venue-price baseline, and manual review finds no
+  # semantic false matches. Stop early after 3 false matches or -$50 P&L.
+  enabled: true
   paper: true
   min_edge: 0.06
   stake_usd: 10.0
