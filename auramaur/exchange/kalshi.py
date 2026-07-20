@@ -909,7 +909,11 @@ class KalshiClient:
             positions = []
             cursor = None
             while True:
-                kwargs = {"limit": 1000}
+                # SDK hard-caps limit at 200 (Field(le=200)) and rejects more
+                # CLIENT-SIDE — limit=1000 made every sync cycle fail before
+                # any HTTP call, silently killing live position sync (#314
+                # regression). The cursor loop handles the paging.
+                kwargs = {"limit": 200}
                 if cursor:
                     kwargs["cursor"] = cursor
                 raw = await self._call_raw(
