@@ -167,3 +167,27 @@ async def test_duplicate_condition_queues_single_stub():
         assert row["n"] == 1
     finally:
         await db.close()
+
+
+def test_transaction_same_task_reentrancy_joins_outer():
+    """bot.py's sync task wraps transaction() around calls that open their
+    own transaction() — same-task nesting must JOIN, not BEGIN twice
+    (the 2026-07-20 position_sync "transaction within a transaction")."""
+    import asyncio
+
+    from auramaur.db.database import Database
+
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        async with db.transaction():
+            await db.execute(
+                "CREATE TABLE t_reent (id INTEGER PRIMARY KEY, v TEXT)")
+            async with db.transaction():  # nested on the same task
+                await db.execute("INSERT INTO t_reent (v) VALUES ('inner')")
+            await db.execute("INSERT INTO t_reent (v) VALUES ('outer')")
+        rows = await db.fetchall("SELECT v FROM t_reent ORDER BY id")
+        assert [r["v"] for r in rows] == ["inner", "outer"]
+        await db.close()
+
+    asyncio.run(run())

@@ -20,6 +20,7 @@ class Database:
         self.db_path = str(runtime_db_path()) if db_path is None else db_path
         self._db: aiosqlite.Connection | None = None
         self._txn_lock = asyncio.Lock()
+        self._txn_task: asyncio.Task | None = None
 
     async def connect(self, ensure_schema: bool = True) -> None:
         """Open the connection.
@@ -88,6 +89,13 @@ class Database:
         NEVER await network I/O while holding this — the >250ms warning
         exists to catch exactly that regression.
         """
+        # Same-task re-entrancy JOINS the outer transaction instead of issuing
+        # a nested BEGIN (sqlite: "cannot start a transaction within a
+        # transaction" — the 2026-07-20 position_sync errors). The outer
+        # holder's commit/rollback governs the joined work.
+        if self._txn_task is not None and self._txn_task is asyncio.current_task():
+            yield self
+            return
         async with self._txn_lock:
             # A legacy autocommit-style writer may be mid-flight (implicit
             # txn open, its commit() imminent). Wait it out rather than
@@ -99,6 +107,7 @@ class Database:
                 await asyncio.sleep(0.005)
             started = time.monotonic()
             await self.db.execute("BEGIN IMMEDIATE")
+            self._txn_task = asyncio.current_task()
             try:
                 yield self
             except BaseException:
@@ -107,6 +116,7 @@ class Database:
             else:
                 await self.db.execute("COMMIT")
             finally:
+                self._txn_task = None
                 held = time.monotonic() - started
                 if held > 0.25:
                     log.warning("database.transaction_held_long",
