@@ -10,7 +10,7 @@ import type {
   StrategyStat,
 } from "./types";
 import type { Phase } from "./useDashboardState";
-import { ago, liveness, money, price, utcClock } from "./format";
+import { ago, deltaClass, liveness, money, price, utcClock } from "./format";
 
 export function TopBar({
   s,
@@ -94,7 +94,7 @@ export function KillSwitchBanner() {
 }
 
 export function StatTiles({ s }: { s: DashboardState }) {
-  const pnlDir = s.total_pnl > 0 ? "up" : s.total_pnl < 0 ? "down" : "";
+  const pnlDir = deltaClass(s.total_pnl);
   return (
     <section className="tiles">
       <div className="tile">
@@ -181,7 +181,7 @@ export function StrategiesPanel({ strategies }: { strategies: StrategyStat[] }) 
                   <td>{st.strategy}</td>
                   <td className="num">{st.entries}</td>
                   <td className="num dim">{money(st.fees)}</td>
-                  <td className={`num ${st.pnl > 0 ? "up" : st.pnl < 0 ? "down" : ""}`}>
+                  <td className={`num ${deltaClass(st.pnl)}`}>
                     {money(st.pnl, true)}
                   </td>
                 </tr>
@@ -237,7 +237,7 @@ export function KrakenPaperPanel({ rows }: { rows: KrakenPaperPosition[] }) {
                 <td className="dim">{r.strategy}</td>
                 <td className="num">{r.quantity.toFixed(4)}</td>
                 <td className="num">{r.entry_price.toFixed(2)}</td>
-                <td className={`num ${r.peak_gain_pct > 0 ? "up" : ""}`}>
+                <td className={`num ${deltaClass(r.peak_gain_pct)}`}>
                   {r.peak_gain_pct.toFixed(1)}%
                 </td>
               </tr>
@@ -328,7 +328,7 @@ export function PositionsPanel({ positions }: { positions: Position[] }) {
                   <td className="num">{p.size.toFixed(0)}</td>
                   <td className="num">{price(p.avg_price)}</td>
                   <td className="num">{price(p.current_price)}</td>
-                  <td className={`num ${p.pnl > 0 ? "up" : p.pnl < 0 ? "down" : ""}`}>
+                  <td className={`num ${deltaClass(p.pnl)}`}>
                     {money(p.pnl, true)}
                   </td>
                 </tr>
@@ -372,7 +372,7 @@ export function SignalsPanel({ signals }: { signals: Signal[] }) {
                   <td className="dim">{sig.strategy_source}</td>
                   <td className="num">{price(sig.claude_prob)}</td>
                   <td className="num">{price(sig.market_prob)}</td>
-                  <td className={`num ${(sig.edge ?? 0) > 0 ? "up" : "down"}`}>
+                  <td className={`num ${deltaClass(sig.edge)}`}>
                     {sig.edge === null ? "—" : `${sig.edge > 0 ? "+" : ""}${sig.edge.toFixed(1)}%`}
                   </td>
                   <td>{sig.action}</td>

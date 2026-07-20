@@ -11,6 +11,11 @@ export function price(v: number | null | undefined): string {
   return v === null || v === undefined ? "—" : v.toFixed(3);
 }
 
+export function deltaClass(value: number | null): "up" | "down" | "" {
+  if (value === null || value === 0) return "";
+  return value > 0 ? "up" : "down";
+}
+
 /** "4s ago" / "3m ago" / "2h ago", matching the cockpit's buckets. */
 export function ago(ageSeconds: number | null): string {
   if (ageSeconds === null) return "—";

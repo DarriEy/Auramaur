@@ -27,7 +27,7 @@ const STALE_AFTER_S = 8; // > server refresh (2s), < long enough to worry
 export function useDashboardState(): DashboardStatus {
   const [envelope, setEnvelope] = useState<Envelope | null>(null);
   const [receivedAt, setReceivedAt] = useState<number | null>(null);
-  const [, setTick] = useState(0); // 1s re-render so ages/staleness move
+  const [clock, setClock] = useState<number | null>(null);
   const sseUp = useRef(false);
 
   useEffect(() => {
@@ -61,7 +61,9 @@ export function useDashboardState(): DashboardStatus {
     const pollTimer = setInterval(() => {
       if (!sseUp.current) void poll();
     }, POLL_FALLBACK_MS);
-    const tickTimer = setInterval(() => setTick((t) => t + 1), 1000);
+    const tick = () => setClock(Date.now());
+    tick();
+    const tickTimer = setInterval(tick, 1000);
 
     return () => {
       disposed = true;
@@ -71,7 +73,9 @@ export function useDashboardState(): DashboardStatus {
     };
   }, []);
 
-  const receivedAgo = receivedAt === null ? null : (Date.now() - receivedAt) / 1000;
+  const receivedAgo = receivedAt === null || clock === null
+    ? null
+    : (clock - receivedAt) / 1000;
   let phase: Phase;
   if (envelope === null) {
     phase = "connecting";

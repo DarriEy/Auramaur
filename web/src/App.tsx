@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ActivityPanel,
   CategoriesPanel,
@@ -21,8 +21,13 @@ const TROUBLESHOOT_AFTER_S = 4;
 
 export default function App() {
   const { envelope, phase, receivedAgo } = useDashboardState();
-  const mountedAt = useRef(Date.now());
-  const waitingFor = (Date.now() - mountedAt.current) / 1000;
+  const [waitingFor, setWaitingFor] = useState(0);
+
+  useEffect(() => {
+    const mountedAt = Date.now();
+    const timer = setInterval(() => setWaitingFor((Date.now() - mountedAt) / 1000), 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   // Which BOOK is on screen — a view choice, defaulting to what the bot is
   // armed to trade. Entirely independent of any trading gate.
