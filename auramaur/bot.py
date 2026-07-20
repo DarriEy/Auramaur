@@ -1533,6 +1533,10 @@ class AuramaurBot(
         if self.settings.bias_harvest.enabled:
             tasks.append(asyncio.create_task(self._task_bias_harvest(), name="bias_harvest"))
 
+        # Platform consensus follower (paper-forced until proven)
+        if self.settings.platform_consensus.enabled:
+            tasks.append(asyncio.create_task(self._task_platform_consensus(), name="platform_consensus"))
+
         # Long-horizon favorite underpricing (paper-forced; structural slope edge)
         if self.settings.long_horizon.enabled:
             tasks.append(asyncio.create_task(self._task_long_horizon(), name="long_horizon"))
