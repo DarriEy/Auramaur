@@ -100,9 +100,13 @@ class Database:
             # A legacy autocommit-style writer may be mid-flight (implicit
             # txn open, its commit() imminent). Wait it out rather than
             # committing on its behalf — that would be the exact bleed this
-            # context manager exists to remove. Bounded: proceed after 2s so
-            # a wedged writer fails loudly in BEGIN rather than hanging us.
-            deadline = time.monotonic() + 2.0
+            # context manager exists to remove. Bounded so a genuinely wedged
+            # writer still fails loudly in BEGIN — but the bound must OUTLAST
+            # real write bursts: measured engine bursts run 1-3.4s, and a 2s
+            # bound turned every unlucky overlap into a position_sync error
+            # (2026-07-20). 15s clears every burst ever observed while still
+            # bounding a true wedge.
+            deadline = time.monotonic() + 15.0
             while self._db._conn.in_transaction and time.monotonic() < deadline:
                 await asyncio.sleep(0.005)
             started = time.monotonic()
