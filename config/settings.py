@@ -749,6 +749,18 @@ class InterimManagerConfig(BaseModel):
     # Robust-edge gate (docs/INTERIM_MANAGER.md "decision rule"): the edge that
     # must survive after subtracting every cost and uncertainty haircut.
     min_robust_edge: float = 0.05
+    # Auto-proposals (charter amendment 2026-07-20): the manager may author
+    # its OWN queue entries from strong calibrated signals. Confidence is
+    # operationalized, not judged: HIGH-confidence source signal, calibrated
+    # edge >= auto_min_calibrated_edge, and then the SAME gauntlet as every
+    # operator proposal (CI haircut from auto_ci_width, robust edge, risk
+    # gateway, delegation, sunset). Scored separately via the proposer tag.
+    auto_propose: bool = False
+    auto_min_confidence: str = "HIGH"
+    auto_min_calibrated_edge: float = 0.10
+    auto_ci_width: float = 0.10
+    auto_daily_cap: int = 3
+    auto_stake_usd: float = 10.0
     # Haircut when no confidence interval is supplied (else CI half-width).
     default_uncertainty_buffer: float = 0.04
     slippage_buffer: float = 0.01

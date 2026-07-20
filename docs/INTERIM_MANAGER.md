@@ -109,6 +109,28 @@ The mandate, compiled: **find short-lived, falsifiable probability
 discrepancies with an external anchor, an explainable mispricing mechanism,
 and enough robust edge to survive uncertainty and execution costs.**
 
+## Auto-proposals (charter amendment, 2026-07-20)
+
+The operator amended the "no autonomous signal generation" clause: when
+`auto_propose` is armed, the manager may author its own queue entries.
+Confidence is OPERATIONALIZED, never judged:
+
+- source signal must carry `auto_min_confidence` (default HIGH) from a
+  non-exempt strategy, be fresh (≤6h), for a market neither held nor
+  proposed in the last 48h;
+- the raw probability is Platt-calibrated per category, and the calibrated
+  edge must clear `auto_min_calibrated_edge` (default 0.10);
+- the proposal's confidence interval is the configured `auto_ci_width` —
+  a deliberately honest haircut the robust-edge gate then charges;
+- capped at `auto_daily_cap` per day, `auto_stake_usd` per entry, 24h
+  sunset, and the category-delegation rule applies before authorship.
+
+Every auto proposal then faces the IDENTICAL gauntlet as an operator
+proposal — nothing about the gates changes with authorship. The `proposer`
+tag separates human and auto theses in the scorecard, so the evaluation
+contract judges each author on its own record. Tracked default: OFF; arming
+is a dated operator override.
+
 ## Evaluation contract (pre-registered)
 
 - `strategy_source = "interim_manager"`; **not** in `exempt_strategies` — the

@@ -276,3 +276,85 @@ def test_startup_migrates_an_existing_v31_database(tmp_path):
         assert idx is not None
         await db.close()
     asyncio.run(run())
+
+
+# ---- auto-proposals (charter amendment 2026-07-20) -------------------------
+
+class _FlatteringCalibration:
+    async def adjust(self, raw, category=""):
+        return min(0.99, raw + 0.05)
+
+    async def record_prediction(self, *a, **k):
+        return None
+
+
+async def _seed_signal(db, market_id="M9", confidence="HIGH", prob=0.62,
+                       market_prob=0.40, strategy="llm"):
+    await db.execute(
+        """INSERT OR IGNORE INTO markets (id, exchange, question, category,
+           outcome_yes_price, outcome_no_price, volume, last_updated)
+           VALUES (?, 'kalshi', 'Q?', 'economics', ?, ?, 0, datetime('now'))""",
+        (market_id, market_prob, 1 - market_prob))
+    await db.execute(
+        """INSERT INTO signals (market_id, exchange, claude_prob,
+           claude_confidence, market_prob, edge, evidence_summary,
+           strategy_source)
+           VALUES (?, 'kalshi', ?, ?, ?, 0, 'stale prices vs fresh print', ?)""",
+        (market_id, prob, confidence, market_prob, strategy))
+    await db.commit()
+
+
+def test_auto_propose_authors_from_high_confidence_calibrated_edge():
+    async def run():
+        pillar, db, gateway, _ = await _pillar()
+        pillar._settings.interim_manager.auto_propose = True
+        pillar._calibration = _FlatteringCalibration()
+        await _seed_signal(db)
+        await pillar._auto_propose({})
+        row = await db.fetchone(
+            "SELECT * FROM manager_proposals WHERE proposer='auto'")
+        assert row is not None
+        assert row["side"] == "BUY"
+        assert row["fair_prob"] == pytest.approx(0.67)  # 0.62 + 0.05
+        assert row["confidence_lo"] < row["fair_prob"] < row["confidence_hi"]
+        assert row["sunset_at"] is not None
+        assert len(row["thesis"]) >= 40 and row["thesis"].startswith("[auto]")
+        await db.close()
+    asyncio.run(run())
+
+
+def test_auto_propose_respects_daily_cap_and_confidence_floor():
+    async def run():
+        pillar, db, gateway, _ = await _pillar()
+        cfg = pillar._settings.interim_manager
+        cfg.auto_propose = True
+        cfg.auto_daily_cap = 1
+        pillar._calibration = _FlatteringCalibration()
+        await _seed_signal(db, "A1")
+        await _seed_signal(db, "A2")
+        await _seed_signal(db, "A3", confidence="MEDIUM")
+        await pillar._auto_propose({})
+        rows = await db.fetchall(
+            "SELECT market_id FROM manager_proposals WHERE proposer='auto'")
+        assert len(rows) == 1  # cap, and the MEDIUM one never qualifies
+        await db.close()
+    asyncio.run(run())
+
+
+def test_auto_propose_stands_down_in_delegated_categories():
+    async def run():
+        pillar, db, gateway, _ = await _pillar()
+        pillar._settings.interim_manager.auto_propose = True
+        pillar._calibration = _FlatteringCalibration()
+        await _seed_signal(db)
+        await pillar._auto_propose({"economics": "econ_indicator"})
+        row = await db.fetchone(
+            "SELECT 1 AS x FROM manager_proposals WHERE proposer='auto'")
+        assert row is None
+        await db.close()
+    asyncio.run(run())
+
+
+def test_auto_propose_disabled_by_tracked_default():
+    s = Settings()
+    assert s.interim_manager.auto_propose is False
