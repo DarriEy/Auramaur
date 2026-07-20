@@ -372,10 +372,14 @@ class PortfolioTracker:
             # Unrealized PnL percentage of cost basis
             pnl_pct = (pos.unrealized_pnl / cost_basis) * 100.0
 
-            # Track peak PnL for trailing stop
-            peak_pnl_pct = peak_prices.get(pos.market_id, pnl_pct)
-            if pnl_pct > peak_pnl_pct:
-                peak_pnl_pct = pnl_pct
+            # Track peak PnL for trailing stop. Seed on first sight: the old
+            # .get(default=pnl_pct) form made the write condition
+            # "current > current" — position_peaks stayed empty forever, so
+            # the trailing tier below was structurally unable to fire for any
+            # position, paper or live (2026-07-20 audit).
+            stored_peak = peak_prices.get(pos.market_id)
+            peak_pnl_pct = pnl_pct if stored_peak is None else max(stored_peak, pnl_pct)
+            if stored_peak is None or pnl_pct > stored_peak:
                 await self._update_peak_price(pos.market_id, pnl_pct)
 
             # 1. Stop-loss — hard floor
@@ -544,15 +548,15 @@ class PortfolioTracker:
     async def _update_peak_price(self, market_id: str, peak_pnl_pct: float) -> None:
         """Track the highest PnL percentage reached for trailing stop."""
         try:
-            await self.db.execute(
-                """INSERT INTO position_peaks (market_id, peak_pnl_pct, updated_at)
-                   VALUES (?, ?, datetime('now'))
-                   ON CONFLICT(market_id) DO UPDATE SET
-                       peak_pnl_pct = MAX(excluded.peak_pnl_pct, position_peaks.peak_pnl_pct),
-                       updated_at = excluded.updated_at""",
-                (market_id, peak_pnl_pct),
-            )
-            await self.db.commit()
+            async with self.db.transaction():
+                await self.db.execute(
+                    """INSERT INTO position_peaks (market_id, peak_pnl_pct, updated_at)
+                       VALUES (?, ?, datetime('now'))
+                       ON CONFLICT(market_id) DO UPDATE SET
+                           peak_pnl_pct = MAX(excluded.peak_pnl_pct, position_peaks.peak_pnl_pct),
+                           updated_at = excluded.updated_at""",
+                    (market_id, peak_pnl_pct),
+                )
         except Exception as e:
             log.debug("peak_price.update_error", error=str(e))
 
