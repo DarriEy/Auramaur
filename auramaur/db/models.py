@@ -777,8 +777,9 @@ CREATE TABLE IF NOT EXISTS manager_proposals (
 );
 CREATE INDEX IF NOT EXISTS idx_manager_proposals_status
     ON manager_proposals(status, created_at);
-CREATE INDEX IF NOT EXISTS idx_manager_proposals_class
-    ON manager_proposals(thesis_class, status);
+-- idx_manager_proposals_class is created in _init_schema AFTER migrations:
+-- it indexes a v32-added column, and this DDL runs before migrations on
+-- existing databases (the 2026-07-19 v32 rollout crashed startup this way).
 
 CREATE TABLE IF NOT EXISTS redemptions (
     condition_id TEXT PRIMARY KEY,
