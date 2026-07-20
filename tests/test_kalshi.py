@@ -196,6 +196,60 @@ class TestKalshiLivePositionAccounting:
             await db.close()
 
     @pytest.mark.asyncio
+    async def test_sync_positions_network_completes_before_first_write(self):
+        """db-contention plan Phase 1: the write transaction must never span a
+        network await. ALL get_market calls (phase ii, network-only) must
+        complete before the FIRST db.execute of the write pass (phase iii)."""
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            client = KalshiClient.__new__(KalshiClient)
+            client._init_api = MagicMock()
+            client._portfolio_api = MagicMock()
+            client._portfolio_api.get_positions_without_preload_content = MagicMock()
+            client._call_raw = AsyncMock(return_value=json.dumps({
+                "market_positions": [
+                    {"ticker": f"KXORD{i}", "position_fp": 5,
+                     "market_exposure_dollars": 2.0}
+                    for i in range(3)
+                ]
+            }))
+
+            events: list[str] = []
+
+            async def _get_market(ticker):
+                events.append(f"net:{ticker}")
+                return Market(
+                    id=ticker, exchange="kalshi", question=f"{ticker}?",
+                    category="test", outcome_yes_price=0.4,
+                    outcome_no_price=0.6,
+                )
+
+            client.get_market = _get_market
+
+            real_execute = db.execute
+
+            async def _execute(sql, params=()):
+                events.append("db")
+                return await real_execute(sql, params)
+
+            db.execute = _execute
+
+            count = await client.sync_positions(db)
+
+            assert count == 3
+            db_events = [i for i, e in enumerate(events) if e == "db"]
+            net_events = [i for i, e in enumerate(events) if e.startswith("net:")]
+            assert len(net_events) == 3, "expected one get_market per position"
+            assert db_events, "sync_positions never wrote"
+            assert max(net_events) < min(db_events), (
+                "a db.execute ran before all get_market network calls "
+                f"finished: {events}"
+            )
+        finally:
+            await db.close()
+
+    @pytest.mark.asyncio
     async def test_sync_positions_preserves_paper_kalshi_rows(self):
         """The live sync must NOT touch is_paper=1 Kalshi rows. A purge lived
         here while nothing traded Kalshi on paper; once the Kalshi paper
