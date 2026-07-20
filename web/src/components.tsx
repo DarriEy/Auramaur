@@ -129,8 +129,10 @@ export function StatTiles({ s }: { s: DashboardState }) {
 const BALANCE_STALE_S = 900;
 
 export function VenuesPanel({ s }: { s: DashboardState }) {
-  // Per-exchange position counts from the actual book — Kalshi paper
-  // positions share the portfolio table and deserve their own line.
+  // ONE row per venue: positions from the book being viewed, merged with the
+  // bot-recorded balance and its age. IBKR paper books get their own lines
+  // beneath the IBKR balance row (positions live in ibkr_paper_positions,
+  // not the shared portfolio table).
   const byExchange = new Map<string, { n: number; value: number }>();
   for (const p of s.positions) {
     const cur = byExchange.get(p.exchange) ?? { n: 0, value: 0 };
@@ -138,25 +140,39 @@ export function VenuesPanel({ s }: { s: DashboardState }) {
     cur.value += (p.current_price || 0) * (p.size || 0);
     byExchange.set(p.exchange, cur);
   }
+  const names = [...new Set([...byExchange.keys(), ...Object.keys(s.venues)])].sort();
   return (
     <section className="panel">
       <h2>Venues</h2>
       <div className="kv">
-        {[...byExchange.entries()].map(([name, v]) => (
-          <div className="row" key={name}>
-            <span className="k">{name}</span>
-            <span className="v">{v.n} pos, {money(v.value)}</span>
-          </div>
-        ))}
-        {byExchange.size === 0 && (
+        {names.map((name) => {
+          const pos = byExchange.get(name);
+          const bal = s.venues[name];
+          const parts = [
+            pos ? `${pos.n} pos, ${money(pos.value)}` : null,
+            bal ? bal.detail : null,
+          ].filter(Boolean);
+          return (
+            <div className="row" key={name}>
+              <span className="k">{name}</span>
+              <span className="v">{parts.length ? parts.join(" \u00b7 ") : "\u2014"}</span>
+              {bal && (
+                <span className={`age${(bal.age_seconds ?? Infinity) > BALANCE_STALE_S ? " stale" : ""}`}>
+                  {ago(bal.age_seconds)}
+                </span>
+              )}
+            </div>
+          );
+        })}
+        {names.length === 0 && (
           <div className="row"><span className="k">book</span><span className="v">empty</span></div>
         )}
-        {Object.entries(s.venues).map(([name, bal]) => (
-          <div className="row" key={`bal-${name}`}>
-            <span className="k">{name}</span>
-            <span className="v">{bal.detail}</span>
-            <span className={`age${(bal.age_seconds ?? Infinity) > BALANCE_STALE_S ? " stale" : ""}`}>
-              {ago(bal.age_seconds)}
+        {(s.ibkr_books ?? []).map((b) => (
+          <div className="row" key={`ibkr-${b.book}`}>
+            <span className="k">ibkr:{b.book}</span>
+            <span className="v">
+              {b.positions} pos, {money(b.unrealized)} unrl
+              {b.equity != null ? ` \u00b7 eq ${money(b.equity)}` : ""}
             </span>
           </div>
         ))}

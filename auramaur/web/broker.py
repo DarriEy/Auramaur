@@ -113,8 +113,10 @@ class StateBroker:
                 # Venue cash is book-independent: recorded by the bot,
                 # served on both views with its age.
                 venues = await queries.venue_balances(self.db)
+                ibkr_books = await queries.ibkr_paper_books(self.db)
                 for state in books.values():
                     state["venues"] = venues
+                    state["ibkr_books"] = ibkr_books
                 self.latest = books
                 self.error = None
                 self.updated_at = datetime.now(timezone.utc).isoformat()

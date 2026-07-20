@@ -17,6 +17,7 @@ def serialize_state(s: dict) -> dict:
         "transfers_armed": s["transfers_armed"],
         "kill_switch": s["kill_switch"],
         "venues": s["venues"],
+        "ibkr_books": s.get("ibkr_books", []),
         "pillars": [
             {
                 "name": name,
