@@ -340,3 +340,92 @@ async def test_broker_calendar_honours_holiday_and_split_sessions():
         spec, now=datetime(2026, 7, 21, 16, tzinfo=timezone.utc))
     assert await client.is_market_open(
         spec, now=datetime(2026, 7, 21, 18, tzinfo=timezone.utc))
+
+
+# ---- FX audit follow-ups (2026-07-20) --------------------------------------
+
+class RankedFakeMarketData(FakeMarketData):
+    """Distinct momentum per instrument so entry ordering is observable."""
+
+    def __init__(self, momenta):
+        self._momenta = momenta
+
+    async def get_daily_bars(self, spec, duration="3 M"):
+        # Construct a price path whose normalized momentum ordering follows
+        # the configured per-key slope: later closes grow by slope per step.
+        slope = self._momenta.get(spec.key, 0.0)
+        return [(f"s-{d:03d}", 100 * (1 + slope) ** d) for d in range(121)]
+
+
+@pytest.mark.asyncio
+async def test_entries_rank_strongest_momentum_first():
+    db = Database(":memory:")
+    await db.connect()
+    settings = Settings()
+    settings.ibkr.multiasset_paper_enabled = True
+    settings.ibkr.multiasset_registry_required = False
+    settings.ibkr.multiasset_refreshes_per_cycle = 12
+    cfg = settings.ibkr.multiasset_books["fx"]
+    cfg.enabled = True
+    cfg.max_positions = 1  # one slot: the strongest signal must win it
+    cfg.max_position_pct = 40
+    cfg.max_deployment_pct = 60
+    momenta = {spec.key: 0.001 for spec in BY_BOOK[IBKRBook.FX]}
+    momenta["GBPJPY"] = 0.004  # clearly strongest trend
+    pillar = IBKRMultiAssetPaperBook(
+        settings, RankedFakeMarketData(momenta), db, IBKRBook.FX)
+    pillar.market_open = lambda now=None: True
+    assert await pillar.run_once() == 1
+    row = await db.fetchone(
+        "SELECT instrument_key FROM ibkr_paper_positions WHERE book='fx'")
+    assert row["instrument_key"] == "GBPJPY"
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_daily_mark_upserts_one_row_per_day():
+    db = Database(":memory:")
+    await db.connect()
+    settings = Settings()
+    settings.ibkr.multiasset_paper_enabled = True
+    settings.ibkr.multiasset_registry_required = False
+    settings.ibkr.multiasset_refreshes_per_cycle = 1
+    settings.ibkr.multiasset_books["futures"].max_position_pct = 40
+    pillar = IBKRMultiAssetPaperBook(
+        settings, FakeMarketData(), db, IBKRBook.FUTURES)
+    pillar.market_open = lambda now=None: True
+    await pillar.run_once()
+    await pillar.run_once()  # same day: must update, not duplicate
+    rows = await db.fetchall(
+        "SELECT * FROM ibkr_paper_daily_marks WHERE book='futures'")
+    assert len(rows) == 1
+    assert rows[0]["equity_usd"] == pytest.approx(
+        rows[0]["realized_cum_usd"] + rows[0]["unrealized_usd"])
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_fx_research_recorder_records_trend_and_carry_once_daily():
+    class Rates:
+        async def rate(self, currency):
+            return {"GBP": 0.05, "JPY": 0.001}.get(currency, 0.03)
+
+    db = Database(":memory:")
+    await db.connect()
+    settings = Settings()
+    settings.ibkr.multiasset_paper_enabled = True
+    settings.ibkr.multiasset_registry_required = False
+    pillar = IBKRMultiAssetPaperBook(
+        settings, RankedFakeMarketData({s.key: 0.002 for s in BY_BOOK[IBKRBook.FX]}),
+        db, IBKRBook.FX, rates_provider=Rates())
+    await pillar._record_research_signals()
+    await pillar._record_research_signals()  # second call same day: no-op
+    trend = await db.fetchall(
+        "SELECT * FROM ibkr_research_signals WHERE signal_name='trend_normalized'")
+    carry = await db.fetchall(
+        "SELECT * FROM ibkr_research_signals WHERE signal_name='fx_carry_trend'")
+    assert len(trend) == len(BY_BOOK[IBKRBook.FX])
+    assert len(carry) == len(BY_BOOK[IBKRBook.FX])
+    gbpjpy = next(r for r in carry if r["instrument_key"] == "GBPJPY")
+    assert gbpjpy["direction"] == 1  # positive carry + uptrend agree
+    await db.close()

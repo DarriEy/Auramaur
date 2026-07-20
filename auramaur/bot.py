@@ -716,8 +716,15 @@ class AuramaurBot(
         from auramaur.strategy.ibkr_multiasset_paper import IBKRMultiAssetPaperBook
 
         client = IBKRReadOnlyMarketData(self.settings)
+        rates_provider = None
+        if self.settings.fred_api_key:
+            from auramaur.data_sources.fred import FREDSource
+            from auramaur.research.fx_rates import FredRatesProvider
+            rates_provider = FredRatesProvider(
+                FREDSource(api_key=self.settings.fred_api_key))
         books = [IBKRMultiAssetPaperBook(
-            self.settings, client, self._components.get("db"), book)
+            self.settings, client, self._components.get("db"), book,
+            rates_provider=rates_provider)
             for book in IBKRBook
             if self.settings.ibkr.multiasset_books[book.value].enabled]
         try:

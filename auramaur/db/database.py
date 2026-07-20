@@ -132,6 +132,8 @@ class Database:
             await self._migrate_v30_to_v31()
         if from_version < 32:
             await self._migrate_v31_to_v32()
+        if from_version < 33:
+            await self._migrate_v32_to_v33()
 
     async def _migrate_v29_to_v30(self) -> None:
         """Add cost-adjusted IBKR round-trip observations."""
@@ -211,6 +213,30 @@ class Database:
         await self._db.execute("UPDATE schema_version SET version = 32")
         await self._db.commit()
         log.info("database.migrated", from_version=31, to_version=32)
+
+    async def _migrate_v32_to_v33(self) -> None:
+        """Daily marks + research signal recordings (new tables only)."""
+        await self._db.execute(
+            """CREATE TABLE IF NOT EXISTS ibkr_paper_daily_marks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                book TEXT NOT NULL, mark_date TEXT NOT NULL,
+                equity_usd REAL NOT NULL,
+                realized_cum_usd REAL NOT NULL DEFAULT 0,
+                unrealized_usd REAL NOT NULL DEFAULT 0,
+                marked_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(book, mark_date))""")
+        await self._db.execute(
+            """CREATE TABLE IF NOT EXISTS ibkr_research_signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                instrument_key TEXT NOT NULL, signal_date TEXT NOT NULL,
+                signal_name TEXT NOT NULL, direction INTEGER NOT NULL,
+                strength REAL NOT NULL DEFAULT 0,
+                detail TEXT NOT NULL DEFAULT '',
+                recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(instrument_key, signal_date, signal_name))""")
+        await self._db.execute("UPDATE schema_version SET version = 33")
+        await self._db.commit()
+        log.info("database.migrated", from_version=32, to_version=33)
 
     async def _migrate_v28_to_v29(self) -> None:
         """Add immutable strategy-research and CLV accounting tables."""
