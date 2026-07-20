@@ -48,7 +48,7 @@ def attribution():
     async def _run():
         settings = Settings()
         db = Database()
-        await db.connect()
+        await db.connect(ensure_schema=False)
         try:
             attr = PerformanceAttributor(db=db)
             venues = await attr.get_venue_summary(is_live=settings.is_live)
@@ -69,7 +69,7 @@ def doctor():
     async def _run():
         settings = Settings()
         db = Database()
-        await db.connect()
+        await db.connect(ensure_schema=False)
         try:
             state = await gather_doctor(settings, db)
             console.print(render_doctor(state))
@@ -107,7 +107,7 @@ def health():
 
         settings = Settings()
         db = Database()
-        await db.connect()
+        await db.connect(ensure_schema=False)
         try:
             report = await preflight(settings, db)
         finally:
@@ -138,7 +138,7 @@ def ibkr_etf_preflight():
 
         settings = Settings()
         db = Database()
-        await db.connect()
+        await db.connect(ensure_schema=False)
         try:
             report = await preflight(settings, db)
         finally:
@@ -169,7 +169,7 @@ def ibkr_multiasset_preflight(book_names):
 
         settings = Settings()
         db = Database()
-        await db.connect()
+        await db.connect(ensure_schema=False)
         try:
             books = tuple(IBKRBook(name) for name in book_names) or None
             report = await preflight(settings, db, books=books)
@@ -200,7 +200,7 @@ def ibkr_contract_approve(instrument_key, reason):
 
     async def _run() -> int:
         db = Database()
-        await db.connect()
+        await db.connect(ensure_schema=False)
         try:
             changed = await approve(db, instrument_key, reason)
         finally:
@@ -237,7 +237,7 @@ def readiness(exchange, days, log_file, json_output):
             fee_rate = 0.07
 
         db = Database()
-        await db.connect()
+        await db.connect(ensure_schema=False)
         try:
             return await evaluate_readiness(
                 db,

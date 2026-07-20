@@ -23,6 +23,9 @@ class MarketData:
         # mode=ro: open existing DB read-only, never create, never write.
         conn = await aiosqlite.connect(f"file:{self._path}?mode=ro", uri=True)
         conn.row_factory = aiosqlite.Row
+        # WAL readers can hit the bot's checkpoint lock; wait briefly instead
+        # of erroring (the bot holds busy_timeout=30000 on its side).
+        await conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
     async def scan_markets(

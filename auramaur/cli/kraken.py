@@ -161,7 +161,7 @@ def kraken_pnl():
 
     async def _run():
         db = Database()
-        await db.connect()
+        await db.connect(ensure_schema=False)
         try:
             state = await gather_spec_performance(db, Settings())
             console.print(render_spec_performance(state))
@@ -180,7 +180,7 @@ def kraken_signal():
     async def _run():
         settings = Settings()
         db = Database()
-        await db.connect()
+        await db.connect(ensure_schema=False)
         try:
             rows = await db.fetchall(
                 """SELECT market_id, predicted_prob, created_at FROM calibration c

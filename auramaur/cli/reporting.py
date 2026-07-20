@@ -71,7 +71,7 @@ def pnl(paper: bool, backfill: bool):
         )
 
         db = Database()
-        await db.connect()
+        await db.connect(ensure_schema=False)
         try:
             if backfill:
                 written = await backfill_ledger(db)
@@ -93,7 +93,7 @@ def ibkr_intelligence():
     """Compare Luna/Terra/Sol ETF forecast quality and paper P&L."""
     async def _run():
         db = Database()
-        await db.connect()
+        await db.connect(ensure_schema=False)
         try:
             rows = await db.fetchall(
                 """SELECT f.model_alias, MAX(f.model) AS model,
@@ -167,7 +167,7 @@ def graduation():
 
         settings = Settings()
         db = Database()
-        await db.connect()
+        await db.connect(ensure_schema=False)
         try:
             ladder = GraduationLadder(db, settings)
             cells = await ladder.report()
@@ -220,7 +220,7 @@ def entailment():
         from auramaur.strategy.entailment_arb import ladder_pairs
 
         db = Database()
-        await db.connect()
+        await db.connect(ensure_schema=False)
         try:
             rows = await db.fetchall(
                 "SELECT * FROM entailment_verdicts ORDER BY checked_at DESC LIMIT 25")
@@ -269,7 +269,7 @@ def oddlot():
 
     async def _run():
         db = Database()
-        await db.connect()
+        await db.connect(ensure_schema=False)
         try:
             rows = await db.fetchall(
                 "SELECT * FROM oddlot_filings ORDER BY filed_at DESC LIMIT 30")
@@ -313,7 +313,7 @@ def backtest(days: int, min_edge: float | None, kelly_fraction: float | None, co
     async def _backtest():
         settings = Settings()
         db = Database()
-        await db.connect()
+        await db.connect(ensure_schema=False)
 
         try:
             engine = BacktestEngine(db, settings)

@@ -80,7 +80,7 @@ def cockpit():
     async def _run():
         settings = Settings()
         db = Database()
-        await db.connect()
+        await db.connect(ensure_schema=False)
         cache: dict = {}
         with Live(console=console, refresh_per_second=2, screen=True) as live:
             while True:
@@ -101,7 +101,7 @@ def status():
     async def _status():
         settings = Settings()
         db = Database()
-        await db.connect()
+        await db.connect(ensure_schema=False)
         try:
             # cache=None → fresh venue balances, no Live loop.
             state = await ck.gather_state(db, settings, cache=None)
