@@ -5,6 +5,16 @@ Read-only browser dashboard over the bot's SQLite state — the web twin of
 the `web` extra) and opens the database with SQLite's `mode=ro`, so this stack
 is structurally unable to write to the trading DB.
 
+Residual-risk honesty (phase-1 threat model): the container's state mount is
+read-write (WAL readers need the `-shm`/`-wal` files), so `mode=ro` +
+`query_only` are SQLite-level guarantees, not kernel-level — a compromised
+web *process* could still corrupt the DB file or delete `KILL_SWITCH` via the
+filesystem. The container is kept off the broker network (it can never reach
+ibgateway's trusted-IP API) and publishes on loopback only, which is also the
+entirety of its auth: anything that can reach 127.0.0.1:8484 can read the
+dashboard. Acceptable for a single-operator LAN deployment; revisit both
+before any remote exposure.
+
 ## Development
 
 Terminal 1 — the API (needs `pip install -e ".[web]"`; on Windows run the app

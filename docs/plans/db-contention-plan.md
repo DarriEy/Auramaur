@@ -116,7 +116,11 @@ decouples producers — no producer changes. Delete the second connection.
   from market_data.py:22-26; add busy_timeout there too.
 - Database.connect(ensure_schema=...): when stored schema_version already
   equals SCHEMA_VERSION (checked read-only first), skip executescript(TABLES).
-  CLI uses the fast path; `auramaur run` keeps full DDL.
+  CLI uses the fast path; `auramaur run` keeps full DDL. Caveat: the no-DDL
+  guarantee is STEADY-STATE only — a version-skewed CLI (upgraded checkout
+  against a not-yet-restarted bot) sees a behind schema_version and will run
+  the full init/migrations against the live DB under the running bot. Restart
+  the bot before using CLI tooling after upgrading the checkout.
 
 **Phase 5 — Money path, last and guarded (~60 LOC + tests, medium risk).**
 Wrap PnLTracker.record_fill/_record_fill_once (pnl.py:39-94+) and
