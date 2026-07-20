@@ -144,3 +144,29 @@ separate design and review. At minimum, a book needs 30 closed paper positions,
 positive net trade P&L after modeled commissions, profit factor above 1.1, fresh
 native quotes for every traded instrument, and asset-specific reconciliation.
 No book graduates another book.
+
+
+## Evidence contract (amended, pre-registered 2026-07-20)
+
+The 200-round-trip / 180-day contract is arithmetically unreachable for
+slow-turnover books: an FX book holding 2-6 weeks across 4 slots produces
+roughly 15-50 round trips in 180 days. Amended BEFORE any FX evidence
+existed:
+
+- **Primary**: `evaluate_ibkr_daily_evidence` over daily marked-to-market
+  book P&L (`ibkr_paper_daily_marks`, written idempotently by each cycle) —
+  at least 120 daily observations across at least 180 days, positive 95%
+  lower confidence bound on the daily mean, drawdown within 10% of budget.
+- **Secondary (cost realism)**: at least 30 cost-adjusted round trips with
+  their own positive lower bound.
+- **Anti-gaming clause**: holding brackets (stops, take-profits, momentum
+  exits) must never be shortened merely to manufacture observations; a
+  cadence change requires its own pre-registration with rationale.
+- **Entry ordering**: when more signals qualify than slots remain, entries
+  are taken strongest-normalized-momentum first (not universe order).
+- **Carry upgrade path**: `fx_carry_trend` and the book's own trend signal
+  are recorded daily, execution-free, to `ibkr_research_signals` (rates via
+  FRED OECD immediate-rate series; monthly, lagged — auditable in the
+  detail column). Wiring carry into entry RANKING (never gating alone) is
+  permitted only after ≥60 recorded days show the blend would not have
+  degraded the realized book, and requires its own pre-registered change.
