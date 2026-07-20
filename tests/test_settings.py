@@ -243,3 +243,54 @@ def test_ibkr_etf_model_effort_is_strict():
     with pytest.raises(ValidationError):
         IBKRConfig(etf_models=[
             {"alias": "test", "model": "gpt-test", "effort": "maximum"}])
+
+
+# ---- YAML x env deep-merge (2026-07-20 regression) -------------------------
+# One IBKR__* env var used to make pydantic-settings discard the ENTIRE yaml
+# ibkr section (field default_factory skipped once any source supplies part
+# of the field). The _YamlDefaultsSource must instead deep-merge: env wins on
+# exactly the keys it names, yaml survives everywhere else.
+
+def _with_yaml_ibkr(monkeypatch, **env):
+    import config.settings as m
+    merged = dict(m._DEFAULTS)
+    merged["ibkr"] = {
+        **m._DEFAULTS.get("ibkr", {}),
+        "multiasset_paper_enabled": False,
+        "multiasset_disabled_instruments": ["7203.T"],
+        "multiasset_books": {
+            **m._DEFAULTS.get("ibkr", {}).get("multiasset_books", {}),
+            "fx": {"enabled": False, "budget_usd": 5000, "max_positions": 4,
+                   "max_position_pct": 10, "max_deployment_pct": 40,
+                   "daily_loss_limit_usd": 75, "stop_loss_pct": 2,
+                   "take_profit_pct": 4, "max_spread_bps": 15},
+        },
+    }
+    monkeypatch.setattr(m, "_DEFAULTS", merged)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    return m.Settings()
+
+
+def test_env_var_no_longer_discards_the_yaml_ibkr_section(monkeypatch):
+    s = _with_yaml_ibkr(monkeypatch, IBKR__MULTIASSET_PAPER_ENABLED="true")
+    # env wins on the key it names…
+    assert s.ibkr.multiasset_paper_enabled is True
+    # …and the rest of the yaml section SURVIVES (this was lost pre-fix):
+    assert s.ibkr.multiasset_disabled_instruments == ["7203.T"]
+    assert s.ibkr.multiasset_books["fx"].enabled is False
+
+
+def test_nested_env_deep_merges_into_yaml_books(monkeypatch):
+    s = _with_yaml_ibkr(monkeypatch,
+                        IBKR__MULTIASSET_PAPER_ENABLED="true",
+                        IBKR__MULTIASSET_BOOKS__FX__ENABLED="true")
+    assert s.ibkr.multiasset_books["fx"].enabled is True
+    # yaml-carried sibling keys of the same book survive the nested override:
+    assert s.ibkr.multiasset_books["fx"].daily_loss_limit_usd == 75
+
+
+def test_yaml_alone_still_applies_without_env(monkeypatch):
+    s = _with_yaml_ibkr(monkeypatch)
+    assert s.ibkr.multiasset_paper_enabled is False
+    assert s.ibkr.multiasset_disabled_instruments == ["7203.T"]
