@@ -212,26 +212,26 @@ async def rebuild_category_stats_from_resolution_pnl(
     if dry_run:
         return result
 
-    for row in rows:
-        await db.execute(
-            """INSERT INTO category_stats
-               (category, total_pnl, trade_count, win_count, avg_edge, updated_at)
-               VALUES (?, ?, ?, ?, ?, datetime('now'))
-               ON CONFLICT(category) DO UPDATE SET
-                   total_pnl = excluded.total_pnl,
-                   trade_count = excluded.trade_count,
-                   win_count = excluded.win_count,
-                   avg_edge = excluded.avg_edge,
-                   updated_at = excluded.updated_at""",
-            (
-                row["category"],
-                float(row["total_pnl"] or 0.0),
-                int(row["trade_count"] or 0),
-                int(row["win_count"] or 0),
-                float(row["avg_edge"] or 0.0),
-            ),
-        )
-    await db.commit()
+    async with db.transaction():
+        for row in rows:
+            await db.execute(
+                """INSERT INTO category_stats
+                   (category, total_pnl, trade_count, win_count, avg_edge, updated_at)
+                   VALUES (?, ?, ?, ?, ?, datetime('now'))
+                   ON CONFLICT(category) DO UPDATE SET
+                       total_pnl = excluded.total_pnl,
+                       trade_count = excluded.trade_count,
+                       win_count = excluded.win_count,
+                       avg_edge = excluded.avg_edge,
+                       updated_at = excluded.updated_at""",
+                (
+                    row["category"],
+                    float(row["total_pnl"] or 0.0),
+                    int(row["trade_count"] or 0),
+                    int(row["win_count"] or 0),
+                    float(row["avg_edge"] or 0.0),
+                ),
+            )
 
     log.info(
         "pnl.rebuild_category_stats",

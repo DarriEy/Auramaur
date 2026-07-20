@@ -167,12 +167,12 @@ class CalibrationTracker:
         if market_pnl is None:
             return
 
-        await self._db.execute(
-            "INSERT OR REPLACE INTO resolution_pnl (market_id, category, pnl, resolved_at) "
-            "VALUES (?, ?, ?, datetime('now'))",
-            (market_id, category, market_pnl.pnl),
-        )
-        await self._db.commit()
+        async with self._db.transaction():
+            await self._db.execute(
+                "INSERT OR REPLACE INTO resolution_pnl (market_id, category, pnl, resolved_at) "
+                "VALUES (?, ?, ?, datetime('now'))",
+                (market_id, category, market_pnl.pnl),
+            )
         await rebuild_category_stats_from_resolution_pnl(self._db, dry_run=False)
         log.info(
             "pnl.realized",
@@ -207,15 +207,15 @@ class CalibrationTracker:
             (market_id,),
         )
 
-        await self._db.execute(
-            """
-            UPDATE calibration
-            SET actual_outcome = ?, resolved_at = datetime('now')
-            WHERE market_id = ? AND actual_outcome IS NULL
-            """,
-            (outcome_int, market_id),
-        )
-        await self._db.commit()
+        async with self._db.transaction():
+            await self._db.execute(
+                """
+                UPDATE calibration
+                SET actual_outcome = ?, resolved_at = datetime('now')
+                WHERE market_id = ? AND actual_outcome IS NULL
+                """,
+                (outcome_int, market_id),
+            )
         log.info("calibration.resolved", market_id=market_id, outcome=actual_outcome)
         if self._lineage_observer is not None:
             self._lineage_observer.resolution(market_id, actual_outcome)
@@ -280,13 +280,13 @@ class CalibrationTracker:
                 # Seed identity params (a=1, b=0 = no adjustment) so online
                 # learning can begin immediately instead of waiting for
                 # min_samples batch refit.
-                await self._db.execute(
-                    """INSERT OR IGNORE INTO calibration_params
-                       (category, a, b, fitted_at)
-                       VALUES (?, 1.0, 0.0, datetime('now'))""",
-                    (cat,),
-                )
-                await self._db.commit()
+                async with self._db.transaction():
+                    await self._db.execute(
+                        """INSERT OR IGNORE INTO calibration_params
+                           (category, a, b, fitted_at)
+                           VALUES (?, 1.0, 0.0, datetime('now'))""",
+                        (cat,),
+                    )
                 params = (1.0, 0.0)
                 self._params_cache[cat] = params
                 log.info("calibration.seeded_identity_params", category=cat)
@@ -306,15 +306,15 @@ class CalibrationTracker:
 
             # Persist to DB
             now = datetime.now(timezone.utc).isoformat()
-            await self._db.execute(
-                """
-                UPDATE calibration_params
-                SET a = ?, b = ?, fitted_at = ?
-                WHERE category = ?
-                """,
-                (new_a, new_b, now, cat),
-            )
-            await self._db.commit()
+            async with self._db.transaction():
+                await self._db.execute(
+                    """
+                    UPDATE calibration_params
+                    SET a = ?, b = ?, fitted_at = ?
+                    WHERE category = ?
+                    """,
+                    (new_a, new_b, now, cat),
+                )
 
             # Compute moving Brier score for logging
             moving_brier = self.get_moving_brier_score()

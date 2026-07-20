@@ -343,49 +343,49 @@ class TradingEngine(CycleOrchestrationMixin):
         """Fetch markets from Gamma API and store in DB."""
         markets = await self.discovery.get_markets(limit=limit)
 
+        # Classify BEFORE opening the transaction — keeps the write burst
+        # db-only so the write lock is held for ms, not the classify pass.
         for market in markets:
             # Venue-tag categories (set by the gamma parser from event tags)
             # are authoritative; keyword-classify only when tags were absent
             # or inconclusive.
-            category = ensure_category(
+            market.category = ensure_category(
                 market.question, market.description, market.category)
-            market.category = category
 
+        async with self.db.transaction():
+            for market in markets:
+                await self.db.execute(
+                    """INSERT OR REPLACE INTO markets
+                       (id, exchange, condition_id, question, description, category, end_date, active,
+                        outcome_yes_price, outcome_no_price, volume, liquidity,
+                        clob_token_yes, clob_token_no, last_updated)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        market.id, market.exchange or self.exchange_name or "polymarket",
+                        market.condition_id, market.question,
+                        market.description, market.category,
+                        market.end_date.isoformat() if market.end_date else None,
+                        int(market.active), market.outcome_yes_price, market.outcome_no_price,
+                        market.volume, market.liquidity,
+                        market.clob_token_yes, market.clob_token_no,
+                        datetime.now(timezone.utc).isoformat(),
+                    ),
+                )
+
+        # Price snapshots + prune as a second short transaction so the
+        # markets upsert above commits (and releases the write lock) first.
+        async with self.db.transaction():
+            for market in markets:
+                await self.db.execute(
+                    "INSERT INTO price_history (market_id, price) VALUES (?, ?)",
+                    (market.id, market.outcome_yes_price),
+                )
+            # Prune old price history to bound table growth. Extended 7 -> 30
+            # days so reversion/intraday research has a multi-week sample; the
+            # 7-day window was too short to rule out a regime artifact.
             await self.db.execute(
-                """INSERT OR REPLACE INTO markets
-                   (id, exchange, condition_id, question, description, category, end_date, active,
-                    outcome_yes_price, outcome_no_price, volume, liquidity,
-                    clob_token_yes, clob_token_no, last_updated)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    market.id, market.exchange or self.exchange_name or "polymarket",
-                    market.condition_id, market.question,
-                    market.description, category,
-                    market.end_date.isoformat() if market.end_date else None,
-                    int(market.active), market.outcome_yes_price, market.outcome_no_price,
-                    market.volume, market.liquidity,
-                    market.clob_token_yes, market.clob_token_no,
-                    datetime.now(timezone.utc).isoformat(),
-                ),
+                "DELETE FROM price_history WHERE recorded_at < datetime('now', '-30 days')"
             )
-
-        await self.db.commit()
-
-        # Record price snapshots for momentum tracking
-        for market in markets:
-            await self.db.execute(
-                "INSERT INTO price_history (market_id, price) VALUES (?, ?)",
-                (market.id, market.outcome_yes_price),
-            )
-        await self.db.commit()
-
-        # Prune old price history to bound table growth. Extended 7 -> 30 days
-        # so reversion/intraday research has a multi-week sample; the 7-day
-        # window was too short to rule out a regime artifact.
-        await self.db.execute(
-            "DELETE FROM price_history WHERE recorded_at < datetime('now', '-30 days')"
-        )
-        await self.db.commit()
 
         return markets
 

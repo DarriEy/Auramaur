@@ -115,9 +115,10 @@ class ResolutionTracker:
                                                     override_exit_price=refund)
                         await self._settle_position(market_id, False, is_paper_scope=1,
                                                     override_exit_price=refund)
-                        await self._db.execute(
-                            "UPDATE markets SET active = 0 WHERE id = ?", (market_id,))
-                        await self._db.commit()
+                        async with self._db.transaction():
+                            await self._db.execute(
+                                "UPDATE markets SET active = 0 WHERE id = ?",
+                                (market_id,))
                         log.info("resolution.void_settled", market_id=market_id,
                                  refund=round(refund, 3))
                         resolved_count += 1
@@ -137,11 +138,11 @@ class ResolutionTracker:
 
                 # Mark the market as inactive in our DB so other queries
                 # (e.g. depth research, correlation) stop considering it.
-                await self._db.execute(
-                    "UPDATE markets SET active = 0, outcome_yes_price = ?, outcome_no_price = ? WHERE id = ?",
-                    (market.outcome_yes_price, market.outcome_no_price, market_id),
-                )
-                await self._db.commit()
+                async with self._db.transaction():
+                    await self._db.execute(
+                        "UPDATE markets SET active = 0, outcome_yes_price = ?, outcome_no_price = ? WHERE id = ?",
+                        (market.outcome_yes_price, market.outcome_no_price, market_id),
+                    )
 
                 log.info(
                     "resolution.detected",
@@ -315,11 +316,11 @@ class ResolutionTracker:
                 token_scope=held_token, is_paper_scope=0,
                 override_exit_price=exit_price,
             )
-            await self._db.execute(
-                "UPDATE markets SET active = 0 WHERE id = ?",
-                (row["market_id"],),
-            )
-            await self._db.commit()
+            async with self._db.transaction():
+                await self._db.execute(
+                    "UPDATE markets SET active = 0 WHERE id = ?",
+                    (row["market_id"],),
+                )
             if prior is None:
                 log.info(
                     "resolution.venue_settled",
