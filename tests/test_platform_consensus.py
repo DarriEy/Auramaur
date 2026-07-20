@@ -6,8 +6,6 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from auramaur.broker.pnl import PnLTracker
 from auramaur.db.database import Database
 from auramaur.exchange.models import (
@@ -94,281 +92,290 @@ def _risk(approved=True, size=8.0):
     return rm
 
 
-@pytest.mark.asyncio
-async def test_platform_consensus_triggers_buy_yes():
-    db = await Database.connect(":memory:", ensure_schema=True)
-    try:
-        # Create schema for signals and portfolio
-        await db.execute(
-            """CREATE TABLE IF NOT EXISTS signals (
-                id INTEGER PRIMARY KEY,
-                market_id TEXT,
-                claude_prob REAL,
-                claude_confidence TEXT,
-                market_prob REAL,
-                edge REAL,
-                second_opinion_prob REAL,
-                divergence REAL,
-                evidence_summary TEXT,
-                action TEXT,
-                strategy_source TEXT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )"""
-        )
-        await db.execute(
-            """CREATE TABLE IF NOT EXISTS portfolio (
-                market_id TEXT PRIMARY KEY,
-                side TEXT,
-                size REAL,
-                avg_price REAL,
-                current_price REAL,
-                category TEXT,
-                token TEXT,
-                token_id TEXT,
-                is_paper INTEGER DEFAULT 1
-            )"""
-        )
-        await db.execute(
-            """CREATE TABLE IF NOT EXISTS markets (
-                id TEXT PRIMARY KEY,
-                exchange TEXT,
-                condition_id TEXT,
-                question TEXT,
-                description TEXT,
-                category TEXT,
-                active INTEGER,
-                outcome_yes_price REAL,
-                outcome_no_price REAL,
-                volume REAL,
-                liquidity REAL,
-                last_updated TEXT
-            )"""
-        )
-        await db.commit()
+def test_platform_consensus_triggers_buy_yes():
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            # Create schema for signals and portfolio
+            await db.execute(
+                """CREATE TABLE IF NOT EXISTS signals (
+                    id INTEGER PRIMARY KEY,
+                    market_id TEXT,
+                    claude_prob REAL,
+                    claude_confidence TEXT,
+                    market_prob REAL,
+                    edge REAL,
+                    second_opinion_prob REAL,
+                    divergence REAL,
+                    evidence_summary TEXT,
+                    action TEXT,
+                    strategy_source TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                )"""
+            )
+            await db.execute(
+                """CREATE TABLE IF NOT EXISTS portfolio (
+                    market_id TEXT PRIMARY KEY,
+                    side TEXT,
+                    size REAL,
+                    avg_price REAL,
+                    current_price REAL,
+                    category TEXT,
+                    token TEXT,
+                    token_id TEXT,
+                    is_paper INTEGER DEFAULT 1
+                )"""
+            )
+            await db.execute(
+                """CREATE TABLE IF NOT EXISTS markets (
+                    id TEXT PRIMARY KEY,
+                    exchange TEXT,
+                    condition_id TEXT,
+                    question TEXT,
+                    description TEXT,
+                    category TEXT,
+                    active INTEGER,
+                    outcome_yes_price REAL,
+                    outcome_no_price REAL,
+                    volume REAL,
+                    liquidity REAL,
+                    last_updated TEXT
+                )"""
+            )
+            await db.commit()
 
-        # Target: Market YES price is 0.50. Consensus forecasts YES is 0.75.
-        # Edge is 0.25 > 0.05 min_edge + fee.
-        # It should trigger BUY YES.
-        market = _market(yes=0.50)
-        settings = _settings()
-        ex = _exchange()
-        rm = _risk()
-        disc = MagicMock()
-        disc.get_markets = AsyncMock(return_value=[market])
+            # Target: Market YES price is 0.50. Consensus forecasts YES is 0.75.
+            # Edge is 0.25 > 0.05 min_edge + fee.
+            # It should trigger BUY YES.
+            market = _market(yes=0.50)
+            settings = _settings()
+            ex = _exchange()
+            rm = _risk()
+            disc = MagicMock()
+            disc.get_markets = AsyncMock(return_value=[market])
 
-        pillar = PlatformConsensusPillar(
-            db=db,
-            settings=settings,
-            discovery=disc,
-            exchange=ex,
-            risk_manager=rm,
-            pnl_tracker=PnLTracker(db, settings),
-            calibration=MagicMock(),
-        )
+            pillar = PlatformConsensusPillar(
+                db=db,
+                settings=settings,
+                discovery=disc,
+                exchange=ex,
+                risk_manager=rm,
+                pnl_tracker=PnLTracker(db, settings),
+                calibration=MagicMock(),
+            )
 
-        manifold_news = NewsItem(
-            id="man-1",
-            source="manifold",
-            title="[Manifold: 75%] Will SpaceX launch Starship in July?",
-            content="Community forecast is 75%",
-            url="https://manifold.markets/space",
-        )
+            manifold_news = NewsItem(
+                id="man-1",
+                source="manifold",
+                title="[Manifold: 75%] Will SpaceX launch Starship in July?",
+                content="Community forecast is 75%",
+                url="https://manifold.markets/space",
+            )
 
-        with patch.object(pillar._manifold, "fetch", AsyncMock(return_value=[manifold_news])), \
-             patch.object(pillar._metaculus, "fetch", AsyncMock(return_value=[])):
-            entered = await pillar.run_once()
+            with patch.object(pillar._manifold, "fetch", AsyncMock(return_value=[manifold_news])), \
+                 patch.object(pillar._metaculus, "fetch", AsyncMock(return_value=[])):
+                entered = await pillar.run_once()
 
-            assert entered == 1
-            # Check DB signals
-            sig_row = await db.fetchone("SELECT * FROM signals WHERE market_id = ?", (market.id,))
-            assert sig_row is not None
-            assert sig_row["claude_prob"] == 0.75
-            assert sig_row["action"] == "BUY"
-            assert sig_row["strategy_source"] == "platform_consensus"
-    finally:
-        await db.close()
+                assert entered == 1
+                # Check DB signals
+                sig_row = await db.fetchone("SELECT * FROM signals WHERE market_id = ?", (market.id,))
+                assert sig_row is not None
+                assert sig_row["claude_prob"] == 0.75
+                assert sig_row["action"] == "BUY"
+                assert sig_row["strategy_source"] == "platform_consensus"
+        finally:
+            await db.close()
 
-
-@pytest.mark.asyncio
-async def test_platform_consensus_triggers_buy_no():
-    db = await Database.connect(":memory:", ensure_schema=True)
-    try:
-        # Create tables
-        await db.execute(
-            """CREATE TABLE IF NOT EXISTS signals (
-                id INTEGER PRIMARY KEY,
-                market_id TEXT,
-                claude_prob REAL,
-                claude_confidence TEXT,
-                market_prob REAL,
-                edge REAL,
-                second_opinion_prob REAL,
-                divergence REAL,
-                evidence_summary TEXT,
-                action TEXT,
-                strategy_source TEXT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )"""
-        )
-        await db.execute(
-            """CREATE TABLE IF NOT EXISTS portfolio (
-                market_id TEXT PRIMARY KEY,
-                side TEXT,
-                size REAL,
-                avg_price REAL,
-                current_price REAL,
-                category TEXT,
-                token TEXT,
-                token_id TEXT,
-                is_paper INTEGER DEFAULT 1
-            )"""
-        )
-        await db.execute(
-            """CREATE TABLE IF NOT EXISTS markets (
-                id TEXT PRIMARY KEY,
-                exchange TEXT,
-                condition_id TEXT,
-                question TEXT,
-                description TEXT,
-                category TEXT,
-                active INTEGER,
-                outcome_yes_price REAL,
-                outcome_no_price REAL,
-                volume REAL,
-                liquidity REAL,
-                last_updated TEXT
-            )"""
-        )
-        await db.commit()
-
-        # Target: Market YES price is 0.50. Consensus forecasts YES is 0.25 (No is 0.75).
-        # Edge is 0.25 > 0.05 min_edge + fee.
-        # It should trigger BUY NO (which is recommended_side=OrderSide.SELL)
-        market = _market(yes=0.50)
-        settings = _settings()
-        ex = _exchange()
-        rm = _risk()
-        disc = MagicMock()
-        disc.get_markets = AsyncMock(return_value=[market])
-
-        pillar = PlatformConsensusPillar(
-            db=db,
-            settings=settings,
-            discovery=disc,
-            exchange=ex,
-            risk_manager=rm,
-            pnl_tracker=PnLTracker(db, settings),
-            calibration=MagicMock(),
-        )
-
-        metaculus_news = NewsItem(
-            id="meta-1",
-            source="metaculus",
-            title="[Metaculus: 25%] Will SpaceX launch Starship in July?",
-            content="Community forecast is 25%",
-            url="https://metaculus.com/space",
-        )
-
-        with patch.object(pillar._manifold, "fetch", AsyncMock(return_value=[])), \
-             patch.object(pillar._metaculus, "fetch", AsyncMock(return_value=[metaculus_news])):
-            entered = await pillar.run_once()
-
-            assert entered == 1
-            # Check DB signals
-            sig_row = await db.fetchone("SELECT * FROM signals WHERE market_id = ?", (market.id,))
-            assert sig_row is not None
-            assert sig_row["claude_prob"] == 0.25
-            assert sig_row["action"] == "SELL"
-            assert sig_row["strategy_source"] == "platform_consensus"
-    finally:
-        await db.close()
+    asyncio.run(run())
 
 
-@pytest.mark.asyncio
-async def test_platform_consensus_insufficient_edge():
-    db = await Database.connect(":memory:", ensure_schema=True)
-    try:
-        # Create tables
-        await db.execute(
-            """CREATE TABLE IF NOT EXISTS signals (
-                id INTEGER PRIMARY KEY,
-                market_id TEXT,
-                claude_prob REAL,
-                claude_confidence TEXT,
-                market_prob REAL,
-                edge REAL,
-                second_opinion_prob REAL,
-                divergence REAL,
-                evidence_summary TEXT,
-                action TEXT,
-                strategy_source TEXT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )"""
-        )
-        await db.execute(
-            """CREATE TABLE IF NOT EXISTS portfolio (
-                market_id TEXT PRIMARY KEY,
-                side TEXT,
-                size REAL,
-                avg_price REAL,
-                current_price REAL,
-                category TEXT,
-                token TEXT,
-                token_id TEXT,
-                is_paper INTEGER DEFAULT 1
-            )"""
-        )
-        await db.execute(
-            """CREATE TABLE IF NOT EXISTS markets (
-                id TEXT PRIMARY KEY,
-                exchange TEXT,
-                condition_id TEXT,
-                question TEXT,
-                description TEXT,
-                category TEXT,
-                active INTEGER,
-                outcome_yes_price REAL,
-                outcome_no_price REAL,
-                volume REAL,
-                liquidity REAL,
-                last_updated TEXT
-            )"""
-        )
-        await db.commit()
+def test_platform_consensus_triggers_buy_no():
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            # Create tables
+            await db.execute(
+                """CREATE TABLE IF NOT EXISTS signals (
+                    id INTEGER PRIMARY KEY,
+                    market_id TEXT,
+                    claude_prob REAL,
+                    claude_confidence TEXT,
+                    market_prob REAL,
+                    edge REAL,
+                    second_opinion_prob REAL,
+                    divergence REAL,
+                    evidence_summary TEXT,
+                    action TEXT,
+                    strategy_source TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                )"""
+            )
+            await db.execute(
+                """CREATE TABLE IF NOT EXISTS portfolio (
+                    market_id TEXT PRIMARY KEY,
+                    side TEXT,
+                    size REAL,
+                    avg_price REAL,
+                    current_price REAL,
+                    category TEXT,
+                    token TEXT,
+                    token_id TEXT,
+                    is_paper INTEGER DEFAULT 1
+                )"""
+            )
+            await db.execute(
+                """CREATE TABLE IF NOT EXISTS markets (
+                    id TEXT PRIMARY KEY,
+                    exchange TEXT,
+                    condition_id TEXT,
+                    question TEXT,
+                    description TEXT,
+                    category TEXT,
+                    active INTEGER,
+                    outcome_yes_price REAL,
+                    outcome_no_price REAL,
+                    volume REAL,
+                    liquidity REAL,
+                    last_updated TEXT
+                )"""
+            )
+            await db.commit()
 
-        # Target: Market YES price is 0.50. Consensus is 0.52. Edge is 0.02 < 0.05 min_edge.
-        market = _market(yes=0.50)
-        settings = _settings()
-        ex = _exchange()
-        rm = _risk()
-        disc = MagicMock()
-        disc.get_markets = AsyncMock(return_value=[market])
+            # Target: Market YES price is 0.50. Consensus forecasts YES is 0.25 (No is 0.75).
+            # Edge is 0.25 > 0.05 min_edge + fee.
+            # It should trigger BUY NO (which is recommended_side=OrderSide.SELL)
+            market = _market(yes=0.50)
+            settings = _settings()
+            ex = _exchange()
+            rm = _risk()
+            disc = MagicMock()
+            disc.get_markets = AsyncMock(return_value=[market])
 
-        pillar = PlatformConsensusPillar(
-            db=db,
-            settings=settings,
-            discovery=disc,
-            exchange=ex,
-            risk_manager=rm,
-            pnl_tracker=PnLTracker(db, settings),
-            calibration=MagicMock(),
-        )
+            pillar = PlatformConsensusPillar(
+                db=db,
+                settings=settings,
+                discovery=disc,
+                exchange=ex,
+                risk_manager=rm,
+                pnl_tracker=PnLTracker(db, settings),
+                calibration=MagicMock(),
+            )
 
-        manifold_news = NewsItem(
-            id="man-1",
-            source="manifold",
-            title="[Manifold: 52%] Will SpaceX launch Starship in July?",
-            content="Community forecast is 52%",
-            url="https://manifold.markets/space",
-        )
+            metaculus_news = NewsItem(
+                id="meta-1",
+                source="metaculus",
+                title="[Metaculus: 25%] Will SpaceX launch Starship in July?",
+                content="Community forecast is 25%",
+                url="https://metaculus.com/space",
+            )
 
-        with patch.object(pillar._manifold, "fetch", AsyncMock(return_value=[manifold_news])), \
-             patch.object(pillar._metaculus, "fetch", AsyncMock(return_value=[])):
-            entered = await pillar.run_once()
+            with patch.object(pillar._manifold, "fetch", AsyncMock(return_value=[])), \
+                 patch.object(pillar._metaculus, "fetch", AsyncMock(return_value=[metaculus_news])):
+                entered = await pillar.run_once()
 
-            assert entered == 0
-            # DB should have no signal
-            sig_row = await db.fetchone("SELECT * FROM signals WHERE market_id = ?", (market.id,))
-            assert sig_row is None
-    finally:
-        await db.close()
+                assert entered == 1
+                # Check DB signals
+                sig_row = await db.fetchone("SELECT * FROM signals WHERE market_id = ?", (market.id,))
+                assert sig_row is not None
+                assert sig_row["claude_prob"] == 0.25
+                assert sig_row["action"] == "SELL"
+                assert sig_row["strategy_source"] == "platform_consensus"
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_platform_consensus_insufficient_edge():
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            # Create tables
+            await db.execute(
+                """CREATE TABLE IF NOT EXISTS signals (
+                    id INTEGER PRIMARY KEY,
+                    market_id TEXT,
+                    claude_prob REAL,
+                    claude_confidence TEXT,
+                    market_prob REAL,
+                    edge REAL,
+                    second_opinion_prob REAL,
+                    divergence REAL,
+                    evidence_summary TEXT,
+                    action TEXT,
+                    strategy_source TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                )"""
+            )
+            await db.execute(
+                """CREATE TABLE IF NOT EXISTS portfolio (
+                    market_id TEXT PRIMARY KEY,
+                    side TEXT,
+                    size REAL,
+                    avg_price REAL,
+                    current_price REAL,
+                    category TEXT,
+                    token TEXT,
+                    token_id TEXT,
+                    is_paper INTEGER DEFAULT 1
+                )"""
+            )
+            await db.execute(
+                """CREATE TABLE IF NOT EXISTS markets (
+                    id TEXT PRIMARY KEY,
+                    exchange TEXT,
+                    condition_id TEXT,
+                    question TEXT,
+                    description TEXT,
+                    category TEXT,
+                    active INTEGER,
+                    outcome_yes_price REAL,
+                    outcome_no_price REAL,
+                    volume REAL,
+                    liquidity REAL,
+                    last_updated TEXT
+                )"""
+            )
+            await db.commit()
+
+            # Target: Market YES price is 0.50. Consensus is 0.52. Edge is 0.02 < 0.05 min_edge.
+            market = _market(yes=0.50)
+            settings = _settings()
+            ex = _exchange()
+            rm = _risk()
+            disc = MagicMock()
+            disc.get_markets = AsyncMock(return_value=[market])
+
+            pillar = PlatformConsensusPillar(
+                db=db,
+                settings=settings,
+                discovery=disc,
+                exchange=ex,
+                risk_manager=rm,
+                pnl_tracker=PnLTracker(db, settings),
+                calibration=MagicMock(),
+            )
+
+            manifold_news = NewsItem(
+                id="man-1",
+                source="manifold",
+                title="[Manifold: 52%] Will SpaceX launch Starship in July?",
+                content="Community forecast is 52%",
+                url="https://manifold.markets/space",
+            )
+
+            with patch.object(pillar._manifold, "fetch", AsyncMock(return_value=[manifold_news])), \
+                 patch.object(pillar._metaculus, "fetch", AsyncMock(return_value=[])):
+                entered = await pillar.run_once()
+
+                assert entered == 0
+                # DB should have no signal
+                sig_row = await db.fetchone("SELECT * FROM signals WHERE market_id = ?", (market.id,))
+                assert sig_row is None
+        finally:
+            await db.close()
+
+    asyncio.run(run())
