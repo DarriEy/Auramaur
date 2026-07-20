@@ -1,0 +1,142 @@
+"""Single state-gathering loop shared by every dashboard client.
+
+One broker per process owns the refresh cadence, so N open browser tabs cost
+the same DB/venue load as one. It also owns degraded-mode behavior: the
+service starts — and stays up — with a missing or schemaless database,
+reporting the reason in its envelope instead of 500ing, and recovers on its
+own the moment the bot creates real state. The dashboard's job is to make the
+system legible; that must extend to the dashboard's own failure modes.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from datetime import datetime, timezone
+
+from auramaur.monitoring import cockpit
+from auramaur.web import queries
+from auramaur.web.db import ReadOnlyDatabase
+from auramaur.web.serialize import serialize_state
+from config.settings import Settings
+
+# Kept under gather_state's 20s venue-cache staleness check so the state loop
+# never fetches venue balances inline (those calls carry 8s timeouts each and
+# would stall first paint).
+VENUE_REFRESH_SECONDS = 15.0
+
+
+class StateBroker:
+    def __init__(
+        self,
+        db: ReadOnlyDatabase,
+        settings: Settings,
+        refresh_seconds: float = 2.0,
+    ):
+        self.db = db
+        self.settings = settings
+        self.refresh_seconds = refresh_seconds
+        # last GOOD {"paper": ..., "live": ...} — kept through errors
+        self.latest: dict | None = None
+        self.error: str | None = None
+        self.updated_at: str | None = None
+        # Primed bal_ts: gather_state must never see a stale cache and fetch
+        # venue balances on the request path; _venue_loop owns that entirely.
+        self._cache: dict = {"bal_ts": time.time(), "venues": {}}
+        self._first_tick = asyncio.Event()
+        self._tasks: list[asyncio.Task] = []
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def start(self) -> None:
+        self._tasks = [
+            asyncio.create_task(self._state_loop()),
+            asyncio.create_task(self._venue_loop()),
+        ]
+
+    async def stop(self) -> None:
+        for task in self._tasks:
+            task.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        await self.db.close()
+
+    async def wait_first(self, timeout: float = 15.0) -> None:
+        """Block until the first gather attempt has finished (ok or not)."""
+        try:
+            await asyncio.wait_for(self._first_tick.wait(), timeout)
+        except TimeoutError:
+            pass
+
+    # -- the envelope every endpoint serves ---------------------------------
+
+    def envelope(self) -> dict:
+        # "Armed" mode (the two deliberate gates), independent of the kill
+        # switch — a halt is its own banner, not a mode change.
+        armed_live = self.settings.auramaur_live and self.settings.execution.live
+        return {
+            "ok": self.error is None and self.latest is not None,
+            "error": self.error,
+            "updated_at": self.updated_at,
+            "bot_mode": "live" if armed_live else "paper",
+            "books": self.latest,
+        }
+
+    # -- loops --------------------------------------------------------------
+
+    async def _gather_book(self, book: str) -> dict:
+        state = serialize_state(
+            await cockpit.gather_state(self.db, self.settings, self._cache, book=book)
+        )
+        flag = 0 if book == "live" else 1
+        state["strategies"] = await queries.strategy_breakdown(self.db, flag)
+        state["categories"] = await queries.category_exposure(self.db, flag)
+        if book == "paper":
+            # Kraken's directional paper book lives in its own table and is
+            # invisible to the portfolio query — surface it explicitly.
+            state["kraken_paper"] = await queries.kraken_paper_positions(self.db)
+        return state
+
+    async def _state_loop(self) -> None:
+        while True:
+            try:
+                if not self.db.connected:
+                    await self.db.connect()
+                self.latest = {
+                    "paper": await self._gather_book("paper"),
+                    "live": await self._gather_book("live"),
+                }
+                self.error = None
+                self.updated_at = datetime.now(timezone.utc).isoformat()
+            except Exception as exc:
+                self.error = self._describe(exc)
+                # Reconnect from scratch next tick — covers a DB that appears,
+                # is replaced, or was mid-creation on the first attempt.
+                await self.db.close()
+            self._first_tick.set()
+            await asyncio.sleep(self.refresh_seconds)
+
+    async def _venue_loop(self) -> None:
+        while True:
+            # Stamp BEFORE fetching too: even a slow fetch keeps the cache age
+            # under gather_state's threshold, so it never fetches inline.
+            self._cache["bal_ts"] = time.time()
+            try:
+                self._cache["venues"] = await cockpit.venue_balances(self.settings)
+            except Exception:
+                pass  # keep the previous balances; state must not depend on venues
+            self._cache["bal_ts"] = time.time()
+            await asyncio.sleep(VENUE_REFRESH_SECONDS)
+
+    def _describe(self, exc: Exception) -> str:
+        msg = str(exc)
+        if "unable to open database" in msg:
+            return (
+                f"database not found or unreadable at {self.db.db_path} — "
+                "start the bot once to create it, or set AURAMAUR_DB_PATH"
+            )
+        if "no such table" in msg:
+            return (
+                f"database at {self.db.db_path} has no bot schema ({msg}) — "
+                "point AURAMAUR_DB_PATH at the bot's real auramaur.db"
+            )
+        return f"{type(exc).__name__}: {msg}"

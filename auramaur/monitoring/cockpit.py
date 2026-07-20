@@ -114,21 +114,35 @@ def recent_activity(lines: list[dict], limit: int = 12) -> list[tuple[str, str]]
 async def _portfolio_pnl(db, settings, is_paper_flag: int) -> dict:
     """Authoritative positions + P&L, ported from the old dashboard path.
 
-    P&L = resolved (live only) + realized cost-basis + unrealized mark-to-market.
-    Deliberately does NOT sum ``trades.pnl`` — that legacy mirror field is
-    unreliable, which is exactly why the cockpit and dashboard used to disagree.
+    P&L = resolved (live book only) + realized cost-basis + unrealized
+    mark-to-market. Deliberately does NOT sum ``trades.pnl`` — that legacy
+    mirror field is unreliable, which is exactly why the cockpit and dashboard
+    used to disagree. Which components apply is keyed off ``is_paper_flag``
+    (the BOOK being read), not the process's own live gates — the web
+    dashboard reads either book from a paper-gated process.
     """
+    live_book = is_paper_flag == 0
+    # cost_basis PK is (market_id, is_paper, token) — the join MUST match all
+    # three. Joining without token fans each portfolio row out per cost_basis
+    # side when a market holds both YES and NO, duplicating positions and
+    # double-counting P&L (found via the web UI's duplicate-key warning).
     rows = await db.fetchall(
         """SELECT p.*, m.question, cb.avg_cost AS cb_avg_cost FROM portfolio p
            LEFT JOIN markets m ON p.market_id = m.id
            LEFT JOIN cost_basis cb ON cb.market_id = p.market_id
                                   AND cb.is_paper = p.is_paper
+                                  AND cb.token = p.token
            WHERE p.is_paper = ?""",
         (is_paper_flag,),
     )
     positions = [
         {
             "market_id": r["market_id"], "question": r["question"] or r["market_id"],
+            # token matters for identity: one market can hold BOTH YES and NO
+            # (portfolio PK is market_id+is_paper+token), so market_id+side
+            # alone does not identify a row.
+            "token": r["token"],
+            "exchange": r["exchange"] or "polymarket",
             "side": r["side"], "size": r["size"], "avg_price": r["avg_price"],
             "current_price": r["current_price"] or r["avg_price"],
             "pnl": (
@@ -151,6 +165,7 @@ async def _portfolio_pnl(db, settings, is_paper_flag: int) -> dict:
             "market_id": r["market_id"], "question": r["question"] or r["market_id"],
             "claude_prob": r["claude_prob"], "market_prob": r["market_prob"],
             "edge": r["edge"], "action": r["action"] or "",
+            "strategy_source": r["strategy_source"] or "llm",
         }
         for r in sig_rows
     ]
@@ -163,15 +178,15 @@ async def _portfolio_pnl(db, settings, is_paper_flag: int) -> dict:
     # Authoritative total P&L.
     resolved_component_sql = (
         "COALESCE((SELECT SUM(r.pnl) FROM resolution_pnl r), 0)"
-        if settings.is_live else "0"
+        if live_book else "0"
     )
     resolved_exclusion_sql = (
         "AND cb.market_id NOT IN (SELECT market_id FROM resolution_pnl)"
-        if settings.is_live else ""
+        if live_book else ""
     )
     portfolio_resolved_exclusion_sql = (
         "AND p.market_id NOT IN (SELECT market_id FROM resolution_pnl)"
-        if settings.is_live else ""
+        if live_book else ""
     )
     pnl_row = await db.fetchone(
         f"""
@@ -189,6 +204,7 @@ async def _portfolio_pnl(db, settings, is_paper_flag: int) -> dict:
                 FROM portfolio p
                 LEFT JOIN cost_basis cb ON cb.market_id = p.market_id
                                       AND cb.is_paper = p.is_paper
+                                      AND cb.token = p.token
                 WHERE p.is_paper = ?
                   {portfolio_resolved_exclusion_sql}
             ), 0) AS total_pnl
@@ -201,7 +217,7 @@ async def _portfolio_pnl(db, settings, is_paper_flag: int) -> dict:
         "SELECT max_drawdown FROM daily_stats ORDER BY date DESC LIMIT 1")
     drawdown = dd_row["max_drawdown"] if dd_row else 0
 
-    if settings.is_live:
+    if live_book:
         balance = None  # on-chain cash is shown by the running bot's syncer
     else:
         balance = settings.execution.paper_initial_balance + total_pnl
@@ -218,24 +234,31 @@ async def _portfolio_pnl(db, settings, is_paper_flag: int) -> dict:
     }
 
 
-async def gather_state(db, settings, cache: dict | None = None) -> dict:
+async def gather_state(db, settings, cache: dict | None = None,
+                       book: str | None = None) -> dict:
     """Collect cockpit state. `cache` persists venue balances between refreshes.
 
     Pass ``cache=None`` for a one-shot snapshot (e.g. ``status``); venue
-    balances are then always fetched fresh.
+    balances are then always fetched fresh. ``book`` ("paper"/"live") reads a
+    specific book regardless of the process's own gates — the web dashboard
+    uses it to serve both views; ``None`` keeps the TUI behavior (the book the
+    bot is actually trading).
     """
     now = datetime.now(timezone.utc)
-    is_paper_flag = 0 if settings.is_live else 1
+    if book is None:
+        is_paper_flag = 0 if settings.is_live else 1
+    else:
+        is_paper_flag = 0 if book == "live" else 1
 
     pf = await _portfolio_pnl(db, settings, is_paper_flag)
 
     # Live venue balances — refreshed at most every 20s (rate-limit friendly).
     if cache is None:
-        venues = await _venue_balances(settings)
+        venues = await venue_balances(settings)
     else:
         if time.time() - cache.get("bal_ts", 0) > 20:
             cache["bal_ts"] = time.time()
-            cache["venues"] = await _venue_balances(settings)
+            cache["venues"] = await venue_balances(settings)
         venues = cache.get("venues", {})
 
     lines = read_log_tail(settings.logging.file)
@@ -253,7 +276,9 @@ async def gather_state(db, settings, cache: dict | None = None) -> dict:
     }
 
 
-async def _venue_balances(settings) -> dict:
+async def venue_balances(settings) -> dict:
+    """Fetch live venue balances. Public: the web dashboard's broker refreshes
+    these on its own cadence so they never block a state request."""
     import asyncio
     out: dict[str, str] = {}
     if settings.kalshi.enabled:
