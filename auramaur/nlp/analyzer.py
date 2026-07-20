@@ -223,6 +223,8 @@ class ClaudeAnalyzer:
         self,
         market: Market,
         evidence: list[NewsItem],
+        *,
+        pin_claude: bool = False,
     ) -> AnalysisResult:
         """Call Claude (primary) to estimate the probability."""
         evidence_text = format_evidence(evidence)
@@ -233,7 +235,8 @@ class ClaudeAnalyzer:
             evidence=evidence_text,
         )
 
-        raw = await self._call_llm(prompt, effort=self._settings.nlp.effort_primary)
+        raw = await self._call_llm(prompt, effort=self._settings.nlp.effort_primary,
+                                   pin_claude=pin_claude)
         parsed = _parse_claude_json(raw)
         return AnalysisResult(**parsed)
 
@@ -262,8 +265,16 @@ class ClaudeAnalyzer:
         market: Market,
         evidence: list[NewsItem],
         cache: NLPCache,
+        *,
+        pin_claude: bool = False,
     ) -> AnalysisResult:
-        """Full analysis pipeline: cache -> primary -> second opinion -> cache."""
+        """Full analysis pipeline: cache -> primary -> second opinion -> cache.
+
+        ``pin_claude=True`` pins the PRIMARY estimate to Claude against the
+        reserved budget slice (see _call_llm) — for callers whose signal is
+        worthless on fallback models (measured: the kraken directional read
+        flatlines at 0.5 on Gemini). The second opinion still routes freely.
+        """
         digest = _evidence_digest(evidence)
         cache_key = make_cache_key(market.question, digest)
 
@@ -278,7 +289,8 @@ class ClaudeAnalyzer:
         # 2. Primary estimate
         show_claude_thinking(market.id, "primary")
         try:
-            primary = await self.estimate_probability(market, evidence)
+            primary = await self.estimate_probability(
+                market, evidence, pin_claude=pin_claude)
         except Exception as e:
             log.warning("analyze.primary_failed", market_id=market.id, error=str(e))
             return AnalysisResult(

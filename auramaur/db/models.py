@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 30
+SCHEMA_VERSION = 32
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -749,6 +749,37 @@ CREATE TABLE IF NOT EXISTS kalshi_execution_samples (
 );
 CREATE INDEX IF NOT EXISTS idx_kalshi_execution_samples_market_time
     ON kalshi_execution_samples(market_id, observed_at);
+
+-- Interim-manager proposal queue: operator-proposed entries awaiting the
+-- pillar's charter/risk/ladder gauntlet. Terminal rows are the audit log.
+CREATE TABLE IF NOT EXISTS manager_proposals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    venue TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    side TEXT NOT NULL,
+    fair_prob REAL NOT NULL,
+    stake_usd REAL NOT NULL,
+    thesis TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    decided_at TEXT,
+    -- Structured thesis (v32): the compiler contract. See docs/INTERIM_MANAGER.md.
+    thesis_class TEXT NOT NULL DEFAULT 'unclassified',
+    confidence_lo REAL,
+    confidence_hi REAL,
+    max_entry_price REAL,
+    catalyst TEXT NOT NULL DEFAULT '',
+    invalidation TEXT NOT NULL DEFAULT '',
+    sunset_at TEXT,
+    robust_edge REAL,
+    decision_price REAL
+);
+CREATE INDEX IF NOT EXISTS idx_manager_proposals_status
+    ON manager_proposals(status, created_at);
+-- idx_manager_proposals_class is created in _init_schema AFTER migrations:
+-- it indexes a v32-added column, and this DDL runs before migrations on
+-- existing databases (the 2026-07-19 v32 rollout crashed startup this way).
 
 CREATE TABLE IF NOT EXISTS redemptions (
     condition_id TEXT PRIMARY KEY,

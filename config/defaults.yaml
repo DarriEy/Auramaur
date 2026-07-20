@@ -549,6 +549,32 @@ entailment_arb:
   # per-series; violations must clear BOTH legs' Kalshi taker fees + buffer.
   kalshi_ladders_enabled: true
 
+interim_manager:
+  # Operator-proposed interim book management (docs/INTERIM_MANAGER.md).
+  # The disciplined channel for deploying idle balance while strategies earn
+  # graduation: proposals via `auramaur manager propose`, executed only after
+  # the charter rules, full risk gateway, and the graduation ladder (which
+  # paper-forces the manager until it earns live like everyone else).
+  # Delegates per category to graduated cells; sunsets once
+  # sunset_after_live_cells non-exempt strategy cells are live/probation.
+  enabled: false
+  paper: true
+  interval_seconds: 900
+  stake_usd: 10.0
+  max_entries_per_cycle: 2
+  max_open_positions: 10
+  proposal_ttl_hours: 48.0
+  sunset_after_live_cells: 3
+  # Robust-edge gate: fair - executable - uncertainty - fees - slippage -
+  # liquidity - correlation must clear this. Conservative about apparent
+  # edges built on weak estimates (docs/INTERIM_MANAGER.md).
+  min_robust_edge: 0.05
+  default_uncertainty_buffer: 0.04
+  slippage_buffer: 0.01
+  thin_liquidity_usd: 200.0
+  liquidity_penalty: 0.02
+  correlation_penalty_per_position: 0.01
+
 econ_indicator:
   # Data-driven Kalshi econ-indicator bin pricing: price "Above X" ladders from
   # FRED history (random-walk nowcast + change-vol, sigma floored), trade bins

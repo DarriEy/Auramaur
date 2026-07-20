@@ -694,6 +694,36 @@ class VolAnchorConfig(BaseModel):
     exclude_categories: list[str] = []
 
 
+class InterimManagerConfig(BaseModel):
+    """Operator-proposed interim book management (strategy/interim_manager.py).
+
+    Disabled and paper-forced by default; the graduation ladder additionally
+    paper-forces unproven cells regardless. Delegates per category to any
+    graduated strategy cell and sunsets outright once enough cells graduate.
+    See docs/INTERIM_MANAGER.md for the charter and evaluation contract.
+    """
+
+    enabled: bool = False
+    paper: bool = True
+    interval_seconds: int = 900
+    stake_usd: float = 10.0
+    max_entries_per_cycle: int = 2
+    max_open_positions: int = 10
+    proposal_ttl_hours: float = 48.0
+    sunset_after_live_cells: int = 3
+    # Robust-edge gate (docs/INTERIM_MANAGER.md "decision rule"): the edge that
+    # must survive after subtracting every cost and uncertainty haircut.
+    min_robust_edge: float = 0.05
+    # Haircut when no confidence interval is supplied (else CI half-width).
+    default_uncertainty_buffer: float = 0.04
+    slippage_buffer: float = 0.01
+    # Markets with less liquidity than this get the thin-liquidity haircut.
+    thin_liquidity_usd: float = 200.0
+    liquidity_penalty: float = 0.02
+    # Haircut per already-open manager position in the same category.
+    correlation_penalty_per_position: float = 0.01
+
+
 class EconIndicatorConfig(BaseModel):
     """Data-driven Kalshi economic-indicator bin pricing (strategy/econ_indicator.py).
 
@@ -1590,6 +1620,7 @@ class Settings(BaseSettings):
             **_DEFAULTS.get("information_graduation", {})))
     entailment_arb: EntailmentArbConfig = Field(default_factory=lambda: EntailmentArbConfig(**_DEFAULTS.get("entailment_arb", {})))
     cross_venue_arb: CrossVenueArbConfig = Field(default_factory=lambda: CrossVenueArbConfig(**_DEFAULTS.get("cross_venue_arb", {})))
+    interim_manager: InterimManagerConfig = Field(default_factory=lambda: InterimManagerConfig(**_DEFAULTS.get("interim_manager", {})))
     econ_indicator: EconIndicatorConfig = Field(default_factory=lambda: EconIndicatorConfig(**_DEFAULTS.get("econ_indicator", {})))
     long_horizon: LongHorizonConfig = Field(default_factory=lambda: LongHorizonConfig(**_DEFAULTS.get("long_horizon", {})))
     agent_trader: AgentTraderConfig = Field(default_factory=lambda: AgentTraderConfig(**_DEFAULTS.get("agent_trader", {})))
