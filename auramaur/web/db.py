@@ -29,6 +29,8 @@ class ReadOnlyDatabase:
         return self._db is not None
 
     async def connect(self) -> None:
+        if self._db is not None:
+            return
         # as_uri() yields file:///C:/... on Windows and file:///app/... on
         # Linux — both forms SQLite accepts; string-built URIs with
         # backslashes are not portable.

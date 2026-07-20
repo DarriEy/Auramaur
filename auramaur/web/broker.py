@@ -97,10 +97,17 @@ class StateBroker:
         return state
 
     async def _state_loop(self) -> None:
+        # The connection is opened per CYCLE and closed after, never held.
+        # A long-lived mode=ro connection to the WAL database held a
+        # persistent read lock on the main file that STARVED the bot's
+        # writers (observed 2026-07-20: /proc/locks showed this process
+        # pinning SQLite's shared-lock byte range while every position-sync
+        # cycle failed "database is locked"). Read-only must also mean
+        # contention-free: transient connections keep every lock as brief
+        # as the queries themselves.
         while True:
             try:
-                if not self.db.connected:
-                    await self.db.connect()
+                await self.db.connect()
                 self.latest = {
                     "paper": await self._gather_book("paper"),
                     "live": await self._gather_book("live"),
@@ -109,7 +116,8 @@ class StateBroker:
                 self.updated_at = datetime.now(timezone.utc).isoformat()
             except Exception as exc:
                 self.error = self._describe(exc)
-                # Reconnect from scratch next tick — covers a DB that appears,
+            finally:
+                # Always drop the handle — also covers a DB that appears,
                 # is replaced, or was mid-creation on the first attempt.
                 await self.db.close()
             self._first_tick.set()
