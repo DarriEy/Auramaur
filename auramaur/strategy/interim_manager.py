@@ -80,6 +80,7 @@ class InterimManagerPillar:
 
         owned_categories = {category: strategy
                            for strategy, category in graduated}
+        await self._auto_propose(owned_categories)
         pending = await self._db.fetchall(
             """SELECT * FROM manager_proposals WHERE status = 'pending'
                ORDER BY created_at LIMIT ?""",
@@ -284,3 +285,85 @@ class InterimManagerPillar:
             return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
         except ValueError:
             return None
+
+    async def _auto_propose(self, owned: dict[str, str]) -> None:
+        """Author queue entries from strong calibrated signals (charter
+        amendment 2026-07-20). Confidence is operationalized: HIGH-confidence
+        source signal, calibrated edge above the floor, category not owned by
+        a graduate, market not already held or proposed. The proposal then
+        faces the identical gauntlet as an operator proposal — the CI width
+        is a configured, deliberately honest haircut, and the robust-edge
+        gate remains the arbiter. Capped per day; scored separately via the
+        proposer tag.
+        """
+        cfg = self._settings.interim_manager
+        if not cfg.auto_propose or self._calibration is None:
+            return
+        try:
+            row = await self._db.fetchone(
+                """SELECT COUNT(*) AS n FROM manager_proposals
+                   WHERE proposer = 'auto' AND created_at >= date('now')""")
+            if int(row["n"] or 0) >= cfg.auto_daily_cap:
+                return
+            budget = cfg.auto_daily_cap - int(row["n"] or 0)
+            signals = await self._db.fetchall(
+                """SELECT s.market_id, s.exchange, s.claude_prob, s.market_prob,
+                          s.evidence_summary, s.strategy_source,
+                          COALESCE(m.category, '') AS category
+                   FROM signals s LEFT JOIN markets m ON m.id = s.market_id
+                   WHERE s.claude_confidence = ?
+                     AND s.timestamp >= datetime('now', '-6 hours')
+                     AND s.market_id NOT IN
+                         (SELECT market_id FROM manager_proposals
+                           WHERE created_at >= datetime('now', '-48 hours'))
+                     AND s.market_id NOT IN
+                         (SELECT market_id FROM portfolio WHERE size > 0)
+                   ORDER BY s.timestamp DESC LIMIT 25""",
+                (cfg.auto_min_confidence,))
+            for sig in signals or []:
+                if budget <= 0:
+                    break
+                category = sig["category"] or ""
+                if category in owned:
+                    continue
+                exempt = set(self._settings.graduation.exempt_strategies)
+                if (sig["strategy_source"] or "") in exempt:
+                    continue  # structural strategies place their own orders
+                calibrated = await self._calibration.adjust(
+                    float(sig["claude_prob"]), category)
+                market_p = float(sig["market_prob"] or 0)
+                if not (0.0 < market_p < 1.0):
+                    continue
+                edge = calibrated - market_p
+                if abs(edge) < cfg.auto_min_calibrated_edge:
+                    continue
+                half = cfg.auto_ci_width / 2.0
+                lo = max(0.01, calibrated - half)
+                hi = min(0.99, calibrated + half)
+                side = "BUY" if edge > 0 else "SELL"
+                thesis = (
+                    f"[auto] Source {sig['strategy_source'] or 'llm'} HIGH-confidence "
+                    f"signal: raw {float(sig['claude_prob']):.2f} -> calibrated "
+                    f"{calibrated:.2f} vs market {market_p:.2f} "
+                    f"(edge {edge:+.2f} after Platt scaling on category "
+                    f"'{category or 'global'}'). Mechanism per source evidence: "
+                    f"{(sig['evidence_summary'] or '')[:200]}")
+                await self._db.execute(
+                    """INSERT INTO manager_proposals
+                       (venue, market_id, side, fair_prob, stake_usd, thesis,
+                        thesis_class, confidence_lo, confidence_hi,
+                        sunset_at, proposer)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,
+                               datetime('now', '+24 hours'), 'auto')""",
+                    (sig["exchange"] or "polymarket", sig["market_id"], side,
+                     round(calibrated, 4), cfg.auto_stake_usd, thesis,
+                     "forecast_divergence" if category in ("weather", "economics")
+                     else "unclassified", round(lo, 4), round(hi, 4)))
+                budget -= 1
+                log.info("interim_manager.auto_proposed",
+                         market_id=sig["market_id"], side=side,
+                         calibrated=round(calibrated, 3),
+                         market=round(market_p, 3), category=category)
+            await self._db.commit()
+        except Exception as e:  # noqa: BLE001 — authorship must not break the cycle
+            log.warning("interim_manager.auto_propose_error", error=str(e)[:150])

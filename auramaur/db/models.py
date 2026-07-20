@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 33
+SCHEMA_VERSION = 34
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -800,7 +800,10 @@ CREATE TABLE IF NOT EXISTS manager_proposals (
     invalidation TEXT NOT NULL DEFAULT '',
     sunset_at TEXT,
     robust_edge REAL,
-    decision_price REAL
+    decision_price REAL,
+    -- v34: who authored the thesis — 'operator' (CLI) or 'auto' (the
+    -- manager's own signal-derived proposals). Scored separately.
+    proposer TEXT NOT NULL DEFAULT 'operator'
 );
 CREATE INDEX IF NOT EXISTS idx_manager_proposals_status
     ON manager_proposals(status, created_at);
