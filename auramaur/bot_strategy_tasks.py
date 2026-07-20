@@ -494,3 +494,32 @@ class StrategyTaskMixin:
             if equity is not None:
                 await equity.close()
 
+    async def _task_platform_consensus(self) -> None:
+        """Periodic platform consensus follower (Metaculus / Manifold)."""
+        from auramaur.strategy.platform_consensus import PlatformConsensusPillar
+
+        pillar = PlatformConsensusPillar(
+            db=self._components.db,
+            settings=self.settings,
+            discovery=self._components.discovery,
+            exchange=self._components.exchange,
+            risk_manager=self._components.risk_manager,
+            pnl_tracker=self._components.pnl_tracker,
+            calibration=self._components.calibration,
+        )
+        interval = max(60, self.settings.platform_consensus.interval_seconds)
+        try:
+            while self._running:
+                if await self._check_kill_switch():
+                    return
+                try:
+                    await pillar.run_once()
+                except Exception as e:
+                    log.error("platform_consensus.cycle_error", error=str(e))
+                await asyncio.sleep(interval)
+        finally:
+            try:
+                await pillar.close()
+            except Exception as e:
+                log.warning("platform_consensus.close_error", error=str(e))
+

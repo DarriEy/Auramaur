@@ -29,6 +29,7 @@ from auramaur.strategy.protocols import ExecutionMode, NO_DIRECT_PLACE_MODES
 from auramaur.strategy.resolution_lens import ResolutionLensPillar
 from auramaur.strategy.arbitrage_scanner import ArbitrageScanner
 from auramaur.strategy.weather_temp import WeatherTempPillar
+from auramaur.strategy.platform_consensus import PlatformConsensusPillar
 
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -47,6 +48,7 @@ PILLARS = [
     (ArbitrageScanner, "auramaur/strategy/arbitrage_scanner.py"),
     (OddLotTenderPillar, "auramaur/strategy/oddlot_tender.py"),
     (IBKRETFPaperPillar, "auramaur/strategy/ibkr_etf_paper.py"),
+    (PlatformConsensusPillar, "auramaur/strategy/platform_consensus.py"),
 ]
 
 # NO_DIRECT_PLACE_MODES (single source of truth in protocols.py): the pillar must

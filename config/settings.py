@@ -413,7 +413,7 @@ class BiasHarvestConfig(BaseModel):
     confidence — by design.
     """
 
-    enabled: bool = False
+    enabled: bool = True
     paper: bool = True
     # Deep band only. The backtest's edge lived in 0.90-0.97 (won 99.3% of 151);
     # the shallow 0.80-0.90 tier has no favorite-longshot edge in practice — paper
@@ -463,6 +463,33 @@ class BiasHarvestConfig(BaseModel):
     # otherwise-eligible markets, modelling a realistic maker CAPTURE rate. The
     # real fill rate is THE risk to validate before any live-arm. 1.0 disables.
     paper_maker_fill_rate: float = 0.5
+
+
+class PlatformConsensusConfig(BaseModel):
+    """Platform consensus follower (strategy/platform_consensus.py).
+
+    Compares Polymarket and Kalshi prices against the community consensus
+    probabilities on Manifold Markets and Metaculus.
+
+    PAPER-FORCED by default: goes through the paper ledger to validate the edge.
+    """
+
+    enabled: bool = False
+    paper: bool = True
+    min_edge: float = 0.06
+    stake_usd: float = 10.0
+    max_open: int = 40
+    max_entries_per_cycle: int = 5
+    scan_limit: int = 200
+    min_liquidity: float = 1000.0
+    min_hours_to_resolution: float = 6.0
+    max_days_to_resolution: float = 45.0
+    match_threshold: float = 0.65
+    min_manifold_bettors: int = 30
+    min_manifold_liquidity: float = 1000.0
+    min_metaculus_forecasters: int = 15
+    interval_seconds: int = 600
+
 
 
 class InformedFlowConfig(BaseModel):
@@ -1661,6 +1688,7 @@ class Settings(BaseSettings):
     market_maker: MarketMakerConfig = Field(default_factory=lambda: MarketMakerConfig(**_DEFAULTS.get("market_maker", {})))
     technical: TechnicalConfig = Field(default_factory=lambda: TechnicalConfig(**_DEFAULTS.get("technical", {})))
     bias_harvest: BiasHarvestConfig = Field(default_factory=lambda: BiasHarvestConfig(**_DEFAULTS.get("bias_harvest", {})))
+    platform_consensus: PlatformConsensusConfig = Field(default_factory=lambda: PlatformConsensusConfig(**_DEFAULTS.get("platform_consensus", {})))
     graduation: GraduationConfig = Field(default_factory=lambda: GraduationConfig(**_DEFAULTS.get("graduation", {})))
     information_graduation: InformationGraduationConfig = Field(
         default_factory=lambda: InformationGraduationConfig(
