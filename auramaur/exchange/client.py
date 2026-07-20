@@ -383,9 +383,19 @@ class PolymarketClient:
             mode = getattr(self._settings.execution, "polymarket_geoblock_mode", "advisory")
             mode = mode if mode in {"advisory", "enforce"} else "advisory"
             if eligibility is not True:
-                log.warning("polymarket.geoblock_advisory",
-                            result="blocked" if eligibility is False else "unavailable",
-                            mode=mode)
+                # One WARN per fresh eligibility check (TTL-gated), not one
+                # per order — identical per-order advisories bury real
+                # warnings in the health panel.
+                fresh = getattr(self, "_geoblock_advisory_logged_at", None)                     != self._geoblock_checked_at
+                if fresh:
+                    self._geoblock_advisory_logged_at = self._geoblock_checked_at
+                    log.warning("polymarket.geoblock_advisory",
+                                result="blocked" if eligibility is False else "unavailable",
+                                mode=mode)
+                else:
+                    log.debug("polymarket.geoblock_advisory",
+                              result="blocked" if eligibility is False else "unavailable",
+                              mode=mode)
                 if mode == "enforce":
                     return OrderResult(
                         order_id="GEOBLOCKED", market_id=order.market_id,
@@ -727,8 +737,18 @@ class PolymarketClient:
             resp = await self.clob_call(self._clob_client.cancel_orders, [order_id])
             not_canceled = resp.get("not_canceled", {}) if isinstance(resp, dict) else {}
             if order_id in not_canceled:
+                reason = str(not_canceled.get(order_id))[:120]
+                lowered = reason.lower()
+                if ("already canceled" in lowered or "already cancelled" in lowered
+                        or "matched" in lowered or "not found" in lowered):
+                    # The venue reached the terminal state before we did —
+                    # that IS a successful cancel outcome, not a warning.
+                    self._live_pending.pop(order_id, None)
+                    log.info("order_cancel.already_terminal",
+                             order_id=order_id, reason=reason)
+                    return True
                 log.warning("order_cancel.rejected", order_id=order_id,
-                            reason=str(not_canceled.get(order_id))[:120])
+                            reason=reason)
                 return False
             self._live_pending.pop(order_id, None)
             log.info("order.cancelled", order_id=order_id)
