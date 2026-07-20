@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
@@ -36,6 +37,18 @@ def _make_market(
     )
 
 
+def _stub_transaction(db):
+    """Mock Database.transaction(): the real one is an async context manager,
+    which AsyncMock's auto-attributes cannot impersonate."""
+
+    @asynccontextmanager
+    async def _txn():
+        yield db
+
+    db.transaction = _txn
+    return db
+
+
 def _make_db(rows: list[dict] | None = None, pos_row: dict | None = None):
     """Build a mock Database."""
     db = AsyncMock()
@@ -54,7 +67,7 @@ def _make_db(rows: list[dict] | None = None, pos_row: dict | None = None):
     db.fetchone = AsyncMock(side_effect=_fetchone)
     db.execute = AsyncMock()
     db.commit = AsyncMock()
-    return db
+    return _stub_transaction(db)
 
 
 def _make_discovery(market: Market | None):
@@ -739,7 +752,7 @@ def _make_sweep_db(portfolio_rows: list[dict]):
     db.fetchone = AsyncMock(side_effect=_fetchone)
     db.execute = AsyncMock()
     db.commit = AsyncMock()
-    return db
+    return _stub_transaction(db)
 
 
 @pytest.mark.asyncio

@@ -359,7 +359,7 @@ def redeem_cmd(submit: bool, limit: int, min_payout: float):
             return
 
         db = Database()
-        await db.connect()
+        await db.connect(ensure_schema=False)
 
         try:
             async with aiohttp.ClientSession() as session:

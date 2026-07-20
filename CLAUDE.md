@@ -18,6 +18,8 @@ When making git commits, use `Assisted-by: Claude (Anthropic)` in the commit mes
 - All money flows through `auramaur/exchange/client.py` — this is the ONLY file that touches the CLOB API for orders.
 - Paper trading interception happens in `auramaur/exchange/paper.py`.
 - Risk manager in `auramaur/risk/manager.py` is the single gateway — no trade bypasses it.
+- The web dashboard (`auramaur/web/` + `web/` SPA) is read-only by construction: it opens the DB with SQLite `mode=ro` and must never gain venue credentials or order paths. Keep it that way.
+- Out-of-process DB consumers (web, MCP, scripts) open the trading DB via transient `mode=ro` URIs with `busy_timeout>=5000` and never run `Database.connect()`'s DDL against the live file; CLI tooling connects with `ensure_schema=False`.
 
 ## Code Style
 - Python 3.11+, async-first (asyncio)

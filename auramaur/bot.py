@@ -735,6 +735,23 @@ class AuramaurBot(
         finally:
             await client.close()
 
+    async def _task_balance_recorder(self) -> None:
+        """Record venue cash to the ``venue_balances`` table so read-only
+        consumers (the web dashboard) can show balances without ever holding
+        venue credentials. IBKR runs on a slower cadence: its fetch is a real
+        gateway session, not a REST call."""
+        from auramaur.monitoring.balances import record_venue_balances
+        cycle = 0
+        while self._running:
+            try:
+                await record_venue_balances(
+                    self._components.db, self.settings,
+                    include_ibkr=(cycle % 5 == 0))
+            except Exception as e:  # noqa: BLE001 — monitoring must not die
+                log.debug("balance_recorder.error", error=str(e))
+            cycle += 1
+            await asyncio.sleep(60)
+
     async def _task_momentum_coupling(self) -> None:
         """Fast path: spot->prediction momentum-coupling pillar (gated, detect-only).
 
@@ -1176,56 +1193,58 @@ class AuramaurBot(
                     reconciled = await reconciler.reconcile()
                     positions = reconciler.to_live_positions(reconciled)
 
-                    # Update cost_basis from real fill prices (ground truth).
-                    # This loop only runs in live mode, so we explicitly
-                    # write is_paper=0 and conflict on (market_id, is_paper).
-                    for rp in reconciled:
-                        await self._components.db.execute(
-                            """INSERT INTO cost_basis (market_id, token, token_id, size, avg_cost, total_cost, is_paper, updated_at)
-                               VALUES (?, ?, ?, ?, ?, ?, 0, datetime('now'))
-                               ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
-                                   token = excluded.token,
-                                   token_id = excluded.token_id,
-                                   size = excluded.size,
-                                   avg_cost = excluded.avg_cost,
-                                   total_cost = excluded.total_cost,
-                                   updated_at = excluded.updated_at""",
-                            # Normalize the raw CLOB outcome ("Yes"/"No") to the
-                            # canonical TokenType value ("YES"/"NO"). Writing the raw
-                            # title-case outcome here was the one site that diverged
-                            # from the fill/Kalshi paths, splitting a single position
-                            # into duplicate (market, "No") + (market, "NO") rows.
-                            (rp.market_id, TokenType.from_str(rp.outcome).value,
-                             rp.token_id, rp.size,
-                             rp.avg_cost, rp.size * rp.avg_cost),
-                        )
-
-                    # Delete stale rows from cost_basis AND portfolio: positions no
-                    # longer held on-chain. Only run this when the reconciler returned
-                    # a non-empty result — an empty reconcile means the CLOB API call
-                    # failed, not that we actually hold zero positions, so we must not
-                    # wipe the tables. Both tables matter: cost_basis feeds sync(),
-                    # and portfolio feeds the risk-manager correlation/exposure checks.
+                    # Update cost_basis from real fill prices (ground truth),
+                    # then delete stale rows — one short, serialized
+                    # transaction (contention plan, Phase 2): the network work
+                    # (reconcile()) is already done, so this block is db-only.
+                    # Only runs when the reconciler returned a non-empty result
+                    # — an empty reconcile means the CLOB API call failed, not
+                    # that we actually hold zero positions, so we must not wipe
+                    # the tables. Both tables matter: cost_basis feeds sync(),
+                    # and portfolio feeds the risk-manager correlation/exposure
+                    # checks.
                     if reconciled:
-                        live_ids = [rp.market_id for rp in reconciled]
-                        placeholders = ",".join("?" * len(live_ids))
-                        # Live-mode reconciliation must only delete live rows;
-                        # paper rows (is_paper=1) live in their own namespace.
-                        cb_cur = await self._components.db.execute(
-                            f"DELETE FROM cost_basis WHERE size > 0 AND is_paper = 0 AND market_id NOT IN ({placeholders})",
-                            live_ids,
-                        )
-                        pf_cur = await self._components.db.execute(
-                            f"DELETE FROM portfolio WHERE exchange = 'polymarket' AND is_paper = 0 AND market_id NOT IN ({placeholders})",
-                            live_ids,
-                        )
+                        async with self._components.db.transaction():
+                            # This loop only runs in live mode, so we explicitly
+                            # write is_paper=0 and conflict on (market_id, is_paper).
+                            for rp in reconciled:
+                                await self._components.db.execute(
+                                    """INSERT INTO cost_basis (market_id, token, token_id, size, avg_cost, total_cost, is_paper, updated_at)
+                                       VALUES (?, ?, ?, ?, ?, ?, 0, datetime('now'))
+                                       ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
+                                           token = excluded.token,
+                                           token_id = excluded.token_id,
+                                           size = excluded.size,
+                                           avg_cost = excluded.avg_cost,
+                                           total_cost = excluded.total_cost,
+                                           updated_at = excluded.updated_at""",
+                                    # Normalize the raw CLOB outcome ("Yes"/"No") to the
+                                    # canonical TokenType value ("YES"/"NO"). Writing the raw
+                                    # title-case outcome here was the one site that diverged
+                                    # from the fill/Kalshi paths, splitting a single position
+                                    # into duplicate (market, "No") + (market, "NO") rows.
+                                    (rp.market_id, TokenType.from_str(rp.outcome).value,
+                                     rp.token_id, rp.size,
+                                     rp.avg_cost, rp.size * rp.avg_cost),
+                                )
+
+                            live_ids = [rp.market_id for rp in reconciled]
+                            placeholders = ",".join("?" * len(live_ids))
+                            # Live-mode reconciliation must only delete live rows;
+                            # paper rows (is_paper=1) live in their own namespace.
+                            cb_cur = await self._components.db.execute(
+                                f"DELETE FROM cost_basis WHERE size > 0 AND is_paper = 0 AND market_id NOT IN ({placeholders})",
+                                live_ids,
+                            )
+                            pf_cur = await self._components.db.execute(
+                                f"DELETE FROM portfolio WHERE exchange = 'polymarket' AND is_paper = 0 AND market_id NOT IN ({placeholders})",
+                                live_ids,
+                            )
                         log.info(
                             "reconciler.stale_removed",
                             cost_basis=cb_cur.rowcount if hasattr(cb_cur, "rowcount") else 0,
                             portfolio=pf_cur.rowcount if hasattr(pf_cur, "rowcount") else 0,
                         )
-
-                    await self._components.db.commit()
                 else:
                     positions = await syncer.sync()
 
@@ -1456,6 +1475,12 @@ class AuramaurBot(
         # Resolution checker and order monitor work with any exchange
         tasks.append(asyncio.create_task(self._task_resolution_checker(), name="resolution_checker"))
         tasks.append(asyncio.create_task(self._task_order_monitor(), name="order_monitor"))
+
+        # Balance recorder: feeds the read-only dashboard's venue panel.
+        if (self.settings.kalshi.enabled or self.settings.kraken.enabled
+                or self.settings.ibkr.enabled):
+            tasks.append(asyncio.create_task(
+                self._task_balance_recorder(), name="balance_recorder"))
 
         # Loop watchdog: a daemon thread that screams when the asyncio loop
         # stops beating (blocking sync call). Runs outside the loop so it can
