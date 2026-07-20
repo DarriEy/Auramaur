@@ -486,16 +486,19 @@ class ExecutionGateway:
         paired / exit) and record_external_fill (the concurrently-placed arb
         legs): API-error cooldown, slippage, record_fill, and the trades-mirror.
         """
-        # Cooldown on API errors — retry in 30 min, not every cycle
+        # Cooldown on API errors — retry in 30 min, not every cycle.
+        # Each best-effort write below runs in its own transaction(): a bare
+        # commit() on the shared connection would land whatever half-open
+        # transaction ANOTHER task has in flight (db-contention plan, Phase 5).
         if result.status == "rejected" and result.order_id == "ERROR":
             try:
-                await self.db.execute(
-                    """INSERT OR REPLACE INTO order_build_drops
-                       (market_id, blocked_until, reason)
-                       VALUES (?, datetime('now', '+30 minutes'), ?)""",
-                    (order.market_id, "place_order API error"),
-                )
-                await self.db.commit()
+                async with self.db.transaction():
+                    await self.db.execute(
+                        """INSERT OR REPLACE INTO order_build_drops
+                           (market_id, blocked_until, reason)
+                           VALUES (?, datetime('now', '+30 minutes'), ?)""",
+                        (order.market_id, "place_order API error"),
+                    )
             except Exception:
                 pass
 
@@ -506,14 +509,14 @@ class ExecutionGateway:
             if order.side == OrderSide.SELL:
                 slippage_bps = -slippage_bps  # For sells, lower fill = worse
             try:
-                await self.db.execute(
-                    """INSERT INTO slippage_log (market_id, exchange, side, expected_price, filled_price, slippage_bps, size, order_type)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (order.market_id, order.exchange or exchange_name, order.side.value,
-                     order.price, result.filled_price, round(slippage_bps, 2), order.size,
-                     order.order_type.value if hasattr(order, 'order_type') else 'limit'),
-                )
-                await self.db.commit()
+                async with self.db.transaction():
+                    await self.db.execute(
+                        """INSERT INTO slippage_log (market_id, exchange, side, expected_price, filled_price, slippage_bps, size, order_type)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (order.market_id, order.exchange or exchange_name, order.side.value,
+                         order.price, result.filled_price, round(slippage_bps, 2), order.size,
+                         order.order_type.value if hasattr(order, 'order_type') else 'limit'),
+                    )
             except Exception:
                 pass
 
@@ -554,26 +557,26 @@ class ExecutionGateway:
             # PnLTracker writes authoritative execution rows to `fills`.
             try:
                 trade_status = "filled" if result.status == "paper" else result.status
-                await self.db.execute(
-                    """INSERT INTO trades
-                       (market_id, signal_id, side, size, price, is_paper,
-                        order_id, status, kelly_fraction, exchange, strategy_source)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        order.market_id,
-                        signal_id,
-                        order.side.value,
-                        fill_size,
-                        fill_price,
-                        1 if result.is_paper else 0,
-                        result.order_id,
-                        trade_status,
-                        None,
-                        order.exchange or exchange_name,
-                        strategy_source,
-                    ),
-                )
-                await self.db.commit()
+                async with self.db.transaction():
+                    await self.db.execute(
+                        """INSERT INTO trades
+                           (market_id, signal_id, side, size, price, is_paper,
+                            order_id, status, kelly_fraction, exchange, strategy_source)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            order.market_id,
+                            signal_id,
+                            order.side.value,
+                            fill_size,
+                            fill_price,
+                            1 if result.is_paper else 0,
+                            result.order_id,
+                            trade_status,
+                            None,
+                            order.exchange or exchange_name,
+                            strategy_source,
+                        ),
+                    )
             except Exception as e:
                 log.debug("engine.trade_mirror_error", error=str(e))
 

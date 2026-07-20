@@ -42,37 +42,54 @@ class PnLTracker:
         BUY:  increases position size, adjusts weighted-average cost.
         SELL: decreases position size, realizes P&L at
               ``(sell_price - avg_cost) * size``.
+
+        The dedupe check and the whole write path run inside ONE
+        ``Database.transaction()``: atomic, serialized against every other
+        adopter, and rolled back as a unit on failure — which is what makes
+        an SQLITE_BUSY retry safe for the first time (the order_id dedupe
+        then guarantees idempotence across attempts). The old error-path
+        ``rollback()`` is gone: on the shared connection it could discard
+        ANOTHER task's uncommitted writes.
         """
-        # Exchange/order ids are the idempotency key. The monitor can observe
-        # the same terminal fill more than once after a restart or persistence
-        # timeout; replaying it would double the position and realized P&L.
-        existing = await self._db.fetchone(
-            "SELECT market_id, side, token, size, price, is_paper FROM fills "
-            "WHERE order_id = ? AND side = ? LIMIT 1",
-            (fill.order_id, fill.side.value),
-        )
-        if existing is not None:
-            same = (
-                existing["market_id"] == fill.market_id
-                and existing["side"] == fill.side.value
-                and existing["token"].upper() == fill.token.value.upper()
-                and abs(float(existing["size"]) - fill.size) < 1e-9
-                and abs(float(existing["price"]) - fill.price) < 1e-9
-                and int(existing["is_paper"]) == (1 if fill.is_paper else 0)
+        ledger_event: dict | None = None
+        async with self._db.transaction():
+            # Exchange/order ids are the idempotency key. The monitor can
+            # observe the same terminal fill more than once after a restart or
+            # persistence timeout; replaying it would double the position and
+            # realized P&L. Checking inside the transaction closes the
+            # read-then-insert race between concurrent observers of the same
+            # fill.
+            existing = await self._db.fetchone(
+                "SELECT market_id, side, token, size, price, is_paper FROM fills "
+                "WHERE order_id = ? AND side = ? LIMIT 1",
+                (fill.order_id, fill.side.value),
             )
-            if same:
-                log.info("pnl.fill_duplicate_ignored", order_id=fill.order_id)
-                return
-            raise ValueError(f"conflicting fill replay for order {fill.order_id}")
+            if existing is not None:
+                same = (
+                    existing["market_id"] == fill.market_id
+                    and existing["side"] == fill.side.value
+                    and existing["token"].upper() == fill.token.value.upper()
+                    and abs(float(existing["size"]) - fill.size) < 1e-9
+                    and abs(float(existing["price"]) - fill.price) < 1e-9
+                    and int(existing["is_paper"]) == (1 if fill.is_paper else 0)
+                )
+                if same:
+                    log.info("pnl.fill_duplicate_ignored", order_id=fill.order_id)
+                    return
+                raise ValueError(f"conflicting fill replay for order {fill.order_id}")
 
-        try:
-            await self._record_fill_once(fill)
-        except Exception:
-            await self._db.rollback()
-            raise
+            ledger_event = await self._record_fill_once(fill)
 
-    async def _record_fill_once(self, fill: Fill) -> None:
-        """Write one new fill and its cost basis as a single transaction."""
+        # The ancillary ledger runs AFTER the authoritative transaction
+        # committed — it commits internally (never inside an open transaction)
+        # and is independently idempotent on source_ref.
+        if ledger_event is not None:
+            from auramaur.broker.ledger import record_ledger_event
+            await record_ledger_event(self._db, **ledger_event)
+
+    async def _record_fill_once(self, fill: Fill) -> dict | None:
+        """Write one new fill and its cost basis. Runs INSIDE the caller's
+        transaction; returns the deferred ledger event (SELLs) or None."""
         # 1. Persist the fill
         cursor = await self._db.execute(
             """INSERT INTO fills
@@ -168,8 +185,8 @@ class PnLTracker:
                 log.debug("pnl.daily_stats_error", error=str(e))
 
             # Defer the ancillary ledger until the authoritative fill + cost
-            # basis transaction commits. The ledger is independently
-            # idempotent and must never commit this transaction halfway through.
+            # basis transaction commits (record_fill runs it after the block).
+            # The ledger commits internally and must never run mid-transaction.
             ledger_event = dict(
                 market_id=fill.market_id, kind="sell", token=fill.token.value,
                 qty=sell_size, pnl=pnl, fees=fill.fee,
@@ -211,11 +228,6 @@ class PnLTracker:
                 now,
             ),
         )
-        await self._db.commit()
-
-        if ledger_event is not None:
-            from auramaur.broker.ledger import record_ledger_event
-            await record_ledger_event(self._db, **ledger_event)
 
         log.info(
             "pnl.fill_recorded",
@@ -226,6 +238,7 @@ class PnLTracker:
             new_position_size=new_size,
             avg_cost=round(new_avg_cost, 4),
         )
+        return ledger_event
 
     # ------------------------------------------------------------------
     # Cost basis queries
