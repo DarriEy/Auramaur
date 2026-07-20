@@ -93,9 +93,11 @@ services:
       - ./runtime/config:/app/runtime-config:ro
     ports:
       - "127.0.0.1:${AURAMAUR_WEB_PORT:-8484}:8484"
-    networks:
-      broker:
-        ipv4_address: ${AURAMAUR_WEB_IP:-172.18.0.4}
+    # Deliberately NOT on the broker network: the dashboard reads a file and
+    # needs no network peers. Keeping it off the subnet means it can never
+    # reach ibgateway, whose API auth is trusted-IP based — the only
+    # order-capable vector a compromised web container would have had. It
+    # lands on the compose default network purely for the loopback publish.
     stop_grace_period: 10s
 
   ibgateway:

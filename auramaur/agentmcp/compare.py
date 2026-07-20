@@ -23,9 +23,11 @@ class _ReadOnlyBotView:
     schema DDL (write locks, potential migrations) — running that against the
     live file from this out-of-process MCP server on every ``compare_to_bot``
     call was the worst external lock-taker (see docs/plans/db-contention-plan.md,
-    Phase 4). Same kernel-enforced pattern as ``market_data.MarketData``:
-    open ro, query, close; ``busy_timeout`` waits out the bot's WAL checkpoint
-    locks; ``query_only`` is a belt on top of ``mode=ro``.
+    Phase 4). Same pattern as ``market_data.MarketData``: open ro, query,
+    close; ``busy_timeout`` waits out the bot's WAL checkpoint locks;
+    ``query_only`` is a belt on top of ``mode=ro``. Note these are
+    SQLite-level guarantees, not kernel-level — the file itself is writable
+    by this process's uid; ``mode=ro`` governs the connection, not the mount.
     """
 
     def __init__(self, path: str) -> None:

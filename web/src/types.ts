@@ -83,6 +83,7 @@ export interface DashboardState {
   transfers_armed: boolean;
   kill_switch: boolean;
   venues: Record<string, VenueBalance>;
+  ibkr_books: { book: string; positions: number; unrealized: number; equity: number | null }[];
   pillars: Pillar[];
   activity: ActivityItem[];
   health: Health;

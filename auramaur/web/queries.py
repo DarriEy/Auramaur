@@ -37,6 +37,32 @@ async def venue_balances(db: ReadOnlyDatabase) -> dict[str, dict]:
     return out
 
 
+async def ibkr_paper_books(db: ReadOnlyDatabase) -> list[dict]:
+    """Per-book IBKR paper summary: open positions, unrealized, latest mark.
+
+    Degrades to ``[]`` before the multiasset schema exists (older DBs) —
+    the venues panel simply shows the IBKR balance row alone.
+    """
+    try:
+        rows = await db.fetchall(
+            """SELECT p.book,
+                      COUNT(*) AS positions,
+                      SUM(COALESCE(p.unrealized_pnl_usd, 0)) AS unrealized,
+                      (SELECT m.equity_usd FROM ibkr_paper_daily_marks m
+                        WHERE m.book = p.book
+                        ORDER BY m.mark_date DESC LIMIT 1) AS equity
+               FROM ibkr_paper_positions p
+               GROUP BY p.book ORDER BY p.book""")
+    except Exception:
+        return []
+    return [
+        {"book": r["book"], "positions": r["positions"],
+         "unrealized": r["unrealized"] or 0.0,
+         "equity": r["equity"]}
+        for r in rows
+    ]
+
+
 async def strategy_breakdown(db: ReadOnlyDatabase, is_paper_flag: int) -> list[dict]:
     """Realized P&L per strategy from the authoritative pnl_ledger."""
     rows = await db.fetchall(

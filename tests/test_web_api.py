@@ -374,3 +374,46 @@ def test_serialize_state_is_json_safe():
         "name": "kalshi", "last_seen": earlier.isoformat(), "age_seconds": 30.0}
     assert s["pillars"][1]["age_seconds"] is None
     assert s["activity"] == [{"time": "11:59:30", "text": "order.filled mkt-1"}]
+
+
+@pytest.mark.asyncio
+async def test_ibkr_paper_books_summary_and_envelope_passthrough(tmp_path):
+    """The venues panel needs IBKR paper books: positions + latest mark."""
+    from auramaur.db.database import Database
+    from auramaur.web.db import ReadOnlyDatabase
+    from auramaur.web import queries
+
+    src = tmp_path / "bot.db"
+    db = Database(str(src))
+    await db.connect()
+    await db.execute(
+        """INSERT INTO ibkr_paper_positions
+           (book, instrument_key, con_id, quantity, avg_cost, currency,
+            fx_to_usd, unrealized_pnl_usd)
+           VALUES ('fx', 'GBPUSD', 1, 1, 1.34, 'USD', 1.0, -3.32)""")
+    await db.execute(
+        """INSERT INTO ibkr_paper_daily_marks
+           (book, mark_date, equity_usd, realized_cum_usd, unrealized_usd)
+           VALUES ('fx', date('now'), -2.81, 0.51, -3.32)""")
+    await db.commit()
+    await db.close()
+
+    ro = ReadOnlyDatabase(str(src))
+    await ro.connect()
+    books = await queries.ibkr_paper_books(ro)
+    await ro.close()
+    assert books == [{"book": "fx", "positions": 1,
+                      "unrealized": -3.32, "equity": -2.81}]
+
+
+@pytest.mark.asyncio
+async def test_ibkr_paper_books_degrades_without_schema(tmp_path):
+    import sqlite3 as sq
+    src = tmp_path / "bare.db"
+    sq.connect(src).close()
+    from auramaur.web.db import ReadOnlyDatabase
+    from auramaur.web import queries
+    ro = ReadOnlyDatabase(str(src))
+    await ro.connect()
+    assert await queries.ibkr_paper_books(ro) == []
+    await ro.close()
