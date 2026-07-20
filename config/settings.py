@@ -8,7 +8,7 @@ from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 
 
 def _deep_merge(base: dict, over: dict) -> dict:
@@ -47,6 +47,41 @@ def _load_defaults() -> dict:
 
 
 _DEFAULTS = _load_defaults()
+
+
+class _YamlDefaultsSource(PydanticBaseSettingsSource):
+    """Lowest-priority settings source serving the merged YAML defaults.
+
+    Without this, the YAML sections only reach nested models through each
+    field's ``default_factory`` — and pydantic-settings ignores a field
+    default the moment ANY source (e.g. one ``IBKR__*`` env var) supplies
+    part of that field. In production, compose always sets IBKR env vars,
+    so the entire ``ibkr:`` YAML section (tracked and local) was silently
+    discarded for months (discovered 2026-07-20: ``7203.T`` never disabled
+    in-container, options/bonds books never config-off).
+
+    As a SOURCE, the YAML participates in pydantic-settings' cross-source
+    deep merge instead: env vars override exactly the keys they name, and
+    every other YAML key survives. Reads the module global at call time so
+    tests can monkeypatch ``_DEFAULTS``.
+    """
+
+    def get_field_value(self, field, field_name):  # pragma: no cover - unused
+        return None, field_name, False
+
+    def __call__(self) -> dict:
+        import copy
+
+        fields = self.settings_cls.model_fields
+        return {k: copy.deepcopy(v) for k, v in _current_defaults().items()
+                if k in fields}
+
+
+def _current_defaults() -> dict:
+    """Indirection so tests can monkeypatch config.settings._DEFAULTS."""
+    import config.settings as _m
+    return _m._DEFAULTS
+
 
 
 class ExecutionConfig(BaseModel):
@@ -1650,6 +1685,18 @@ class Settings(BaseSettings):
         # unrelated stray var shouldn't crash Settings on startup.
         "extra": "ignore",
     }
+
+    @classmethod
+    def settings_customise_sources(cls, settings_cls, init_settings,
+                                   env_settings, dotenv_settings,
+                                   file_secret_settings):
+        # Order = priority (first wins). YAML defaults sit BELOW every other
+        # source: env/dotenv/init override exactly the keys they name and
+        # deep-merge with the rest of the YAML section (see
+        # _YamlDefaultsSource). Field default_factories remain as the final
+        # fallback for sections absent from every source.
+        return (init_settings, env_settings, dotenv_settings,
+                file_secret_settings, _YamlDefaultsSource(settings_cls))
 
     def model_post_init(self, __context) -> None:
         """Export pass-through tokens to the process environment.
