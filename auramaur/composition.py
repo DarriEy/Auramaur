@@ -355,8 +355,10 @@ async def assemble_components(
 
     ig = s.information_graduation
     from auramaur.lineage_observer import LineageObserver
+    # One in-process writer (contention plan, Phase 3): the observer runs on
+    # the shared connection instead of opening a second full Database.
     lineage_observer = await LineageObserver.create(
-        db_path, min_resolved=ig.min_resolved, min_paired=ig.min_paired,
+        db, min_resolved=ig.min_resolved, min_paired=ig.min_paired,
         min_success_rate=ig.min_success_rate,
         probation_multiplier=ig.probation_multiplier,
     )
@@ -554,6 +556,12 @@ async def assemble_components(
     )
 
     return Components({
+        # Shutdown close()s components in this dict's insertion order. The
+        # lineage observer shares the "db" connection (it does not own one),
+        # so it must drain its queue and stop its worker BEFORE the database
+        # closes — hence it precedes "db". Aggregator.close() also calls
+        # observer.close(); the observer makes the second call a no-op.
+        "lineage_observer": lineage_observer,
         "db": db, "aggregator": aggregator, "discovery": primary_discovery,
         "discoveries": discoveries,
         "paper": paper, "exchange": primary_exchange, "analyzer": analyzer,

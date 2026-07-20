@@ -1193,56 +1193,58 @@ class AuramaurBot(
                     reconciled = await reconciler.reconcile()
                     positions = reconciler.to_live_positions(reconciled)
 
-                    # Update cost_basis from real fill prices (ground truth).
-                    # This loop only runs in live mode, so we explicitly
-                    # write is_paper=0 and conflict on (market_id, is_paper).
-                    for rp in reconciled:
-                        await self._components.db.execute(
-                            """INSERT INTO cost_basis (market_id, token, token_id, size, avg_cost, total_cost, is_paper, updated_at)
-                               VALUES (?, ?, ?, ?, ?, ?, 0, datetime('now'))
-                               ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
-                                   token = excluded.token,
-                                   token_id = excluded.token_id,
-                                   size = excluded.size,
-                                   avg_cost = excluded.avg_cost,
-                                   total_cost = excluded.total_cost,
-                                   updated_at = excluded.updated_at""",
-                            # Normalize the raw CLOB outcome ("Yes"/"No") to the
-                            # canonical TokenType value ("YES"/"NO"). Writing the raw
-                            # title-case outcome here was the one site that diverged
-                            # from the fill/Kalshi paths, splitting a single position
-                            # into duplicate (market, "No") + (market, "NO") rows.
-                            (rp.market_id, TokenType.from_str(rp.outcome).value,
-                             rp.token_id, rp.size,
-                             rp.avg_cost, rp.size * rp.avg_cost),
-                        )
-
-                    # Delete stale rows from cost_basis AND portfolio: positions no
-                    # longer held on-chain. Only run this when the reconciler returned
-                    # a non-empty result — an empty reconcile means the CLOB API call
-                    # failed, not that we actually hold zero positions, so we must not
-                    # wipe the tables. Both tables matter: cost_basis feeds sync(),
-                    # and portfolio feeds the risk-manager correlation/exposure checks.
+                    # Update cost_basis from real fill prices (ground truth),
+                    # then delete stale rows — one short, serialized
+                    # transaction (contention plan, Phase 2): the network work
+                    # (reconcile()) is already done, so this block is db-only.
+                    # Only runs when the reconciler returned a non-empty result
+                    # — an empty reconcile means the CLOB API call failed, not
+                    # that we actually hold zero positions, so we must not wipe
+                    # the tables. Both tables matter: cost_basis feeds sync(),
+                    # and portfolio feeds the risk-manager correlation/exposure
+                    # checks.
                     if reconciled:
-                        live_ids = [rp.market_id for rp in reconciled]
-                        placeholders = ",".join("?" * len(live_ids))
-                        # Live-mode reconciliation must only delete live rows;
-                        # paper rows (is_paper=1) live in their own namespace.
-                        cb_cur = await self._components.db.execute(
-                            f"DELETE FROM cost_basis WHERE size > 0 AND is_paper = 0 AND market_id NOT IN ({placeholders})",
-                            live_ids,
-                        )
-                        pf_cur = await self._components.db.execute(
-                            f"DELETE FROM portfolio WHERE exchange = 'polymarket' AND is_paper = 0 AND market_id NOT IN ({placeholders})",
-                            live_ids,
-                        )
+                        async with self._components.db.transaction():
+                            # This loop only runs in live mode, so we explicitly
+                            # write is_paper=0 and conflict on (market_id, is_paper).
+                            for rp in reconciled:
+                                await self._components.db.execute(
+                                    """INSERT INTO cost_basis (market_id, token, token_id, size, avg_cost, total_cost, is_paper, updated_at)
+                                       VALUES (?, ?, ?, ?, ?, ?, 0, datetime('now'))
+                                       ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
+                                           token = excluded.token,
+                                           token_id = excluded.token_id,
+                                           size = excluded.size,
+                                           avg_cost = excluded.avg_cost,
+                                           total_cost = excluded.total_cost,
+                                           updated_at = excluded.updated_at""",
+                                    # Normalize the raw CLOB outcome ("Yes"/"No") to the
+                                    # canonical TokenType value ("YES"/"NO"). Writing the raw
+                                    # title-case outcome here was the one site that diverged
+                                    # from the fill/Kalshi paths, splitting a single position
+                                    # into duplicate (market, "No") + (market, "NO") rows.
+                                    (rp.market_id, TokenType.from_str(rp.outcome).value,
+                                     rp.token_id, rp.size,
+                                     rp.avg_cost, rp.size * rp.avg_cost),
+                                )
+
+                            live_ids = [rp.market_id for rp in reconciled]
+                            placeholders = ",".join("?" * len(live_ids))
+                            # Live-mode reconciliation must only delete live rows;
+                            # paper rows (is_paper=1) live in their own namespace.
+                            cb_cur = await self._components.db.execute(
+                                f"DELETE FROM cost_basis WHERE size > 0 AND is_paper = 0 AND market_id NOT IN ({placeholders})",
+                                live_ids,
+                            )
+                            pf_cur = await self._components.db.execute(
+                                f"DELETE FROM portfolio WHERE exchange = 'polymarket' AND is_paper = 0 AND market_id NOT IN ({placeholders})",
+                                live_ids,
+                            )
                         log.info(
                             "reconciler.stale_removed",
                             cost_basis=cb_cur.rowcount if hasattr(cb_cur, "rowcount") else 0,
                             portfolio=pf_cur.rowcount if hasattr(pf_cur, "rowcount") else 0,
                         )
-
-                    await self._components.db.commit()
                 else:
                     positions = await syncer.sync()
 
