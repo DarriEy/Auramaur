@@ -20,15 +20,23 @@ Connection handling matters here (learned the hard way — #117's timeout
 bump didn't stop the lock warnings): the first cut opened a NEW connection
 per call and ran ``CREATE TABLE IF NOT EXISTS`` every time — a DDL write
 even on the read path — colliding with the bot's long write transactions.
-Now one cached connection per process runs the DDL once, reads never
-write, and a locked write is retried once before degrading to the
-process-local in-memory count (restart-blind, but analysis never breaks).
+One cached connection per process runs the DDL once and reads never write.
+
+Locking policy (reworked 2026-07-19 after the busy-wait froze the bot): these
+helpers run synchronously ON the asyncio event loop, and the bot's own
+``Database`` writer only advances when that loop advances — so busy-waiting
+here for the bot's write lock can be a SELF-deadlock, and every failed write
+used to stall every pillar ~31s (15s busy x2 + 1s sleep). No timeout value
+fixes waiting on a lock whose holder you are blocking. So: fail FAST
+(250ms), count the missed increment in ``_pending``, and fold it into the
+next successful write — the persistent counter stays exact without ever
+blocking the loop for more than a beat.
 """
 
 from __future__ import annotations
 
 import sqlite3
-import time
+import threading
 from datetime import date
 
 import structlog
@@ -37,23 +45,31 @@ log = structlog.get_logger()
 
 _db_path = "auramaur.db"  # same working-directory convention as Database
 _conn_cache: sqlite3.Connection | None = None
+_lock = threading.Lock()  # the connection is shared cross-thread
 _mem_calls = 0
 _mem_day = ""
+_pending = 0  # increments recorded in memory but not yet persisted
+_PENDING_ALARM = 25  # sustained persistence failure — worth a warning
 
 
 def set_db_path(path: str) -> None:
     """Point the counter at the instance's sqlite file (bot startup)."""
-    global _db_path
+    global _db_path, _mem_calls, _mem_day, _pending
     if path != _db_path:
         _reset_conn()
+        _mem_calls, _mem_day, _pending = 0, "", 0
     _db_path = path
 
 
 def _conn() -> sqlite3.Connection:
-    """One cached connection per process; schema created once."""
+    """One cached connection per process; schema created once.
+
+    timeout=0.25 is deliberate — see the locking policy in the module
+    docstring: waiting longer cannot help and can freeze the event loop.
+    """
     global _conn_cache
     if _conn_cache is None:
-        conn = sqlite3.connect(_db_path, timeout=15, check_same_thread=False)
+        conn = sqlite3.connect(_db_path, timeout=0.25, check_same_thread=False)
         conn.execute(
             """CREATE TABLE IF NOT EXISTS llm_call_counter (
                    day TEXT PRIMARY KEY,
@@ -78,16 +94,20 @@ def _reset_conn() -> None:
 def calls_today() -> int:
     """Claude calls recorded today across all processes and restarts."""
     today = date.today().isoformat()
-    try:
-        row = _conn().execute(
-            "SELECT claude_calls FROM llm_call_counter WHERE day = ?",
-            (today,),
-        ).fetchone()
-        return int(row[0]) if row else 0
-    except sqlite3.Error as e:
-        log.debug("call_budget.read_error", error=str(e))
-        _reset_conn()
-        return _mem_calls if _mem_day == today else 0
+    with _lock:
+        pending = _pending if _mem_day == today else 0
+        try:
+            row = _conn().execute(
+                "SELECT claude_calls FROM llm_call_counter WHERE day = ?",
+                (today,),
+            ).fetchone()
+            # Pending increments are real calls that haven't landed in the
+            # row yet — the budget check must see them.
+            return (int(row[0]) if row else 0) + pending
+        except sqlite3.Error as e:
+            log.debug("call_budget.read_error", error=str(e))
+            _reset_conn()
+            return _mem_calls if _mem_day == today else 0
 
 
 def paced_limit(base_limit: int, *, peak_start_hour: int, peak_end_hour: int,
@@ -135,23 +155,31 @@ def non_reserved_limit(settings) -> int:
 
 
 def record_call() -> int:
-    """Count one successful Claude call; returns today's new total."""
-    global _mem_calls, _mem_day
+    """Count one successful Claude call; returns today's new total.
+
+    Single fast attempt (never a busy-wait — module docstring). On a lock
+    miss the increment goes to ``_pending`` and is folded into the next
+    successful write, so the persistent counter stays exact.
+    """
+    global _mem_calls, _mem_day, _pending
     today = date.today().isoformat()
-    if _mem_day != today:
-        _mem_day, _mem_calls = today, 0
-    _mem_calls += 1
-    for attempt in (1, 2):
+    with _lock:
+        if _mem_day != today:
+            # The budget is daily; unpersisted increments from yesterday
+            # expire with the day they belonged to.
+            _mem_day, _mem_calls, _pending = today, 0, 0
+        _mem_calls += 1
         try:
             conn = _conn()
             conn.execute(
                 """INSERT INTO llm_call_counter (day, claude_calls)
-                   VALUES (?, 1)
+                   VALUES (?, ?)
                    ON CONFLICT(day) DO UPDATE SET
-                       claude_calls = claude_calls + 1""",
-                (today,),
+                       claude_calls = claude_calls + ?""",
+                (today, 1 + _pending, 1 + _pending),
             )
             conn.commit()
+            _pending = 0
             row = conn.execute(
                 "SELECT claude_calls FROM llm_call_counter WHERE day = ?",
                 (today,),
@@ -159,8 +187,13 @@ def record_call() -> int:
             return int(row[0])
         except sqlite3.Error as e:
             _reset_conn()
-            if attempt == 1:
-                time.sleep(1.0)
-                continue
-            log.warning("call_budget.write_error", error=str(e))
+            _pending += 1
+            # A miss is now harmless (folded in later) — only sustained
+            # failure to persist deserves the health panel's attention.
+            if _pending >= _PENDING_ALARM:
+                log.warning("call_budget.write_error", error=str(e),
+                            pending=_pending)
+            else:
+                log.debug("call_budget.write_deferred", error=str(e),
+                          pending=_pending)
     return _mem_calls
