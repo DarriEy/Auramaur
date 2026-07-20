@@ -768,10 +768,17 @@ class PolymarketClient:
                     self._live_pending.pop(str(oid), None)
             return count
         except Exception as e:
-            log.warning(
+            msg = str(e)
+            # 400 "invalid token id" deterministically means the token's book
+            # no longer exists (market resolved/settled) — nothing to cancel,
+            # not an operational fault. The reconciler resurrecting such
+            # phantom positions is tracked separately; don't let its symptom
+            # sit in the health panel every cycle.
+            level = (log.debug if "invalid token id" in msg else log.warning)
+            level(
                 "order.stale_cancel_error",
                 token_id=token_id[:20],
-                error=str(e)[:200],
+                error=msg[:200],
             )
             return 0
 
