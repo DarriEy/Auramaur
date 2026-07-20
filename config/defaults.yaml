@@ -569,6 +569,15 @@ interim_manager:
   # liquidity - correlation must clear this. Conservative about apparent
   # edges built on weak estimates (docs/INTERIM_MANAGER.md).
   min_robust_edge: 0.05
+  # Auto-proposals: OFF by tracked default; arm deliberately in the local
+  # overrides. Confidence is operationalized (HIGH source signal + calibrated
+  # edge floor) and every auto proposal faces the identical gauntlet.
+  auto_propose: false
+  auto_min_confidence: "HIGH"
+  auto_min_calibrated_edge: 0.10
+  auto_ci_width: 0.10
+  auto_daily_cap: 3
+  auto_stake_usd: 10.0
   default_uncertainty_buffer: 0.04
   slippage_buffer: 0.01
   thin_liquidity_usd: 200.0

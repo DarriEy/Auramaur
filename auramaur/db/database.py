@@ -134,6 +134,8 @@ class Database:
             await self._migrate_v31_to_v32()
         if from_version < 33:
             await self._migrate_v32_to_v33()
+        if from_version < 34:
+            await self._migrate_v33_to_v34()
 
     async def _migrate_v29_to_v30(self) -> None:
         """Add cost-adjusted IBKR round-trip observations."""
@@ -237,6 +239,18 @@ class Database:
         await self._db.execute("UPDATE schema_version SET version = 33")
         await self._db.commit()
         log.info("database.migrated", from_version=32, to_version=33)
+
+    async def _migrate_v33_to_v34(self) -> None:
+        """Tag manager proposals with their author (operator vs auto)."""
+        try:
+            await self._db.execute(
+                "ALTER TABLE manager_proposals ADD COLUMN "
+                "proposer TEXT NOT NULL DEFAULT 'operator'")
+        except Exception:  # noqa: BLE001 — column already present
+            pass
+        await self._db.execute("UPDATE schema_version SET version = 34")
+        await self._db.commit()
+        log.info("database.migrated", from_version=33, to_version=34)
 
     async def _migrate_v28_to_v29(self) -> None:
         """Add immutable strategy-research and CLV accounting tables."""

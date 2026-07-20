@@ -120,12 +120,15 @@ def list_proposals(show_all: bool) -> None:
                 f"SELECT * FROM manager_proposals {where} "
                 "ORDER BY created_at DESC LIMIT 50")
             table = Table(title="interim-manager proposals")
-            for col in ("id", "venue", "market", "side", "fair", "stake",
+            for col in ("id", "by", "venue", "market", "side", "fair", "stake",
                         "status", "reason", "created"):
                 table.add_column(col)
             for r in rows or []:
-                table.add_row(str(r["id"]), r["venue"], r["market_id"], r["side"],
-                              f"{r['fair_prob']:.2f}", f"{r['stake_usd']:.2f}",
+                keys = r.keys()
+                by = r["proposer"] if "proposer" in keys else "operator"
+                table.add_row(str(r["id"]), by, r["venue"], r["market_id"],
+                              r["side"], f"{r['fair_prob']:.2f}",
+                              f"{r['stake_usd']:.2f}",
                               r["status"], (r["reason"] or "")[:50],
                               str(r["created_at"])[:16])
             console.print(table)
@@ -166,7 +169,7 @@ def report() -> None:
         db = await _db()
         try:
             rows = await db.fetchall(
-                """SELECT mp.thesis_class AS cls,
+                """SELECT mp.proposer || ':' || mp.thesis_class AS cls,
                           COUNT(*) AS proposals,
                           SUM(mp.status = 'executed') AS executed,
                           SUM(mp.status = 'skipped') AS skipped,
@@ -177,7 +180,7 @@ def report() -> None:
                        ON led.market_id = mp.market_id
                       AND led.strategy_source = 'interim_manager'
                     GROUP BY mp.thesis_class ORDER BY proposals DESC""")
-            table = Table(title="interim-manager scorecard (by thesis class)")
+            table = Table(title="interim-manager scorecard (by proposer:class)")
             for col in ("class", "proposals", "executed", "skipped",
                         "avg robust edge", "realized P&L"):
                 table.add_column(col)
