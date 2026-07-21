@@ -16,6 +16,7 @@ describe("operator workspace", () => {
     const html = renderToStaticMarkup(<WorkspaceNav view="execution" onView={() => undefined} />);
     expect(html).toContain("Dashboard sections");
     expect(html).toContain('aria-current="page"');
+    expect(html).toContain('href="#execution"');
     expect(html).toContain("Opportunities");
   });
 
@@ -26,5 +27,21 @@ describe("operator workspace", () => {
     expect(html).toContain("All monitored systems are operational");
     expect(html).toContain("Baseline saved");
     expect(html).toContain("Portfolio");
+  });
+
+  it("does not report unavailable reconciliation as healthy", () => {
+    const html = renderToStaticMarkup(
+      <OperatorWorkspace s={{ ...state, reconciliation: undefined }} initialView="execution" />
+    );
+    expect(html).toContain("Reconciliation unavailable");
+    expect(html).not.toContain("No venue/database discrepancies");
+  });
+
+  it("shows explicit empty states and no dead intelligence actions", () => {
+    const html = renderToStaticMarkup(
+      <OperatorWorkspace s={state} initialView="intelligence" />
+    );
+    expect(html).toContain("No resolved forecasts are available yet");
+    expect(html).not.toContain("Open workspace");
   });
 });
