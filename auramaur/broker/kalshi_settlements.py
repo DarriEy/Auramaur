@@ -39,6 +39,9 @@ from auramaur.db.database import Database
 
 log = structlog.get_logger()
 
+# Tickers already warned as unbookable this process (see held_side_unknown).
+_UNBOOKABLE_WARNED: set[str] = set()
+
 _MAX_PAGES = 25  # 200/page → up to 5000 settlements; far beyond current history
 
 
@@ -128,8 +131,15 @@ async def sweep_kalshi_settlements(
                 cost = y_cost if y_cost > 0 else n_cost
                 basis = "venue_single_sided"
             else:
-                log.warning("kalshi_settlements.held_side_unknown", ticker=ticker,
-                            yes_cost=y_cost, no_cost=n_cost, settled=settled_iso)
+                # Warn once per process: these tickers are permanently
+                # unbookable (two-sided venue history, no own basis) and were
+                # re-warned identically every 30-min sweep (~400 log
+                # lines/day, 2026-07-20 audit).
+                if ticker not in _UNBOOKABLE_WARNED:
+                    _UNBOOKABLE_WARNED.add(ticker)
+                    log.warning("kalshi_settlements.held_side_unknown",
+                                ticker=ticker, yes_cost=y_cost,
+                                no_cost=n_cost, settled=settled_iso)
                 results.append({
                     "ticker": ticker, "result": result, "qty": venue_count,
                     "payout": None, "pnl": None, "settled": settled_iso,

@@ -45,8 +45,12 @@ async def kraken_balance(settings) -> str:
             raise RuntimeError("kraken returned no balances")
         usdc = bal.get("USDC", 0.0)
         cad = bal.get("ZCAD", 0.0)
+        # Dust floor: venue rounding residues (AVAX 4e-7 etc.) read as open
+        # spec positions on the console/dashboard (2026-07-20 audit). No
+        # price feed here, so a quantity floor: real entries are whole-ish
+        # units, dust is <=1e-4.
         crypto = [a for a, v in bal.items()
-                  if v > 0 and a != "USDC" and not a.startswith("Z")]
+                  if v >= 0.01 and a != "USDC" and not a.startswith("Z")]
         return (f"${usdc:.0f} USDC + {cad:.0f} CAD"
                 + (f" | spec: {','.join(crypto)}" if crypto else ""))
     finally:

@@ -62,11 +62,13 @@ class TestKalshiPositionSyncerPaperSync:
         s.is_live = is_live
         return s
 
-    def _db(self):
+    def _db(self, kalshi_ids=("KXTEST",)):
         db = MagicMock()
         db.execute = AsyncMock()
         db.commit = AsyncMock()
-        db.fetchall = AsyncMock(return_value=[])
+        # _sync_paper scopes the shared PaperTrader book to markets known as
+        # exchange='kalshi' (2026-07-20 audit fix).
+        db.fetchall = AsyncMock(return_value=[{"id": mid} for mid in kalshi_ids])
         return db
 
     @pytest.mark.asyncio
@@ -97,7 +99,11 @@ class TestKalshiPositionSyncerPaperSync:
         assert positions[0].size == 10.0
 
     @pytest.mark.asyncio
-    async def test_paper_sync_empty_clears_portfolio(self):
+    async def test_paper_sync_empty_preserves_pillar_rows(self):
+        """Empty PaperTrader memory must NOT blanket-delete kalshi paper rows:
+        strategy pillars own paper kalshi positions that PaperTrader never
+        tracked, and the old unconditional DELETE shredded them
+        (2026-07-20 audit)."""
         paper = MagicMock()
         paper.positions = {}
 
@@ -111,7 +117,7 @@ class TestKalshiPositionSyncerPaperSync:
         positions = await syncer.sync()
         assert positions == []
         delete_calls = [c for c in syncer._db.execute.call_args_list if "DELETE" in str(c)]
-        assert delete_calls
+        assert not delete_calls
 
 
 class TestKalshiLivePositionAccounting:

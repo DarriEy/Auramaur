@@ -408,7 +408,7 @@ class IBKRMultiAssetPaperBook:
                 (self.book.value, r + u, r, u))
             await self._db.commit()
         except Exception as e:  # noqa: BLE001 - bookkeeping must not break the cycle
-            log.debug("ibkr_multiasset.mark_error", book=self.book.value,
+            log.warning("ibkr_multiasset.mark_error", book=self.book.value,
                       error=str(e)[:120])
 
     async def _record_research_signals(self) -> None:
@@ -467,8 +467,8 @@ class IBKRMultiAssetPaperBook:
                         (spec.key, signal.direction, signal.score,
                          signal.rationale[:200]))
                 except Exception as e:  # noqa: BLE001 - one pair must not stop the sweep
-                    log.debug("ibkr_multiasset.research_signal_error",
+                    log.warning("ibkr_multiasset.research_signal_error",
                               key=spec.key, error=str(e)[:100])
             await self._db.commit()
         except Exception as e:  # noqa: BLE001 - research-only
-            log.debug("ibkr_multiasset.research_error", error=str(e)[:120])
+            log.warning("ibkr_multiasset.research_error", error=str(e)[:120])

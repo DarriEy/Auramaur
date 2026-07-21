@@ -214,12 +214,44 @@ class PortfolioTracker:
     # Drawdown
     # ------------------------------------------------------------------
 
+    _current_drawdown_pct: float | None = None
+
+    async def note_equity(self, equity: float) -> None:
+        """Record current equity: maintain the daily peak and the live
+        drawdown the risk gates read.
+
+        Nothing wrote ``daily_stats.peak_balance`` before 2026-07-20, so
+        ``get_drawdown`` returned 0.0 forever and the max-drawdown /
+        drawdown-heat gates could never trip. The portfolio monitor calls
+        this once per tick with venue cash + position marks; the peak
+        persists across restarts via daily_stats, the current drawdown is
+        held in memory (staleness bounded by the monitor interval).
+        """
+        if equity is None or equity <= 0:
+            return
+        async with self.db.transaction():
+            await self.db.execute(
+                """INSERT INTO daily_stats (date, total_pnl, trades_count, wins, losses, peak_balance)
+                   VALUES (date('now'), 0, 0, 0, 0, ?)
+                   ON CONFLICT(date) DO UPDATE SET
+                       peak_balance = MAX(COALESCE(peak_balance, 0), excluded.peak_balance)""",
+                (equity,),
+            )
+        row = await self.db.fetchone(
+            "SELECT MAX(peak_balance) AS peak FROM daily_stats")
+        peak = float(row["peak"] or 0.0) if row else 0.0
+        self._current_drawdown_pct = (
+            max(0.0, (peak - equity) / peak * 100.0) if peak > 0 else 0.0)
+
     async def get_drawdown(self) -> float:
         """Return current drawdown from peak as a percentage.
 
-        Peak is stored in ``daily_stats.peak_balance``.  Current balance is
-        ``peak_balance + today's unrealised PnL``.
+        Prefers the equity-fed figure from ``note_equity`` (fresh within one
+        portfolio tick); falls back to the legacy peak+unrealised estimate
+        for processes that never feed equity (tests, tools).
         """
+        if self._current_drawdown_pct is not None:
+            return self._current_drawdown_pct
         # Get the most recent peak balance
         row = await self.db.fetchone(
             "SELECT peak_balance FROM daily_stats ORDER BY date DESC LIMIT 1"

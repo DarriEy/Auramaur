@@ -541,11 +541,23 @@ class KalshiPositionSyncer:
         positions: list[LivePosition] = []
         current_ids: set[str] = set()
 
+        # The shared PaperTrader book holds EVERY venue's paper positions:
+        # stamping them all exchange='kalshi' relabeled Polymarket paper rows
+        # as Kalshi (double-counting them in both venue views), and the
+        # cleanup DELETE below could shred pillar-owned kalshi paper rows not
+        # tracked in PaperTrader memory (2026-07-20 audit). Scope this pass
+        # to markets discovery knows as Kalshi.
+        kalshi_rows = await self._db.fetchall(
+            "SELECT id FROM markets WHERE exchange = 'kalshi'")
+        kalshi_ids = {r["id"] for r in kalshi_rows}
+
         # PaperTrader state is in memory, so the whole upsert+cleanup pass is
         # db-only — one short, serialized transaction (contention plan,
         # Phase 2). No network awaits may ever run inside this block.
         async with self._db.transaction():
             for market_id, pos in self._paper.positions.items():
+                if market_id not in kalshi_ids:
+                    continue
                 token = pos.token if pos.token else TokenType.YES
                 token_id = pos.token_id or market_id
                 category = getattr(pos, "category", "") or ""
@@ -601,9 +613,12 @@ class KalshiPositionSyncer:
                     tuple(current_ids),
                 )
             else:
-                await self._db.execute(
-                    "DELETE FROM portfolio WHERE exchange='kalshi' AND is_paper=1"
-                )
+                # No kalshi positions in PaperTrader memory. Do NOT blanket-
+                # delete: paper kalshi rows owned by strategy pillars (not
+                # tracked in PaperTrader) would be shredded. Stale
+                # PaperTrader-written rows will be reconciled on the next
+                # pass that has positions.
+                pass
 
         log.info("sync.kalshi.paper.done", positions=len(positions))
         return positions

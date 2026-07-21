@@ -136,6 +136,19 @@ class ResolutionTracker:
                 await self._settle_position(market_id, outcome, is_paper_scope=0)
                 await self._settle_position(market_id, outcome, is_paper_scope=1)
 
+                # Persist realized $ AFTER settlement so the ledger already
+                # carries this market's settle rows. The old pre-settlement
+                # call (inside record_resolution) both undercounted payout
+                # and, being fills-based, double-credited complementary-token
+                # exits (resolution_pnl +$349 vs ledger -$0.97, 2026-07-20).
+                if self._calibration is not None:
+                    try:
+                        await self._calibration.persist_realized_pnl(
+                            market_id, 1 if outcome else 0)
+                    except Exception as e:
+                        log.debug("resolution.persist_pnl_error",
+                                  market_id=market_id, error=str(e))
+
                 # Mark the market as inactive in our DB so other queries
                 # (e.g. depth research, correlation) stop considering it.
                 async with self._db.transaction():

@@ -149,13 +149,25 @@ class CalibrationTracker:
             category=category,
         )
 
-    async def _persist_realized_pnl(self, market_id: str, outcome_int: int,
-                                    category: str) -> None:
-        """Store realized $ P&L for a resolved market from its live fills.
+    async def persist_realized_pnl(self, market_id: str, outcome_int: int,
+                                   category: str = "") -> None:
+        """Store realized $ P&L for a resolved market from the pnl_ledger.
 
-        P&L = sell_proceeds - buy_cost - fees + resolution_payout (held token
-        pays $1 if it won). No-op if the market had no live fills.
+        Called by the resolution tracker AFTER settlement so the ledger
+        already carries this market's sell + settlement rows. Idempotent:
+        an existing resolution_pnl row is left untouched -- re-running for
+        an already-persisted market was firing ~2000x/day (for 143 distinct
+        markets), each triggering a full category_stats rebuild and
+        clobbering resolved_at via INSERT OR REPLACE (2026-07-20 audit).
         """
+        exists = await self._db.fetchone(
+            "SELECT 1 FROM resolution_pnl WHERE market_id = ?", (market_id,))
+        if exists is not None:
+            return
+        if not category:
+            row = await self._db.fetchone(
+                "SELECT category FROM markets WHERE id = ?", (market_id,))
+            category = (row["category"] if row is not None else "") or ""
         from auramaur.broker.pnl_repair import (
             compute_market_resolution_pnl,
             rebuild_category_stats_from_resolution_pnl,
@@ -220,10 +232,10 @@ class CalibrationTracker:
         if self._lineage_observer is not None:
             self._lineage_observer.resolution(market_id, actual_outcome)
 
-        # Persist realized $ P&L from this market's fills + the outcome, so edge
-        # is measurable in dollars (trades.pnl is never populated otherwise).
-        await self._persist_realized_pnl(
-            market_id, outcome_int, pred_row["category"] if pred_row else "")
+        # Realized $ persistence moved to the resolution tracker, AFTER
+        # settlement: at this point the ledger has no settle row yet, so a
+        # fills-based computation here both undercounted payout and
+        # double-credited complementary-token exits (2026-07-20 audit).
 
         # Trigger online calibration update if we have the prediction data
         if pred_row is not None:

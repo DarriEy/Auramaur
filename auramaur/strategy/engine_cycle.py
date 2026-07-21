@@ -616,6 +616,25 @@ class CycleOrchestrationMixin:
                 await self.calibration.record_prediction(
                     market.id, raw_prob, market.category or ""
                 )
+                observer = getattr(self.aggregator, "observer", None)
+                if observer is not None:
+                    # Mirror the legacy analyze_market emission: the strategic
+                    # path (the only path most books take) never wrote
+                    # forecast_snapshots, so the shadow-source graduation
+                    # ladder had ZERO rows ever (2026-07-20 audit).
+                    from datetime import datetime as _dt, timezone as _tz
+                    observer.forecast(
+                        market_id=market.id,
+                        exchange=market.exchange or self.exchange_name or "polymarket",
+                        category=market.category or "",
+                        raw_probability=raw_prob,
+                        calibrated_probability=claude_prob,
+                        market_yes_price=market.outcome_yes_price,
+                        market_no_price=market.outcome_no_price,
+                        observed_at=_dt.now(_tz.utc).isoformat(),
+                        model=getattr(getattr(self, "analyzer", None), "_model", ""),
+                        strategy_source="strategic",
+                    )
             market_prob = market.outcome_yes_price
 
             # Edge calculation (same as detect_edge)

@@ -377,8 +377,10 @@ class TradingEngine(CycleOrchestrationMixin):
         async with self.db.transaction():
             for market in markets:
                 await self.db.execute(
-                    "INSERT INTO price_history (market_id, price) VALUES (?, ?)",
-                    (market.id, market.outcome_yes_price),
+                    "INSERT INTO price_history (market_id, price, exchange)"
+                    " VALUES (?, ?, ?)",
+                    (market.id, market.outcome_yes_price,
+                     market.exchange or self.exchange_name or "polymarket"),
                 )
             # Prune old price history to bound table growth. Extended 7 -> 30
             # days so reversion/intraday research has a multi-week sample; the
