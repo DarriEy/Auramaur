@@ -142,3 +142,33 @@ def test_get_client_is_singleton():
     a = local_llm.get_client(settings)
     b = local_llm.get_client(settings)
     assert a is b
+
+
+async def test_local_llm_stats_query():
+    from auramaur.web.queries import local_llm_stats
+
+    db = await _db()
+    try:
+        client = LocalLLMClient(_settings(), db)
+        client._request = AsyncMock(return_value=_ok_response({"x": 1}))
+        await client.generate_json("p1", purpose="distill")
+        await client.generate_json("p2", purpose="triage")
+        stats = await local_llm_stats(db)
+        assert stats["purposes"]["distill"]["calls"] == 1
+        assert stats["purposes"]["triage"]["ok"] == 1
+        assert stats["claims_24h"] == 0
+    finally:
+        await db.close()
+
+
+async def test_local_llm_stats_degrades_without_tables():
+    from auramaur.web.queries import local_llm_stats
+
+    class NoTableDb:
+        async def fetchall(self, *a):
+            raise RuntimeError("no such table")
+
+        async def fetchone(self, *a):
+            raise RuntimeError("no such table")
+
+    assert await local_llm_stats(NoTableDb()) == {}
