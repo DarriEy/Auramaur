@@ -235,6 +235,8 @@ class Database:
             await self._migrate_v34_to_v35()
         if from_version < 36:
             await self._migrate_v35_to_v36()
+        if from_version < 37:
+            await self._migrate_v36_to_v37()
 
     async def _migrate_v29_to_v30(self) -> None:
         """Add cost-adjusted IBKR round-trip observations."""
@@ -365,6 +367,34 @@ class Database:
         await self._db.execute("UPDATE schema_version SET version = 36")
         await self._db.commit()
         log.info("database.migrated", from_version=35, to_version=36)
+
+    async def _migrate_v36_to_v37(self) -> None:
+        """Canonical outcomes and normalized forecast evidence."""
+        # TABLES already created the additive tables/view. Seed one canonical
+        # result per venue+market from legacy authoritative resolution rows.
+        await self._db.execute(
+            """INSERT OR IGNORE INTO market_outcomes
+               (event_key,venue,market_id,event_family,outcome,resolved_at,source,resolution_version)
+               SELECT lower(COALESCE(NULLIF(m.exchange,''),'polymarket')) || ':' || c.market_id,
+                      lower(COALESCE(NULLIF(m.exchange,''),'polymarket')), c.market_id, c.market_id,
+                      c.actual_outcome, c.resolved_at, 'calibration_backfill', 'legacy-v1'
+                 FROM calibration c
+                 JOIN (SELECT market_id,MAX(id) AS id FROM calibration
+                        WHERE actual_outcome IS NOT NULL GROUP BY market_id) latest
+                   ON latest.id=c.id
+                 LEFT JOIN markets m ON m.id=c.market_id""")
+        await self._db.execute(
+            """INSERT OR IGNORE INTO market_outcomes
+               (event_key,venue,market_id,event_family,outcome,resolved_at,source,resolution_version)
+               SELECT lower(e.venue) || ':' || e.market_id, lower(e.venue), e.market_id,
+                      e.event_family,
+                      o.outcome, MIN(o.resolved_at), 'evaluation_backfill', 'legacy-v1'
+                 FROM evaluation_outcomes o
+                 JOIN evaluation_episodes e ON e.episode_hash=o.episode_hash
+                GROUP BY lower(e.venue),e.market_id,o.outcome""")
+        await self._db.execute("UPDATE schema_version SET version = 37")
+        await self._db.commit()
+        log.info("database.migrated", from_version=36, to_version=37)
 
     async def _migrate_v28_to_v29(self) -> None:
         """Add immutable strategy-research and CLV accounting tables."""

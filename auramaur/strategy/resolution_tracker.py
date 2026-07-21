@@ -16,6 +16,9 @@ from auramaur.db.database import Database
 from auramaur.exchange.models import Market
 from auramaur.exchange.protocols import MarketDiscovery
 from auramaur.nlp.calibration import CalibrationTracker
+from auramaur.evaluation.evidence import (
+    ForecastScoreMaterializer, MarketOutcome, OutcomeRepository,
+)
 
 log = structlog.get_logger()
 
@@ -34,6 +37,8 @@ class ResolutionTracker:
         self._calibration = calibration
         self._discoveries = discoveries
         self._proxy_address = proxy_address
+        self._outcomes = OutcomeRepository(db)
+        self._score_materializer = ForecastScoreMaterializer(db)
 
     async def check_resolutions(self) -> int:
         """Check all pending predictions for resolutions.
@@ -74,6 +79,27 @@ class ResolutionTracker:
                    FROM cost_basis cb
                    LEFT JOIN markets m ON cb.market_id = m.id
                    WHERE cb.size > 0
+                   UNION ALL
+                   SELECT e.market_id AS market_id, e.venue AS exchange
+                   FROM evaluation_episodes e
+                   LEFT JOIN market_outcomes o
+                     ON o.event_key=lower(e.venue) || ':' || e.market_id
+                   WHERE o.event_key IS NULL
+                   UNION ALL
+                   SELECT f.market_id AS market_id, f.exchange AS exchange
+                   FROM forecast_snapshots f
+                   LEFT JOIN market_outcomes o
+                     ON o.event_key=lower(COALESCE(NULLIF(f.exchange,''),'polymarket'))
+                                      || ':' || f.market_id
+                   WHERE o.event_key IS NULL
+                   UNION ALL
+                   SELECT t.market_id AS market_id, m.exchange AS exchange
+                   FROM information_trials t
+                   LEFT JOIN markets m ON m.id=t.market_id
+                   LEFT JOIN market_outcomes o
+                     ON o.event_key=lower(COALESCE(NULLIF(m.exchange,''),'polymarket'))
+                                      || ':' || t.market_id
+                   WHERE o.event_key IS NULL
                )
                GROUP BY market_id"""
         )
@@ -124,8 +150,19 @@ class ResolutionTracker:
                         resolved_count += 1
                     continue
 
-                # Feed into calibration — triggers online Platt update
-                await self._calibration.record_resolution(market_id, outcome)
+                # Canonical venue truth is shared by every forecast stream.
+                # Record before legacy calibration so an unrelated calibration
+                # failure cannot strand evaluation/lineage scoring.
+                await self._outcomes.record(MarketOutcome(
+                    venue=exchange, market_id=market_id,
+                    outcome=1 if outcome else 0,
+                    resolved_at=datetime.now(timezone.utc), source="resolution_tracker",
+                    event_family=getattr(market, "neg_risk_market_id", "") or market_id,
+                ))
+
+                # Feed the production-only calibration loop independently.
+                if self._calibration is not None:
+                    await self._calibration.record_resolution(market_id, outcome)
 
                 # Compute realized PnL from the position and clean up. Settle
                 # each mode explicitly: a market can be held in BOTH paper and
@@ -189,6 +226,10 @@ class ResolutionTracker:
                 log.warning("resolution.venue_sweep_error", error=str(e))
 
         if resolved_count > 0:
+            try:
+                await self._score_materializer.refresh()
+            except Exception as e:
+                log.warning("forecast_scores.refresh_failed", error=str(e))
             log.info("resolution.cycle_complete", newly_resolved=resolved_count)
 
         return resolved_count

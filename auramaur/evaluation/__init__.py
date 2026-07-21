@@ -17,6 +17,9 @@ from .domain import (
 )
 from .scoring import ForecastScore, score_forecast
 from .store import EvaluationStore
+from .evidence import (
+    ForecastScoreMaterializer, MarketOutcome, OutcomeRepository, event_key,
+)
 
 __all__ = [
     "AdapterResponse",
@@ -37,4 +40,8 @@ __all__ = [
     "ForecastScore",
     "score_forecast",
     "EvaluationStore",
+    "ForecastScoreMaterializer",
+    "MarketOutcome",
+    "OutcomeRepository",
+    "event_key",
 ]

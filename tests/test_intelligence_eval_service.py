@@ -66,7 +66,7 @@ async def test_service_records_paired_treatments_without_trading(tmp_path):
         await db.close()
 
 
-async def test_service_settles_every_snapshot_from_venue_result(tmp_path):
+async def test_service_does_not_duplicate_resolution_detection(tmp_path):
     db = Database(str(tmp_path / "eval-settle.db"))
     await db.connect()
     try:
@@ -79,8 +79,8 @@ async def test_service_settles_every_snapshot_from_venue_result(tmp_path):
         discovery.market.active = False
         discovery.market.closed = True
         await service.run_once()
-        row = await db.fetchone("SELECT outcome, source FROM evaluation_outcomes")
-        assert row["outcome"] == 1 and row["source"] == "venue"
+        assert await db.fetchone("SELECT 1 FROM evaluation_outcomes") is None
+        assert await db.fetchone("SELECT 1 FROM market_outcomes") is None
     finally:
         await db.close()
 

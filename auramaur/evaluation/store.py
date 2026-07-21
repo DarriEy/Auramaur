@@ -8,6 +8,7 @@ from auramaur.evaluation.domain import (
     EpisodeSnapshot, EvaluationForecast, EvaluationOutcome, EvaluationRun,
 )
 from auramaur.evaluation.scoring import ForecastScore, score_forecast
+from auramaur.evaluation.evidence import MarketOutcome, OutcomeRepository
 
 
 def _ts(value) -> str:
@@ -85,6 +86,13 @@ class EvaluationStore:
     async def settle(self, outcome: EvaluationOutcome) -> None:
         if await self.get_episode(outcome.episode_hash) is None:
             raise ValueError("unknown episode")
+        episode = await self.get_episode(outcome.episode_hash)
+        await OutcomeRepository(self._db).record(MarketOutcome(
+            venue=episode.venue, market_id=episode.market_id,
+            outcome=outcome.outcome, resolved_at=outcome.resolved_at,
+            source=outcome.source or "evaluation_compat",
+            event_family=episode.event_family or episode.market_id,
+        ))
         async with self._db.transaction():
             existing = await self._db.fetchone(
                 "SELECT outcome, resolved_at, source FROM evaluation_outcomes WHERE episode_hash = ?",
@@ -105,7 +113,8 @@ class EvaluationStore:
             """SELECT f.prob_yes, e.market_prob_yes, o.outcome
                FROM evaluation_forecasts f
                JOIN evaluation_episodes e ON e.episode_hash=f.episode_hash
-               LEFT JOIN evaluation_outcomes o ON o.episode_hash=f.episode_hash
+               LEFT JOIN market_outcomes o
+                 ON o.event_key=lower(e.venue) || ':' || e.market_id
                WHERE f.forecast_id=?""", (forecast_id,))
         if row is None or row["outcome"] is None:
             return None
@@ -114,14 +123,18 @@ class EvaluationStore:
     async def summary(self) -> list[dict]:
         """Read-only per-arm resolved scorecard for CLI/reporting consumers."""
         rows = await self._db.fetchall(
-            """SELECT r.arm_name, r.model, COUNT(*) AS forecasts,
-                      AVG((f.prob_yes-o.outcome)*(f.prob_yes-o.outcome)) AS brier,
-                      AVG((e.market_prob_yes-o.outcome)*
-                          (e.market_prob_yes-o.outcome)) AS market_brier,
-                      SUM(CASE WHEN f.action='ABSTAIN' THEN 1 ELSE 0 END) AS abstains
-               FROM evaluation_forecasts f
-               JOIN evaluation_runs r ON r.run_id=f.run_id
-               JOIN evaluation_episodes e ON e.episode_hash=f.episode_hash
-               JOIN evaluation_outcomes o ON o.episode_hash=f.episode_hash
-               GROUP BY r.arm_name, r.model ORDER BY brier ASC""")
+            """WITH ranked AS (
+                 SELECT u.*, ROW_NUMBER() OVER (
+                   PARTITION BY u.arm,u.event_family
+                   ORDER BY u.observed_at ASC,u.forecast_key ASC) AS rn
+                 FROM unified_forecast_evidence u
+                 WHERE u.stream='intelligence_eval' AND u.outcome IS NOT NULL
+               )
+               SELECT arm AS arm_name,model,COUNT(*) AS forecasts,
+                      AVG((probability-outcome)*(probability-outcome)) AS brier,
+                      AVG((market_probability-outcome)*
+                          (market_probability-outcome)) AS market_brier,
+                      SUM(abstained) AS abstains
+                 FROM ranked WHERE rn=1
+                GROUP BY arm,model ORDER BY brier ASC""")
         return [dict(row) for row in rows]
