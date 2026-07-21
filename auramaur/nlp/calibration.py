@@ -133,15 +133,14 @@ class CalibrationTracker:
             category: Market category for per-category calibration.
         """
         await self._ensure_initialized()
-        await self._db.execute(
-            """
-            INSERT INTO calibration (market_id, predicted_prob, category, created_at)
-            VALUES (?, ?, ?, datetime('now'))
-            """,
-            (market_id, predicted_prob, category),
-        )
+        sql = """INSERT INTO calibration
+                 (market_id,predicted_prob,category,created_at)
+                 VALUES (?,?,?,datetime('now'))"""
         if commit:
-            await self._db.commit()
+            async with self._db.transaction():
+                await self._db.execute(sql, (market_id, predicted_prob, category))
+        else:
+            await self._db.execute(sql, (market_id, predicted_prob, category))
         log.debug(
             "calibration.recorded",
             market_id=market_id,

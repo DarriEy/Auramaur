@@ -16,7 +16,9 @@ from auramaur.cli._base import console, main
 
 
 @main.command("intelligence-eval")
-def intelligence_eval_report():
+@click.option("--all-streams", is_flag=True,
+              help="Compare production, intelligence, and information-trial streams.")
+def intelligence_eval_report(all_streams: bool):
     """Show the resolved, market-relative shadow evaluation scorecard."""
     async def _run():
         from auramaur.evaluation.store import EvaluationStore
@@ -27,9 +29,27 @@ def intelligence_eval_report():
         db = ReadOnlyDatabase()
         await db.connect()
         try:
-            rows = await EvaluationStore(db).summary()
+            if all_streams:
+                rows = await db.fetchall(
+                    """WITH ranked AS (
+                         SELECT *,ROW_NUMBER() OVER (
+                           PARTITION BY stream,arm,probability_kind,event_family,horizon_bucket
+                           ORDER BY observed_at,forecast_key) rn
+                         FROM forecast_score_facts
+                         WHERE score_version='binary-proper-v1')
+                       SELECT stream,arm,probability_kind,horizon_bucket,
+                              COUNT(*) forecasts,AVG(brier) brier,
+                              AVG(market_brier) market_brier
+                         FROM ranked WHERE rn=1
+                        GROUP BY stream,arm,probability_kind,horizon_bucket
+                        ORDER BY stream,arm,probability_kind,horizon_bucket""")
+                rows = [dict(row) for row in rows]
+            else:
+                rows = await EvaluationStore(db).summary()
             table = Table(title="Intelligence × Exploration Evaluation")
             table.add_column("Arm")
+            if all_streams:
+                table.add_column("Kind")
             table.add_column("Model")
             table.add_column("N", justify="right")
             table.add_column("Brier", justify="right")
@@ -37,9 +57,14 @@ def intelligence_eval_report():
             table.add_column("Δ vs market", justify="right")
             for row in rows:
                 brier, market = float(row["brier"]), float(row["market_brier"])
-                table.add_row(row["arm_name"], row["model"], str(row["forecasts"]),
-                              f"{brier:.4f}", f"{market:.4f}",
-                              f"{market - brier:+.4f}")
+                arm = row.get("arm_name") or f"{row['stream']}:{row['arm']}"
+                model = row.get("model") or ""
+                values = [arm]
+                if all_streams:
+                    values.append(f"{row['probability_kind']} {row['horizon_bucket']}")
+                values.extend([model, str(row["forecasts"]), f"{brier:.4f}",
+                               f"{market:.4f}", f"{market - brier:+.4f}"])
+                table.add_row(*values)
             console.print(table)
         finally:
             await db.close()

@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 36
+SCHEMA_VERSION = 37
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -934,4 +934,113 @@ CREATE TABLE IF NOT EXISTS evaluation_outcomes (
     resolved_at TEXT NOT NULL,
     source TEXT NOT NULL DEFAULT ''
 );
+
+-- One venue-qualified result for every binary event. Forecast tables retain
+-- their historical outcome columns during migration, but all new comparative
+-- scoring joins this registry so resolution truth and timing cannot drift.
+CREATE TABLE IF NOT EXISTS market_outcomes (
+    event_key TEXT PRIMARY KEY,
+    venue TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    event_family TEXT NOT NULL DEFAULT '',
+    outcome INTEGER NOT NULL CHECK(outcome IN (0, 1)),
+    resolved_at TEXT NOT NULL,
+    source TEXT NOT NULL,
+    resolution_version TEXT NOT NULL DEFAULT 'venue-v1',
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(venue, market_id)
+);
+CREATE INDEX IF NOT EXISTS idx_market_outcomes_market
+    ON market_outcomes(market_id, venue);
+
+-- Rebuildable, explicitly-versioned scores over the normalized evidence view.
+CREATE TABLE IF NOT EXISTS forecast_score_facts (
+    forecast_key TEXT PRIMARY KEY,
+    event_key TEXT NOT NULL,
+    event_family TEXT NOT NULL DEFAULT '',
+    stream TEXT NOT NULL,
+    arm TEXT NOT NULL DEFAULT '',
+    probability_kind TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    horizon_bucket TEXT NOT NULL,
+    outcome INTEGER NOT NULL CHECK(outcome IN (0, 1)),
+    brier REAL NOT NULL,
+    log_loss REAL NOT NULL,
+    market_brier REAL,
+    brier_delta REAL,
+    brier_skill REAL,
+    score_version TEXT NOT NULL,
+    scored_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_forecast_score_stream_event
+    ON forecast_score_facts(stream, arm, event_key);
+
+-- Semantic read model: source tables keep their distinct write contracts.
+-- Production raw/calibrated rows are separate observations; experimental
+-- treatments retain episode/run identity; information trials retain arms.
+CREATE VIEW IF NOT EXISTS unified_forecast_evidence AS
+SELECT 'snapshot:raw:' || f.id AS forecast_key,
+       'production' AS stream,
+       lower(COALESCE(NULLIF(f.exchange,''),'polymarket')) || ':' || f.market_id AS event_key,
+       COALESCE(NULLIF(o.event_family,''),f.market_id) AS event_family,
+       lower(COALESCE(NULLIF(f.exchange,''),'polymarket')) AS venue,
+       f.market_id, f.observed_at, f.observed_at AS evidence_cutoff,
+       f.raw_probability AS probability, 'raw' AS probability_kind,
+       f.market_yes_price AS market_probability, f.model,
+       f.strategy_source AS arm, f.strategy_source,
+       NULL AS experiment_id, NULL AS episode_hash,
+       f.evidence_run_ids AS evidence_ids, f.config_fingerprint,
+       '' AS prompt_version, '' AS output_schema_version,
+       0.0 AS compute_seconds, 'succeeded' AS status, 0 AS abstained,
+       o.outcome, o.resolved_at
+  FROM forecast_snapshots f
+  LEFT JOIN market_outcomes o
+    ON o.event_key=lower(COALESCE(NULLIF(f.exchange,''),'polymarket')) || ':' || f.market_id
+UNION ALL
+SELECT 'snapshot:calibrated:' || f.id, 'production',
+       lower(COALESCE(NULLIF(f.exchange,''),'polymarket')) || ':' || f.market_id,
+       COALESCE(NULLIF(o.event_family,''),f.market_id),
+       lower(COALESCE(NULLIF(f.exchange,''),'polymarket')),
+       f.market_id, f.observed_at, f.observed_at,
+       f.calibrated_probability, 'calibrated', f.market_yes_price, f.model,
+       f.strategy_source, f.strategy_source, NULL, NULL,
+       f.evidence_run_ids, f.config_fingerprint, '', '', 0.0, 'succeeded', 0,
+       o.outcome, o.resolved_at
+  FROM forecast_snapshots f
+  LEFT JOIN market_outcomes o
+    ON o.event_key=lower(COALESCE(NULLIF(f.exchange,''),'polymarket')) || ':' || f.market_id
+ WHERE f.calibrated_probability IS NOT NULL
+UNION ALL
+SELECT 'evaluation:' || ef.forecast_id, 'intelligence_eval',
+       lower(e.venue) || ':' || e.market_id,
+       COALESCE(NULLIF(o.event_family,''),e.event_family),
+       lower(e.venue), e.market_id, e.observed_at,
+       COALESCE(json_extract(e.snapshot_json,'$.evidence_cutoff'),e.observed_at),
+       ef.prob_yes,
+       CASE WHEN r.exploration_policy='samples_critic' THEN 'critic'
+            WHEN r.exploration_policy='single' THEN 'single'
+            ELSE 'aggregate' END,
+       e.market_prob_yes, r.model, r.arm_name, 'intelligence_eval',
+       r.run_id, e.episode_hash, ef.evidence_ids_json, '',
+       r.prompt_version, r.output_schema_version, r.compute_seconds,
+       r.status, CASE WHEN ef.action='ABSTAIN' THEN 1 ELSE 0 END,
+       o.outcome, o.resolved_at
+  FROM evaluation_forecasts ef
+  JOIN evaluation_runs r ON r.run_id=ef.run_id
+  JOIN evaluation_episodes e ON e.episode_hash=ef.episode_hash
+  LEFT JOIN market_outcomes o ON o.event_key=lower(e.venue) || ':' || e.market_id
+UNION ALL
+SELECT 'information:' || pf.trial_id || ':' || pf.arm, 'information_trial',
+       lower(COALESCE(NULLIF(m.exchange,''),'polymarket')) || ':' || t.market_id,
+       COALESCE(NULLIF(o.event_family,''),t.market_id),
+       lower(COALESCE(NULLIF(m.exchange,''),'polymarket')),
+       t.market_id, t.observed_at, t.observed_at, pf.probability,
+       'trial', t.market_price, '', pf.arm, s.source, t.id, NULL, '[]', '', '', '',
+       0.0, 'succeeded', 0, o.outcome, o.resolved_at
+  FROM paired_forecasts pf
+  JOIN information_trials t ON t.id=pf.trial_id
+  JOIN information_strategies s ON s.id=t.strategy_id
+  LEFT JOIN markets m ON m.id=t.market_id
+  LEFT JOIN market_outcomes o
+    ON o.event_key=lower(COALESCE(NULLIF(m.exchange,''),'polymarket')) || ':' || t.market_id;
 """

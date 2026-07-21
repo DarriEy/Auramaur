@@ -263,29 +263,25 @@ class TradingEngine(CycleOrchestrationMixin):
         the streak); an approval clears it — the market earned its way back.
         """
         try:
-            if approved:
-                await self.db.execute(
-                    "DELETE FROM signal_rejections WHERE market_id = ?",
-                    (market.id,),
-                )
-            else:
-                await self.db.execute(
-                    """INSERT INTO signal_rejections
-                       (market_id, exchange, rejected_at, yes_price, reason, streak)
-                       VALUES (?, ?, datetime('now'), ?, ?, 1)
-                       ON CONFLICT(market_id) DO UPDATE SET
-                           rejected_at = excluded.rejected_at,
-                           yes_price = excluded.yes_price,
-                           reason = excluded.reason,
-                           streak = streak + 1""",
-                    (
-                        market.id,
-                        market.exchange or self.exchange_name or "",
-                        market.outcome_yes_price,
-                        (reason or "")[:200],
-                    ),
-                )
-            await self.db.commit()
+            async with self.db.transaction():
+                if approved:
+                    await self.db.execute(
+                        "DELETE FROM signal_rejections WHERE market_id = ?",
+                        (market.id,),
+                    )
+                else:
+                    await self.db.execute(
+                        """INSERT INTO signal_rejections
+                           (market_id,exchange,rejected_at,yes_price,reason,streak)
+                           VALUES (?,?,datetime('now'),?,?,1)
+                           ON CONFLICT(market_id) DO UPDATE SET
+                               rejected_at=excluded.rejected_at,
+                               yes_price=excluded.yes_price,
+                               reason=excluded.reason,
+                               streak=streak+1""",
+                        (market.id, market.exchange or self.exchange_name or "",
+                         market.outcome_yes_price, (reason or "")[:200]),
+                    )
         except Exception as e:
             log.debug("engine.rejection_record_error", market_id=market.id, error=str(e))
 
@@ -624,9 +620,9 @@ class TradingEngine(CycleOrchestrationMixin):
             )
             analysis.calibrated_probability = calibrated
 
-        # Existing calibration remains on its established connection. New
-        # lineage is observer-only: enqueueing is non-blocking and its worker
-        # owns a separate connection, so it cannot roll back or stall trading.
+        # Lineage enqueueing is non-blocking. Both calibration and the observer
+        # share the process Database and serialize short writes through its
+        # transaction lock; neither can bleed into the other's transaction.
         if self.calibration is not None:
             await self.calibration.record_prediction(
                 market.id, analysis.probability, market.category or "",
@@ -694,32 +690,29 @@ class TradingEngine(CycleOrchestrationMixin):
             )
 
         # 4. Ensure market exists in DB then store signal
-        await self.db.execute(
-            """INSERT OR IGNORE INTO markets (id, exchange, condition_id, question, description,
-               category, active, outcome_yes_price, outcome_no_price,
-               volume, liquidity, last_updated)
-               VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))""",
-            (market.id, market.exchange or self.exchange_name or "polymarket",
-             market.condition_id, market.question,
-             market.description[:500],
-             ensure_category(market.question, market.description, market.category),
-             market.outcome_yes_price, market.outcome_no_price,
-             market.volume, market.liquidity),
-        )
-        await self.db.execute(
-            """INSERT INTO signals (market_id, claude_prob, claude_confidence, market_prob,
-                                     edge, second_opinion_prob, divergence, evidence_summary, action,
-                                     strategy_source)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                signal.market_id, signal.claude_prob, signal.claude_confidence.value,
-                signal.market_prob, signal.edge, signal.second_opinion_prob,
-                signal.divergence, signal.evidence_summary,
-                signal.recommended_side.value if signal.recommended_side else None,
-                signal.strategy_source,
-            ),
-        )
-        await self.db.commit()
+        async with self.db.transaction():
+            await self.db.execute(
+                """INSERT OR IGNORE INTO markets
+                   (id,exchange,condition_id,question,description,category,active,
+                    outcome_yes_price,outcome_no_price,volume,liquidity,last_updated)
+                   VALUES (?,?,?,?,?,?,1,?,?,?,?,datetime('now'))""",
+                (market.id, market.exchange or self.exchange_name or "polymarket",
+                 market.condition_id, market.question, market.description[:500],
+                 ensure_category(market.question, market.description, market.category),
+                 market.outcome_yes_price, market.outcome_no_price,
+                 market.volume, market.liquidity),
+            )
+            await self.db.execute(
+                """INSERT INTO signals
+                   (market_id,claude_prob,claude_confidence,market_prob,edge,
+                    second_opinion_prob,divergence,evidence_summary,action,strategy_source)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (signal.market_id, signal.claude_prob, signal.claude_confidence.value,
+                 signal.market_prob, signal.edge, signal.second_opinion_prob,
+                 signal.divergence, signal.evidence_summary,
+                 signal.recommended_side.value if signal.recommended_side else None,
+                 signal.strategy_source),
+            )
 
         # 5. Risk evaluation (pass actual cash for correct Kelly sizing)
         cash = await self._get_available_cash()

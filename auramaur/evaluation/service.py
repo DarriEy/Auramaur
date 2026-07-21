@@ -15,13 +15,14 @@ from datetime import datetime, timezone
 import structlog
 
 from auramaur.evaluation.domain import (
-    EpisodeSnapshot, EvaluationForecast, EvaluationOutcome, EvaluationRun, RunStatus,
+    EpisodeSnapshot, EvaluationForecast, EvaluationRun, RunStatus,
 )
 from auramaur.evaluation.runner import (
     AdapterResponse, ArmSpec, Episode, ExplorationPolicy, GenerationRequest,
     IntelligenceEvalRunner, TreatmentSpec,
 )
 from auramaur.evaluation.store import EvaluationStore
+from auramaur.evaluation.evidence import ForecastScoreMaterializer
 
 log = structlog.get_logger()
 
@@ -92,6 +93,7 @@ class IntelligenceEvalService:
         self._local_cfg = settings.local_llm
         self._discovery = discovery
         self._store = EvaluationStore(db)
+        self._score_materializer = ForecastScoreMaterializer(db)
         adapter = LocalForecastAdapter(local_client, self._cfg.prompt_version)
         arm = ArmSpec("local", self._local_cfg.model, adapter, {
             "num_ctx": self._local_cfg.num_ctx,
@@ -102,7 +104,9 @@ class IntelligenceEvalService:
         self._runner = IntelligenceEvalRunner(self._cfg.max_concurrency)
 
     async def run_once(self) -> int:
-        await self._settle_known_outcomes()
+        # ResolutionTracker owns venue truth. Refreshing here makes newly
+        # canonicalized results visible even during quiet/no-resolution cycles.
+        await self._score_materializer.refresh()
         markets = await self._discovery.get_markets(
             active=True, limit=self._cfg.scan_limit)
         eligible = [market for market in markets if (
@@ -171,26 +175,3 @@ class IntelligenceEvalService:
             ))
             written += 1
         return written
-
-    async def _settle_known_outcomes(self) -> int:
-        rows = await self._db.fetchall(
-            """SELECT DISTINCT e.episode_hash, e.market_id
-               FROM evaluation_episodes e
-               LEFT JOIN evaluation_outcomes o ON o.episode_hash=e.episode_hash
-               WHERE o.episode_hash IS NULL""")
-        settled = 0
-        cache = {}
-        for row in rows:
-            market_id = row["market_id"]
-            if market_id not in cache:
-                cache[market_id] = await self._discovery.get_market(market_id)
-            market = cache[market_id]
-            result = str(getattr(market, "result", "") or "").strip().lower()
-            if result not in ("yes", "no"):
-                continue
-            await self._store.settle(EvaluationOutcome(
-                episode_hash=row["episode_hash"], outcome=1 if result == "yes" else 0,
-                resolved_at=datetime.now(timezone.utc), source="venue",
-            ))
-            settled += 1
-        return settled
