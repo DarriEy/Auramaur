@@ -20,8 +20,12 @@ def intelligence_eval_report():
     """Show the resolved, market-relative shadow evaluation scorecard."""
     async def _run():
         from auramaur.evaluation.store import EvaluationStore
-        db = Database()
-        await db.connect(ensure_schema=False)
+        from auramaur.web.db import ReadOnlyDatabase
+
+        # Pure report: mode=ro + query_only makes writes impossible at SQLite,
+        # and avoids Database.connect()'s write PRAGMAs/DDL on the live file.
+        db = ReadOnlyDatabase()
+        await db.connect()
         try:
             rows = await EvaluationStore(db).summary()
             table = Table(title="Intelligence × Exploration Evaluation")
