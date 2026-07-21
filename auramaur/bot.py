@@ -785,7 +785,7 @@ class AuramaurBot(
                     self._components.db, self.settings,
                     include_ibkr=(cycle % 5 == 0))
             except Exception as e:  # noqa: BLE001 — monitoring must not die
-                log.debug("balance_recorder.error", error=str(e))
+                log.warning("balance_recorder.error", error=str(e))
             cycle += 1
             await asyncio.sleep(60)
 

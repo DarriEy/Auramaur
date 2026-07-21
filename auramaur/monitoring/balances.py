@@ -100,9 +100,12 @@ async def record_venue_balances(db, settings, *, include_ibkr: bool = True) -> N
     for venue, fetch in fetchers.items():
         try:
             detail = await fetch(settings)
-        except Exception as exc:  # noqa: BLE001 — keep last good row, age tells the story
-            log.debug("balance_recorder.fetch_error", venue=venue,
-                      error=str(exc)[:120])
+        except Exception as exc:  # noqa: BLE001 — keep last good row
+            # warning, not debug: the stale row silently stood in for a live
+            # balance for 8h during the 2026-07-21 gateway 2FA outage — the
+            # age column "told the story" but nothing surfaced it.
+            log.warning("balance_recorder.fetch_error", venue=venue,
+                        error=str(exc)[:120])
             continue
         await db.execute(
             """INSERT INTO venue_balances (venue, detail, fetched_at)
