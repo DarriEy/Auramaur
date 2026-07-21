@@ -1,15 +1,14 @@
-"""Position reconciler — builds ground-truth positions from CLOB trade history.
+"""Position reconciler — projects Polymarket's current holdings into the DB.
 
 Solves the ID mapping problem:
   Our DB uses numeric market IDs (e.g. "1339769")
-  CLOB uses condition_ids (hex hashes) and asset_ids (76-digit token IDs)
-  Gamma API bridges them via conditionId field
+  Polymarket uses condition_ids (hex hashes) and asset_ids (token IDs)
 
 This module:
-1. Fetches confirmed trades from CLOB API
-2. Reconstructs net positions per token
-3. Maps CLOB condition_ids to our market IDs via CLOB market lookup
-4. Returns ground-truth positions with correct token_ids for selling
+1. Fetches net current positions from the public Data API
+2. Maps condition_ids to Auramaur market IDs
+3. Persists an atomic venue-native snapshot for reconciliation diagnostics
+4. Retains the old CLOB-history reconstruction as an explicit diagnostic
 """
 
 from __future__ import annotations
@@ -38,7 +37,7 @@ class ReconciledPosition:
 
 
 class PositionReconciler:
-    """Reconciles positions between CLOB trade history and our DB."""
+    """Reconciles venue-native current positions with Auramaur's database."""
 
     def __init__(self, exchange, db):
         self._exchange = exchange
@@ -49,9 +48,62 @@ class PositionReconciler:
         # the end, so the write never interleaves with per-position network
         # calls (SQLite lock contention — db-contention-plan Phase 1).
         self._pending_stubs: list[tuple] = []
+        self.last_fetch_ok = False
 
     async def reconcile(self) -> list[ReconciledPosition]:
-        """Full reconciliation from CLOB trade history.
+        """Reconcile from Polymarket's net current-position endpoint."""
+        from datetime import datetime, timezone
+
+        from auramaur.broker.redeemer import fetch_current_positions
+
+        self.last_fetch_ok = False
+        try:
+            held = await fetch_current_positions(
+                self._exchange._settings.polymarket_proxy_address)
+        except Exception as exc:
+            log.warning("reconciler.positions_error", error=str(exc))
+            return []
+
+        fetched_at = datetime.now(timezone.utc).isoformat()
+        positions: list[ReconciledPosition] = []
+        snapshot_rows: list[tuple] = []
+        for item in held:
+            market_id = await self._find_market_id(
+                item.condition_id, item.title, item.slug)
+            market_id = market_id or item.condition_id[:16]
+            avg_cost = item.avg_price if 0 < item.avg_price <= 1 else item.cur_price
+            current_price = item.cur_price if item.cur_price > 0 else avg_cost
+            snapshot_rows.append((
+                "polymarket", item.asset_id, item.condition_id, market_id,
+                item.title, item.outcome, item.size, item.avg_price, item.cur_price,
+                item.initial_value, item.current_value, item.cash_pnl,
+                int(item.redeemable), fetched_at,
+            ))
+            if item.redeemable:
+                continue
+            positions.append(ReconciledPosition(
+                market_id=market_id, condition_id=item.condition_id,
+                token_id=item.asset_id, outcome=item.outcome,
+                question=item.title, size=item.size, avg_cost=avg_cost,
+                current_price=current_price,
+            ))
+        await self._flush_pending_stubs()
+        async with self._db.transaction():
+            await self._db.execute(
+                "DELETE FROM venue_positions WHERE venue = 'polymarket'")
+            for row in snapshot_rows:
+                await self._db.execute(
+                    """INSERT INTO venue_positions
+                       (venue,asset_id,condition_id,market_id,title,outcome,size,
+                        avg_price,current_price,initial_value,current_value,
+                        cash_pnl,redeemable,fetched_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", row)
+        self.last_fetch_ok = True
+        log.info("reconciler.complete", positions=len(positions), source="data_api")
+        return positions
+
+    async def reconcile_from_trades(self) -> list[ReconciledPosition]:
+        """Legacy full reconciliation from CLOB history, retained for diagnostics.
 
         1. Fetch all confirmed trades
         2. Reconstruct net positions per token

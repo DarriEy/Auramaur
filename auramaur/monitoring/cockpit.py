@@ -145,6 +145,10 @@ async def _portfolio_pnl(db, settings, is_paper_flag: int) -> dict:
             "exchange": r["exchange"] or "polymarket",
             "side": r["side"], "size": r["size"], "avg_price": r["avg_price"],
             "current_price": r["current_price"] or r["avg_price"],
+            "updated_at": r["updated_at"],
+            "initial_value": (r["avg_price"] or 0) * (r["size"] or 0),
+            "current_value": (r["current_price"] or r["avg_price"] or 0) * (r["size"] or 0),
+            "to_win": r["size"] or 0,
             "pnl": (
                 ((r["current_price"] or r["avg_price"]) - (r["cb_avg_cost"] or r["avg_price"]))
                 * (r["size"] or 0)

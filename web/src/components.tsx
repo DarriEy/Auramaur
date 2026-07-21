@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type {
   Book,
   CategoryStat,
@@ -11,6 +12,7 @@ import type {
 } from "./types";
 import type { Phase } from "./useDashboardState";
 import { ago, deltaClass, liveness, money, price, utcClock } from "./format";
+import { filterPositions } from "./positionFilter";
 
 export function TopBar({
   s,
@@ -144,6 +146,17 @@ export function VenuesPanel({ s }: { s: DashboardState }) {
   return (
     <section className="panel">
       <h2>Venues</h2>
+      {s.reconciliation?.available && !s.reconciliation.in_sync && (
+        <div className="conn-banner degraded" role="alert">
+          Venue mismatch: Polymarket reports {s.reconciliation.venue_count} positions,
+          Auramaur has {s.reconciliation.db_count}. Missing {s.reconciliation.missing.length},
+          extra {s.reconciliation.extra.length}, quantity mismatches
+          {` ${s.reconciliation.size_mismatches.length}`}.
+        </div>
+      )}
+      {s.reconciliation?.available && s.reconciliation.in_sync && (
+        <div className="clean">✓ Venue and database are in sync ({s.reconciliation.venue_count})</div>
+      )}
       <div className="kv">
         {names.map((name) => {
           const pos = byExchange.get(name);
@@ -313,17 +326,20 @@ export function HealthPanel({ health }: { health: Health }) {
     </section>
   );
 }
-
-const POSITIONS_SHOWN = 15;
-
+  // The complete book remains available; search narrows it without truncation.
 export function PositionsPanel({ positions }: { positions: Position[] }) {
-  // Biggest movers first and capped, like the cockpit: a monitoring view's
-  // density comes from selection, not from scrolling a wall of rows.
-  const sorted = [...positions].sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl));
-  const shown = sorted.slice(0, POSITIONS_SHOWN);
+  const [query, setQuery] = useState("");
+  const shown = filterPositions(positions, query);
   return (
     <section className="panel">
       <h2>Positions</h2>
+      <input
+        aria-label="Search positions"
+        className="position-search"
+        placeholder={`Search all ${positions.length} positions`}
+        value={query}
+        onChange={(event) => setQuery(event.target.value)}
+      />
       {shown.length === 0 ? (
         <div className="empty">No open positions</div>
       ) : (
@@ -358,11 +374,6 @@ export function PositionsPanel({ positions }: { positions: Position[] }) {
               ))}
             </tbody>
           </table>
-          {sorted.length > POSITIONS_SHOWN && (
-            <div className="tbl-note">
-              top {POSITIONS_SHOWN} of {sorted.length} by |P&L| — full book in phase-2 explorer
-            </div>
-          )}
         </div>
       )}
     </section>

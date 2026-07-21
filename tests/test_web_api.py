@@ -417,3 +417,59 @@ async def test_ibkr_paper_books_degrades_without_schema(tmp_path):
     await ro.connect()
     assert await queries.ibkr_paper_books(ro) == []
     await ro.close()
+
+
+@pytest.mark.asyncio
+async def test_state_reports_structured_balance_and_position_mismatch(tmp_path):
+    db_path = str(tmp_path / "auramaur.db")
+    await _seed_bot_db(db_path)
+    db = Database(db_path)
+    await db.connect()
+    try:
+        await db.execute(
+            """INSERT INTO portfolio
+               (market_id,exchange,side,size,avg_price,current_price,token,token_id,is_paper)
+               VALUES ('live-1','polymarket','BUY',10,.4,.5,'YES','asset-1',0)""")
+        now = "2026-07-21T12:00:00+00:00"
+        await db.execute(
+            """INSERT INTO venue_balances
+               (venue,detail,available,equity,fetched_at)
+               VALUES ('polymarket','$166 available | $1189 equity',166.15,1189.13,?)""",
+            (now,))
+        for asset, market, size, value in (
+            ("asset-1", "live-1", 12.0, 5.0),
+            ("asset-manual", "live-manual", 10.0, 7.5),
+        ):
+            await db.execute(
+                """INSERT INTO venue_positions
+                   (venue,asset_id,condition_id,market_id,title,outcome,size,
+                    avg_price,current_price,current_value,fetched_at)
+                   VALUES ('polymarket',?,?,?,'Held market','YES',?,.4,.5,?,?)""",
+                (asset, f"condition-{asset}", market, size, value, now))
+        await db.commit()
+    finally:
+        await db.close()
+
+    with _client(tmp_path, db_path) as client:
+        env = client.get("/api/state").json()
+        assert env["ok"] is True
+        live = env["books"]["live"]
+        balance = live["venues"]["polymarket"]
+        assert balance["available"] == pytest.approx(166.15)
+        assert balance["equity"] == pytest.approx(1189.13)
+        recon = live["reconciliation"]
+        assert recon["available"] is True
+        assert recon["in_sync"] is False
+        assert recon["venue_count"] == 2
+        assert recon["db_count"] == 1
+        assert recon["venue_value"] == pytest.approx(12.5)
+        assert recon["db_value"] == pytest.approx(5.0)
+        assert recon["missing"] == [{
+            "asset_id": "asset-manual", "title": "Held market",
+            "outcome": "YES", "size": 10.0,
+        }]
+        assert recon["extra"] == []
+        assert recon["size_mismatches"] == [{
+            "asset_id": "asset-1", "title": "Held market", "outcome": "YES",
+            "venue_size": 12.0, "db_size": 10.0,
+        }]

@@ -237,6 +237,8 @@ class Database:
             await self._migrate_v35_to_v36()
         if from_version < 37:
             await self._migrate_v36_to_v37()
+        if from_version < 38:
+            await self._migrate_v37_to_v38()
 
     async def _migrate_v29_to_v30(self) -> None:
         """Add cost-adjusted IBKR round-trip observations."""
@@ -367,6 +369,19 @@ class Database:
         await self._db.execute("UPDATE schema_version SET version = 36")
         await self._db.commit()
         log.info("database.migrated", from_version=35, to_version=36)
+    async def _migrate_v37_to_v38(self) -> None:
+        """Structured venue balances and venue-native position snapshots."""
+        for column in ("available REAL", "equity REAL"):
+            try:
+                await self._db.execute(
+                    f"ALTER TABLE venue_balances ADD COLUMN {column}")
+            except aiosqlite.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+        await self._db.execute("UPDATE schema_version SET version = 38")
+        await self._db.commit()
+        log.info("database.migrated", from_version=37, to_version=38)
+
 
     async def _migrate_v36_to_v37(self) -> None:
         """Canonical outcomes and normalized forecast evidence."""

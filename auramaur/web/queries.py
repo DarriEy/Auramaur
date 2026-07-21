@@ -23,7 +23,7 @@ async def venue_balances(db: ReadOnlyDatabase) -> dict[str, dict]:
     """
     try:
         rows = await db.fetchall(
-            "SELECT venue, detail, fetched_at FROM venue_balances ORDER BY venue")
+            "SELECT venue, detail, available, equity, fetched_at FROM venue_balances ORDER BY venue")
     except Exception:
         return {}
     now = datetime.now(timezone.utc)
@@ -33,8 +33,56 @@ async def venue_balances(db: ReadOnlyDatabase) -> dict[str, dict]:
             age = max(0.0, (now - datetime.fromisoformat(r["fetched_at"])).total_seconds())
         except (ValueError, TypeError):  # unparseable or naive timestamp
             age = None
-        out[r["venue"]] = {"detail": r["detail"], "age_seconds": age}
+        out[r["venue"]] = {"detail": r["detail"], "age_seconds": age,
+                           "available": r["available"], "equity": r["equity"],
+                           "fetched_at": r["fetched_at"]}
     return out
+
+
+async def venue_reconciliation(db: ReadOnlyDatabase) -> dict:
+    """Compare the latest venue-native snapshot with the live DB projection."""
+    try:
+        summary = await db.fetchone(
+            """SELECT COUNT(CASE WHEN redeemable=0 THEN 1 END) AS venue_count,
+                      MAX(fetched_at) AS fetched_at,
+                      COALESCE(SUM(CASE WHEN redeemable=0 THEN current_value ELSE 0 END),0)
+                          AS venue_value
+                 FROM venue_positions WHERE venue='polymarket'""")
+        dbrow = await db.fetchone(
+            """SELECT COUNT(*) AS db_count,
+                      COALESCE(SUM(size * COALESCE(current_price,avg_price)),0) AS db_value
+                 FROM portfolio WHERE exchange='polymarket' AND is_paper=0""")
+        missing = await db.fetchall(
+            """SELECT v.asset_id,v.title,v.outcome,v.size
+                 FROM venue_positions v LEFT JOIN portfolio p
+                   ON p.token_id=v.asset_id AND p.exchange='polymarket' AND p.is_paper=0
+                WHERE v.venue='polymarket' AND v.redeemable=0
+                  AND p.token_id IS NULL ORDER BY v.current_value DESC""")
+        extra = await db.fetchall(
+            """SELECT p.token_id,p.market_id,p.token,p.size
+                 FROM portfolio p LEFT JOIN venue_positions v
+                   ON v.asset_id=p.token_id AND v.venue='polymarket' AND v.redeemable=0
+                WHERE p.exchange='polymarket' AND p.is_paper=0 AND v.asset_id IS NULL""")
+        size_mismatches = await db.fetchall(
+            """SELECT v.asset_id,v.title,v.outcome,v.size AS venue_size,p.size AS db_size
+                 FROM venue_positions v JOIN portfolio p
+                   ON p.token_id=v.asset_id AND p.exchange='polymarket' AND p.is_paper=0
+                WHERE v.venue='polymarket' AND v.redeemable=0
+                  AND ABS(v.size-p.size)>0.001
+                ORDER BY ABS(v.size-p.size) DESC""")
+    except Exception:
+        return {"available": False, "in_sync": False, "venue_count": 0,
+                "db_count": 0, "missing": [], "extra": [],
+                "size_mismatches": [], "fetched_at": None}
+    return {
+        "available": summary["fetched_at"] is not None,
+        "in_sync": not missing and not extra and not size_mismatches,
+        "venue_count": summary["venue_count"], "db_count": dbrow["db_count"],
+        "venue_value": summary["venue_value"], "db_value": dbrow["db_value"],
+        "fetched_at": summary["fetched_at"],
+        "missing": [dict(r) for r in missing], "extra": [dict(r) for r in extra],
+        "size_mismatches": [dict(r) for r in size_mismatches],
+    }
 
 
 async def ibkr_paper_books(db: ReadOnlyDatabase) -> list[dict]:
