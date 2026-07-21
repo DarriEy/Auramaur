@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -9,12 +10,19 @@ from auramaur.db.database import Database
 
 
 def _db(*, fetchone=None, execute=None):
-    return SimpleNamespace(
+    ns = SimpleNamespace(
         fetchone=fetchone or AsyncMock(return_value=None),
         execute=execute or AsyncMock(),
         commit=AsyncMock(),
-        db=SimpleNamespace(rollback=AsyncMock()),
+        db=SimpleNamespace(rollback=AsyncMock(), in_transaction=False),
     )
+
+    @asynccontextmanager
+    async def _transaction():
+        yield ns
+
+    ns.transaction = _transaction
+    return ns
 
 
 @pytest.mark.asyncio
@@ -35,7 +43,9 @@ async def test_cache_put_retries_lock_without_losing_analysis(monkeypatch):
 
     assert db.execute.await_count == 2
     db.db.rollback.assert_not_awaited()
-    db.commit.assert_awaited_once()
+    # Commit semantics moved inside Database.transaction(); the legacy
+    # commit() must no longer be issued (it was the bleed vector).
+    db.commit.assert_not_awaited()
 
 
 @pytest.mark.asyncio

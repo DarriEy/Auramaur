@@ -24,18 +24,20 @@ class ShadowSource:
 
 @pytest.mark.asyncio
 async def test_shadow_evidence_is_persisted_but_withheld(tmp_path):
-    observer = await LineageObserver.create(str(tmp_path / "shadow.db"))
+    db = Database(str(tmp_path / "shadow.db"))
+    await db.connect()
+    observer = await LineageObserver.create(db)
     result = await Aggregator([ShadowSource()], observer=observer).gather(
         "fact", market_id="m", market_price=.4,
     )
     await observer.flush()
-    db = observer.db
     assert result == []
     row = await db.fetchone("SELECT information_mode,rank_position FROM evidence_observations")
     assert row["information_mode"] == "shadow" and row["rank_position"] is None
     trial = await db.fetchone("SELECT assignment,market_price FROM information_trials")
     assert trial["assignment"] in {"control", "treatment"} and trial["market_price"] == .4
     await observer.close()
+    await db.close()
 
 
 @pytest.mark.asyncio
@@ -80,7 +82,7 @@ async def test_assignment_is_immutable_and_deterministic():
 async def test_market_resolution_reconciles_information_trials(tmp_path):
     db = Database(str(tmp_path / "resolution.db"))
     await db.connect()
-    observer = await LineageObserver.create(str(tmp_path / "resolution.db"))
+    observer = await LineageObserver.create(db)
     ladder = observer.ladder
     sid = await ladder.register("candidate", "weather", "0-6h")
     trial, _ = await ladder.assign(

@@ -20,7 +20,7 @@ def data_audit():
         from auramaur.data_quality import audit_data_contracts
 
         db = Database()
-        await db.connect()
+        await db.connect(ensure_schema=False)
         try:
             violations = await audit_data_contracts(db)
             if not violations:
@@ -47,7 +47,7 @@ def information_graduation_report():
         from auramaur.information_graduation import InformationGraduation
 
         db = Database()
-        await db.connect()
+        await db.connect(ensure_schema=False)
         try:
             rows = await InformationGraduation(db).report()
             table = Table(title="Information graduation")
@@ -91,7 +91,7 @@ def repair_categories(write: bool, reclassify_all: bool):
         from auramaur.strategy.classifier import classify_market
 
         db = Database()
-        await db.connect()
+        await db.connect(ensure_schema=False)
         try:
             scope_sql = ("" if reclassify_all
                          else " WHERE category = '' OR category IS NULL")
@@ -158,7 +158,7 @@ def settle_stale(write: bool):
             return
 
         db = Database()
-        await db.connect()
+        await db.connect(ensure_schema=False)
         try:
             tracker = ResolutionTracker(db=db, calibration=None,
                                         discoveries={}, proxy_address=proxy)
@@ -213,7 +213,7 @@ def kalshi_settlements(write: bool):
 
         settings = Settings()
         db = Database()
-        await db.connect()
+        await db.connect(ensure_schema=False)
         try:
             paper = PaperTrader(db=db)
             client = KalshiClient(settings=settings, paper_trader=paper)
@@ -227,20 +227,20 @@ def kalshi_settlements(write: bool):
             t.add_column("Ticker", max_width=30)
             t.add_column("Result", width=6)
             t.add_column("Qty", justify="right")
-            t.add_column("Revenue", justify="right")
+            t.add_column("Payout", justify="right")
             t.add_column("P&L", justify="right")
             total, skipped = 0.0, 0
             for r in sorted(rows, key=lambda x: x["settled"]):
                 if r["pnl"] is None:
                     skipped += 1
                     t.add_row(r["settled"][:10], r["ticker"][:30], r["result"],
-                              f"{r['qty']:.0f}", f"${r['revenue']:.2f}",
-                              "[yellow]skip: no cost[/]")
+                              f"{r['qty']:.0f}", "—",
+                              f"[yellow]skip: {r['reason']}[/]")
                     continue
                 total += r["pnl"]
                 color = "green" if r["pnl"] >= 0 else "red"
                 t.add_row(r["settled"][:10], r["ticker"][:30], r["result"],
-                          f"{r['qty']:.0f}", f"${r['revenue']:.2f}",
+                          f"{r['qty']:.0f}", f"${r['payout']:.2f}",
                           f"[{color}]{r['pnl']:+.2f}[/]")
             console.print(t)
             color = "green" if total >= 0 else "red"
@@ -269,7 +269,7 @@ def repair_pnl(write: bool):
         )
 
         db = Database()
-        await db.connect()
+        await db.connect(ensure_schema=False)
         try:
             dry_run = not write
             backfill = await backfill_resolution_pnl(db, is_paper=0, dry_run=dry_run)
@@ -326,7 +326,7 @@ def reconcile_kalshi_orders(write: bool):
 
         settings = Settings()
         db = Database()
-        await db.connect()
+        await db.connect(ensure_schema=False)
         try:
             paper = PaperTrader(db=db)
             exchange = KalshiClient(settings=settings, paper_trader=paper)

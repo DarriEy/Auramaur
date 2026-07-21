@@ -62,11 +62,13 @@ class TestKalshiPositionSyncerPaperSync:
         s.is_live = is_live
         return s
 
-    def _db(self):
+    def _db(self, kalshi_ids=("KXTEST",)):
         db = MagicMock()
         db.execute = AsyncMock()
         db.commit = AsyncMock()
-        db.fetchall = AsyncMock(return_value=[])
+        # _sync_paper scopes the shared PaperTrader book to markets known as
+        # exchange='kalshi' (2026-07-20 audit fix).
+        db.fetchall = AsyncMock(return_value=[{"id": mid} for mid in kalshi_ids])
         return db
 
     @pytest.mark.asyncio
@@ -97,7 +99,11 @@ class TestKalshiPositionSyncerPaperSync:
         assert positions[0].size == 10.0
 
     @pytest.mark.asyncio
-    async def test_paper_sync_empty_clears_portfolio(self):
+    async def test_paper_sync_empty_preserves_pillar_rows(self):
+        """Empty PaperTrader memory must NOT blanket-delete kalshi paper rows:
+        strategy pillars own paper kalshi positions that PaperTrader never
+        tracked, and the old unconditional DELETE shredded them
+        (2026-07-20 audit)."""
         paper = MagicMock()
         paper.positions = {}
 
@@ -111,10 +117,35 @@ class TestKalshiPositionSyncerPaperSync:
         positions = await syncer.sync()
         assert positions == []
         delete_calls = [c for c in syncer._db.execute.call_args_list if "DELETE" in str(c)]
-        assert delete_calls
+        assert not delete_calls
 
 
 class TestKalshiLivePositionAccounting:
+    @pytest.mark.asyncio
+    async def test_sync_positions_page_size_within_sdk_cap(self):
+        """kalshi-python caps `limit` at 200 CLIENT-SIDE (Field(le=200)): a
+        larger page size fails pydantic validation before any HTTP call, which
+        silently killed live position sync for a day (#314 regression). The
+        mocked _call_raw here can't catch that, so pin the kwarg itself."""
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            client = KalshiClient.__new__(KalshiClient)
+            client._init_api = MagicMock()
+            client._portfolio_api = MagicMock()
+            seen: list[dict] = []
+
+            async def _raw(fn, **kwargs):
+                seen.append(kwargs)
+                return json.dumps({"market_positions": []})
+
+            client._call_raw = _raw
+            await client.sync_positions(db)
+            assert seen, "sync_positions never fetched"
+            assert all(1 <= k.get("limit", 0) <= 200 for k in seen)
+        finally:
+            await db.close()
+
     @pytest.mark.asyncio
     async def test_sync_positions_writes_portfolio_and_cost_basis(self):
         db = Database(":memory:")
@@ -167,6 +198,60 @@ class TestKalshiLivePositionAccounting:
             assert cost_basis["avg_cost"] == pytest.approx(0.42)
             assert cost_basis["total_cost"] == pytest.approx(4.2)
             assert cost_basis["is_paper"] == 0
+        finally:
+            await db.close()
+
+    @pytest.mark.asyncio
+    async def test_sync_positions_network_completes_before_first_write(self):
+        """db-contention plan Phase 1: the write transaction must never span a
+        network await. ALL get_market calls (phase ii, network-only) must
+        complete before the FIRST db.execute of the write pass (phase iii)."""
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            client = KalshiClient.__new__(KalshiClient)
+            client._init_api = MagicMock()
+            client._portfolio_api = MagicMock()
+            client._portfolio_api.get_positions_without_preload_content = MagicMock()
+            client._call_raw = AsyncMock(return_value=json.dumps({
+                "market_positions": [
+                    {"ticker": f"KXORD{i}", "position_fp": 5,
+                     "market_exposure_dollars": 2.0}
+                    for i in range(3)
+                ]
+            }))
+
+            events: list[str] = []
+
+            async def _get_market(ticker):
+                events.append(f"net:{ticker}")
+                return Market(
+                    id=ticker, exchange="kalshi", question=f"{ticker}?",
+                    category="test", outcome_yes_price=0.4,
+                    outcome_no_price=0.6,
+                )
+
+            client.get_market = _get_market
+
+            real_execute = db.execute
+
+            async def _execute(sql, params=()):
+                events.append("db")
+                return await real_execute(sql, params)
+
+            db.execute = _execute
+
+            count = await client.sync_positions(db)
+
+            assert count == 3
+            db_events = [i for i, e in enumerate(events) if e == "db"]
+            net_events = [i for i, e in enumerate(events) if e.startswith("net:")]
+            assert len(net_events) == 3, "expected one get_market per position"
+            assert db_events, "sync_positions never wrote"
+            assert max(net_events) < min(db_events), (
+                "a db.execute ran before all get_market network calls "
+                f"finished: {events}"
+            )
         finally:
             await db.close()
 

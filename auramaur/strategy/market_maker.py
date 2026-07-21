@@ -315,6 +315,34 @@ class MarketMaker:
         # reaper (and, after a freeze, nobody) cleaned them up.
         prior = self._active_quotes.pop(market.id, None)
         if prior is not None:
+            # Identical-requote guard: when the freshly computed quote matches
+            # the resting pair and BOTH legs are still tracked as pending
+            # (check_fills prunes filled/cancelled/rejected ids, and paper ids
+            # are pruned immediately — so this path is effectively live-only),
+            # KEEP the resting orders. Cancel+replace of an unchanged quote
+            # forfeits book time-priority every refresh cycle, which is why
+            # the live MM could quote for hours without a fill (2026-07-20:
+            # identical 0.46/0.48 requoted every ~34s on three markets).
+            # placed_at is refreshed so _cancel_stale_quotes doesn't reap a
+            # deliberately-kept quote; if the book moves or the market drops
+            # out of the candidate set, this guard fails and the normal
+            # cancel/stale paths run — the orphaned-GTC leak cannot return.
+            if (
+                abs(prior.bid_price - quote.bid_price) < 1e-9
+                and abs(prior.ask_price - quote.ask_price) < 1e-9
+                and prior.size == quote.size
+                and prior.bid_order_id in self._pending_orders
+                and prior.ask_order_id in self._pending_orders
+            ):
+                prior.placed_at = datetime.now(timezone.utc)
+                self._active_quotes[market.id] = prior
+                log.debug(
+                    "market_maker.quote_kept",
+                    market_id=market.id,
+                    bid=prior.bid_price,
+                    ask=prior.ask_price,
+                )
+                return None, "quote_unchanged"
             await self._cancel_quote(prior)
 
         # Place the two-sided quote

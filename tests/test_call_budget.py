@@ -60,6 +60,40 @@ def test_sqlite_failure_degrades_to_memory(tmp_path):
     assert call_budget._mem_day == date.today().isoformat()
 
 
+def test_locked_writer_fails_fast_and_folds_count_back(tmp_path):
+    """The 2026-07-19 event-loop freeze: a held write lock used to busy-wait
+    ~31s ON the loop (a potential self-deadlock — the holder's commit only
+    advances when the loop does). A miss must return in a beat, and the
+    missed increment must land in the row on the next successful write."""
+    import sqlite3
+    import time
+
+    _use_tmp_db(tmp_path)
+    assert call_budget.record_call() == 1
+
+    blocker = sqlite3.connect(str(tmp_path / "test.db"))
+    blocker.execute("BEGIN IMMEDIATE")  # hold the write lock
+    t0 = time.monotonic()
+    n = call_budget.record_call()  # cannot persist
+    elapsed = time.monotonic() - t0
+    blocker.rollback()
+    blocker.close()
+
+    assert n == 2  # in-memory total is still right
+    assert elapsed < 2.0, f"blocked {elapsed:.1f}s — busy-wait is back"
+    assert call_budget._pending == 1
+
+    # Budget checks between the miss and the flush must still see the call.
+    assert call_budget.calls_today() == 2
+
+    assert call_budget.record_call() == 3  # 1 stored + 1 pending + 1 new
+    assert call_budget._pending == 0
+
+    # The ROW carries all three: a fresh reader (restart) agrees.
+    call_budget.set_db_path(str(tmp_path / "test.db"))
+    assert call_budget.calls_today() == 3
+
+
 # ---------------------------------------------------------------------------
 # Pacing envelope — the non-reserved pool is time-shaped toward the peak
 # window (measured flow peaks 12-22 UTC; greedy consumption used to exhaust

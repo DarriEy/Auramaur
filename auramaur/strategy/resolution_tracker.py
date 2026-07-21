@@ -115,9 +115,10 @@ class ResolutionTracker:
                                                     override_exit_price=refund)
                         await self._settle_position(market_id, False, is_paper_scope=1,
                                                     override_exit_price=refund)
-                        await self._db.execute(
-                            "UPDATE markets SET active = 0 WHERE id = ?", (market_id,))
-                        await self._db.commit()
+                        async with self._db.transaction():
+                            await self._db.execute(
+                                "UPDATE markets SET active = 0 WHERE id = ?",
+                                (market_id,))
                         log.info("resolution.void_settled", market_id=market_id,
                                  refund=round(refund, 3))
                         resolved_count += 1
@@ -135,13 +136,26 @@ class ResolutionTracker:
                 await self._settle_position(market_id, outcome, is_paper_scope=0)
                 await self._settle_position(market_id, outcome, is_paper_scope=1)
 
+                # Persist realized $ AFTER settlement so the ledger already
+                # carries this market's settle rows. The old pre-settlement
+                # call (inside record_resolution) both undercounted payout
+                # and, being fills-based, double-credited complementary-token
+                # exits (resolution_pnl +$349 vs ledger -$0.97, 2026-07-20).
+                if self._calibration is not None:
+                    try:
+                        await self._calibration.persist_realized_pnl(
+                            market_id, 1 if outcome else 0)
+                    except Exception as e:
+                        log.debug("resolution.persist_pnl_error",
+                                  market_id=market_id, error=str(e))
+
                 # Mark the market as inactive in our DB so other queries
                 # (e.g. depth research, correlation) stop considering it.
-                await self._db.execute(
-                    "UPDATE markets SET active = 0, outcome_yes_price = ?, outcome_no_price = ? WHERE id = ?",
-                    (market.outcome_yes_price, market.outcome_no_price, market_id),
-                )
-                await self._db.commit()
+                async with self._db.transaction():
+                    await self._db.execute(
+                        "UPDATE markets SET active = 0, outcome_yes_price = ?, outcome_no_price = ? WHERE id = ?",
+                        (market.outcome_yes_price, market.outcome_no_price, market_id),
+                    )
 
                 log.info(
                     "resolution.detected",
@@ -291,16 +305,19 @@ class ResolutionTracker:
                 # adjust daily_stats by the delta. _settle_position below then
                 # cleans up the resurrected row (cleanup-only, ref already booked).
                 delta = venue_pnl - prior["pnl"]
-                await self._db.execute(
-                    "UPDATE pnl_ledger SET pnl = ?, qty = ? WHERE source_ref = ?",
-                    (venue_pnl, row["size"], ref))
-                today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-                await self._db.execute(
-                    """INSERT INTO daily_stats (date, total_pnl, trades_count, wins, losses)
-                       VALUES (?, ?, 0, 0, 0)
-                       ON CONFLICT(date) DO UPDATE SET
-                           total_pnl = total_pnl + excluded.total_pnl""",
-                    (today, delta))
+                # Ledger correction + stats delta land atomically (contention
+                # plan, Phase 2) — both statements are db-only.
+                async with self._db.transaction():
+                    await self._db.execute(
+                        "UPDATE pnl_ledger SET pnl = ?, qty = ? WHERE source_ref = ?",
+                        (venue_pnl, row["size"], ref))
+                    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                    await self._db.execute(
+                        """INSERT INTO daily_stats (date, total_pnl, trades_count, wins, losses)
+                           VALUES (?, ?, 0, 0, 0)
+                           ON CONFLICT(date) DO UPDATE SET
+                               total_pnl = total_pnl + excluded.total_pnl""",
+                        (today, delta))
                 log.info(
                     "resolution.venue_correction",
                     market_id=row["market_id"], token=held_token,
@@ -312,11 +329,11 @@ class ResolutionTracker:
                 token_scope=held_token, is_paper_scope=0,
                 override_exit_price=exit_price,
             )
-            await self._db.execute(
-                "UPDATE markets SET active = 0 WHERE id = ?",
-                (row["market_id"],),
-            )
-            await self._db.commit()
+            async with self._db.transaction():
+                await self._db.execute(
+                    "UPDATE markets SET active = 0 WHERE id = ?",
+                    (row["market_id"],),
+                )
             if prior is None:
                 log.info(
                     "resolution.venue_settled",
@@ -543,23 +560,12 @@ class ResolutionTracker:
         )
 
         if already_booked is None:
-            # Record PnL in daily stats
-            try:
-                today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-                await self._db.execute(
-                    """INSERT INTO daily_stats (date, total_pnl, trades_count, wins, losses)
-                       VALUES (?, ?, 1, ?, ?)
-                       ON CONFLICT(date) DO UPDATE SET
-                           total_pnl = total_pnl + excluded.total_pnl,
-                           trades_count = trades_count + 1,
-                           wins = wins + excluded.wins,
-                           losses = losses + excluded.losses""",
-                    (today, pnl, 1 if pnl > 0 else 0, 1 if pnl < 0 else 0),
-                )
-            except Exception as e:
-                log.debug("resolution.daily_stats_error", error=str(e))
-
             # Unified realized-P&L ledger: settlement of the residual position.
+            # Booked FIRST and outside the transaction below: record_ledger_event
+            # manages its own commit (so it must never run inside an open
+            # transaction()) and is idempotent on source_ref — if we crash
+            # between it and the batch below, the retry sees the ref booked and
+            # takes the cleanup-only path instead of double-counting.
             from auramaur.broker.ledger import record_ledger_event
             await record_ledger_event(
                 self._db,
@@ -576,44 +582,63 @@ class ResolutionTracker:
         else:
             cost_basis_pnl_delta = 0.0
 
-        # Zero the cost_basis size (always) and accrue realized P&L only when we
-        # booked above. Scoped to the same paper/live mode AND token as the
-        # settled position, so a paper resolution can't zero a live row's cost
-        # basis and settling one side can't zero the other (YES+NO can coexist
-        # since the #78 PKs).
-        try:
-            await self._db.execute(
-                """UPDATE cost_basis
-                   SET realized_pnl = realized_pnl + ?, size = 0, updated_at = datetime('now')
-                   WHERE market_id = ? AND is_paper = ? AND UPPER(token) = UPPER(?)""",
-                (cost_basis_pnl_delta, market_id, is_paper_flag, token),
-            )
-        except Exception as e:
-            log.debug("resolution.cost_basis_error", error=str(e))
+        # Stats accrual + cleanup as one short, serialized transaction
+        # (contention plan, Phase 2). Everything here is db-only — the network
+        # work (market fetch / venue sweep) happened before _settle_position.
+        async with self._db.transaction():
+            if already_booked is None:
+                # Record PnL in daily stats
+                try:
+                    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                    await self._db.execute(
+                        """INSERT INTO daily_stats (date, total_pnl, trades_count, wins, losses)
+                           VALUES (?, ?, 1, ?, ?)
+                           ON CONFLICT(date) DO UPDATE SET
+                               total_pnl = total_pnl + excluded.total_pnl,
+                               trades_count = trades_count + 1,
+                               wins = wins + excluded.wins,
+                               losses = losses + excluded.losses""",
+                        (today, pnl, 1 if pnl > 0 else 0, 1 if pnl < 0 else 0),
+                    )
+                except Exception as e:
+                    log.debug("resolution.daily_stats_error", error=str(e))
 
-        # Remove from portfolio — scoped by is_paper so a paper resolution
-        # doesn't delete a live position for the same market (and vice versa).
-        # When the caller settled a specific token, only that row goes: a
-        # YES+NO pair (mergeable) settles leg by leg.
-        if token_scope is not None:
-            await self._db.execute(
-                "DELETE FROM portfolio WHERE market_id = ? AND is_paper = ? "
-                "AND UPPER(token) = UPPER(?)",
-                (market_id, is_paper_flag, token_scope),
-            )
-        else:
-            await self._db.execute(
-                "DELETE FROM portfolio WHERE market_id = ? AND is_paper = ?",
-                (market_id, is_paper_flag),
-            )
+            # Zero the cost_basis size (always) and accrue realized P&L only when
+            # we booked above. Scoped to the same paper/live mode AND token as the
+            # settled position, so a paper resolution can't zero a live row's cost
+            # basis and settling one side can't zero the other (YES+NO can coexist
+            # since the #78 PKs).
+            try:
+                await self._db.execute(
+                    """UPDATE cost_basis
+                       SET realized_pnl = realized_pnl + ?, size = 0, updated_at = datetime('now')
+                       WHERE market_id = ? AND is_paper = ? AND UPPER(token) = UPPER(?)""",
+                    (cost_basis_pnl_delta, market_id, is_paper_flag, token),
+                )
+            except Exception as e:
+                log.debug("resolution.cost_basis_error", error=str(e))
 
-        # Remove peak tracking
-        await self._db.execute(
-            "DELETE FROM position_peaks WHERE market_id = ?",
-            (market_id,),
-        )
+            # Remove from portfolio — scoped by is_paper so a paper resolution
+            # doesn't delete a live position for the same market (and vice versa).
+            # When the caller settled a specific token, only that row goes: a
+            # YES+NO pair (mergeable) settles leg by leg.
+            if token_scope is not None:
+                await self._db.execute(
+                    "DELETE FROM portfolio WHERE market_id = ? AND is_paper = ? "
+                    "AND UPPER(token) = UPPER(?)",
+                    (market_id, is_paper_flag, token_scope),
+                )
+            else:
+                await self._db.execute(
+                    "DELETE FROM portfolio WHERE market_id = ? AND is_paper = ?",
+                    (market_id, is_paper_flag),
+                )
 
-        await self._db.commit()
+            # Remove peak tracking
+            await self._db.execute(
+                "DELETE FROM position_peaks WHERE market_id = ?",
+                (market_id,),
+            )
 
         log.info(
             "resolution.position_settled",

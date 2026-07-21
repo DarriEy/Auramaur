@@ -82,9 +82,23 @@ class NLPCache:
     async def _write_with_lock_retry(self, sql: str, params: tuple) -> bool:
         """Retry an idempotent cache upsert; cache failure never loses analysis."""
         for attempt in range(3):
+            # Another task's transaction is open on the shared connection.
+            # Never commit under it (a legacy commit here lands that task's
+            # half-written rows — the exact bleed the contention plan names
+            # this file for) and never queue a mere cache write behind
+            # transaction()'s multi-second BEGIN wait. Back off; dropping a
+            # cache row is acceptable, blocking or bleeding is not.
+            if getattr(getattr(self._db, "db", None), "in_transaction", False):
+                if attempt == 2:
+                    log.warning("nlp_cache.write_busy_dropped")
+                    return False
+                delay = 0.25 * (2**attempt)
+                log.info("nlp_cache.write_busy_retry", attempt=attempt + 1, delay=delay)
+                await asyncio.sleep(delay)
+                continue
             try:
-                await self._db.execute(sql, params)
-                await self._db.commit()
+                async with self._db.transaction():
+                    await self._db.execute(sql, params)
                 return True
             except aiosqlite.OperationalError as exc:
                 if not self._is_transient_lock(exc):

@@ -11,10 +11,62 @@ realization), segmented exactly as ``auramaur pnl`` / the strategy-books panel.
 
 from __future__ import annotations
 
+import aiosqlite
+
 from auramaur.db.database import Database
 
 
-async def _book_stats(db: Database, *, is_paper: bool) -> dict:
+class _ReadOnlyBotView:
+    """Transient ``mode=ro`` view of the BOT's live trading database.
+
+    Deliberately NOT ``Database``: its ``connect()`` applies the WAL pragma and
+    schema DDL (write locks, potential migrations) — running that against the
+    live file from this out-of-process MCP server on every ``compare_to_bot``
+    call was the worst external lock-taker (see docs/plans/db-contention-plan.md,
+    Phase 4). Same pattern as ``market_data.MarketData``: open ro, query,
+    close; ``busy_timeout`` waits out the bot's WAL checkpoint locks;
+    ``query_only`` is a belt on top of ``mode=ro``. Note these are
+    SQLite-level guarantees, not kernel-level — the file itself is writable
+    by this process's uid; ``mode=ro`` governs the connection, not the mount.
+    """
+
+    def __init__(self, path: str) -> None:
+        self._path = path
+        self._conn: aiosqlite.Connection | None = None
+
+    async def connect(self) -> None:
+        # as_uri() is portable (file:///C:/... on Windows, file:///... on
+        # Linux) — raw f-string URIs with backslashes are not (see web/db.py).
+        from pathlib import Path
+
+        uri = f"{Path(self._path).resolve().as_uri()}?mode=ro"
+        conn = await aiosqlite.connect(uri, uri=True)
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("PRAGMA busy_timeout=5000")
+        await conn.execute("PRAGMA query_only=ON")
+        self._conn = conn
+
+    async def close(self) -> None:
+        if self._conn is not None:
+            await self._conn.close()
+            self._conn = None
+
+    @property
+    def db(self) -> aiosqlite.Connection:
+        if self._conn is None:
+            raise RuntimeError("Bot DB not connected. Call connect() first.")
+        return self._conn
+
+    async def fetchone(self, sql: str, params: tuple = ()) -> aiosqlite.Row | None:
+        cursor = await self.db.execute(sql, params)
+        return await cursor.fetchone()
+
+    async def fetchall(self, sql: str, params: tuple = ()) -> list[aiosqlite.Row]:
+        cursor = await self.db.execute(sql, params)
+        return list(await cursor.fetchall())
+
+
+async def _book_stats(db: Database | _ReadOnlyBotView, *, is_paper: bool) -> dict:
     """Realized ledger + open exposure for one mode of one database."""
     flag = 1 if is_paper else 0
     row = await db.fetchone(
@@ -83,7 +135,9 @@ async def build_comparison(agent_db_path: str, auramaur_db_path: str) -> dict:
     finally:
         await agent_db.close()
 
-    bot_db = Database(auramaur_db_path)
+    # The bot's live DB is opened read-only and transiently — never with
+    # Database.connect() and its DDL (see _ReadOnlyBotView docstring).
+    bot_db = _ReadOnlyBotView(auramaur_db_path)
     await bot_db.connect()
     try:
         bot_paper = await _book_stats(bot_db, is_paper=True)

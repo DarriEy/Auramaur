@@ -19,7 +19,9 @@ def manager():
 
 async def _db() -> Database:
     db = Database(str(db_path()))
-    await db.connect()
+    # CLI fast path (CLAUDE.md policy): no DDL/write locks against the live
+    # bot's database when the schema is already current.
+    await db.connect(ensure_schema=False)
     return db
 
 

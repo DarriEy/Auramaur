@@ -61,6 +61,45 @@ services:
       - ibgateway
     stop_grace_period: 2m
 
+  # Read-only dashboard over the bot's state. Same image, different command;
+  # opens the DB with mode=ro and gets NO venue secrets or Kalshi key, so it
+  # cannot trade or move funds even if compromised. Loopback-published only.
+  auramaur-web:
+    platform: ${AURAMAUR_PLATFORM:-linux/amd64}
+    image: ${AURAMAUR_IMAGE:-auramaur}:${AURAMAUR_VERSION:-local}
+    restart: unless-stopped
+    # Web twin of the bot entrypoint: no KILL_SWITCH refusal (the dashboard
+    # must stay up during a halt), no log/claude writability requirements.
+    entrypoint: ["/usr/bin/tini", "--", "/usr/local/bin/auramaur-web-entrypoint.sh"]
+    command: ["auramaur", "web", "--host", "0.0.0.0", "--port", "8484"]
+    environment:
+      # Mirror the bot's live gate so the LIVE/PAPER badge (and which book the
+      # dashboard reads) agrees with what the bot is actually doing.
+      AURAMAUR_LIVE: ${AURAMAUR_CONTAINER_LIVE:-false}
+      AURAMAUR_STATE_DIR: /app/state
+      AURAMAUR_DB_PATH: /app/state/auramaur.db
+      AURAMAUR_LOG_DIR: /app/logs
+      LOGGING__FILE: /app/logs/auramaur.log
+      AURAMAUR_KILL_SWITCH_PATH: /app/state/KILL_SWITCH
+      AURAMAUR_LOCAL_CONFIG: /app/runtime-config/defaults.local.yaml
+      HOME: /home/auramaur
+      AURAMAUR_RUNTIME_UID: ${AURAMAUR_UID:-1000}
+      AURAMAUR_RUNTIME_GID: ${AURAMAUR_GID:-1000}
+    volumes:
+      # State stays rw-mounted (WAL readers need the -shm/-wal files) but the
+      # process opens the DB read-only; logs are tail-read for the activity feed.
+      - ./runtime/state:/app/state
+      - ./runtime/logs:/app/logs:ro
+      - ./runtime/config:/app/runtime-config:ro
+    ports:
+      - "127.0.0.1:${AURAMAUR_WEB_PORT:-8484}:8484"
+    # Deliberately NOT on the broker network: the dashboard reads a file and
+    # needs no network peers. Keeping it off the subnet means it can never
+    # reach ibgateway, whose API auth is trusted-IP based — the only
+    # order-capable vector a compromised web container would have had. It
+    # lands on the compose default network purely for the loopback publish.
+    stop_grace_period: 10s
+
   ibgateway:
     platform: ${AURAMAUR_PLATFORM:-linux/amd64}
     image: ${IB_GATEWAY_IMAGE:-auramaur-ibgateway}:${IB_GATEWAY_VERSION:-local}

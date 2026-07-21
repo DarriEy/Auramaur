@@ -909,7 +909,11 @@ class KalshiClient:
             positions = []
             cursor = None
             while True:
-                kwargs = {"limit": 1000}
+                # SDK hard-caps limit at 200 (Field(le=200)) and rejects more
+                # CLIENT-SIDE — limit=1000 made every sync cycle fail before
+                # any HTTP call, silently killing live position sync (#314
+                # regression). The cursor loop handles the paging.
+                kwargs = {"limit": 200}
                 if cursor:
                     kwargs["cursor"] = cursor
                 raw = await self._call_raw(
@@ -922,8 +926,12 @@ class KalshiClient:
                 if not cursor:
                     break
 
-            synced = 0
-            synced_ids: list[str] = []
+            # Phase (ii): network-only. Resolve current market data for every
+            # position into plain dicts — ZERO db statements here, so the
+            # write transaction below never spans a network await (SQLite
+            # lock contention; see docs/plans/db-contention-plan.md Phase 1).
+            from auramaur.strategy.classifier import ensure_category
+            rows: list[dict] = []
             for p in positions:
                 pos_fp = float(p.get("position_fp", 0))
                 if pos_fp == 0:
@@ -948,7 +956,6 @@ class KalshiClient:
                     market = None
                     current_price = avg_price
 
-                from auramaur.strategy.classifier import ensure_category
                 # The ticker stands in for the question when the market lookup
                 # fails (NOT NULL column), but it must never reach the
                 # classifier — keyword-matching a ticker string produces
@@ -961,11 +968,26 @@ class KalshiClient:
                         market.question, description, market.category)
                 else:
                     category = "other"
-                yes_price = market.outcome_yes_price if market else 0.0
-                no_price = market.outcome_no_price if market else 0.0
-                volume = market.volume if market else 0.0
-                liquidity = market.liquidity if market else 0.0
+                rows.append({
+                    "ticker": ticker,
+                    "question": question,
+                    "description": description,
+                    "category": category,
+                    "yes_price": market.outcome_yes_price if market else 0.0,
+                    "no_price": market.outcome_no_price if market else 0.0,
+                    "volume": market.volume if market else 0.0,
+                    "liquidity": market.liquidity if market else 0.0,
+                    "contracts": contracts,
+                    "avg_price": avg_price,
+                    "current_price": current_price,
+                    "token": token,
+                })
 
+            # Phase (iii): one short write pass — same SQL as before, single
+            # commit at the end. No awaits other than db statements.
+            synced = 0
+            synced_ids: list[str] = []
+            for r in rows:
                 await db.execute(
                     """INSERT INTO markets
                        (id, exchange, condition_id, ticker, question, description, category,
@@ -985,16 +1007,16 @@ class KalshiClient:
                            liquidity = excluded.liquidity,
                            last_updated = excluded.last_updated""",
                     (
-                        ticker,
-                        ticker,
-                        ticker,
-                        question,
-                        description[:500],
-                        category,
-                        yes_price,
-                        no_price,
-                        volume,
-                        liquidity,
+                        r["ticker"],
+                        r["ticker"],
+                        r["ticker"],
+                        r["question"],
+                        r["description"][:500],
+                        r["category"],
+                        r["yes_price"],
+                        r["no_price"],
+                        r["volume"],
+                        r["liquidity"],
                     ),
                 )
 
@@ -1013,9 +1035,10 @@ class KalshiClient:
                            token = excluded.token,
                            token_id = excluded.token_id,
                            updated_at = excluded.updated_at""",
-                    (ticker, contracts, round(avg_price, 4),
-                     round(current_price, 4), round((current_price - avg_price) * contracts, 4),
-                     category, token, ticker),
+                    (r["ticker"], r["contracts"], round(r["avg_price"], 4),
+                     round(r["current_price"], 4),
+                     round((r["current_price"] - r["avg_price"]) * r["contracts"], 4),
+                     r["category"], r["token"], r["ticker"]),
                 )
                 await db.execute(
                     """INSERT INTO cost_basis
@@ -1030,15 +1053,15 @@ class KalshiClient:
                            total_cost = excluded.total_cost,
                            updated_at = excluded.updated_at""",
                     (
-                        ticker,
-                        token,
-                        ticker,
-                        contracts,
-                        round(avg_price, 4),
-                        round(contracts * avg_price, 4),
+                        r["ticker"],
+                        r["token"],
+                        r["ticker"],
+                        r["contracts"],
+                        round(r["avg_price"], 4),
+                        round(r["contracts"] * r["avg_price"], 4),
                     ),
                 )
-                synced_ids.append(ticker)
+                synced_ids.append(r["ticker"])
                 synced += 1
 
             if synced_ids:

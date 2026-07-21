@@ -51,12 +51,13 @@ async def test_existing_v21_database_runs_all_current_migrations(tmp_path):
 
 @pytest.mark.asyncio
 async def test_gather_persists_point_in_time_lineage(tmp_path):
-    observer = await LineageObserver.create(str(tmp_path / "lineage.db"))
+    db = Database(str(tmp_path / "lineage.db"))
+    await db.connect()
+    observer = await LineageObserver.create(db)
     items = await Aggregator([Source()], observer=observer).gather(
         "question", market_id="m1",
     )
     await observer.flush()
-    db = observer.db
     assert items[0].ingestion_run_id
     run = await db.fetchone("SELECT * FROM ingestion_runs")
     obs = await db.fetchone("SELECT * FROM evidence_observations")
@@ -65,19 +66,23 @@ async def test_gather_persists_point_in_time_lineage(tmp_path):
     assert obs["content_hash"] and obs["run_id"] == run["id"]
     assert fetch["status"] == "ok" and fetch["item_count"] == 1
     await observer.close()
+    await db.close()
 
 
 @pytest.mark.asyncio
 async def test_lineage_failure_does_not_drop_evidence(tmp_path):
-    observer = await LineageObserver.create(str(tmp_path / "broken.db"))
-    await observer.db.execute("DROP TABLE ingestion_runs")
-    await observer.db.commit()
+    db = Database(str(tmp_path / "broken.db"))
+    await db.connect()
+    observer = await LineageObserver.create(db)
+    await db.execute("DROP TABLE ingestion_runs")
+    await db.commit()
     items = await Aggregator([Source()], observer=observer).gather(
         "question", market_id="m1",
     )
     await observer.flush()
     assert [item.title for item in items] == ["A fact"]
     await observer.close()
+    await db.close()
 
 
 @pytest.mark.asyncio
@@ -123,8 +128,9 @@ async def test_paper_cycle_lineage_through_resolution_and_report(tmp_path, capsy
     db_path = tmp_path / "cycle.db"
     db = Database(str(db_path))
     await db.connect()
-    observer = await LineageObserver.create(str(db_path))
-    assert observer.db.db is not db.db
+    observer = await LineageObserver.create(db)
+    # One in-process writer: the observer shares the bot's connection.
+    assert observer.db is db
     settings = Settings()
     calibration = CalibrationTracker(db, min_samples=30, lineage_observer=observer)
     engine = TradingEngine(

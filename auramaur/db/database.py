@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
+from contextlib import asynccontextmanager
+
 import aiosqlite
 import structlog
 
@@ -15,8 +19,19 @@ class Database:
     def __init__(self, db_path: str | None = None):
         self.db_path = str(runtime_db_path()) if db_path is None else db_path
         self._db: aiosqlite.Connection | None = None
+        self._txn_lock = asyncio.Lock()
+        self._txn_task: asyncio.Task | None = None
 
-    async def connect(self) -> None:
+    async def connect(self, ensure_schema: bool = True) -> None:
+        """Open the connection.
+
+        ``ensure_schema=False`` is the fast path for CLI/tooling callers: when
+        the stored schema_version already matches SCHEMA_VERSION, the DDL
+        executescript is skipped entirely, so a routine CLI invocation takes
+        NO write locks against the live bot's database. A behind/fresh
+        database still gets the full init — the flag can never leave a caller
+        on a stale schema.
+        """
         self._db = await aiosqlite.connect(self.db_path)
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("PRAGMA journal_mode=WAL")
@@ -38,8 +53,88 @@ class Database:
         # the lock WAIT is the safe fix). 30s covers transient bursts; a lock
         # beyond it would signal sustained write saturation, a capacity problem.
         await self._db.execute("PRAGMA busy_timeout=30000")
-        await self._init_schema()
+        # WAL-safe fsync reduction: NORMAL syncs the WAL at checkpoint, not on
+        # every commit. Durability loss is bounded to the last commit(s) on
+        # POWER FAILURE only (app crashes lose nothing) — an accepted trade
+        # for shorter write-lock hold times in a contended single-writer file.
+        await self._db.execute("PRAGMA synchronous=NORMAL")
+        if ensure_schema or not await self._schema_is_current():
+            await self._init_schema()
         log.info("database.connected", path=self.db_path)
+
+    async def _schema_is_current(self) -> bool:
+        try:
+            cursor = await self._db.execute(
+                "SELECT version FROM schema_version LIMIT 1")
+            row = await cursor.fetchone()
+        except aiosqlite.OperationalError:
+            return False  # fresh file — no schema_version table yet
+        if row is None:
+            return False
+        current = row[0] if isinstance(row[0], int) else row["version"]
+        return current >= SCHEMA_VERSION
+
+    @asynccontextmanager
+    async def transaction(self):
+        """Serialized, atomic write transaction on the shared connection.
+
+        ~30 pillar tasks share ONE aiosqlite connection with implicit
+        deferred transactions. Without serialization, task B's ``commit()``
+        lands task A's half-written rows, and an error-path ``rollback()``
+        can discard ANOTHER task's uncommitted writes — the reason
+        record_fill has never been retry-safe. ``BEGIN IMMEDIATE`` under an
+        asyncio.Lock gives each adopter a private, atomic write that claims
+        the file's write lock up front.
+
+        NEVER await network I/O while holding this — the >250ms warning
+        exists to catch exactly that regression.
+        """
+        # Same-task re-entrancy JOINS the outer transaction instead of issuing
+        # a nested BEGIN (sqlite: "cannot start a transaction within a
+        # transaction" — the 2026-07-20 position_sync errors). The outer
+        # holder's commit/rollback governs the joined work.
+        if self._txn_task is not None and self._txn_task is asyncio.current_task():
+            yield self
+            return
+        async with self._txn_lock:
+            # A legacy autocommit-style writer may be mid-flight (implicit
+            # txn open, its commit() imminent). Wait it out rather than
+            # committing on its behalf — that would be the exact bleed this
+            # context manager exists to remove. Bounded so a genuinely wedged
+            # writer still fails loudly in BEGIN — but the bound must OUTLAST
+            # real write bursts: measured engine bursts run 1-3.4s, and a 2s
+            # bound turned every unlucky overlap into a position_sync error
+            # (2026-07-20). 15s clears every burst ever observed while still
+            # bounding a true wedge.
+            deadline = time.monotonic() + 15.0
+            while self._db._conn.in_transaction and time.monotonic() < deadline:
+                await asyncio.sleep(0.005)
+            started = time.monotonic()
+            await self.db.execute("BEGIN IMMEDIATE")
+            self._txn_task = asyncio.current_task()
+            try:
+                yield self
+            except BaseException:
+                await self.db.execute("ROLLBACK")
+                raise
+            else:
+                try:
+                    await self.db.execute("COMMIT")
+                except Exception as exc:  # noqa: BLE001 — narrow handling
+                    if "no transaction is active" not in str(exc).lower():
+                        raise
+                    # A legacy writer's commit() landed mid-transaction and
+                    # ended it early: the batch's rows ARE durable, but its
+                    # atomicity was violated. Log loudly (this is the bleed
+                    # phase 5 exists to retire) without failing the writer —
+                    # failing here reports durable writes as failures.
+                    log.warning("database.transaction_commit_bled")
+            finally:
+                self._txn_task = None
+                held = time.monotonic() - started
+                if held > 0.25:
+                    log.warning("database.transaction_held_long",
+                                seconds=round(held, 3))
 
     async def close(self) -> None:
         if self._db:
@@ -904,7 +999,18 @@ class Database:
         return await cursor.fetchall()
 
     async def commit(self) -> None:
-        await self.db.commit()
+        try:
+            await self.db.commit()
+        except Exception as exc:  # noqa: BLE001 — narrow re-raise below
+            if "no transaction is active" in str(exc).lower():
+                # A transaction() adopter's COMMIT already landed these rows
+                # (legacy commit interleaved with an explicit transaction on
+                # the shared connection). The data is durable; only this
+                # caller's notion of "its own" commit was stale. Full adopter
+                # migration (contention plan phase 5) retires this path.
+                log.debug("database.commit_already_landed")
+                return
+            raise
 
     async def rollback(self) -> None:
         await self.db.rollback()

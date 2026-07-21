@@ -45,6 +45,10 @@ class PositionReconciler:
         self._db = db
         # Cache: condition_id -> CLOB market info
         self._market_cache: dict[str, dict] = {}
+        # Stub market rows collected during reconcile() and batch-inserted at
+        # the end, so the write never interleaves with per-position network
+        # calls (SQLite lock contention — db-contention-plan Phase 1).
+        self._pending_stubs: list[tuple] = []
 
     async def reconcile(self) -> list[ReconciledPosition]:
         """Full reconciliation from CLOB trade history.
@@ -196,6 +200,9 @@ class PositionReconciler:
                 *self._extract_token_pair(tokens, asset_id, pos_data["outcome"]),
             )
 
+        # One short write pass now that all network calls are done.
+        await self._flush_pending_stubs()
+
         log.info(
             "reconciler.complete",
             positions=len(positions),
@@ -254,28 +261,47 @@ class PositionReconciler:
             if row:
                 return row["id"]
 
-        # No match — insert a stub so exits and risk checks can find it
+        # No match — queue a stub so exits and risk checks can find it. The
+        # actual INSERT is deferred to _flush_pending_stubs() at the end of
+        # reconcile(): writing here would open a transaction that spans the
+        # loop's network awaits.
         if question and condition_id:
             from datetime import datetime, timezone
 
             from auramaur.strategy.classifier import ensure_category
             stub_id = condition_id[:16]
-            try:
+            if not any(row[0] == stub_id for row in self._pending_stubs):
+                self._pending_stubs.append(
+                    (stub_id, condition_id, question, ensure_category(question),
+                     datetime.now(timezone.utc).isoformat()),
+                )
+            return stub_id
+
+        return None
+
+    async def _flush_pending_stubs(self) -> None:
+        """Batch-insert the stub market rows queued by _find_market_id.
+
+        One short write pass with a single commit; INSERT OR IGNORE keeps it
+        idempotent against rows created elsewhere in the meantime.
+        """
+        if not self._pending_stubs:
+            return
+        stubs, self._pending_stubs = self._pending_stubs, []
+        try:
+            for row in stubs:
                 await self._db.execute(
                     """INSERT OR IGNORE INTO markets
                        (id, condition_id, question, category, last_updated)
                        VALUES (?, ?, ?, ?, ?)""",
-                    (stub_id, condition_id, question, ensure_category(question),
-                     datetime.now(timezone.utc).isoformat()),
+                    row,
                 )
-                await self._db.commit()
+            await self._db.commit()
+            for row in stubs:
                 log.info("reconciler.stub_market_created",
-                         market_id=stub_id, question=question[:60])
-            except Exception:
-                pass
-            return stub_id
-
-        return None
+                         market_id=row[0], question=row[2][:60])
+        except Exception:
+            pass
 
     @staticmethod
     def _extract_token_pair(

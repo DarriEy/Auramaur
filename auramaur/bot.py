@@ -256,10 +256,29 @@ class AuramaurBot(
             if await self._check_kill_switch():
                 return
             try:
+                # Actionable-first targeting: raw liquidity DESC over a
+                # stale markets table pinned the recorder to a handful of
+                # dead long-horizon books (three 2028 election markets) while
+                # the markets the bot actually trades got zero snapshots --
+                # decision_marks had NO rows ever (2026-07-20 audit). Rank
+                # held positions and recent decisions first, then fresh
+                # liquid markets that have not already ended.
                 rows = await engine.db.fetchall(
-                    "SELECT id, clob_token_yes FROM markets "
-                    "WHERE active = 1 AND exchange = ? AND clob_token_yes != '' "
-                    "AND liquidity >= ? ORDER BY liquidity DESC LIMIT ?",
+                    """SELECT id, clob_token_yes,
+                              (id IN (SELECT market_id FROM portfolio WHERE size > 0)) AS held,
+                              (id IN (SELECT market_id FROM decision_snapshots
+                                      WHERE observed_at >= datetime('now', '-2 days'))) AS decided
+                       FROM markets
+                       WHERE active = 1 AND exchange = ? AND clob_token_yes != ''
+                         AND (end_date IS NULL OR end_date > datetime('now'))
+                         AND (
+                             id IN (SELECT market_id FROM portfolio WHERE size > 0)
+                             OR id IN (SELECT market_id FROM decision_snapshots
+                                       WHERE observed_at >= datetime('now', '-2 days'))
+                             OR (liquidity >= ? AND last_updated >= datetime('now', '-1 day'))
+                         )
+                       ORDER BY held DESC, decided DESC, liquidity DESC
+                       LIMIT ?""",
                     (engine.exchange_name or "polymarket", min_liquidity, max_markets),
                 )
                 recorded = 0
@@ -376,6 +395,17 @@ class AuramaurBot(
                 self._last_known_cash = total_cash
                 total_pnl = await pnl_tracker.get_total_pnl(all_positions)
                 poly_cash = per_exchange_cash.get("polymarket", total_cash)
+
+                # Feed the drawdown gate: nothing ever wrote
+                # daily_stats.peak_balance, so get_drawdown() returned 0.0
+                # forever and check_max_drawdown / check_drawdown_heat could
+                # never trip (2026-07-20 audit, confirmed critical).
+                try:
+                    equity = total_cash + sum(
+                        p.size * p.current_price for p in all_positions)
+                    await portfolio_tracker.note_equity(equity)
+                except Exception as e:
+                    log.debug("drawdown.note_equity_error", error=str(e))
 
                 if first_tick:
                     first_tick = False
@@ -741,6 +771,23 @@ class AuramaurBot(
                 await asyncio.sleep(self.settings.ibkr.multiasset_cycle_seconds)
         finally:
             await client.close()
+
+    async def _task_balance_recorder(self) -> None:
+        """Record venue cash to the ``venue_balances`` table so read-only
+        consumers (the web dashboard) can show balances without ever holding
+        venue credentials. IBKR runs on a slower cadence: its fetch is a real
+        gateway session, not a REST call."""
+        from auramaur.monitoring.balances import record_venue_balances
+        cycle = 0
+        while self._running:
+            try:
+                await record_venue_balances(
+                    self._components.db, self.settings,
+                    include_ibkr=(cycle % 5 == 0))
+            except Exception as e:  # noqa: BLE001 — monitoring must not die
+                log.warning("balance_recorder.error", error=str(e))
+            cycle += 1
+            await asyncio.sleep(60)
 
     async def _task_momentum_coupling(self) -> None:
         """Fast path: spot->prediction momentum-coupling pillar (gated, detect-only).
@@ -1183,56 +1230,85 @@ class AuramaurBot(
                     reconciled = await reconciler.reconcile()
                     positions = reconciler.to_live_positions(reconciled)
 
-                    # Update cost_basis from real fill prices (ground truth).
-                    # This loop only runs in live mode, so we explicitly
-                    # write is_paper=0 and conflict on (market_id, is_paper).
-                    for rp in reconciled:
-                        await self._components.db.execute(
-                            """INSERT INTO cost_basis (market_id, token, token_id, size, avg_cost, total_cost, is_paper, updated_at)
-                               VALUES (?, ?, ?, ?, ?, ?, 0, datetime('now'))
-                               ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
-                                   token = excluded.token,
-                                   token_id = excluded.token_id,
-                                   size = excluded.size,
-                                   avg_cost = excluded.avg_cost,
-                                   total_cost = excluded.total_cost,
-                                   updated_at = excluded.updated_at""",
-                            # Normalize the raw CLOB outcome ("Yes"/"No") to the
-                            # canonical TokenType value ("YES"/"NO"). Writing the raw
-                            # title-case outcome here was the one site that diverged
-                            # from the fill/Kalshi paths, splitting a single position
-                            # into duplicate (market, "No") + (market, "NO") rows.
-                            (rp.market_id, TokenType.from_str(rp.outcome).value,
-                             rp.token_id, rp.size,
-                             rp.avg_cost, rp.size * rp.avg_cost),
-                        )
-
-                    # Delete stale rows from cost_basis AND portfolio: positions no
-                    # longer held on-chain. Only run this when the reconciler returned
-                    # a non-empty result — an empty reconcile means the CLOB API call
-                    # failed, not that we actually hold zero positions, so we must not
-                    # wipe the tables. Both tables matter: cost_basis feeds sync(),
-                    # and portfolio feeds the risk-manager correlation/exposure checks.
+                    # Update cost_basis from real fill prices (ground truth),
+                    # then delete stale rows — one short, serialized
+                    # transaction (contention plan, Phase 2): the network work
+                    # (reconcile()) is already done, so this block is db-only.
+                    # Only runs when the reconciler returned a non-empty result
+                    # — an empty reconcile means the CLOB API call failed, not
+                    # that we actually hold zero positions, so we must not wipe
+                    # the tables. Both tables matter: cost_basis feeds sync(),
+                    # and portfolio feeds the risk-manager correlation/exposure
+                    # checks.
                     if reconciled:
-                        live_ids = [rp.market_id for rp in reconciled]
-                        placeholders = ",".join("?" * len(live_ids))
-                        # Live-mode reconciliation must only delete live rows;
-                        # paper rows (is_paper=1) live in their own namespace.
-                        cb_cur = await self._components.db.execute(
-                            f"DELETE FROM cost_basis WHERE size > 0 AND is_paper = 0 AND market_id NOT IN ({placeholders})",
-                            live_ids,
-                        )
-                        pf_cur = await self._components.db.execute(
-                            f"DELETE FROM portfolio WHERE exchange = 'polymarket' AND is_paper = 0 AND market_id NOT IN ({placeholders})",
-                            live_ids,
-                        )
+                        # Skip already-settled legs: their P&L is booked, but
+                        # unredeemed tokens still show in CLOB trade history,
+                        # so this upsert resurrected them into cost_basis as
+                        # open size every pass (148 rows / $918 phantom,
+                        # 2026-07-20 audit). Excluding them from live_ids also
+                        # lets the stale-delete below sweep the residue out.
+                        try:
+                            settled = await syncer._settled_keys(0)
+                        except Exception:
+                            settled = set()
+                        unsettled = [
+                            rp for rp in reconciled
+                            if (rp.market_id, TokenType.from_str(rp.outcome).value)
+                            not in settled
+                        ]
+                        if len(unsettled) < len(reconciled):
+                            log.debug("reconciler.settled_skipped",
+                                      count=len(reconciled) - len(unsettled))
+                        async with self._components.db.transaction():
+                            # This loop only runs in live mode, so we explicitly
+                            # write is_paper=0 and conflict on (market_id, is_paper).
+                            for rp in unsettled:
+                                await self._components.db.execute(
+                                    """INSERT INTO cost_basis (market_id, token, token_id, size, avg_cost, total_cost, is_paper, updated_at)
+                                       VALUES (?, ?, ?, ?, ?, ?, 0, datetime('now'))
+                                       ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
+                                           token = excluded.token,
+                                           token_id = excluded.token_id,
+                                           size = excluded.size,
+                                           avg_cost = excluded.avg_cost,
+                                           total_cost = excluded.total_cost,
+                                           updated_at = excluded.updated_at""",
+                                    # Normalize the raw CLOB outcome ("Yes"/"No") to the
+                                    # canonical TokenType value ("YES"/"NO"). Writing the raw
+                                    # title-case outcome here was the one site that diverged
+                                    # from the fill/Kalshi paths, splitting a single position
+                                    # into duplicate (market, "No") + (market, "NO") rows.
+                                    (rp.market_id, TokenType.from_str(rp.outcome).value,
+                                     rp.token_id, rp.size,
+                                     rp.avg_cost, rp.size * rp.avg_cost),
+                                )
+
+                            live_ids = [rp.market_id for rp in unsettled]
+                            placeholders = ",".join("?" * len(live_ids))
+                            # Live-mode reconciliation must only delete live rows;
+                            # paper rows (is_paper=1) live in their own namespace.
+                            # ONLY Polymarket rows: this reconciler's universe
+                            # is CLOB trade history, so without the exchange scope
+                            # it deleted every live KALSHI cost_basis row each
+                            # ~75s pass — Kalshi sells then found size=0 and
+                            # booked $0.00 realized P&L into the ledger that
+                            # feeds the live daily-loss gate (found 2026-07-20;
+                            # the portfolio delete below always had the filter).
+                            cb_cur = await self._components.db.execute(
+                                f"""DELETE FROM cost_basis WHERE size > 0 AND is_paper = 0
+                                    AND market_id NOT IN ({placeholders})
+                                    AND market_id IN (SELECT id FROM markets WHERE exchange = 'polymarket')""",
+                                live_ids,
+                            )
+                            pf_cur = await self._components.db.execute(
+                                f"DELETE FROM portfolio WHERE exchange = 'polymarket' AND is_paper = 0 AND market_id NOT IN ({placeholders})",
+                                live_ids,
+                            )
                         log.info(
                             "reconciler.stale_removed",
                             cost_basis=cb_cur.rowcount if hasattr(cb_cur, "rowcount") else 0,
                             portfolio=pf_cur.rowcount if hasattr(pf_cur, "rowcount") else 0,
                         )
-
-                    await self._components.db.commit()
                 else:
                     positions = await syncer.sync()
 
@@ -1463,6 +1539,12 @@ class AuramaurBot(
         # Resolution checker and order monitor work with any exchange
         tasks.append(asyncio.create_task(self._task_resolution_checker(), name="resolution_checker"))
         tasks.append(asyncio.create_task(self._task_order_monitor(), name="order_monitor"))
+
+        # Balance recorder: feeds the read-only dashboard's venue panel.
+        if (self.settings.kalshi.enabled or self.settings.kraken.enabled
+                or self.settings.ibkr.enabled):
+            tasks.append(asyncio.create_task(
+                self._task_balance_recorder(), name="balance_recorder"))
 
         # Loop watchdog: a daemon thread that screams when the asyncio loop
         # stops beating (blocking sync call). Runs outside the loop so it can

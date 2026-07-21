@@ -227,6 +227,15 @@ class TestCalibrationTracker:
                (order_id, market_id, side, token, size, price, is_paper)
                VALUES ('o1', 'm_pnl', 'BUY', 'YES', 10, 0.4, 0)"""
         ), event_loop)
+        # Resolution P&L derives from the authoritative pnl_ledger (raw fills
+        # are aliased by complementary-token exits — 2026-07-20 audit): the
+        # settlement of BUY 10 @ 0.4 on a YES outcome books +6.0 there.
+        run(db.execute(
+            """INSERT INTO pnl_ledger
+               (market_id, kind, token, qty, pnl, fees, is_paper, source_ref)
+               VALUES ('m_pnl', 'settlement', 'YES', 10, 6.0, 0, 0,
+                       'settle:m_pnl:YES:0')"""
+        ), event_loop)
         run(db.commit(), event_loop)
 
         result = run(backfill_resolution_pnl(db, dry_run=False), event_loop)

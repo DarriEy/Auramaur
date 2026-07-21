@@ -61,42 +61,26 @@ async def compute_market_resolution_pnl(
 
     ``sell proceeds - buy cost - fees + winning-token payout``.
     """
-    fills = await db.fetchall(
-        """SELECT side, token, size, price, fee
-           FROM fills
-           WHERE market_id = ? AND is_paper = ?""",
+    # Derive from the authoritative pnl_ledger, not raw fills: complementary-
+    # token exits (sell YES to close a NO holding) leave the fills history
+    # aliased, so the old formula credited resolution payout for tokens that
+    # were already exited -- resolution_pnl summed +$349 while the ledger
+    # (which reconciles) summed -$0.97 (2026-07-20 audit). The caller runs
+    # AFTER settlement, so sell + settlement rows are all present.
+    row = await db.fetchone(
+        """SELECT COALESCE(SUM(pnl), 0) AS pnl, COUNT(*) AS n,
+                  COALESCE(SUM(fees), 0) AS fees
+           FROM pnl_ledger WHERE market_id = ? AND is_paper = ?""",
         (market_id, is_paper),
     )
-    if not fills:
+    if row is None or int(row["n"] or 0) == 0:
         return None
 
     buy_cost = 0.0
     sell_proceeds = 0.0
-    fees = 0.0
-    net: dict[str, float] = {}
-
-    for fill in fills:
-        side = _fill_side(fill["side"])
-        token = _fill_token(fill["token"])
-        size = float(fill["size"] or 0.0)
-        price = float(fill["price"] or 0.0)
-        fees += float(fill["fee"] or 0.0)
-
-        if side == "BUY":
-            buy_cost += size * price
-            net[token] = net.get(token, 0.0) + size
-        elif side == "SELL":
-            sell_proceeds += size * price
-            net[token] = net.get(token, 0.0) - size
-
+    fees = float(row["fees"] or 0.0)
     payout = 0.0
-    for token, size in net.items():
-        if size <= 0.01:
-            continue
-        if (token == "YES" and outcome == 1) or (token == "NO" and outcome == 0):
-            payout += size
-
-    pnl = sell_proceeds - buy_cost - fees + payout
+    pnl = float(row["pnl"] or 0.0)
     return MarketPnL(
         market_id=market_id,
         category=category or "",
@@ -212,26 +196,26 @@ async def rebuild_category_stats_from_resolution_pnl(
     if dry_run:
         return result
 
-    for row in rows:
-        await db.execute(
-            """INSERT INTO category_stats
-               (category, total_pnl, trade_count, win_count, avg_edge, updated_at)
-               VALUES (?, ?, ?, ?, ?, datetime('now'))
-               ON CONFLICT(category) DO UPDATE SET
-                   total_pnl = excluded.total_pnl,
-                   trade_count = excluded.trade_count,
-                   win_count = excluded.win_count,
-                   avg_edge = excluded.avg_edge,
-                   updated_at = excluded.updated_at""",
-            (
-                row["category"],
-                float(row["total_pnl"] or 0.0),
-                int(row["trade_count"] or 0),
-                int(row["win_count"] or 0),
-                float(row["avg_edge"] or 0.0),
-            ),
-        )
-    await db.commit()
+    async with db.transaction():
+        for row in rows:
+            await db.execute(
+                """INSERT INTO category_stats
+                   (category, total_pnl, trade_count, win_count, avg_edge, updated_at)
+                   VALUES (?, ?, ?, ?, ?, datetime('now'))
+                   ON CONFLICT(category) DO UPDATE SET
+                       total_pnl = excluded.total_pnl,
+                       trade_count = excluded.trade_count,
+                       win_count = excluded.win_count,
+                       avg_edge = excluded.avg_edge,
+                       updated_at = excluded.updated_at""",
+                (
+                    row["category"],
+                    float(row["total_pnl"] or 0.0),
+                    int(row["trade_count"] or 0),
+                    int(row["win_count"] or 0),
+                    float(row["avg_edge"] or 0.0),
+                ),
+            )
 
     log.info(
         "pnl.rebuild_category_stats",

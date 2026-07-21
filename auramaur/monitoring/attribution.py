@@ -80,13 +80,11 @@ class PerformanceAttributor:
 
             multipliers[category] = round(mult, 2)
 
-            # Store the multiplier
-            await self._db.execute(
-                "UPDATE category_stats SET kelly_multiplier = ? WHERE category = ?",
-                (multipliers[category], category),
-            )
-
-        await self._db.commit()
+        # NOTE: computed for display/telemetry only. PerformanceFeedback
+        # (Brier-based) is the single writer of
+        # category_stats.kelly_multiplier -- both tasks wrote the column
+        # hourly with different formulas, so the multiplier the risk manager
+        # applied depended on which task ran last (2026-07-20 audit).
         log.info("attribution.multipliers", multipliers=multipliers)
         return multipliers
 

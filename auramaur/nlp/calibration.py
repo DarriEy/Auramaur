@@ -149,13 +149,25 @@ class CalibrationTracker:
             category=category,
         )
 
-    async def _persist_realized_pnl(self, market_id: str, outcome_int: int,
-                                    category: str) -> None:
-        """Store realized $ P&L for a resolved market from its live fills.
+    async def persist_realized_pnl(self, market_id: str, outcome_int: int,
+                                   category: str = "") -> None:
+        """Store realized $ P&L for a resolved market from the pnl_ledger.
 
-        P&L = sell_proceeds - buy_cost - fees + resolution_payout (held token
-        pays $1 if it won). No-op if the market had no live fills.
+        Called by the resolution tracker AFTER settlement so the ledger
+        already carries this market's sell + settlement rows. Idempotent:
+        an existing resolution_pnl row is left untouched -- re-running for
+        an already-persisted market was firing ~2000x/day (for 143 distinct
+        markets), each triggering a full category_stats rebuild and
+        clobbering resolved_at via INSERT OR REPLACE (2026-07-20 audit).
         """
+        exists = await self._db.fetchone(
+            "SELECT 1 FROM resolution_pnl WHERE market_id = ?", (market_id,))
+        if exists is not None:
+            return
+        if not category:
+            row = await self._db.fetchone(
+                "SELECT category FROM markets WHERE id = ?", (market_id,))
+            category = (row["category"] if row is not None else "") or ""
         from auramaur.broker.pnl_repair import (
             compute_market_resolution_pnl,
             rebuild_category_stats_from_resolution_pnl,
@@ -167,12 +179,12 @@ class CalibrationTracker:
         if market_pnl is None:
             return
 
-        await self._db.execute(
-            "INSERT OR REPLACE INTO resolution_pnl (market_id, category, pnl, resolved_at) "
-            "VALUES (?, ?, ?, datetime('now'))",
-            (market_id, category, market_pnl.pnl),
-        )
-        await self._db.commit()
+        async with self._db.transaction():
+            await self._db.execute(
+                "INSERT OR REPLACE INTO resolution_pnl (market_id, category, pnl, resolved_at) "
+                "VALUES (?, ?, ?, datetime('now'))",
+                (market_id, category, market_pnl.pnl),
+            )
         await rebuild_category_stats_from_resolution_pnl(self._db, dry_run=False)
         log.info(
             "pnl.realized",
@@ -207,23 +219,23 @@ class CalibrationTracker:
             (market_id,),
         )
 
-        await self._db.execute(
-            """
-            UPDATE calibration
-            SET actual_outcome = ?, resolved_at = datetime('now')
-            WHERE market_id = ? AND actual_outcome IS NULL
-            """,
-            (outcome_int, market_id),
-        )
-        await self._db.commit()
+        async with self._db.transaction():
+            await self._db.execute(
+                """
+                UPDATE calibration
+                SET actual_outcome = ?, resolved_at = datetime('now')
+                WHERE market_id = ? AND actual_outcome IS NULL
+                """,
+                (outcome_int, market_id),
+            )
         log.info("calibration.resolved", market_id=market_id, outcome=actual_outcome)
         if self._lineage_observer is not None:
             self._lineage_observer.resolution(market_id, actual_outcome)
 
-        # Persist realized $ P&L from this market's fills + the outcome, so edge
-        # is measurable in dollars (trades.pnl is never populated otherwise).
-        await self._persist_realized_pnl(
-            market_id, outcome_int, pred_row["category"] if pred_row else "")
+        # Realized $ persistence moved to the resolution tracker, AFTER
+        # settlement: at this point the ledger has no settle row yet, so a
+        # fills-based computation here both undercounted payout and
+        # double-credited complementary-token exits (2026-07-20 audit).
 
         # Trigger online calibration update if we have the prediction data
         if pred_row is not None:
@@ -280,13 +292,13 @@ class CalibrationTracker:
                 # Seed identity params (a=1, b=0 = no adjustment) so online
                 # learning can begin immediately instead of waiting for
                 # min_samples batch refit.
-                await self._db.execute(
-                    """INSERT OR IGNORE INTO calibration_params
-                       (category, a, b, fitted_at)
-                       VALUES (?, 1.0, 0.0, datetime('now'))""",
-                    (cat,),
-                )
-                await self._db.commit()
+                async with self._db.transaction():
+                    await self._db.execute(
+                        """INSERT OR IGNORE INTO calibration_params
+                           (category, a, b, fitted_at)
+                           VALUES (?, 1.0, 0.0, datetime('now'))""",
+                        (cat,),
+                    )
                 params = (1.0, 0.0)
                 self._params_cache[cat] = params
                 log.info("calibration.seeded_identity_params", category=cat)
@@ -306,15 +318,15 @@ class CalibrationTracker:
 
             # Persist to DB
             now = datetime.now(timezone.utc).isoformat()
-            await self._db.execute(
-                """
-                UPDATE calibration_params
-                SET a = ?, b = ?, fitted_at = ?
-                WHERE category = ?
-                """,
-                (new_a, new_b, now, cat),
-            )
-            await self._db.commit()
+            async with self._db.transaction():
+                await self._db.execute(
+                    """
+                    UPDATE calibration_params
+                    SET a = ?, b = ?, fitted_at = ?
+                    WHERE category = ?
+                    """,
+                    (new_a, new_b, now, cat),
+                )
 
             # Compute moving Brier score for logging
             moving_brier = self.get_moving_brier_score()

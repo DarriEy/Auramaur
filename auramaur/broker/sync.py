@@ -340,41 +340,46 @@ class PositionSyncer:
         is_paper_flag = 0 if self._settings.is_live else 1
         positions = self._drop_settled(
             positions, await self._settled_keys(is_paper_flag))
-        for pos in positions:
-            side = OrderSide.BUY.value
-            token = pos.token.value if pos.token else "YES"
-            token_id = pos.token_id or ""
-            # Mark-integrity floor: never persist a live held position at <=0.
-            # Reconciler positions can arrive at current_price 0 when the token's
-            # price couldn't be resolved (e.g. the markets row lacks clob tokens,
-            # so side-resolution fails) — a phantom -100% that distorts the risk
-            # gates. Floor to avg_cost (mirrors _sync_live) and zero the matching
-            # unrealized so the books stay consistent. Real marks still win.
-            if pos.current_price > 0:
-                current_price, upnl = pos.current_price, pos.unrealized_pnl
-            else:
-                current_price = float(pos.avg_cost or 0)
-                upnl = 0.0
-            await self._db.execute(
-                """INSERT INTO portfolio
-                   (market_id, exchange, side, size, avg_price, current_price,
-                    unrealized_pnl, category, token, token_id, is_paper, updated_at)
-                   VALUES (?, 'polymarket', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
-                       exchange = excluded.exchange,
-                       size = excluded.size,
-                       avg_price = excluded.avg_price,
-                       current_price = excluded.current_price,
-                       unrealized_pnl = excluded.unrealized_pnl,
-                       token = excluded.token,
-                       token_id = excluded.token_id,
-                       is_paper = excluded.is_paper,
-                       updated_at = excluded.updated_at""",
-                (pos.market_id, side, pos.size, pos.avg_cost,
-                 current_price, upnl, pos.category,
-                 token, token_id, is_paper_flag, now),
-            )
-        await self._db.commit()
+        # All inputs are already in memory — the upsert burst is one short,
+        # serialized transaction (contention plan, Phase 2). No network awaits
+        # may ever run inside this block.
+        if positions:
+            async with self._db.transaction():
+                for pos in positions:
+                    side = OrderSide.BUY.value
+                    token = pos.token.value if pos.token else "YES"
+                    token_id = pos.token_id or ""
+                    # Mark-integrity floor: never persist a live held position at
+                    # <=0. Reconciler positions can arrive at current_price 0 when
+                    # the token's price couldn't be resolved (e.g. the markets row
+                    # lacks clob tokens, so side-resolution fails) — a phantom
+                    # -100% that distorts the risk gates. Floor to avg_cost
+                    # (mirrors _sync_live) and zero the matching unrealized so the
+                    # books stay consistent. Real marks still win.
+                    if pos.current_price > 0:
+                        current_price, upnl = pos.current_price, pos.unrealized_pnl
+                    else:
+                        current_price = float(pos.avg_cost or 0)
+                        upnl = 0.0
+                    await self._db.execute(
+                        """INSERT INTO portfolio
+                           (market_id, exchange, side, size, avg_price, current_price,
+                            unrealized_pnl, category, token, token_id, is_paper, updated_at)
+                           VALUES (?, 'polymarket', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
+                               exchange = excluded.exchange,
+                               size = excluded.size,
+                               avg_price = excluded.avg_price,
+                               current_price = excluded.current_price,
+                               unrealized_pnl = excluded.unrealized_pnl,
+                               token = excluded.token,
+                               token_id = excluded.token_id,
+                               is_paper = excluded.is_paper,
+                               updated_at = excluded.updated_at""",
+                        (pos.market_id, side, pos.size, pos.avg_cost,
+                         current_price, upnl, pos.category,
+                         token, token_id, is_paper_flag, now),
+                    )
         log.info("sync.merge_new", count=len(positions))
 
     async def _reconcile(self, positions: list[LivePosition]) -> None:
@@ -418,55 +423,58 @@ class PositionSyncer:
         db_market_ids = {row["market_id"] for row in db_rows}
         live_market_ids = {pos.market_id for pos in positions}
 
-        # DELETE positions no longer held (Polymarket, current mode only)
+        # DELETE + upsert as one short, serialized transaction (contention
+        # plan, Phase 2): every input is already fetched, so no network await
+        # can run inside this block. The delete pass and the upsert pass land
+        # (or roll back) atomically instead of straddling other tasks' commits.
         stale = db_market_ids - live_market_ids
-        for market_id in stale:
-            await self._db.execute(
-                "DELETE FROM portfolio WHERE market_id = ? AND exchange = 'polymarket' AND is_paper = ?",
-                (market_id, is_paper_flag),
-            )
-            log.info("sync.reconcile.removed", market_id=market_id)
+        async with self._db.transaction():
+            # DELETE positions no longer held (Polymarket, current mode only)
+            for market_id in stale:
+                await self._db.execute(
+                    "DELETE FROM portfolio WHERE market_id = ? AND exchange = 'polymarket' AND is_paper = ?",
+                    (market_id, is_paper_flag),
+                )
+                log.info("sync.reconcile.removed", market_id=market_id)
 
-        # INSERT or UPDATE positions from exchange
-        for pos in positions:
-            # Determine side — we always BUY on Polymarket, but keep BUY as default
-            side = OrderSide.BUY.value
-            token = pos.token.value if pos.token else "YES"
-            token_id = pos.token_id or ""
+            # INSERT or UPDATE positions from exchange
+            for pos in positions:
+                # Determine side — we always BUY on Polymarket, but keep BUY as default
+                side = OrderSide.BUY.value
+                token = pos.token.value if pos.token else "YES"
+                token_id = pos.token_id or ""
 
-            await self._db.execute(
-                """INSERT INTO portfolio
-                   (market_id, exchange, side, size, avg_price, current_price,
-                    unrealized_pnl, category, token, token_id, is_paper, updated_at)
-                   VALUES (?, 'polymarket', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
-                       exchange = excluded.exchange,
-                       side = excluded.side,
-                       size = excluded.size,
-                       avg_price = excluded.avg_price,
-                       current_price = excluded.current_price,
-                       unrealized_pnl = excluded.unrealized_pnl,
-                       category = excluded.category,
-                       token = excluded.token,
-                       token_id = excluded.token_id,
-                       is_paper = excluded.is_paper,
-                       updated_at = excluded.updated_at""",
-                (
-                    pos.market_id,
-                    side,
-                    pos.size,
-                    pos.avg_cost,
-                    pos.current_price,
-                    pos.unrealized_pnl,
-                    pos.category,
-                    token,
-                    token_id,
-                    is_paper_flag,
-                    now,
-                ),
-            )
-
-        await self._db.commit()
+                await self._db.execute(
+                    """INSERT INTO portfolio
+                       (market_id, exchange, side, size, avg_price, current_price,
+                        unrealized_pnl, category, token, token_id, is_paper, updated_at)
+                       VALUES (?, 'polymarket', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
+                           exchange = excluded.exchange,
+                           side = excluded.side,
+                           size = excluded.size,
+                           avg_price = excluded.avg_price,
+                           current_price = excluded.current_price,
+                           unrealized_pnl = excluded.unrealized_pnl,
+                           category = excluded.category,
+                           token = excluded.token,
+                           token_id = excluded.token_id,
+                           is_paper = excluded.is_paper,
+                           updated_at = excluded.updated_at""",
+                    (
+                        pos.market_id,
+                        side,
+                        pos.size,
+                        pos.avg_cost,
+                        pos.current_price,
+                        pos.unrealized_pnl,
+                        pos.category,
+                        token,
+                        token_id,
+                        is_paper_flag,
+                        now,
+                    ),
+                )
 
         if stale:
             log.info("sync.reconcile.cleanup", removed=len(stale))
@@ -533,67 +541,85 @@ class KalshiPositionSyncer:
         positions: list[LivePosition] = []
         current_ids: set[str] = set()
 
-        for market_id, pos in self._paper.positions.items():
-            token = pos.token if pos.token else TokenType.YES
-            token_id = pos.token_id or market_id
-            category = getattr(pos, "category", "") or ""
-            current_ids.add(market_id)
+        # The shared PaperTrader book holds EVERY venue's paper positions:
+        # stamping them all exchange='kalshi' relabeled Polymarket paper rows
+        # as Kalshi (double-counting them in both venue views), and the
+        # cleanup DELETE below could shred pillar-owned kalshi paper rows not
+        # tracked in PaperTrader memory (2026-07-20 audit). Scope this pass
+        # to markets discovery knows as Kalshi.
+        kalshi_rows = await self._db.fetchall(
+            "SELECT id FROM markets WHERE exchange = 'kalshi'")
+        kalshi_ids = {r["id"] for r in kalshi_rows}
 
-            await self._db.execute(
-                """INSERT INTO portfolio
-                   (market_id, exchange, side, size, avg_price, current_price,
-                    unrealized_pnl, category, token, token_id, is_paper, updated_at)
-                   VALUES (?, 'kalshi', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
-                   ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
-                       exchange = excluded.exchange,
-                       side = excluded.side,
-                       size = excluded.size,
-                       avg_price = excluded.avg_price,
-                       current_price = excluded.current_price,
-                       unrealized_pnl = excluded.unrealized_pnl,
-                       category = excluded.category,
-                       token = excluded.token,
-                       token_id = excluded.token_id,
-                       is_paper = excluded.is_paper,
-                       updated_at = excluded.updated_at""",
-                (
-                    market_id,
-                    pos.side.value,
-                    pos.size,
-                    pos.avg_price,
-                    pos.current_price,
-                    pos.unrealized_pnl,
-                    category,
-                    token.value,
-                    token_id,
-                    now,
-                ),
-            )
-            positions.append(
-                LivePosition(
-                    market_id=market_id,
-                    token=token,
-                    token_id=token_id,
-                    size=pos.size,
-                    avg_cost=pos.avg_price,
-                    current_price=pos.current_price,
-                    category=category,
-                ),
-            )
+        # PaperTrader state is in memory, so the whole upsert+cleanup pass is
+        # db-only — one short, serialized transaction (contention plan,
+        # Phase 2). No network awaits may ever run inside this block.
+        async with self._db.transaction():
+            for market_id, pos in self._paper.positions.items():
+                if market_id not in kalshi_ids:
+                    continue
+                token = pos.token if pos.token else TokenType.YES
+                token_id = pos.token_id or market_id
+                category = getattr(pos, "category", "") or ""
+                current_ids.add(market_id)
 
-        if current_ids:
-            placeholders = ",".join("?" * len(current_ids))
-            await self._db.execute(
-                f"DELETE FROM portfolio WHERE exchange='kalshi' AND is_paper=1"
-                f" AND market_id NOT IN ({placeholders})",
-                tuple(current_ids),
-            )
-        else:
-            await self._db.execute(
-                "DELETE FROM portfolio WHERE exchange='kalshi' AND is_paper=1"
-            )
+                await self._db.execute(
+                    """INSERT INTO portfolio
+                       (market_id, exchange, side, size, avg_price, current_price,
+                        unrealized_pnl, category, token, token_id, is_paper, updated_at)
+                       VALUES (?, 'kalshi', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                       ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
+                           exchange = excluded.exchange,
+                           side = excluded.side,
+                           size = excluded.size,
+                           avg_price = excluded.avg_price,
+                           current_price = excluded.current_price,
+                           unrealized_pnl = excluded.unrealized_pnl,
+                           category = excluded.category,
+                           token = excluded.token,
+                           token_id = excluded.token_id,
+                           is_paper = excluded.is_paper,
+                           updated_at = excluded.updated_at""",
+                    (
+                        market_id,
+                        pos.side.value,
+                        pos.size,
+                        pos.avg_price,
+                        pos.current_price,
+                        pos.unrealized_pnl,
+                        category,
+                        token.value,
+                        token_id,
+                        now,
+                    ),
+                )
+                positions.append(
+                    LivePosition(
+                        market_id=market_id,
+                        token=token,
+                        token_id=token_id,
+                        size=pos.size,
+                        avg_cost=pos.avg_price,
+                        current_price=pos.current_price,
+                        category=category,
+                    ),
+                )
 
-        await self._db.commit()
+            if current_ids:
+                placeholders = ",".join("?" * len(current_ids))
+                await self._db.execute(
+                    f"DELETE FROM portfolio WHERE exchange='kalshi' AND is_paper=1"
+                    f" AND market_id NOT IN ({placeholders})",
+                    tuple(current_ids),
+                )
+            else:
+                # No kalshi positions in PaperTrader memory. Do NOT blanket-
+                # delete: paper kalshi rows owned by strategy pillars (not
+                # tracked in PaperTrader) would be shredded. Stale
+                # PaperTrader-written rows will be reconciled on the next
+                # pass that has positions.
+                pass
+
         log.info("sync.kalshi.paper.done", positions=len(positions))
         return positions
 
