@@ -86,7 +86,26 @@ class LineageObserver:
             try:
                 if event is None:
                     return
-                await getattr(self, f"_write_{event.kind}")(**event.payload)
+                # Contention retry: transaction()'s in_transaction pre-check
+                # and its BEGIN execute on different sides of the shared
+                # aiosqlite statement queue, so a write racing another task's
+                # implicit transaction can fail in ms with "cannot start a
+                # transaction within a transaction" (or a transient lock).
+                # Both clear as soon as the interleaved writer commits, and a
+                # single dropped event was how forecast_snapshots lost rows
+                # on 2026-07-21. Bounded retries; anything else raises on the
+                # first attempt.
+                for attempt in range(3):
+                    try:
+                        await getattr(self, f"_write_{event.kind}")(**event.payload)
+                        break
+                    except Exception as exc:
+                        detail = str(exc).lower()
+                        transient = ("cannot start a transaction" in detail
+                                     or "database is locked" in detail)
+                        if not transient or attempt == 2:
+                            raise
+                        await asyncio.sleep(0.1 * (attempt + 1))
             except Exception as exc:
                 # transaction() already rolled back this batch; a bare
                 # rollback() here would run on the SHARED connection and could
