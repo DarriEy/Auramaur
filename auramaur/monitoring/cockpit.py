@@ -222,7 +222,16 @@ async def _portfolio_pnl(db, settings, is_paper_flag: int) -> dict:
     drawdown = dd_row["max_drawdown"] if dd_row else 0
 
     if live_book:
-        balance = None  # on-chain cash is shown by the running bot's syncer
+        # Credential-less process: live cash comes from the bot-recorded
+        # structured venue row (v38 available/equity columns, #332), not a
+        # venue call. None only when the bot has not recorded a row yet.
+        bal_row = await db.fetchone(
+            "SELECT available FROM venue_balances WHERE venue = 'polymarket'")
+        balance = (
+            float(bal_row["available"])
+            if bal_row is not None and bal_row["available"] is not None
+            else None
+        )
     else:
         balance = settings.execution.paper_initial_balance + total_pnl
 

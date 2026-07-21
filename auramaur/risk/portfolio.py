@@ -242,6 +242,17 @@ class PortfolioTracker:
         peak = float(row["peak"] or 0.0) if row else 0.0
         self._current_drawdown_pct = (
             max(0.0, (peak - equity) / peak * 100.0) if peak > 0 else 0.0)
+        # Persist the running max so daily_stats.max_drawdown (the dashboard
+        # tile and the historical record) reflects what the gate saw — the
+        # column existed since the schema's origin but was never written.
+        if self._current_drawdown_pct > 0:
+            async with self.db.transaction():
+                await self.db.execute(
+                    """UPDATE daily_stats
+                       SET max_drawdown = MAX(COALESCE(max_drawdown, 0), ?)
+                       WHERE date = date('now')""",
+                    (round(self._current_drawdown_pct, 4),),
+                )
 
     async def get_drawdown(self) -> float:
         """Return current drawdown from peak as a percentage.
