@@ -494,6 +494,26 @@ class StrategyTaskMixin:
             if equity is not None:
                 await equity.close()
 
+    async def _task_evidence_distiller(self) -> None:
+        """Local-LLM evidence distiller (shadow-safe; evidence-side only)."""
+        from auramaur.nlp import local_llm
+        from auramaur.nlp.evidence_distiller import EvidenceDistiller
+
+        client = local_llm.get_client(self.settings, self._components.db)
+        pillar = EvidenceDistiller(
+            db=self._components.db, settings=self.settings, client=client)
+        interval = max(300, self.settings.local_llm.distiller.interval_seconds)
+        while self._running:
+            if await self._check_kill_switch():
+                return
+            try:
+                await pillar.run_once()
+            except Exception as e:
+                log.error("distiller.cycle_error", error=str(e), exc_info=True)
+            await asyncio.sleep(interval)
+        # No client close here — the singleton is shared across consumers and
+        # closed once in bot shutdown via local_llm.aclose().
+
     async def _task_platform_consensus(self) -> None:
         """Periodic platform consensus follower (Metaculus / Manifold)."""
         from auramaur.strategy.platform_consensus import PlatformConsensusPillar

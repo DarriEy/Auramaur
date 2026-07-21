@@ -137,14 +137,18 @@ def _get_embedder(model_name: str):
         return None
 
 
-def _embedding_scores(query: str, texts: list[str], model_name: str) -> list[float] | None:
+def _embedding_scores(
+    query: str, texts: list[str], model_name: str, query_prefix: str = "",
+) -> list[float] | None:
     model = _get_embedder(model_name)
     if model is None:
         return None
     try:
         import numpy as np
 
-        vecs = model.encode([query] + texts, normalize_embeddings=True, show_progress_bar=False)
+        vecs = model.encode(
+            [query_prefix + query] + texts,
+            normalize_embeddings=True, show_progress_bar=False)
         q = np.asarray(vecs[0])
         docs = np.asarray(vecs[1:])
         sims = (docs @ q).tolist()
@@ -165,11 +169,15 @@ def relevance_scores(
     *,
     backend: str = "embeddings",
     model_name: str = "all-MiniLM-L6-v2",
+    query_prefix: str = "",
 ) -> list[float]:
     """Score each text's relevance to ``query`` in [0, 1].
 
     Falls through embeddings -> tfidf -> heuristic depending on ``backend`` and
-    what's actually available. Never raises.
+    what's actually available. Never raises. ``query_prefix`` is the
+    asymmetric-retrieval prefix some models (bge family) want on the QUERY
+    only; it never touches the documents and is ignored off the embeddings
+    backend.
     """
     if not texts:
         return []
@@ -182,7 +190,7 @@ def relevance_scores(
 
     for b in order:
         if b == "embeddings":
-            scores = _embedding_scores(query, texts, model_name)
+            scores = _embedding_scores(query, texts, model_name, query_prefix)
         elif b == "tfidf":
             scores = _tfidf_scores(query, texts)
         else:

@@ -114,9 +114,11 @@ class StateBroker:
                 # served on both views with its age.
                 venues = await queries.venue_balances(self.db)
                 ibkr_books = await queries.ibkr_paper_books(self.db)
+                local_llm = await queries.local_llm_stats(self.db)
                 for state in books.values():
                     state["venues"] = venues
                     state["ibkr_books"] = ibkr_books
+                    state["local_llm"] = local_llm
                 self.latest = books
                 self.error = None
                 self.updated_at = datetime.now(timezone.utc).isoformat()

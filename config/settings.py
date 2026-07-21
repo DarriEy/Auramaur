@@ -346,6 +346,9 @@ class NLPConfig(BaseModel):
     # Falls back automatically if the chosen backend is unavailable.
     relevance_backend: Literal["embeddings", "tfidf", "heuristic"] = "embeddings"
     embedding_model: str = "all-MiniLM-L6-v2"
+    # Asymmetric-retrieval prefix applied to the QUERY only (bge-family models
+    # want e.g. "Represent this sentence for searching relevant passages: ").
+    embedding_query_prefix: str = ""
     # Calibration feedback as a reliability curve (over/under-confidence per
     # probability band + top misses) instead of dumping raw resolved rows.
     calibration_buckets: bool = True
@@ -1546,6 +1549,66 @@ class GeminiConfig(BaseModel):
     claude_budget_threshold: float = 0.8
 
 
+class LocalDistillerConfig(BaseModel):
+    """Local-LLM evidence distiller: batches recent NewsItems into structured
+    claims that (once out of shadow mode) enrich the strategic batch prompts."""
+
+    enabled: bool = False
+    # Shadow mode persists + logs claims but never alters prompts. Flip to
+    # False only after claim quality has been spot-checked for a few days.
+    shadow_mode: bool = True
+    interval_seconds: int = 900
+    batch_size: int = 8               # articles distilled per cycle
+    max_item_age_hours: int = 24      # ignore evidence older than this
+    max_claims_per_item: int = 5
+    prompt_char_budget: int = 600     # distilled-claims chars added per market block
+    retention_days: int = 14
+
+
+class LocalTriageConfig(BaseModel):
+    """Local-LLM materiality pre-screen for the news reactor. Fail-open: any
+    error/timeout/over-cap means the (headline, market) pair passes through."""
+
+    enabled: bool = False
+    threshold: float = 0.35           # materiality score below this => don't flag
+    timeout_seconds: int = 20         # short: a cold-start fails open, never stalls
+    max_calls_per_cycle: int = 20     # beyond cap, pairs pass through unfiltered
+
+
+class LocalEnsembleArmConfig(BaseModel):
+    """Local model as an ensemble arm. measure_only records predictions to
+    ensemble_predictions for Brier scoring without entering the blend."""
+
+    enabled: bool = False
+    measure_only: bool = True
+
+
+class LocalLLMConfig(BaseModel):
+    """Local Ollama tier — free/unlimited inference, evidence-side only.
+
+    Hard fail-open: every consumer treats a None reply as "feature off for
+    this call". Configure this section via YAML only (defaults.local.yaml per
+    deployment) — do not mix LOCAL_LLM__* env vars with yaml fields, or
+    pydantic-settings rebuilds the whole section from env + class defaults.
+    """
+
+    enabled: bool = False
+    # From inside the compose stack use http://host.docker.internal:11434
+    # (set via runtime defaults.local.yaml, never via env).
+    base_url: str = "http://127.0.0.1:11434"
+    model: str = "qwen3:8b"
+    num_ctx: int = 8192
+    timeout_seconds: int = 120
+    concurrency: int = 1              # GPU serializes anyway
+    keep_alive: str = "30m"           # Ollama keep_alive per request; fights cold starts
+    # Circuit breaker: after 3 consecutive transport failures the client
+    # returns None instantly for this long instead of stacking timeouts.
+    failure_cooldown_seconds: int = 300
+    distiller: LocalDistillerConfig = Field(default_factory=LocalDistillerConfig)
+    triage: LocalTriageConfig = Field(default_factory=LocalTriageConfig)
+    ensemble_arm: LocalEnsembleArmConfig = Field(default_factory=LocalEnsembleArmConfig)
+
+
 class ArbitrageConfig(BaseModel):
     enabled: bool = True
     min_profit_after_fees_pct: float = 1.5
@@ -1684,6 +1747,7 @@ class Settings(BaseSettings):
     ensemble: EnsembleConfig = Field(default_factory=lambda: EnsembleConfig(**_DEFAULTS.get("ensemble", {})))
     llm_ensemble: LLMEnsembleConfig = Field(default_factory=lambda: LLMEnsembleConfig(**_DEFAULTS.get("llm_ensemble", {})))
     gemini: GeminiConfig = Field(default_factory=lambda: GeminiConfig(**_DEFAULTS.get("gemini", {})))
+    local_llm: LocalLLMConfig = Field(default_factory=lambda: LocalLLMConfig(**_DEFAULTS.get("local_llm", {})))
     momentum_coupling: MomentumCouplingConfig = Field(default_factory=lambda: MomentumCouplingConfig(**_DEFAULTS.get("momentum_coupling", {})))
     market_maker: MarketMakerConfig = Field(default_factory=lambda: MarketMakerConfig(**_DEFAULTS.get("market_maker", {})))
     technical: TechnicalConfig = Field(default_factory=lambda: TechnicalConfig(**_DEFAULTS.get("technical", {})))

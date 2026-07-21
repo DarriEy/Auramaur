@@ -1,6 +1,8 @@
 __pycache__/
 *.py[cod]
+*.tsbuildinfo
 *.egg-info/
+node_modules/
 dist/
 build/
 .env

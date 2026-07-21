@@ -57,6 +57,11 @@ services:
     networks:
       broker:
         ipv4_address: ${AURAMAUR_BOT_IP:-172.18.0.3}
+    # Local-LLM tier: reach the host's native Ollama (:11434). The endpoint
+    # itself is configured via runtime defaults.local.yaml (local_llm.base_url),
+    # never via env — see the local_llm section-trap note in defaults.yaml.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - ibgateway
     stop_grace_period: 2m

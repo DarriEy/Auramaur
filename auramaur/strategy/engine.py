@@ -7,10 +7,15 @@ from datetime import datetime, timezone
 import structlog
 
 import asyncio
-import fcntl
 import os
 import tempfile
 import time
+
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+    import msvcrt
 
 from auramaur.data_sources.aggregator import Aggregator
 from auramaur.db.database import Database
@@ -20,6 +25,30 @@ from auramaur.exchange.protocols import ExchangeClient, MarketDiscovery
 # Shared directory for cross-instance market claim locks
 _CLAIM_DIR = os.path.join(tempfile.gettempdir(), "auramaur_claims")
 os.makedirs(_CLAIM_DIR, exist_ok=True)
+
+
+def _lock_claim_file(fh) -> None:
+    """Acquire a non-blocking advisory lock on every supported OS."""
+    if fcntl is not None:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return
+
+    fh.seek(0, os.SEEK_END)
+    if fh.tell() == 0:
+        fh.write(b"\0")
+        fh.flush()
+    fh.seek(0)
+    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+
+
+def _unlock_claim_file(fh) -> None:
+    if fcntl is not None:
+        fcntl.flock(fh, fcntl.LOCK_UN)
+        return
+    fh.seek(0)
+    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+
+
 from auramaur.monitoring.display import (
     show_analysis, show_analyzing, show_evidence, show_risk_decision,
 )
@@ -474,8 +503,8 @@ class TradingEngine(CycleOrchestrationMixin):
 
         # Try to acquire exclusive lock first — if we can't, another instance has it
         try:
-            fh = open(claim_path, "a+")
-            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fh = open(claim_path, "a+b")
+            _lock_claim_file(fh)
         except OSError:
             return False
 
@@ -488,9 +517,9 @@ class TradingEngine(CycleOrchestrationMixin):
                 size = os.path.getsize(claim_path)
                 if size > 0:
                     fh.seek(0)
-                    owner = fh.read().strip()
+                    owner = fh.read().strip(b"\0").decode(errors="replace")
                     if owner and owner != str(os.getpid()):
-                        fcntl.flock(fh, fcntl.LOCK_UN)
+                        _unlock_claim_file(fh)
                         fh.close()
                         return False
         except FileNotFoundError:
@@ -500,11 +529,11 @@ class TradingEngine(CycleOrchestrationMixin):
         try:
             fh.seek(0)
             fh.truncate()
-            fh.write(str(os.getpid()))
+            fh.write(str(os.getpid()).encode())
             fh.flush()
             os.fsync(fh.fileno())
             # Release lock so other instances can check freshness
-            fcntl.flock(fh, fcntl.LOCK_UN)
+            _unlock_claim_file(fh)
             fh.close()
             return True
         except OSError:

@@ -550,6 +550,7 @@ class CycleOrchestrationMixin:
                         top_n=nlp.evidence_top_n,
                         backend=nlp.relevance_backend,
                         model_name=nlp.embedding_model,
+                        query_prefix=nlp.embedding_query_prefix,
                     )
                     return (market.id, ranked)
                 except Exception as e:
@@ -567,9 +568,25 @@ class CycleOrchestrationMixin:
         if not batch_markets:
             return []
 
-        # Batch analysis with world model
+        # Batch analysis with world model. Optionally enrich each market block
+        # with locally distilled claims (Phase 2 of the local-LLM tier — only
+        # once the distiller is out of shadow mode). Fail-open on any error.
+        distilled_map: dict[str, str] = {}
+        local_cfg = getattr(self.settings, "local_llm", None)
+        if (local_cfg is not None and local_cfg.enabled
+                and local_cfg.distiller.enabled
+                and not local_cfg.distiller.shadow_mode):
+            try:
+                from auramaur.nlp.evidence_distiller import load_distilled_map
+                distilled_map = await load_distilled_map(
+                    self.db, [m.id for m in batch_markets],
+                    local_cfg.distiller.prompt_char_budget)
+            except Exception as e:
+                log.debug("strategic.distilled_load_failed", error=str(e)[:120])
+
         strategic: StrategicAnalyzer = self.strategic
-        analysis = await strategic.analyze_batch_with_adversarial(batch_markets, evidence_map)
+        analysis = await strategic.analyze_batch_with_adversarial(
+            batch_markets, evidence_map, distilled_map or None)
 
         if not analysis.markets:
             log.warning("strategic.no_market_results", batch_size=len(batch_markets))

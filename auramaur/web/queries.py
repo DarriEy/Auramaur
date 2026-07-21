@@ -115,3 +115,45 @@ async def kraken_paper_positions(db: ReadOnlyDatabase) -> list[dict]:
          "opened_at": r["opened_at"]}
         for r in rows
     ]
+
+
+async def local_llm_stats(db: ReadOnlyDatabase) -> dict:
+    """Local Ollama tier health: last-24h calls by purpose plus distiller
+    output. Book-independent, like ``venue_balances``.
+
+    Degrades to ``{}`` when the tables don't exist yet (bot not restarted
+    since schema v35) so the panel just omits the tier rather than erroring.
+    """
+    try:
+        rows = await db.fetchall(
+            """SELECT purpose,
+                      COUNT(*) AS calls,
+                      SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END) AS ok,
+                      SUM(CASE WHEN status IN ('parse_error', 'timeout',
+                                               'request_error', 'api_error')
+                               THEN 1 ELSE 0 END) AS errors,
+                      CAST(AVG(duration_ms) AS INTEGER) AS avg_ms,
+                      SUM(prompt_tokens) AS prompt_tokens,
+                      SUM(output_tokens) AS output_tokens
+               FROM local_llm_calls
+               WHERE created_at >= datetime('now', '-24 hours')
+               GROUP BY purpose ORDER BY purpose""")
+        claims = await db.fetchone(
+            """SELECT COUNT(*) AS n, MAX(created_at) AS latest
+               FROM distilled_claims
+               WHERE created_at >= datetime('now', '-24 hours')""")
+    except Exception:
+        return {}
+    return {
+        "purposes": {
+            r["purpose"]: {
+                "calls": r["calls"], "ok": r["ok"], "errors": r["errors"],
+                "avg_ms": r["avg_ms"],
+                "prompt_tokens": r["prompt_tokens"] or 0,
+                "output_tokens": r["output_tokens"] or 0,
+            }
+            for r in rows
+        },
+        "claims_24h": claims["n"] if claims else 0,
+        "last_claim_at": claims["latest"] if claims else None,
+    }

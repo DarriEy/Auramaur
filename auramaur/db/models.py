@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 34
+SCHEMA_VERSION = 35
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -833,4 +833,46 @@ CREATE TABLE IF NOT EXISTS venue_balances (
     detail TEXT NOT NULL,
     fetched_at TEXT NOT NULL
 );
+-- v35: local Ollama LLM tier (evidence-side only, never trades).
+-- Distilled claims are keyed by the SHA-256 of title, a newline, and content,
+-- the same formula the aggregator stamps into evidence_observations, so claims
+-- join to markets through that table.
+CREATE TABLE IF NOT EXISTS distilled_claims (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    content_hash TEXT NOT NULL,
+    item_id TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    claim TEXT NOT NULL,
+    entities TEXT NOT NULL DEFAULT '[]',
+    event_date TEXT DEFAULT '',
+    markets_affected TEXT NOT NULL DEFAULT '[]',
+    model TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_distilled_hash_claim
+    ON distilled_claims(content_hash, claim);
+CREATE INDEX IF NOT EXISTS idx_distilled_created ON distilled_claims(created_at);
+
+CREATE TABLE IF NOT EXISTS distill_progress (
+    content_hash TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'done',
+    claims INTEGER NOT NULL DEFAULT 0,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS local_llm_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    purpose TEXT NOT NULL,
+    model TEXT NOT NULL,
+    status TEXT NOT NULL,
+    prompt_chars INTEGER NOT NULL DEFAULT 0,
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    error TEXT DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_local_llm_calls_day
+    ON local_llm_calls(purpose, created_at);
 """

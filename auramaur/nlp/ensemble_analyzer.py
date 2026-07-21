@@ -32,6 +32,31 @@ class ModelResult(BaseModel):
     time_sensitivity: str = "MEDIUM"
     weight: float = 0.5
     error: str | None = None
+    # measure_only arms record predictions (Brier history) but stay out of
+    # the blend until the flag is flipped off.
+    measure_only: bool = False
+
+
+class ArmSpec(BaseModel):
+    """One ensemble arm. Claude arms keep name == model string so existing
+    ensemble_predictions keys are preserved."""
+
+    name: str
+    provider: str = "claude"   # 'claude' | 'ollama'
+    measure_only: bool = False
+
+
+_LOCAL_ENSEMBLE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "probability": {"type": "number"},
+        "confidence": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH"]},
+        "reasoning": {"type": "string"},
+        "key_factors": {"type": "array", "items": {"type": "string"}},
+        "time_sensitivity": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH"]},
+    },
+    "required": ["probability"],
+}
 
 
 class EnsembleResult(BaseModel):
@@ -61,6 +86,21 @@ class EnsembleAnalyzer:
         self._db = db
         self._models = settings.llm_ensemble.models
         self._model_weights: dict[str, float] = {}
+        # Arm list: claude arms (name == model string) plus, when configured,
+        # the local Ollama arm. The local arm never touches the Claude call
+        # budget and — while measure_only — never enters the blend.
+        self._arms = [ArmSpec(name=m, provider="claude") for m in self._models]
+        self._local_client = None  # injectable test seam
+        local_cfg = getattr(settings, "local_llm", None)
+        if (local_cfg is not None and local_cfg.enabled
+                and local_cfg.ensemble_arm.enabled):
+            from auramaur.nlp import local_llm
+            self._local_client = local_llm.get_client(settings, db)
+            self._arms.append(ArmSpec(
+                name=f"ollama:{local_cfg.model}",
+                provider="ollama",
+                measure_only=local_cfg.ensemble_arm.measure_only,
+            ))
 
     # ------------------------------------------------------------------
     # Weight management
@@ -87,7 +127,7 @@ class EnsembleAnalyzer:
         )
 
         if not rows:
-            self._model_weights = {m: default_weight for m in self._models}
+            self._model_weights = {a.name: default_weight for a in self._arms}
             log.debug("ensemble.using_default_weights", weights=self._model_weights)
             return self._model_weights
 
@@ -141,10 +181,10 @@ class EnsembleAnalyzer:
             for model in raw_weights:
                 raw_weights[model] /= total
 
-        # Fill in defaults for models without enough data
-        for model in self._models:
-            if model not in raw_weights:
-                raw_weights[model] = default_weight
+        # Fill in defaults for arms without enough data
+        for arm in self._arms:
+            if arm.name not in raw_weights:
+                raw_weights[arm.name] = default_weight
 
         # Re-normalize after adding defaults
         total = sum(raw_weights.values())
@@ -193,11 +233,11 @@ class EnsembleAnalyzer:
             for model in raw_weights:
                 raw_weights[model] /= total
 
-        # Fill missing models with small default
+        # Fill missing arms with small default
         default_weight = self._settings.llm_ensemble.default_weight
-        for model in self._models:
-            if model not in raw_weights:
-                raw_weights[model] = default_weight
+        for arm in self._arms:
+            if arm.name not in raw_weights:
+                raw_weights[arm.name] = default_weight
 
         total = sum(raw_weights.values())
         if total > 0:
@@ -240,39 +280,43 @@ class EnsembleAnalyzer:
         else:
             weights = await self.load_model_weights()
 
-        # Launch all models in parallel
-        tasks = [self._call_model(model, prompt) for model in self._models]
+        # Launch all arms in parallel
+        tasks = [self._call_arm(arm, prompt) for arm in self._arms]
         raw_results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Collect successful results
         model_results: list[ModelResult] = []
-        for model, result in zip(self._models, raw_results):
+        for arm, result in zip(self._arms, raw_results):
             if isinstance(result, Exception):
                 log.warning(
                     "ensemble.model_failed",
-                    model=model,
+                    model=arm.name,
                     error=str(result),
                 )
                 model_results.append(ModelResult(
-                    model=model,
+                    model=arm.name,
                     probability=0.5,
                     weight=0.0,
                     error=str(result),
+                    measure_only=arm.measure_only,
                 ))
             else:
-                weight = weights.get(model, self._settings.llm_ensemble.default_weight)
+                weight = weights.get(arm.name, self._settings.llm_ensemble.default_weight)
                 model_results.append(ModelResult(
-                    model=model,
+                    model=arm.name,
                     probability=result["probability"],
                     confidence=result.get("confidence", "MEDIUM"),
                     reasoning=result.get("reasoning", ""),
                     key_factors=result.get("key_factors", []),
                     time_sensitivity=result.get("time_sensitivity", "MEDIUM"),
                     weight=weight,
+                    measure_only=arm.measure_only,
                 ))
 
-        # Blend results
-        successful = [mr for mr in model_results if mr.error is None]
+        # ok_results feed Brier recording (so measure-only arms accrue
+        # history); only blendable arms shape the traded estimate.
+        ok_results = [mr for mr in model_results if mr.error is None]
+        successful = [mr for mr in ok_results if not mr.measure_only]
 
         if not successful:
             log.error("ensemble.all_models_failed", market_id=market.id)
@@ -285,7 +329,7 @@ class EnsembleAnalyzer:
         blended = self._weighted_blend(successful)
 
         # Record per-model predictions for future Brier scoring
-        for mr in successful:
+        for mr in ok_results:
             await self.record_model_prediction(market.id, mr.model, mr.probability, category)
 
         # Build combined reasoning
@@ -318,7 +362,9 @@ class EnsembleAnalyzer:
             "ensemble.blended",
             market_id=market.id,
             blended_prob=round(blended, 4),
-            model_probs={mr.model: round(mr.probability, 4) for mr in successful},
+            # ok_results (not just blendable) so a measure-only arm's
+            # divergence is visible before it earns blend weight.
+            model_probs={mr.model: round(mr.probability, 4) for mr in ok_results},
             model_weights={mr.model: round(mr.weight, 4) for mr in successful},
             spread=round(max(mr.probability for mr in successful) - min(mr.probability for mr in successful), 4),
         )
@@ -334,6 +380,33 @@ class EnsembleAnalyzer:
     # ------------------------------------------------------------------
     # Model calling
     # ------------------------------------------------------------------
+
+    async def _call_arm(self, arm: ArmSpec, prompt: str) -> dict:
+        """Dispatch one arm by provider (pattern: agent_trader._run_model)."""
+        if arm.provider == "ollama":
+            return await self._call_local(prompt)
+        return await self._call_model(arm.name, prompt)
+
+    async def _call_local(self, prompt: str) -> dict:
+        """Local Ollama arm — free, no Claude budget check or record_call."""
+        if self._local_client is None:
+            raise RuntimeError("local ensemble arm not configured")
+        result = await self._local_client.generate_json(
+            prompt,
+            schema=_LOCAL_ENSEMBLE_SCHEMA,
+            purpose="ensemble",
+            max_tokens=700,
+        )
+        if result is None:
+            # Existing per-arm failure isolation turns this into a
+            # weight-0 error arm without touching the Claude arms.
+            raise RuntimeError("local model unavailable")
+        try:
+            probability = float(result.get("probability", 0.5))
+        except (TypeError, ValueError):
+            raise RuntimeError("local model returned non-numeric probability")
+        result["probability"] = max(0.01, min(0.99, probability))
+        return result
 
     async def _call_model(self, model: str, prompt: str) -> dict:
         """Call a specific model via Claude CLI.
