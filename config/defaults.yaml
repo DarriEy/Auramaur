@@ -516,6 +516,22 @@ local_llm:
     enabled: false
     measure_only: true     # record Brier history without entering the blend
 
+# Prospective intelligence x exploration evaluation. Shadow-only: this task
+# records paired forecasts and can never submit orders or write portfolio rows.
+intelligence_eval:
+  enabled: false
+  interval_seconds: 3600
+  scan_limit: 100
+  markets_per_cycle: 8
+  min_liquidity: 1000.0
+  max_concurrency: 1
+  prompt_version: "forecast-v1"
+  output_schema_version: "binary-v1"
+  treatments:
+    - {name: "local_single", policy: "single", samples: 1, base_seed: 11}
+    - {name: "local_samples_4", policy: "samples", samples: 4, base_seed: 23}
+    - {name: "local_samples_4_critic", policy: "samples_critic", samples: 4, base_seed: 37}
+
 market_maker:
   enabled: true
   min_spread_bps: 40        # minimum 0.4% spread (BBO-join kicks in when 1-tick improvement would go below this)

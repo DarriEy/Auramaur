@@ -87,6 +87,7 @@ class LocalLLMClient:
         purpose: str = "generic",
         max_tokens: int = 800,
         temperature: float = 0.0,
+        seed: int | None = None,
         timeout: float | None = None,
     ) -> dict | None:
         """One JSON-constrained completion. None on any failure (fail-open)."""
@@ -113,6 +114,8 @@ class LocalLLMClient:
                 "num_predict": max_tokens,
             },
         }
+        if seed is not None:
+            payload["options"]["seed"] = int(seed)
         effective_timeout = timeout or float(self._cfg.timeout_seconds)
         started = time.monotonic()
         status = "request_error"

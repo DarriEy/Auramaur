@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 35
+SCHEMA_VERSION = 36
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -875,4 +875,63 @@ CREATE TABLE IF NOT EXISTS local_llm_calls (
 );
 CREATE INDEX IF NOT EXISTS idx_local_llm_calls_day
     ON local_llm_calls(purpose, created_at);
+
+-- Prospective, execution-free intelligence x exploration evaluation. Episodes
+-- are immutable content-addressed snapshots; every arm sees the same hash.
+CREATE TABLE IF NOT EXISTS evaluation_episodes (
+    episode_hash TEXT PRIMARY KEY,
+    venue TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    event_family TEXT NOT NULL DEFAULT '',
+    observed_at TEXT NOT NULL,
+    market_prob_yes REAL NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_evaluation_episodes_family_time
+    ON evaluation_episodes(event_family, observed_at);
+
+CREATE TABLE IF NOT EXISTS evaluation_runs (
+    run_id TEXT PRIMARY KEY,
+    arm_name TEXT NOT NULL,
+    model TEXT NOT NULL,
+    quantization TEXT NOT NULL DEFAULT '',
+    exploration_policy TEXT NOT NULL,
+    seed INTEGER NOT NULL DEFAULT 0,
+    prompt_version TEXT NOT NULL,
+    output_schema_version TEXT NOT NULL,
+    status TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    tool_calls INTEGER NOT NULL DEFAULT 0,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    compute_seconds REAL NOT NULL DEFAULT 0,
+    error TEXT NOT NULL DEFAULT '',
+    started_at TEXT NOT NULL,
+    completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS evaluation_forecasts (
+    forecast_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    episode_hash TEXT NOT NULL,
+    prob_yes REAL NOT NULL,
+    action TEXT NOT NULL,
+    min_acceptable_price REAL,
+    max_acceptable_price REAL,
+    thesis TEXT NOT NULL DEFAULT '',
+    uncertainty REAL,
+    evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(run_id, episode_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_evaluation_forecasts_episode
+    ON evaluation_forecasts(episode_hash);
+
+CREATE TABLE IF NOT EXISTS evaluation_outcomes (
+    episode_hash TEXT PRIMARY KEY,
+    outcome INTEGER NOT NULL CHECK(outcome IN (0, 1)),
+    resolved_at TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT ''
+);
 """
