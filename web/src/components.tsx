@@ -48,6 +48,7 @@ export function TopBar({
           <button
             key={b}
             className={`seg${book === b ? " active" : ""}`}
+            aria-pressed={book === b}
             onClick={() => onBook(b)}
           >
             {b}

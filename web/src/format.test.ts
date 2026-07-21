@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { ago, deltaClass, liveness, money, price, utcClock } from "./format";
+import { ago, deltaClass, exactTime, liveness, money, price, utcClock } from "./format";
 
 describe("dashboard formatting", () => {
+  it("formats exact timestamp tooltips without invalid Intl options", () => {
+    expect(exactTime("2026-07-21T12:00:00Z")).toContain("2026");
+    expect(exactTime("not-a-date")).toBe("not-a-date");
+  });
+
   it("formats missing and signed financial values", () => {
     expect(money(null)).toBe("n/a");
     expect(money(12.5, true)).toBe("+$12.50");

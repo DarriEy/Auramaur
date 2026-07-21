@@ -39,3 +39,33 @@ export function liveness(
 export function utcClock(iso: string): string {
   return `${iso.slice(11, 19)} UTC`;
 }
+
+export function compactNumber(value: number): string {
+  return new Intl.NumberFormat("en-US", {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(value);
+}
+
+export function exactTime(value?: string | null): string {
+  if (!value) return "Unknown time";
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)
+    ? `${value.replace(" ", "T")}Z`
+    : value;
+  const date = new Date(normalized);
+  return Number.isFinite(date.getTime())
+    ? new Intl.DateTimeFormat("en-US", {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        second: "2-digit",
+        timeZoneName: "short",
+      }).format(date)
+    : value;
+}
+
+export function humanize(value: string): string {
+  return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
