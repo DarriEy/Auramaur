@@ -85,7 +85,7 @@ class TestArbitrageExecutor:
         ), event_loop)
         run(db.execute(
             """INSERT INTO markets (id, condition_id, question, active, outcome_yes_price, outcome_no_price, last_updated)
-               VALUES ('expensive', 'c2', 'Same event?', 1, 0.55, 0.45, datetime('now'))"""
+               VALUES ('expensive', 'c2', 'Event?', 1, 0.55, 0.45, datetime('now'))"""
         ), event_loop)
         run(db.execute(
             """INSERT INTO market_relationships
@@ -99,6 +99,46 @@ class TestArbitrageExecutor:
         buy_sig, sell_sig, _ = pairs[0]
         assert buy_sig.market_id == "cheap"
         assert sell_sig.market_id == "expensive"
+
+    def test_distinct_outcomes_in_same_event_are_not_arbitrage(self, executor, event_loop):
+        db = executor._db
+        for mid, question, price in (
+            ("actor-a", "Will Timothee be the #1 searched actor?", 0.08),
+            ("actor-b", "Will Zendaya be the #1 searched actor?", 0.31),
+        ):
+            run(db.execute(
+                """INSERT INTO markets (id, condition_id, question, active,
+                       outcome_yes_price, outcome_no_price, last_updated)
+                   VALUES (?, ?, ?, 1, ?, ?, datetime('now'))""",
+                (mid, mid, question, price, 1 - price),
+            ), event_loop)
+        run(db.execute(
+            """INSERT INTO market_relationships
+               (market_id_a, market_id_b, relationship_type, strength, description, detected_at)
+               VALUES ('actor-a', 'actor-b', 'same_event', 0.95, 'Same search event', datetime('now'))"""
+        ), event_loop)
+        run(db.commit(), event_loop)
+
+        assert run(executor.generate_arb_signals(), event_loop) == []
+
+    def test_load_market_preserves_execution_metadata(self, executor, event_loop):
+        db = executor._db
+        run(db.execute(
+            """INSERT INTO markets
+               (id, exchange, condition_id, ticker, question, active,
+                outcome_yes_price, outcome_no_price, clob_token_yes,
+                clob_token_no, last_updated)
+               VALUES ('meta', 'polymarket', 'c1', 'ticker-1', 'Event?', 1,
+                       0.4, 0.6, 'yes-token', 'no-token', datetime('now'))"""
+        ), event_loop)
+        run(db.commit(), event_loop)
+
+        market = run(executor._load_market("meta"), event_loop)
+        assert market is not None
+        assert market.exchange == "polymarket"
+        assert market.ticker == "ticker-1"
+        assert market.clob_token_yes == "yes-token"
+        assert market.clob_token_no == "no-token"
 
     def test_missing_market_skipped(self, executor, event_loop):
         """Opportunities with missing markets should be skipped."""
@@ -148,6 +188,28 @@ def test_arb_category_gate_filters_blocked_and_non_allowlisted():
         allowed_categories_live=None)
     assert [m.id for m in [kbo, labeled, unknown, crypto]
             if paper._category_ok(m)] == ["unk", "cry"]
+
+
+@pytest.mark.asyncio
+async def test_conditional_arb_fails_closed_without_clob_tokens():
+    """Missing venue metadata must stop both legs before risk or placement."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from auramaur.bot_arb import ArbExecutionMixin
+    from auramaur.exchange.models import Market
+
+    mixin = ArbExecutionMixin.__new__(ArbExecutionMixin)
+    market = Market(id="missing-token", question="Will X?", exchange="polymarket")
+    risk = MagicMock()
+    risk.evaluate = AsyncMock()
+
+    await mixin._execute_conditional_arb(
+        MagicMock(), MagicMock(), market, market,
+        {"type": "price_divergence"}, risk,
+        {"polymarket": MagicMock()},
+    )
+
+    risk.evaluate.assert_not_awaited()
 
 
 @pytest.mark.asyncio

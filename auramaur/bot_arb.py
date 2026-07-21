@@ -60,6 +60,23 @@ class ArbExecutionMixin(ArbTradeExecutionMixin, ArbScanLoopMixin):
             log.debug("arbitrage.no_engine", buy=buy_exchange, sell=sell_exchange)
             return
 
+        # Fail closed before risk evaluation or order construction when a
+        # reconstructed Polymarket leg lacks the CLOB token required for its
+        # side. This prevents a malformed relative-value pair reaching the
+        # execution gateway even if upstream persistence regresses.
+        missing_tokens = []
+        if buy_exchange == "polymarket" and not buy_market.clob_token_yes:
+            missing_tokens.append((buy_market.id, "YES"))
+        if sell_exchange == "polymarket" and not sell_market.clob_token_no:
+            missing_tokens.append((sell_market.id, "NO"))
+        if missing_tokens:
+            log.error(
+                "arbitrage.missing_execution_metadata",
+                type=opp.get("type"),
+                missing_tokens=missing_tokens,
+            )
+            return
+
         alerts: AlertManager = self._components.alerts
 
         # Risk checks on both legs using exchange-local cash for sizing.
