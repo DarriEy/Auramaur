@@ -70,7 +70,18 @@ class PositionReconciler:
         for item in held:
             market_id = await self._find_market_id(
                 item.condition_id, item.title, item.slug)
-            market_id = market_id or item.condition_id[:16]
+            if not market_id:
+                # Self-heal before stubbing: ingest the market from Gamma by
+                # CLOB token id. The silent condition-prefix stub fallback
+                # accumulated 154 stub market rows and left venue positions
+                # untracked (found 2026-07-21 via the venue-drift panel — a
+                # near-resolved $10 winner among them).
+                market_id = await self._ingest_market_from_gamma(item)
+            if not market_id:
+                market_id = item.condition_id[:16]
+                log.warning("reconciler.stub_market",
+                            condition_id=item.condition_id[:20],
+                            title=item.title[:60], asset_id=item.asset_id[:24])
             avg_cost = item.avg_price if 0 < item.avg_price <= 1 else item.cur_price
             current_price = item.cur_price if item.cur_price > 0 else avg_cost
             snapshot_rows.append((
@@ -282,6 +293,65 @@ class PositionReconciler:
             log.debug("reconciler.market_lookup_error",
                       condition_id=condition_id[:20], error=str(e))
         return None
+
+    async def _ingest_market_from_gamma(self, item) -> str | None:
+        """Fetch and ingest market metadata from Gamma by CLOB token id.
+
+        Returns the real Gamma market id, or None (caller then stubs, loudly).
+        Network runs OUTSIDE any transaction; the metadata upsert is one
+        short db-only transaction. INSERT OR REPLACE is idempotent and also
+        repairs a pre-existing truncated-id stub row for the same market on
+        conflict-free columns (the stub keeps its own id row until the
+        cleanup sweep removes it)."""
+        import json as _json
+
+        import aiohttp
+
+        url = ("https://gamma-api.polymarket.com/markets?clob_token_ids="
+               + item.asset_id)
+        try:
+            async with aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=15)) as sess:
+                async with sess.get(url) as resp:
+                    if resp.status != 200:
+                        return None
+                    data = await resp.json()
+        except Exception as exc:
+            log.debug("reconciler.gamma_ingest_error", error=str(exc)[:120])
+            return None
+        if not data:
+            return None
+        m = data[0]
+        mid = str(m.get("id") or "")
+        if not mid:
+            return None
+        try:
+            toks = _json.loads(m.get("clobTokenIds") or "[]")
+        except Exception:
+            toks = []
+        try:
+            prices = _json.loads(m.get("outcomePrices") or "[]")
+        except Exception:
+            prices = []
+        yes_p = float(prices[0]) if len(prices) > 0 else 0.0
+        no_p = float(prices[1]) if len(prices) > 1 else 0.0
+        async with self._db.transaction():
+            await self._db.execute(
+                """INSERT OR REPLACE INTO markets
+                   (id, exchange, condition_id, question, description, category,
+                    end_date, active, outcome_yes_price, outcome_no_price,
+                    volume, liquidity, clob_token_yes, clob_token_no, last_updated)
+                   VALUES (?, 'polymarket', ?, ?, '', '', ?, ?, ?, ?, 0, 0, ?, ?,
+                           datetime('now'))""",
+                (mid, m.get("conditionId") or item.condition_id,
+                 m.get("question") or item.title,
+                 m.get("endDate"), 1 if m.get("active") else 0, yes_p, no_p,
+                 toks[0] if len(toks) > 0 else "",
+                 toks[1] if len(toks) > 1 else ""),
+            )
+        log.info("reconciler.market_ingested", market_id=mid,
+                 question=(m.get("question") or "")[:60])
+        return mid
 
     async def _find_market_id(
         self, condition_id: str, question: str, slug: str,
