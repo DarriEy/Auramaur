@@ -144,9 +144,16 @@ class LineageObserver:
                 )
 
     async def _write_forecast(self, **p: Any) -> None:
+        # Tolerate producers that omit optional context: a missing key was a
+        # per-event KeyError that silently zeroed the forecast stream for a
+        # day (strategic-path emission, found 2026-07-21). The snapshot row
+        # is the evidence; config/evidence ids are provenance decoration.
         fingerprint = hashlib.sha256(json.dumps(
-            p.pop("config"), sort_keys=True, separators=(",", ":"),
+            p.pop("config", {}), sort_keys=True, separators=(",", ":"),
         ).encode()).hexdigest()[:16]
+        p.setdefault("evidence_run_ids", [])
+        p.setdefault("model", "")
+        p.setdefault("strategy_source", "")
         async with self.db.transaction():
             await self.db.execute(
                 """INSERT INTO forecast_snapshots

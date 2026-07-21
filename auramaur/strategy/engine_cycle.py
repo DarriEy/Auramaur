@@ -649,8 +649,10 @@ class CycleOrchestrationMixin:
                         market_yes_price=market.outcome_yes_price,
                         market_no_price=market.outcome_no_price,
                         observed_at=_dt.now(_tz.utc).isoformat(),
+                        evidence_run_ids=[],
                         model=getattr(getattr(self, "analyzer", None), "_model", ""),
                         strategy_source="strategic",
+                        config=self.settings.nlp.model_dump(mode="json"),
                     )
             market_prob = market.outcome_yes_price
 
