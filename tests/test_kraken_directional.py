@@ -1,14 +1,47 @@
 """Tests for the Kraken directional spot pillar — asymmetric long bias."""
 
 from auramaur.components import Components
+import asyncio
 import contextlib
 from unittest.mock import AsyncMock, MagicMock, patch
+import urllib.parse
 
 import pytest
 
 from auramaur.treasury.kraken_pillar import KrakenPillar
 from auramaur.exchange.kraken import KrakenSpotClient
 from auramaur.exchange.models import OrderResult, OrderSide
+
+
+@pytest.mark.asyncio
+async def test_private_requests_use_strictly_increasing_serialized_nonces():
+    settings = MagicMock()
+    settings.kraken_api_key = "key"
+    settings.kraken_api_secret = "c2VjcmV0"
+    observed = []
+
+    class Response:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return None
+        async def json(self):
+            return {"error": [], "result": {}}
+
+    class Session:
+        closed = False
+        def post(self, _url, *, data, headers):
+            del headers
+            observed.append(int(urllib.parse.parse_qs(data)["nonce"][0]))
+            return Response()
+
+    client = KrakenSpotClient(settings)
+    client._session = Session()
+    with patch("auramaur.exchange.kraken.time.time_ns", return_value=1_000_000):
+        await asyncio.gather(*(client._private("Balance") for _ in range(5)))
+
+    assert observed == sorted(observed)
+    assert len(set(observed)) == 5
 
 
 # ---------------------------------------------------------------------------

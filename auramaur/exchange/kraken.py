@@ -49,6 +49,8 @@ class KrakenSpotClient:
         self._settings = settings
         self._session: aiohttp.ClientSession | None = None
         self._sem = asyncio.Semaphore(_RATE_LIMIT)
+        self._private_lock = asyncio.Lock()
+        self._last_nonce = 0
         self._quote_rate_cache: dict[str, float] = {}  # quote asset -> USD rate
         self._pair_quote_cache: dict[str, str] = {}     # pair -> quote asset code
 
@@ -86,21 +88,28 @@ class KrakenSpotClient:
         if not key or not secret:
             return {"error": ["EAuramaur:No Kraken credentials"]}
         path = f"/0/private/{method}"
-        data = dict(data or {})
-        data["nonce"] = int(time.time() * 1000)
-        body = urllib.parse.urlencode(data)
-        async with self._sem:
-            session = await self._get_session()
-            async with session.post(
-                _API + path,
-                data=body,
-                headers={
-                    "API-Key": key,
-                    "API-Sign": self._sign(path, data),
-                    "Content-Type": "application/x-www-form-urlencoded",
-                },
-            ) as r:
-                return await r.json()
+        # Kraken requires strictly increasing nonces per API key. Serialize
+        # private requests as well as allocation so network scheduling cannot
+        # deliver a later nonce before an earlier one. Microseconds also move
+        # safely beyond this client's former millisecond nonce range.
+        async with self._private_lock:
+            data = dict(data or {})
+            nonce = max(time.time_ns() // 1_000, self._last_nonce + 1)
+            self._last_nonce = nonce
+            data["nonce"] = nonce
+            body = urllib.parse.urlencode(data)
+            async with self._sem:
+                session = await self._get_session()
+                async with session.post(
+                    _API + path,
+                    data=body,
+                    headers={
+                        "API-Key": key,
+                        "API-Sign": self._sign(path, data),
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                ) as r:
+                    return await r.json()
 
     # ------------------------------------------------------------------
     # Read-only

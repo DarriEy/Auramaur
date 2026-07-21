@@ -142,7 +142,8 @@ If no relationships found, return []. Only return the JSON array, no other text.
         P(X wins primary) = 60% but P(X wins general) = 70%.
         """
         rows = await self._db.fetchall(
-            """SELECT mr.*, m1.outcome_yes_price as price_a, m2.outcome_yes_price as price_b
+            """SELECT mr.*, m1.outcome_yes_price as price_a, m2.outcome_yes_price as price_b,
+                      m1.question as question_a, m2.question as question_b
                FROM market_relationships mr
                JOIN markets m1 ON mr.market_id_a = m1.id
                JOIN markets m2 ON mr.market_id_b = m2.id
@@ -167,9 +168,14 @@ If no relationships found, return []. Only return the JSON array, no other text.
                         "description": row["description"],
                     })
 
-            # Same event: prices should be close
+            # ``same_event`` means the markets concern the same underlying
+            # event, not that they express the same proposition. Distinct
+            # outcomes in a multi-outcome event can legitimately have very
+            # different prices, so only identical questions are fungible.
             if row["relationship_type"] == "same_event":
-                if abs(price_a - price_b) > 0.05:
+                question_a = " ".join((row["question_a"] or "").casefold().split())
+                question_b = " ".join((row["question_b"] or "").casefold().split())
+                if question_a and question_a == question_b and abs(price_a - price_b) > 0.05:
                     opportunities.append({
                         "type": "price_divergence",
                         "market_a": row["market_id_a"],

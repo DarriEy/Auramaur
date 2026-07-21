@@ -133,7 +133,9 @@ class ArbitrageExecutor:
 
         return Market(
             id=row["id"],
+            exchange=row["exchange"] or "polymarket",
             condition_id=row["condition_id"],
+            ticker=row["ticker"] or "",
             question=row["question"],
             description=row["description"] or "",
             category=row["category"] or "",
@@ -143,4 +145,6 @@ class ArbitrageExecutor:
             outcome_no_price=row["outcome_no_price"] or 0.5,
             volume=row["volume"] or 0,
             liquidity=row["liquidity"] or 0,
+            clob_token_yes=row["clob_token_yes"] or "",
+            clob_token_no=row["clob_token_no"] or "",
         )
