@@ -16,7 +16,8 @@ export interface HealthTop {
   event: string;
   count: number;
   level?: string;
-  message?: string;
+  last_msg?: string;
+  last_ts?: string;
 }
 
 export interface Health {
@@ -37,6 +38,8 @@ export interface Position {
   current_price: number;
   pnl: number;
   updated_at?: string;
+  category?: string;
+  end_date?: string | null;
   initial_value?: number;
   current_value?: number;
   to_win?: number;
@@ -67,11 +70,15 @@ export interface KrakenPaperPosition {
 export interface Signal {
   market_id: string;
   question: string;
+  timestamp?: string;
+  exchange?: string;
   claude_prob: number | null;
   market_prob: number | null;
   edge: number | null;
   action: string;
   strategy_source: string;
+  confidence?: string;
+  evidence_summary?: string;
 }
 
 /** Venue cash as recorded bot-side into the DB; age is how old the row is —
@@ -129,6 +136,10 @@ export interface DashboardState {
   intelligence_eval?: {
     arm: string; model: string; forecasts: number;
     brier: number | null; market_brier: number | null; abstains: number;
+  }[];
+  performance_history?: {
+    date: string; total_pnl: number; trades_count: number; wins: number;
+    losses: number; max_drawdown: number; peak_balance: number;
   }[];
 }
 

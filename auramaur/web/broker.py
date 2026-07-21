@@ -120,12 +120,14 @@ class StateBroker:
                 ibkr_books = await queries.ibkr_paper_books(self.db)
                 local_llm = await queries.local_llm_stats(self.db)
                 intel_eval = await queries.intelligence_eval_summary(self.db)
+                performance = await queries.performance_history(self.db)
                 for state in books.values():
                     state["venues"] = venues
                     state["reconciliation"] = reconciliation
                     state["ibkr_books"] = ibkr_books
                     state["local_llm"] = local_llm
                     state["intelligence_eval"] = intel_eval
+                    state["performance_history"] = performance
                 initial_empty = all(
                     state["position_count"] == 0 and state["trade_count"] == 0
                     for state in books.values())

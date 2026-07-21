@@ -109,6 +109,11 @@ async def test_state_endpoint_serves_seeded_paper_book(tmp_path):
         assert s["balance"] == pytest.approx(
             settings.execution.paper_initial_balance + 3.0)
         assert s["signals"][0]["edge"] == pytest.approx(22.0)
+        assert s["signals"][0]["timestamp"]
+        assert s["signals"][0]["exchange"] == "polymarket"
+        assert s["positions"][0]["category"] == "weather"
+        assert "end_date" in s["positions"][0]
+        assert s["performance_history"] == []
         # Pillars are present but silent (no log lines seeded).
         assert all(p["age_seconds"] is None for p in s["pillars"])
 
@@ -417,6 +422,29 @@ async def test_ibkr_paper_books_degrades_without_schema(tmp_path):
     await ro.connect()
     assert await queries.ibkr_paper_books(ro) == []
     await ro.close()
+
+
+@pytest.mark.asyncio
+async def test_performance_history_is_chronological_and_bounded(tmp_path):
+    from auramaur.db.database import Database
+    from auramaur.web.db import ReadOnlyDatabase
+    from auramaur.web import queries
+    src = tmp_path / "history.db"
+    db = Database(str(src))
+    await db.connect()
+    for day, pnl in (("2026-07-19", 1.0), ("2026-07-20", 3.0), ("2026-07-21", 2.0)):
+        await db.execute(
+            "INSERT INTO daily_stats (date,total_pnl,trades_count) VALUES (?,?,1)",
+            (day, pnl),
+        )
+    await db.commit()
+    await db.close()
+    ro = ReadOnlyDatabase(str(src))
+    await ro.connect()
+    rows = await queries.performance_history(ro, days=2)
+    await ro.close()
+    assert [row["date"] for row in rows] == ["2026-07-20", "2026-07-21"]
+    assert [row["total_pnl"] for row in rows] == [3.0, 2.0]
 
 
 @pytest.mark.asyncio

@@ -149,6 +149,19 @@ async def category_exposure(db: ReadOnlyDatabase, is_paper_flag: int) -> list[di
     ]
 
 
+async def performance_history(db: ReadOnlyDatabase, days: int = 14) -> list[dict]:
+    """Recent daily account marks for compact, honest trend context."""
+    try:
+        rows = await db.fetchall(
+            """SELECT date,total_pnl,trades_count,wins,losses,max_drawdown,peak_balance
+                 FROM daily_stats ORDER BY date DESC LIMIT ?""",
+            (days,),
+        )
+    except Exception:
+        return []
+    return [dict(r) for r in reversed(rows)]
+
+
 async def kraken_paper_positions(db: ReadOnlyDatabase) -> list[dict]:
     """The Kraken directional paper book — its own table, invisible to the
     portfolio query, so it must be surfaced explicitly (paper view only)."""

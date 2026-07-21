@@ -319,7 +319,7 @@ export function HealthPanel({ health }: { health: Health }) {
         {health.top.map((t) => (
           <div className="row" key={t.event}>
             <span className="count">{t.count}</span>
-            <span className="event" title={t.message}>{t.event}</span>
+            <span className="event" title={t.last_msg}>{t.event}</span>
           </div>
         ))}
       </div>
