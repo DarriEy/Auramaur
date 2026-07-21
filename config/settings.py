@@ -1085,6 +1085,13 @@ class GraduationConfig(BaseModel):
 
     mode: str = "observe"
     min_markets: int = 100
+    # Per-strategy overrides for min_markets: the global bar of 100 markets
+    # in window_days is only reachable by high-volume books (2026-07-20
+    # audit: weather_temp alone at 140; the next-best cells accrue 30-45),
+    # so every other book's paper evidence fed a gate it could never clear.
+    # Keyed by strategy_source; unlisted strategies use min_markets. The
+    # tracked default stays empty — fresh clones keep the strict bar.
+    min_markets_overrides: dict[str, int] = {}
     window_days: int = 90
     confidence_z: float = 1.645
     min_mean_pnl_lower_bound: float = 0.0

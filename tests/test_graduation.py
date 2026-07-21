@@ -300,3 +300,28 @@ async def test_ladder_cell_uses_classified_category_when_label_missing():
         assert d.force_paper is False
 
     await db.close()
+
+
+def test_min_markets_overrides_per_strategy():
+    """A strategy listed in min_markets_overrides is evaluated at its own
+    bar; unlisted strategies keep the global min_markets. (2026-07-21: the
+    global 100-market bar was reachable only by high-volume books, so every
+    other book fed a gate it could never clear.)"""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        settings = _settings(min_markets=100,
+                             min_markets_overrides={"slow_book": 5})
+        ladder = GraduationLadder(db, settings)
+
+        # 6 profitable paper markets: above slow_book's 5-market bar.
+        await _seed(db, "slow_book", "other", n=6, pnl_each=1.0, is_paper=1)
+        d = await ladder.decide("slow_book", "other")
+        assert d.force_paper is False and d.status == "probation"
+
+        # Identical evidence under an unlisted strategy: global bar holds.
+        await _seed(db, "unlisted_book", "other", n=6, pnl_each=1.0, is_paper=1)
+        d = await ladder.decide("unlisted_book", "other")
+        assert d.force_paper is True and d.status == "unproven"
+        await db.close()
+    asyncio.run(run())

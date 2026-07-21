@@ -136,15 +136,21 @@ class GraduationLadder:
     async def _compute(self, strategy: str, category: str) -> CellDecision:
         cfg = self._settings.graduation
         s = await self._cell_stats(strategy, category)
+        # Per-strategy evidence bar (falls back to the global min_markets):
+        # slow-accruing books earn evaluation at a reachable n instead of
+        # feeding a gate only high-volume books can clear. The statistical
+        # contract is unchanged — the one-sided LCB still must clear zero,
+        # it just gets computed once n is plausible for the book's cadence.
+        min_markets = cfg.min_markets_overrides.get(strategy, cfg.min_markets)
 
-        if s["live_n"] >= cfg.min_markets:
+        if s["live_n"] >= min_markets:
             if s["live_lcb"] > cfg.min_mean_pnl_lower_bound:
                 return _LIVE_FULL
             return CellDecision(
                 True, 1.0, "demoted",
                 f"live evidence insufficient (mean-P&L LCB ${s['live_lcb']:+.3f}; "
                 f"${s['live_pnl']:+.2f} over {s['live_n']} independent markets)")
-        if s["paper_n"] >= cfg.min_markets:
+        if s["paper_n"] >= min_markets:
             if s["paper_lcb"] > cfg.min_mean_pnl_lower_bound:
                 return CellDecision(
                     False, cfg.probation_multiplier, "probation",
