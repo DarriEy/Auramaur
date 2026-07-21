@@ -36,6 +36,10 @@ export interface Position {
   avg_price: number;
   current_price: number;
   pnl: number;
+  updated_at?: string;
+  initial_value?: number;
+  current_value?: number;
+  to_win?: number;
 }
 
 export interface StrategyStat {
@@ -75,6 +79,9 @@ export interface Signal {
 export interface VenueBalance {
   detail: string;
   age_seconds: number | null;
+  available?: number | null;
+  equity?: number | null;
+  fetched_at?: string;
 }
 
 export interface DashboardState {
@@ -84,6 +91,18 @@ export interface DashboardState {
   kill_switch: boolean;
   venues: Record<string, VenueBalance>;
   ibkr_books: { book: string; positions: number; unrealized: number; equity: number | null }[];
+  reconciliation?: {
+    available: boolean;
+    in_sync: boolean;
+    venue_count: number;
+    db_count: number;
+    venue_value?: number;
+    db_value?: number;
+    fetched_at: string | null;
+    missing: unknown[];
+    extra: unknown[];
+    size_mismatches: unknown[];
+  };
   pillars: Pillar[];
   activity: ActivityItem[];
   health: Health;

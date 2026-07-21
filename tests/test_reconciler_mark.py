@@ -59,7 +59,7 @@ async def _run(token_price):
     }
     recon = PositionReconciler(_exchange([_trade()], market_info), db=None)
     recon._find_market_id = AsyncMock(return_value="mkt1")
-    return await recon.reconcile()
+    return await recon.reconcile_from_trades()
 
 
 @pytest.mark.asyncio

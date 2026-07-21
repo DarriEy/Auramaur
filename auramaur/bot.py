@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
+from datetime import datetime, timezone
 from auramaur.killswitch import kill_switch_present
 from typing import TYPE_CHECKING
 
@@ -1215,7 +1216,7 @@ class AuramaurBot(
             await asyncio.sleep(interval)
 
     async def _task_position_sync(self) -> None:
-        """Periodically sync positions from CLOB trade history (ground truth)."""
+        """Periodically sync net current positions from Polymarket."""
         from auramaur.broker.reconciler import PositionReconciler
         from auramaur.broker.sync import PositionSyncer
 
@@ -1226,7 +1227,7 @@ class AuramaurBot(
         while self._running:
             try:
                 if self.settings.is_live:
-                    # Use reconciler for ground truth from CLOB trades
+                    # The Data API's net current positions are venue truth.
                     reconciled = await reconciler.reconcile()
                     positions = reconciler.to_live_positions(reconciled)
 
@@ -1234,17 +1235,14 @@ class AuramaurBot(
                     # then delete stale rows — one short, serialized
                     # transaction (contention plan, Phase 2): the network work
                     # (reconcile()) is already done, so this block is db-only.
-                    # Only runs when the reconciler returned a non-empty result
-                    # — an empty reconcile means the CLOB API call failed, not
-                    # that we actually hold zero positions, so we must not wipe
+                    # A successful empty response is authoritative; a failed
+                    # fetch leaves last_fetch_ok false and never wipes
                     # the tables. Both tables matter: cost_basis feeds sync(),
                     # and portfolio feeds the risk-manager correlation/exposure
                     # checks.
-                    if reconciled:
-                        # Skip already-settled legs: their P&L is booked, but
-                        # unredeemed tokens still show in CLOB trade history,
-                        # so this upsert resurrected them into cost_basis as
-                        # open size every pass (148 rows / $918 phantom,
+                    if reconciler.last_fetch_ok:
+                        # Skip already-settled legs if the venue still exposes
+                        # them before redemption (148 rows / $918 phantom,
                         # 2026-07-20 audit). Excluding them from live_ids also
                         # lets the stale-delete below sweep the residue out.
                         try:
@@ -1256,6 +1254,7 @@ class AuramaurBot(
                             if (rp.market_id, TokenType.from_str(rp.outcome).value)
                             not in settled
                         ]
+                        positions = reconciler.to_live_positions(unsettled)
                         if len(unsettled) < len(reconciled):
                             log.debug("reconciler.settled_skipped",
                                       count=len(reconciled) - len(unsettled))
@@ -1283,12 +1282,14 @@ class AuramaurBot(
                                      rp.avg_cost, rp.size * rp.avg_cost),
                                 )
 
-                            live_ids = [rp.market_id for rp in unsettled]
-                            placeholders = ",".join("?" * len(live_ids))
+                            live_tokens = [rp.token_id for rp in unsettled]
+                            placeholders = ",".join("?" * len(live_tokens))
+                            exclusion = (f"AND token_id NOT IN ({placeholders})"
+                                         if live_tokens else "")
                             # Live-mode reconciliation must only delete live rows;
                             # paper rows (is_paper=1) live in their own namespace.
-                            # ONLY Polymarket rows: this reconciler's universe
-                            # is CLOB trade history, so without the exchange scope
+                            # Scope deletion to Polymarket: without it this task
+                            # previously deleted live Kalshi cost-basis rows.
                             # it deleted every live KALSHI cost_basis row each
                             # ~75s pass — Kalshi sells then found size=0 and
                             # booked $0.00 realized P&L into the ledger that
@@ -1296,13 +1297,13 @@ class AuramaurBot(
                             # the portfolio delete below always had the filter).
                             cb_cur = await self._components.db.execute(
                                 f"""DELETE FROM cost_basis WHERE size > 0 AND is_paper = 0
-                                    AND market_id NOT IN ({placeholders})
+                                    {exclusion}
                                     AND market_id IN (SELECT id FROM markets WHERE exchange = 'polymarket')""",
-                                live_ids,
+                                live_tokens,
                             )
                             pf_cur = await self._components.db.execute(
-                                f"DELETE FROM portfolio WHERE exchange = 'polymarket' AND is_paper = 0 AND market_id NOT IN ({placeholders})",
-                                live_ids,
+                                f"DELETE FROM portfolio WHERE exchange = 'polymarket' AND is_paper = 0 {exclusion}",
+                                live_tokens,
                             )
                         log.info(
                             "reconciler.stale_removed",
@@ -1315,6 +1316,18 @@ class AuramaurBot(
                 cash = await syncer.get_cash_balance()
                 total_value = sum(p.size * p.current_price for p in positions)
                 unrealized = sum(p.unrealized_pnl for p in positions)
+                if self.settings.is_live:
+                    now = datetime.now(timezone.utc).isoformat()
+                    equity = cash + total_value
+                    async with self._components.db.transaction():
+                        await self._components.db.execute(
+                            """INSERT INTO venue_balances
+                               (venue,detail,available,equity,fetched_at)
+                               VALUES ('polymarket',?,?,?,?)
+                               ON CONFLICT(venue) DO UPDATE SET detail=excluded.detail,
+                               available=excluded.available,equity=excluded.equity,
+                               fetched_at=excluded.fetched_at""",
+                            (f"${cash:.2f} available | ${equity:.2f} equity", cash, equity, now))
 
                 log.info(
                     "sync.portfolio",

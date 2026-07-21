@@ -23,6 +23,102 @@ POLYMARKET_DATA_API = "https://data-api.polymarket.com/positions"
 
 
 @dataclass
+class VenuePosition:
+    """One current holding returned by Polymarket's position API."""
+
+    condition_id: str
+    asset_id: str
+    title: str
+    outcome: str
+    size: float
+    avg_price: float
+    cur_price: float
+    initial_value: float
+    current_value: float
+    cash_pnl: float
+    redeemable: bool
+    end_date: str
+    slug: str
+    neg_risk: bool = False
+    mergeable: bool = False
+
+
+async def fetch_current_positions(
+    proxy_address: str,
+    session: aiohttp.ClientSession | None = None,
+    *,
+    size_threshold: float = 0.01,
+) -> list[VenuePosition]:
+    """Return the venue-native current holdings for an account.
+
+    Unlike the CLOB trade-history reconstruction, this endpoint is already
+    netted and includes manual/external trades. A successful empty response is
+    authoritative; request failures raise and therefore never erase the last
+    good database snapshot.
+    """
+    if not proxy_address:
+        raise ValueError("proxy_address is required")
+    page_size = 500
+    max_offset = 10_000
+    close_session = session is None
+    if session is None:
+        session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
+    items: list[dict] = []
+    offset = 0
+    try:
+        while True:
+            params = {
+                "user": proxy_address, "sizeThreshold": str(size_threshold),
+                "limit": str(page_size), "offset": str(offset),
+                "sortBy": "TOKENS", "sortDirection": "DESC",
+            }
+            async with session.get(
+                POLYMARKET_DATA_API, params=params, timeout=15,
+            ) as resp:
+                resp.raise_for_status()
+                page = await resp.json()
+            if not isinstance(page, list) or any(not isinstance(row, dict) for row in page):
+                raise ValueError("Polymarket positions response must be a list of objects")
+            items.extend(page)
+            if len(page) < page_size:
+                break
+            offset += page_size
+            if offset > max_offset:
+                raise RuntimeError("Polymarket positions exceeded supported pagination range")
+    finally:
+        if close_session:
+            await session.close()
+
+    positions: list[VenuePosition] = []
+    seen_assets: set[str] = set()
+    for item in items:
+        asset_id = str(item.get("asset", ""))
+        condition_id = str(item.get("conditionId", ""))
+        if not asset_id or not condition_id:
+            raise ValueError("Polymarket position is missing asset or conditionId")
+        if asset_id in seen_assets:
+            raise ValueError(f"Polymarket returned duplicate asset {asset_id}")
+        seen_assets.add(asset_id)
+        size = float(item.get("size", 0) or 0)
+        if size <= size_threshold:
+            continue
+        positions.append(VenuePosition(
+            condition_id=condition_id, asset_id=asset_id,
+            title=str(item.get("title", "")), outcome=str(item.get("outcome", "")),
+            size=size, avg_price=float(item.get("avgPrice", 0) or 0),
+            cur_price=float(item.get("curPrice", 0) or 0),
+            initial_value=float(item.get("initialValue", 0) or 0),
+            current_value=float(item.get("currentValue", 0) or 0),
+            cash_pnl=float(item.get("cashPnl", 0) or 0),
+            redeemable=bool(item.get("redeemable")),
+            neg_risk=bool(item.get("negativeRisk") or item.get("negRisk")),
+            mergeable=bool(item.get("mergeable")),
+            end_date=str(item.get("endDate", "")), slug=str(item.get("slug", "")),
+        ))
+    return positions
+
+
+@dataclass
 class RedeemablePosition:
     """A Polymarket position's redemption / resolution state."""
 
@@ -70,30 +166,15 @@ async def fetch_redeemable_positions(
     effectively resolved (price at 0 or 1) but are still inside the oracle
     confirmation window — so the user can see what's coming soon.
     """
-    if not proxy_address:
-        raise ValueError("proxy_address is required")
-
-    close_session = session is None
-    if session is None:
-        session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
-
-    try:
-        params = {"user": proxy_address, "sizeThreshold": "0.01"}
-        async with session.get(POLYMARKET_DATA_API, params=params, timeout=15) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-    finally:
-        if close_session:
-            await session.close()
-
+    data = await fetch_current_positions(proxy_address, session, size_threshold=0.01)
     results: list[RedeemablePosition] = []
     for item in data:
-        size = float(item.get("size", 0) or 0)
+        size = item.size
         if size <= 0:
             continue
 
-        redeemable_now = bool(item.get("redeemable"))
-        cur_price = float(item.get("curPrice", 0.5) or 0.5)
+        redeemable_now = item.redeemable
+        cur_price = item.cur_price
 
         # "Effectively resolved" = curPrice converged to 0 or 1.  Polymarket's
         # data-api returns curPrice in the range 0..1 relative to the *user's
@@ -111,21 +192,21 @@ async def fetch_redeemable_positions(
         payout = size if is_winner else 0.0
 
         results.append(RedeemablePosition(
-            condition_id=str(item.get("conditionId", "")),
-            asset_id=str(item.get("asset", "")),
-            title=str(item.get("title", "")),
-            outcome=str(item.get("outcome", "")),
+            condition_id=item.condition_id,
+            asset_id=item.asset_id,
+            title=item.title,
+            outcome=item.outcome,
             size=size,
-            avg_price=float(item.get("avgPrice", 0) or 0),
+            avg_price=item.avg_price,
             cur_price=cur_price,
             payout=payout,
             is_winner=is_winner,
             redeemable_now=redeemable_now,
             status=status,
-            neg_risk=bool(item.get("negativeRisk") or item.get("negRisk") or False),
-            mergeable=bool(item.get("mergeable") or False),
-            end_date=str(item.get("endDate", "")),
-            slug=str(item.get("slug", "")),
+            neg_risk=item.neg_risk,
+            mergeable=item.mergeable,
+            end_date=item.end_date,
+            slug=item.slug,
         ))
 
     log.info(

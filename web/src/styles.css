@@ -250,6 +250,17 @@ td.down { color: var(--delta-down); }
 td.dim, .dim { color: var(--ink-muted); }
 
 .empty { color: var(--ink-muted); font-size: 13px; padding: 6px 0; }
+.position-search {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0 0 10px;
+  padding: 7px 9px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+}
 .tbl-note { color: var(--ink-muted); font-size: 12px; padding: 8px 8px 2px; }
 
 /* ---- pillar liveness ---- */

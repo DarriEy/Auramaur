@@ -41,6 +41,9 @@ class StateBroker:
         # the bot's recorder maintains.
         self._cache: dict = {"bal_ts": time.time(), "venues": {}}
         self._first_tick = asyncio.Event()
+        # Avoid publishing the schema-only instant while a newly appearing DB
+        # is still receiving its first transaction.
+        self._initial_empty_since: float | None = None
         self._tasks: list[asyncio.Task] = []
 
     # -- lifecycle ---------------------------------------------------------
@@ -113,17 +116,33 @@ class StateBroker:
                 # Venue cash is book-independent: recorded by the bot,
                 # served on both views with its age.
                 venues = await queries.venue_balances(self.db)
+                reconciliation = await queries.venue_reconciliation(self.db)
                 ibkr_books = await queries.ibkr_paper_books(self.db)
                 local_llm = await queries.local_llm_stats(self.db)
                 intel_eval = await queries.intelligence_eval_summary(self.db)
                 for state in books.values():
                     state["venues"] = venues
+                    state["reconciliation"] = reconciliation
                     state["ibkr_books"] = ibkr_books
                     state["local_llm"] = local_llm
                     state["intelligence_eval"] = intel_eval
-                self.latest = books
-                self.error = None
-                self.updated_at = datetime.now(timezone.utc).isoformat()
+                initial_empty = all(
+                    state["position_count"] == 0 and state["trade_count"] == 0
+                    for state in books.values())
+                if self.latest is None and initial_empty:
+                    now_mono = time.monotonic()
+                    if self._initial_empty_since is None:
+                        self._initial_empty_since = now_mono
+                    initializing = now_mono - self._initial_empty_since < 1.0
+                else:
+                    initializing = False
+                if initializing:
+                    self.error = (
+                        "database schema is ready; waiting for first committed state")
+                else:
+                    self.latest = books
+                    self.error = None
+                    self.updated_at = datetime.now(timezone.utc).isoformat()
             except Exception as exc:
                 self.error = self._describe(exc)
             finally:

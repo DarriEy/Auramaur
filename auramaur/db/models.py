@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 37
+SCHEMA_VERSION = 38
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -831,8 +831,24 @@ CREATE INDEX IF NOT EXISTS idx_redemptions_status ON redemptions(status);
 CREATE TABLE IF NOT EXISTS venue_balances (
     venue TEXT PRIMARY KEY,
     detail TEXT NOT NULL,
+    available REAL,
+    equity REAL,
     fetched_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS venue_positions (
+    venue TEXT NOT NULL, asset_id TEXT NOT NULL,
+    condition_id TEXT NOT NULL DEFAULT '', market_id TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '', outcome TEXT NOT NULL DEFAULT '',
+    size REAL NOT NULL, avg_price REAL NOT NULL DEFAULT 0,
+    current_price REAL NOT NULL DEFAULT 0,
+    initial_value REAL NOT NULL DEFAULT 0,
+    current_value REAL NOT NULL DEFAULT 0,
+    cash_pnl REAL NOT NULL DEFAULT 0, redeemable INTEGER NOT NULL DEFAULT 0,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (venue, asset_id)
+);
+CREATE INDEX IF NOT EXISTS idx_venue_positions_market
+    ON venue_positions(venue, market_id);
 -- v35: local Ollama LLM tier (evidence-side only, never trades).
 -- Distilled claims are keyed by the SHA-256 of title, a newline, and content,
 -- the same formula the aggregator stamps into evidence_observations, so claims
