@@ -233,6 +233,8 @@ class Database:
             await self._migrate_v33_to_v34()
         if from_version < 35:
             await self._migrate_v34_to_v35()
+        if from_version < 36:
+            await self._migrate_v35_to_v36()
 
     async def _migrate_v29_to_v30(self) -> None:
         """Add cost-adjusted IBKR round-trip observations."""
@@ -357,6 +359,12 @@ class Database:
         await self._db.execute("UPDATE schema_version SET version = 35")
         await self._db.commit()
         log.info("database.migrated", from_version=34, to_version=35)
+
+    async def _migrate_v35_to_v36(self) -> None:
+        """Prospective intelligence-evaluation tables (additive only)."""
+        await self._db.execute("UPDATE schema_version SET version = 36")
+        await self._db.commit()
+        log.info("database.migrated", from_version=35, to_version=36)
 
     async def _migrate_v28_to_v29(self) -> None:
         """Add immutable strategy-research and CLV accounting tables."""

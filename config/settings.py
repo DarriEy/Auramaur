@@ -1609,6 +1609,44 @@ class LocalLLMConfig(BaseModel):
     ensemble_arm: LocalEnsembleArmConfig = Field(default_factory=LocalEnsembleArmConfig)
 
 
+class IntelligenceEvalTreatment(BaseModel):
+    """One paired local inference-time exploration treatment."""
+
+    name: str
+    policy: Literal["single", "samples", "samples_critic"] = "single"
+    samples: int = Field(default=1, ge=1, le=32)
+    base_seed: int = 0
+
+    @model_validator(mode="after")
+    def single_has_one_sample(self):
+        if self.policy == "single" and self.samples != 1:
+            raise ValueError("single intelligence-eval treatment requires samples=1")
+        return self
+
+
+class IntelligenceEvalConfig(BaseModel):
+    """Shadow-only prospective model/exploration evaluation."""
+
+    enabled: bool = False
+    interval_seconds: int = Field(default=3600, ge=300)
+    scan_limit: int = Field(default=100, ge=1, le=1000)
+    markets_per_cycle: int = Field(default=8, ge=1, le=100)
+    min_liquidity: float = Field(default=1000.0, ge=0)
+    max_concurrency: int = Field(default=1, ge=1, le=16)
+    prompt_version: str = "forecast-v1"
+    output_schema_version: str = "binary-v1"
+    treatments: list[IntelligenceEvalTreatment] = Field(default_factory=lambda: [
+        IntelligenceEvalTreatment(name="local_single"),
+    ])
+
+    @model_validator(mode="after")
+    def unique_treatments(self):
+        names = [item.name for item in self.treatments]
+        if len(names) != len(set(names)):
+            raise ValueError("intelligence-eval treatment names must be unique")
+        return self
+
+
 class ArbitrageConfig(BaseModel):
     enabled: bool = True
     min_profit_after_fees_pct: float = 1.5
@@ -1748,6 +1786,9 @@ class Settings(BaseSettings):
     llm_ensemble: LLMEnsembleConfig = Field(default_factory=lambda: LLMEnsembleConfig(**_DEFAULTS.get("llm_ensemble", {})))
     gemini: GeminiConfig = Field(default_factory=lambda: GeminiConfig(**_DEFAULTS.get("gemini", {})))
     local_llm: LocalLLMConfig = Field(default_factory=lambda: LocalLLMConfig(**_DEFAULTS.get("local_llm", {})))
+    intelligence_eval: IntelligenceEvalConfig = Field(
+        default_factory=lambda: IntelligenceEvalConfig(
+            **_DEFAULTS.get("intelligence_eval", {})))
     momentum_coupling: MomentumCouplingConfig = Field(default_factory=lambda: MomentumCouplingConfig(**_DEFAULTS.get("momentum_coupling", {})))
     market_maker: MarketMakerConfig = Field(default_factory=lambda: MarketMakerConfig(**_DEFAULTS.get("market_maker", {})))
     technical: TechnicalConfig = Field(default_factory=lambda: TechnicalConfig(**_DEFAULTS.get("technical", {})))

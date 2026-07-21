@@ -111,6 +111,25 @@ class StrategyTaskMixin:
                 log.error("agent_trader.cycle_error", error=str(e))
             await asyncio.sleep(interval)
 
+    async def _task_intelligence_eval(self) -> None:
+        """Prospective local-model evaluation; shadow-only and order-free."""
+        from auramaur.evaluation.service import IntelligenceEvalService
+        from auramaur.nlp import local_llm
+
+        service = IntelligenceEvalService(
+            self._components.db, self.settings, self._components.discovery,
+            local_llm.get_client(self.settings, self._components.db),
+        )
+        interval = self.settings.intelligence_eval.interval_seconds
+        while self._running:
+            if await self._check_kill_switch():
+                return
+            try:
+                await service.run_once()
+            except Exception as exc:  # noqa: BLE001 — shadow task fails isolated
+                log.error("intelligence_eval.cycle_error", error=str(exc))
+            await asyncio.sleep(interval)
+
     async def _task_term_structure(self) -> None:
         """Periodic deadline-ladder curve reader (paper-forced; one LLM read
         prices a whole family of strikes)."""

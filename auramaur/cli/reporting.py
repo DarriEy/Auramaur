@@ -14,6 +14,37 @@ from config.settings import Settings
 
 from auramaur.cli._base import console, main
 
+
+@main.command("intelligence-eval")
+def intelligence_eval_report():
+    """Show the resolved, market-relative shadow evaluation scorecard."""
+    async def _run():
+        from auramaur.evaluation.store import EvaluationStore
+        from auramaur.web.db import ReadOnlyDatabase
+
+        # Pure report: mode=ro + query_only makes writes impossible at SQLite,
+        # and avoids Database.connect()'s write PRAGMAs/DDL on the live file.
+        db = ReadOnlyDatabase()
+        await db.connect()
+        try:
+            rows = await EvaluationStore(db).summary()
+            table = Table(title="Intelligence × Exploration Evaluation")
+            table.add_column("Arm")
+            table.add_column("Model")
+            table.add_column("N", justify="right")
+            table.add_column("Brier", justify="right")
+            table.add_column("Market", justify="right")
+            table.add_column("Δ vs market", justify="right")
+            for row in rows:
+                brier, market = float(row["brier"]), float(row["market_brier"])
+                table.add_row(row["arm_name"], row["model"], str(row["forecasts"]),
+                              f"{brier:.4f}", f"{market:.4f}",
+                              f"{market - brier:+.4f}")
+            console.print(table)
+        finally:
+            await db.close()
+    asyncio.run(_run())
+
 @main.command()
 @click.argument("query")
 @click.option("--limit", default=20, help="Number of markets to show")

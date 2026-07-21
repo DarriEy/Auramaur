@@ -130,11 +130,12 @@ async def test_schema_passed_as_format():
     client = LocalLLMClient(_settings(), None)
     client._request = AsyncMock(return_value=_ok_response({"x": 1}))
     schema = {"type": "object", "properties": {"x": {"type": "number"}}}
-    await client.generate_json("prompt", schema=schema)
+    await client.generate_json("prompt", schema=schema, seed=12345)
     payload = client._request.await_args.args[0]
     assert payload["format"] == schema
     assert payload["think"] is False
     assert payload["stream"] is False
+    assert payload["options"]["seed"] == 12345
 
 
 def test_get_client_is_singleton():

@@ -1627,6 +1627,11 @@ class AuramaurBot(
         if self.settings.agent_trader.enabled:
             tasks.append(asyncio.create_task(self._task_agent_trader(), name="agent_trader"))
 
+        if (self.settings.intelligence_eval.enabled
+                and self.settings.local_llm.enabled):
+            tasks.append(asyncio.create_task(
+                self._task_intelligence_eval(), name="intelligence_eval"))
+
         # Deadline-ladder curve reader (paper-forced; amortized reading edge)
         if self.settings.term_structure.enabled:
             tasks.append(asyncio.create_task(self._task_term_structure(), name="term_structure"))
