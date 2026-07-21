@@ -279,3 +279,51 @@ class TestStrategicParseAndThrottle:
         # Immediate second run is within the interval → served from cache, no call.
         run(a.analyze_batch_with_adversarial([market], evidence), event_loop)
         assert calls["n"] == 1
+
+    def test_batch_throttle_defers_novel_before_floor(self, db, event_loop):
+        """Inside the novel floor, even uncached markets wait (cost guard)."""
+        s = Settings()
+        s.nlp.strategic_min_interval_seconds = 3600
+        s.nlp.strategic_novel_floor_seconds = 600
+        s.nlp.skip_second_opinion = True
+        a = StrategicAnalyzer(settings=s, db=db)
+        calls = {"n": 0}
+
+        async def fake_llm(*args, **kwargs):
+            calls["n"] += 1
+            return '[{"market_id": "m1", "probability": 0.3, "confidence": "MEDIUM"}]'
+
+        a._call_llm = fake_llm  # type: ignore[assignment]
+        run(a.analyze_batch_with_adversarial([_market("m1", 0.40)], {}), event_loop)
+        assert calls["n"] == 1
+
+        # Novel market immediately after: within floor -> deferred, no call.
+        out = run(a.analyze_batch_with_adversarial([_market("m2", 0.50)], {}), event_loop)
+        assert calls["n"] == 1
+        assert out.markets == []
+
+    def test_novel_batch_overrides_after_floor(self, db, event_loop):
+        """Past the floor (but inside the interval), NOVEL markets analyze —
+        the interval throttles re-analysis, not first analysis. The old
+        behavior dropped every uncached candidate for the full interval
+        (18 of 27 batch attempts produced nothing on 2026-07-21)."""
+        from datetime import datetime, timedelta, timezone
+
+        s = Settings()
+        s.nlp.strategic_min_interval_seconds = 3600
+        s.nlp.strategic_novel_floor_seconds = 600
+        s.nlp.skip_second_opinion = True
+        a = StrategicAnalyzer(settings=s, db=db)
+        calls = {"n": 0}
+
+        async def fake_llm(*args, **kwargs):
+            calls["n"] += 1
+            return '[{"market_id": "m2", "probability": 0.6, "confidence": "MEDIUM"}]'
+
+        a._call_llm = fake_llm  # type: ignore[assignment]
+        a._last_batch_at = datetime.now(timezone.utc) - timedelta(seconds=700)
+
+        out = run(a.analyze_batch_with_adversarial([_market("m2", 0.50)], {}), event_loop)
+        assert calls["n"] == 1  # novel override ran the batch
+        assert [m.market_id for m in out.markets] == ["m2"]
+

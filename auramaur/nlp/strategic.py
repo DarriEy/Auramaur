@@ -692,8 +692,26 @@ class StrategicAnalyzer:
         if interval and markets and self._last_batch_at is not None:
             elapsed = (datetime.now(timezone.utc) - self._last_batch_at).total_seconds()
             if elapsed < interval:
-                cached, _, _ = await self._partition_cached(markets, evidence_map)
-                return StrategicAnalysis(markets=cached)
+                cached, to_analyze, _ = await self._partition_cached(markets, evidence_map)
+                # Throttle RE-analysis, never novel analysis: serving only
+                # cached results dropped every uncached candidate on the
+                # floor in ~13ms — 18 of 27 batch attempts on 2026-07-21
+                # produced nothing, silently (upstream logged the ambiguous
+                # no_market_results). A batch with genuinely novel markets
+                # may run once the shorter novel-floor has passed; the full
+                # interval still governs re-batching of already-cached sets,
+                # and analyze_batch reuses cache internally either way.
+                floor = getattr(self._settings.nlp,
+                                "strategic_novel_floor_seconds", 600)
+                if not to_analyze or elapsed < floor:
+                    log.info("strategic.batch_throttled",
+                             served_cached=len(cached),
+                             deferred_novel=len(to_analyze),
+                             reopen_in_s=round(interval - elapsed))
+                    return StrategicAnalysis(markets=cached)
+                log.info("strategic.novel_batch_override",
+                         novel=len(to_analyze), cached=len(cached),
+                         elapsed_s=round(elapsed))
         if markets:
             self._last_batch_at = datetime.now(timezone.utc)
 

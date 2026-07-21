@@ -305,6 +305,11 @@ class NLPConfig(BaseModel):
     # so per-cycle batching mostly burned budget; cap the cadence and serve
     # cached results in between. 0 disables the throttle.
     strategic_min_interval_seconds: int = 1800
+    # Inside the interval, a batch containing NOVEL (uncached) markets may
+    # still run once this floor has passed — the interval throttles
+    # re-analysis of known sets, not first analysis of new candidates
+    # (which the old behavior silently dropped; 2026-07-21).
+    strategic_novel_floor_seconds: int = 600
     # Lever 3: tool-use refinement is the single heaviest call (multi-turn web).
     # Tightened from 5.0/4 — only strong edges earn a web-research pass, and at
     # most 2 per cycle — which is where most of the realized token burn lived.
