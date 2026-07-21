@@ -428,3 +428,63 @@ export function ActivityPanel({ s }: { s: DashboardState }) {
     </section>
   );
 }
+
+export function IntelligencePanel({ s }: { s: DashboardState }) {
+  // Local Ollama tier + shadow evaluation scorecard. Both sources are
+  // evidence-side (no order paths); the panel omits itself entirely until
+  // the tier has produced any rows, so pre-v35 deployments render nothing.
+  const llm = s.local_llm;
+  const evalRows = s.intelligence_eval ?? [];
+  const purposes = llm ? Object.entries(llm.purposes) : [];
+  if (!llm && evalRows.length === 0) return null;
+  if (llm && purposes.length === 0 && llm.claims_24h === 0 && evalRows.length === 0) return null;
+  return (
+    <section className="panel">
+      <h2>Intelligence tier</h2>
+      <div className="kv">
+        {llm && (
+          <div className="row">
+            <span className="k">distiller</span>
+            <span className="v">
+              {llm.claims_24h} claims 24h
+              {llm.last_claim_at ? ` \u00b7 last ${llm.last_claim_at.slice(11, 16)}Z` : ""}
+            </span>
+          </div>
+        )}
+        {purposes.map(([p, st]) => (
+          <div className="row" key={p}>
+            <span className="k">{p}</span>
+            <span className="v">
+              {st.calls} calls
+              {st.errors ? ` \u00b7 ${st.errors} err` : ""}
+              {st.avg_ms != null ? ` \u00b7 ${st.avg_ms}ms` : ""}
+            </span>
+          </div>
+        ))}
+        {evalRows.map((r) => {
+          const delta =
+            r.brier != null && r.market_brier != null
+              ? r.market_brier - r.brier
+              : null;
+          return (
+            <div className="row" key={`${r.arm}-${r.model}`}>
+              <span className="k">eval:{r.arm}</span>
+              <span className="v">
+                n={r.forecasts} \u00b7 Brier {r.brier?.toFixed(3) ?? "\u2014"} vs mkt{" "}
+                {r.market_brier?.toFixed(3) ?? "\u2014"}
+                {delta != null ? ` (${delta >= 0 ? "+" : ""}${delta.toFixed(3)})` : ""}
+              </span>
+            </div>
+          );
+        })}
+        {evalRows.length === 0 && (
+          <div className="row">
+            <span className="k">eval</span>
+            <span className="v">no resolved episodes yet</span>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+

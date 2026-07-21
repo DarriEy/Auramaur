@@ -4,6 +4,7 @@ import {
   CategoriesPanel,
   ConnectionBanner,
   HealthPanel,
+  IntelligencePanel,
   KillSwitchBanner,
   KrakenPaperPanel,
   PillarsPanel,
@@ -85,6 +86,7 @@ export default function App() {
           <PillarsPanel pillars={state.pillars} />
           <CategoriesPanel categories={state.categories} />
           <HealthPanel health={state.health} />
+          <IntelligencePanel s={state} />
         </div>
         <div className="col">
           <PositionsPanel positions={state.positions} />

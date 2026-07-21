@@ -157,3 +157,40 @@ async def local_llm_stats(db: ReadOnlyDatabase) -> dict:
         "claims_24h": claims["n"] if claims else 0,
         "last_claim_at": claims["latest"] if claims else None,
     }
+
+
+async def intelligence_eval_summary(db: ReadOnlyDatabase) -> list[dict]:
+    """Per-arm resolved scorecard from the unified evidence view (schema
+    v37). Mirrors EvaluationStore.summary() but through the read-only web
+    connection; degrades to [] when the view does not exist yet so the
+    panel omits itself rather than erroring."""
+    try:
+        rows = await db.fetchall(
+            """WITH ranked AS (
+                 SELECT u.*, ROW_NUMBER() OVER (
+                   PARTITION BY u.arm,u.event_family
+                   ORDER BY u.observed_at ASC,u.forecast_key ASC) AS rn
+                 FROM unified_forecast_evidence u
+                 WHERE u.stream='intelligence_eval' AND u.outcome IS NOT NULL
+               )
+               SELECT arm AS arm_name,model,COUNT(*) AS forecasts,
+                      AVG((probability-outcome)*(probability-outcome)) AS brier,
+                      AVG((market_probability-outcome)*
+                          (market_probability-outcome)) AS market_brier,
+                      SUM(abstained) AS abstains
+                 FROM ranked WHERE rn=1
+                GROUP BY arm,model ORDER BY brier ASC""")
+    except Exception:
+        return []
+    return [
+        {
+            "arm": r["arm_name"], "model": r["model"],
+            "forecasts": r["forecasts"],
+            "brier": round(r["brier"], 4) if r["brier"] is not None else None,
+            "market_brier": (round(r["market_brier"], 4)
+                             if r["market_brier"] is not None else None),
+            "abstains": r["abstains"] or 0,
+        }
+        for r in rows
+    ]
+

@@ -99,6 +99,18 @@ export interface DashboardState {
   categories: CategoryStat[];
   /** Present on the paper book only — Kraken's isolated directional book. */
   kraken_paper?: KrakenPaperPosition[];
+  local_llm?: {
+    purposes: Record<string, {
+      calls: number; ok: number; errors: number; avg_ms: number | null;
+      prompt_tokens: number; output_tokens: number;
+    }>;
+    claims_24h: number;
+    last_claim_at: string | null;
+  };
+  intelligence_eval?: {
+    arm: string; model: string; forecasts: number;
+    brier: number | null; market_brier: number | null; abstains: number;
+  }[];
 }
 
 export type Book = "paper" | "live";
