@@ -790,7 +790,7 @@ class KrakenPillar:
                     pair, OrderSide.SELL, volume=vol, ordertype="market",
                     purpose="directional", max_usd=max(notional, kcfg.max_order_usd) * 1.1,
                     dry_run=True if effective_paper else None,
-                    client_order_id=f"aur-s-{uuid.uuid4().hex}"[:32])
+                    client_order_id=str(uuid.uuid4()))
                 placed = res.order_id not in ("ERROR", "BLOCKED")
                 fill_price = None
                 if placed:
@@ -902,7 +902,7 @@ class KrakenPillar:
                 res = await self._k.place_spot_order(
                     pair, OrderSide.BUY, volume=vol, ordertype="market", purpose="directional",
                     dry_run=True if effective_paper else None,
-                    client_order_id=f"aur-b-{uuid.uuid4().hex}"[:32])
+                    client_order_id=str(uuid.uuid4()))
                 if res.order_id not in ("ERROR", "BLOCKED"):
                     # Record the fill and anchor the entry to the actual fill price
                     # so cost basis + the stops use real numbers. Paper books a
