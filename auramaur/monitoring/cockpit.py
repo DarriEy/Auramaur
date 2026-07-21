@@ -127,7 +127,7 @@ async def _portfolio_pnl(db, settings, is_paper_flag: int) -> dict:
     # side when a market holds both YES and NO, duplicating positions and
     # double-counting P&L (found via the web UI's duplicate-key warning).
     rows = await db.fetchall(
-        """SELECT p.*, m.question, cb.avg_cost AS cb_avg_cost FROM portfolio p
+        """SELECT p.*, m.question, m.end_date, cb.avg_cost AS cb_avg_cost FROM portfolio p
            LEFT JOIN markets m ON p.market_id = m.id
            LEFT JOIN cost_basis cb ON cb.market_id = p.market_id
                                   AND cb.is_paper = p.is_paper
@@ -143,6 +143,8 @@ async def _portfolio_pnl(db, settings, is_paper_flag: int) -> dict:
             # alone does not identify a row.
             "token": r["token"],
             "exchange": r["exchange"] or "polymarket",
+            "category": r["category"] or "uncategorized",
+            "end_date": r["end_date"],
             "side": r["side"], "size": r["size"], "avg_price": r["avg_price"],
             "current_price": r["current_price"] or r["avg_price"],
             "updated_at": r["updated_at"],
@@ -167,9 +169,12 @@ async def _portfolio_pnl(db, settings, is_paper_flag: int) -> dict:
     signals = [
         {
             "market_id": r["market_id"], "question": r["question"] or r["market_id"],
+            "timestamp": r["timestamp"], "exchange": r["exchange"] or "polymarket",
             "claude_prob": r["claude_prob"], "market_prob": r["market_prob"],
             "edge": r["edge"], "action": r["action"] or "",
             "strategy_source": r["strategy_source"] or "llm",
+            "confidence": r["claude_confidence"] or "",
+            "evidence_summary": r["evidence_summary"] or "",
         }
         for r in sig_rows
     ]

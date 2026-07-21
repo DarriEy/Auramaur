@@ -1,22 +1,12 @@
 import { useEffect, useState } from "react";
 import {
-  ActivityPanel,
-  CategoriesPanel,
   ConnectionBanner,
-  HealthPanel,
-  IntelligencePanel,
   KillSwitchBanner,
-  KrakenPaperPanel,
-  PillarsPanel,
-  PositionsPanel,
-  SignalsPanel,
-  StatTiles,
-  StrategiesPanel,
   TopBar,
-  VenuesPanel,
 } from "./components";
 import type { Book } from "./types";
 import { useDashboardState } from "./useDashboardState";
+import { OperatorWorkspace, type View } from "./workspace";
 
 const TROUBLESHOOT_AFTER_S = 4;
 
@@ -79,25 +69,12 @@ export default function App() {
       />
       <ConnectionBanner phase={phase} error={envelope?.error ?? null} receivedAgo={receivedAgo} />
       {state.kill_switch && <KillSwitchBanner />}
-      <StatTiles s={state} />
-      <div className="grid">
-        <div className="col">
-          <VenuesPanel s={state} />
-          <PillarsPanel pillars={state.pillars} />
-          <CategoriesPanel categories={state.categories} />
-          <HealthPanel health={state.health} />
-          <IntelligencePanel s={state} />
-        </div>
-        <div className="col">
-          <PositionsPanel positions={state.positions} />
-          <StrategiesPanel strategies={state.strategies} />
-          <SignalsPanel signals={state.signals} />
-        </div>
-        <div className="col col-side">
-          <ActivityPanel s={state} />
-          {book === "paper" && <KrakenPaperPanel rows={state.kraken_paper ?? []} />}
-        </div>
-      </div>
+      <OperatorWorkspace
+        s={state}
+        scope={book}
+        historyIsCurrent={book === envelope!.bot_mode}
+        initialView={(location.hash.slice(1) || "overview") as View}
+      />
     </div>
   );
 }
