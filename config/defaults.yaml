@@ -483,6 +483,39 @@ gemini:
   off_hours_utc: [4, 5, 6, 7, 8, 9]   # deep-night ET — conserve Claude
   claude_budget_threshold: 0.8        # switch at 80% of daily_claude_call_budget
 
+# Local Ollama LLM tier (free/unlimited; evidence-side only, never trades).
+# Serves from native Windows Ollama on the dev/prod host; containers reach it
+# at http://host.docker.internal:11434 (set base_url in defaults.local.yaml).
+# Configure this section via YAML ONLY — do not mix LOCAL_LLM__* env vars with
+# yaml fields (any env var makes pydantic-settings rebuild the whole section
+# from env + class defaults, silently discarding the yaml block).
+local_llm:
+  enabled: false
+  base_url: "http://127.0.0.1:11434"
+  model: "qwen3:8b"
+  num_ctx: 8192
+  timeout_seconds: 120
+  concurrency: 1
+  keep_alive: "30m"
+  failure_cooldown_seconds: 300
+  distiller:
+    enabled: false
+    shadow_mode: true      # persist+log only; flip false to enrich prompts
+    interval_seconds: 900
+    batch_size: 8
+    max_item_age_hours: 24
+    max_claims_per_item: 5
+    prompt_char_budget: 600
+    retention_days: 14
+  triage:
+    enabled: false
+    threshold: 0.35
+    timeout_seconds: 20
+    max_calls_per_cycle: 20
+  ensemble_arm:
+    enabled: false
+    measure_only: true     # record Brier history without entering the blend
+
 market_maker:
   enabled: true
   min_spread_bps: 40        # minimum 0.4% spread (BBO-join kicks in when 1-tick improvement would go below this)

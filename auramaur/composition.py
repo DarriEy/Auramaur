@@ -469,12 +469,19 @@ async def assemble_components(
     news_reactor = None
     if engines and discoveries:
         rss_source = next((s for s in sources if isinstance(s, RSSSource)), RSSSource())
+        # Optional local-LLM materiality pre-screen (fail-open by design).
+        triage = None
+        if settings.local_llm.enabled and settings.local_llm.triage.enabled:
+            from auramaur.nlp import local_llm
+            from auramaur.nlp.news_triage import MaterialityTriage
+            triage = MaterialityTriage(local_llm.get_client(settings, db), settings)
         news_reactor = NewsReactor(
             rss_source=rss_source,
             discoveries=discoveries,
             engines=engines,
             db=db,
             fast_analysis=hybrid and settings.hybrid.news_fast_analysis,
+            triage=triage,
         )
 
     # Attribution (optional)

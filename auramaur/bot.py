@@ -1682,6 +1682,10 @@ class AuramaurBot(
         if self.settings.oddlot_tender.enabled:
             tasks.append(asyncio.create_task(self._task_oddlot_tender(), name="oddlot_tender"))
 
+        # Local-LLM evidence distiller (evidence-side only, never trades)
+        if self.settings.local_llm.enabled and self.settings.local_llm.distiller.enabled:
+            tasks.append(asyncio.create_task(self._task_evidence_distiller(), name="evidence_distiller"))
+
         # Kraken treasury/capital pillar (+ gated directional spot)
         if self.settings.kraken.enabled:
             tasks.append(asyncio.create_task(self._task_kraken_pillar(), name="kraken_treasury"))
@@ -1727,6 +1731,13 @@ class AuramaurBot(
             await self._cancel_resting_live_orders()
         except Exception as e:
             log.debug("shutdown.cancel_sweep_error", error=str(e))
+
+        # Close the shared local-LLM client (singleton; safe if never opened)
+        try:
+            from auramaur.nlp import local_llm
+            await local_llm.aclose()
+        except Exception:
+            pass
 
         for name, comp in self._components.items():
             if hasattr(comp, "close"):

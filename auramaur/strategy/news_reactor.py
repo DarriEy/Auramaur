@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -13,6 +14,9 @@ from auramaur.db.database import Database
 from auramaur.exchange.models import Market
 from auramaur.exchange.protocols import MarketDiscovery
 from auramaur.strategy.engine import TradingEngine
+
+if TYPE_CHECKING:
+    from auramaur.nlp.news_triage import MaterialityTriage
 
 log = structlog.get_logger()
 
@@ -88,6 +92,7 @@ class NewsReactor:
         min_liquidity: float = 2000.0,
         min_proper_nouns: int = 1,
         fast_analysis: bool = False,
+        triage: "MaterialityTriage | None" = None,
     ) -> None:
         """Initialize the reactor.
 
@@ -114,6 +119,9 @@ class NewsReactor:
         self._min_proper_nouns = min_proper_nouns
         self._fast_analysis = fast_analysis
         self._analysis_semaphore = asyncio.Semaphore(1)
+        # Optional local-LLM materiality pre-screen (fail-open: None or any
+        # screen error preserves today's flag-everything behavior).
+        self._triage = triage
 
     # ------------------------------------------------------------------
     # Public API
@@ -133,6 +141,9 @@ class NewsReactor:
         new_items = self._filter_new(items)
         if not new_items:
             return []
+
+        if self._triage is not None:
+            self._triage.reset_cycle()
 
         log.info(
             "news_reactor.new_stories",
@@ -161,6 +172,22 @@ class NewsReactor:
                                 category=getattr(market, "category", "") or "",
                             )
                             continue
+                        if self._triage is not None:
+                            try:
+                                score = await self._triage.screen(
+                                    item.id, item.title, market.question)
+                            except Exception as e:  # noqa: BLE001 — fail open
+                                log.debug("news_reactor.triage_error",
+                                          error=str(e)[:120])
+                                score = None
+                            if score is not None and score < self._triage.threshold:
+                                log.info(
+                                    "news_reactor.triage_skip",
+                                    market_id=market.id,
+                                    score=round(score, 2),
+                                    headline=item.title[:80],
+                                )
+                                continue
                         engine.flag_market_from_news(market.id)
                         flagged.append({
                             "exchange": exchange_name,

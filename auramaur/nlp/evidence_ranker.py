@@ -41,6 +41,7 @@ def rank_evidence(
     top_n: int,
     backend: str = "embeddings",
     model_name: str = "all-MiniLM-L6-v2",
+    query_prefix: str = "",
     now: datetime | None = None,
 ) -> list[NewsItem]:
     """Return the top-``top_n`` items by combined recency/authority/relevance.
@@ -57,7 +58,8 @@ def rank_evidence(
     now = now or datetime.now(tz=timezone.utc)
 
     texts = [f"{it.title or ''}. {(it.content or '')[:400]}" for it in items]
-    rel = relevance_scores(question, texts, backend=backend, model_name=model_name)
+    rel = relevance_scores(question, texts, backend=backend,
+                           model_name=model_name, query_prefix=query_prefix)
 
     scored: list[tuple[float, NewsItem]] = []
     for item, r in zip(items, rel):

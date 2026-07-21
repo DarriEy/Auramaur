@@ -231,6 +231,8 @@ class Database:
             await self._migrate_v32_to_v33()
         if from_version < 34:
             await self._migrate_v33_to_v34()
+        if from_version < 35:
+            await self._migrate_v34_to_v35()
 
     async def _migrate_v29_to_v30(self) -> None:
         """Add cost-adjusted IBKR round-trip observations."""
@@ -346,6 +348,15 @@ class Database:
         await self._db.execute("UPDATE schema_version SET version = 34")
         await self._db.commit()
         log.info("database.migrated", from_version=33, to_version=34)
+
+    async def _migrate_v34_to_v35(self) -> None:
+        """Local LLM tier tables (distilled_claims, distill_progress,
+        local_llm_calls)."""
+        # TABLES has already created the additive tables; only advance the
+        # version so older live databases converge without destructive DDL.
+        await self._db.execute("UPDATE schema_version SET version = 35")
+        await self._db.commit()
+        log.info("database.migrated", from_version=34, to_version=35)
 
     async def _migrate_v28_to_v29(self) -> None:
         """Add immutable strategy-research and CLV accounting tables."""

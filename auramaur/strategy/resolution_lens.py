@@ -343,7 +343,8 @@ class ResolutionLensPillar:
             nlp = self._settings.nlp
             ranked = rank_evidence(
                 m.question, items, top_n=cfg.phase3_max_evidence,
-                backend=nlp.relevance_backend, model_name=nlp.embedding_model)
+                backend=nlp.relevance_backend, model_name=nlp.embedding_model,
+                query_prefix=nlp.embedding_query_prefix)
             return ranked or items[:cfg.phase3_max_evidence]
         except Exception as e:
             log.warning("lens.evidence_error", market_id=m.id, error=str(e))
