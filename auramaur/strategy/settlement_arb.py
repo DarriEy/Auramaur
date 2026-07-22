@@ -203,6 +203,9 @@ class SettlementArbPillar:
             if kalshi_exchange is not None else None
         )
         self._schema_ready = False
+        # Per-cycle funnel-stage counters (where predicated markets died) —
+        # reset each run_once, emitted on the cycle log line.
+        self._stages: dict[str, int] = {}
 
     async def _ensure_schema(self) -> None:
         if self._schema_ready:
@@ -230,6 +233,7 @@ class SettlementArbPillar:
         # this each candidate re-fetches in _maybe_enter, bursting ~250 calls/cycle
         # past FRED's rate limit (fred_observations_failed spike). Keyed by series.
         self._fred_cycle_cache = {}
+        self._stages = {}
         markets = await self._candidates()
         entered = 0
         with_pred = 0
@@ -251,8 +255,12 @@ class SettlementArbPillar:
         # pillar indistinguishable from dead. scanned/with_predicate/entered tell
         # the three stories apart: no candidates vs none determinable vs converged.
         log.info("settlement_arb.cycle", scanned=len(markets),
-                 with_predicate=with_pred, entered=entered)
+                 with_predicate=with_pred, entered=entered,
+                 stages=dict(self._stages))
         return entered
+
+    def _bump(self, stage: str) -> None:
+        self._stages[stage] = self._stages.get(stage, 0) + 1
 
     async def _candidates(self) -> list:
         """Active Poly econ markets with a numeric-threshold shape, future-dated."""
@@ -398,12 +406,15 @@ class SettlementArbPillar:
         cfg = self._settings.settlement_arb
         spec = spec_for_series(pred["indicator"])
         if spec is None:
+            self._bump("no_spec")
             return False
         obs = await self._fred_observations(spec.fred_series, cfg.history_n)
         if not obs:
+            self._bump("no_obs")
             return False
         value = indicator_at_period(obs, spec, pred["reference_period"])
         if value is None:
+            self._bump("print_pending")
             return False  # print not out yet -> undetermined, never forecast
         # Resolve on the figure as the agency REPORTS it (CPI YoY/U3 to 0.1pp,
         # payrolls to 1,000) — the bins settle on the rounded print, not the
@@ -421,6 +432,7 @@ class SettlementArbPillar:
         fair = 1.0 if yes_locked else 0.0
         edge = fair - yes_price
         if abs(edge) < cfg.min_edge:
+            self._bump("converged")
             return False  # already converged — no lag to capture
         side = OrderSide.BUY if edge > 0 else OrderSide.SELL
 
@@ -438,6 +450,7 @@ class SettlementArbPillar:
         )
         decision = await self._risk.evaluate(signal, m)
         if not decision.approved or decision.position_size <= 0:
+            self._bump("risk_rejected")
             log.info("settlement_arb.risk_rejected", market_id=m.id, reason=decision.reason)
             return False
         size = min(decision.position_size, cfg.stake_usd)
@@ -449,6 +462,8 @@ class SettlementArbPillar:
         res = await gateway.submit(TradeIntent(
             signal=signal, market=m, size_dollars=size, force_paper=force_paper))
         ok = res.status in ("filled", "paper", "partial", "pending")
+        if not ok:
+            self._bump("submit_failed")
         if ok:
             log.info("settlement_arb.entered", market_id=m.id, side=side.value,
                      locked="YES" if yes_locked else "NO", value=round(value, 2),
