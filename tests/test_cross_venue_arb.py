@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from auramaur.broker.pnl import PnLTracker
 from auramaur.db.database import Database
@@ -249,6 +249,26 @@ def test_second_leg_rejection_marks_partial_not_traded_and_does_not_retry():
             assert await pillar.run_once() == 0
             assert poly_ex.place_order.await_count == 1
             assert kalshi_ex.place_order.await_count == 1
+        finally:
+            await db.close()
+    asyncio.run(run())
+
+
+def test_zero_pair_cycle_still_logs():
+    """A cycle with no candidate pairs must still log (the silent early return
+    made a never-matching pair scan indistinguishable from a dead task)."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            pillar = _pillar(db, _settings(), [], [])
+            with patch("auramaur.strategy.cross_venue_arb.log") as mock_log:
+                entered = await pillar.run_once()
+            assert entered == 0
+            calls = [c for c in mock_log.info.call_args_list
+                     if c.args and c.args[0] == "cross_venue.cycle"]
+            assert len(calls) == 1
+            assert calls[0].kwargs == {"pairs": 0, "entered": 0}
         finally:
             await db.close()
     asyncio.run(run())

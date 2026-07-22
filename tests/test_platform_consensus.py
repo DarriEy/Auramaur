@@ -400,3 +400,32 @@ def test_platform_consensus_quality_thresholds_fail_closed():
 
     assert not PlatformConsensusPillar._quality_ok(thin, "Manifold", cfg)
     assert not PlatformConsensusPillar._quality_ok(missing, "Metaculus", cfg)
+
+
+def test_zero_entry_cycle_still_logs():
+    """A zero-entry cycle must still log cycle_done (the entered>0 guard made
+    zero-entry cycles silent — weeks of 'running fine, entering nothing' were
+    indistinguishable from a dead task)."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            disc = MagicMock()
+            disc.get_markets = AsyncMock(return_value=[])
+            pillar = PlatformConsensusPillar(
+                db=db, settings=_settings(), discovery=disc,
+                exchange=_exchange(), risk_manager=_risk(),
+                pnl_tracker=PnLTracker(db, _settings()),
+                calibration=MagicMock(),
+            )
+            with patch("auramaur.strategy.platform_consensus.log") as mock_log:
+                entered = await pillar.run_once()
+            assert entered == 0
+            calls = [c for c in mock_log.info.call_args_list
+                     if c.args and c.args[0] == "platform_consensus.cycle_done"]
+            assert len(calls) == 1
+            assert calls[0].kwargs["entered"] == 0
+            assert calls[0].kwargs["scanned"] == 0
+        finally:
+            await db.close()
+    asyncio.run(run())
