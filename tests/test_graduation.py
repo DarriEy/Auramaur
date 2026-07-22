@@ -325,3 +325,40 @@ def test_min_markets_overrides_per_strategy():
         assert d.force_paper is True and d.status == "unproven"
         await db.close()
     asyncio.run(run())
+
+
+def test_strategy_level_election_aggregates_categories():
+    """A strategy in strategy_level_strategies is judged on its whole
+    cross-category record; per-cell grain would keep each category below
+    the bar. (2026-07-22: agent_trader_opus at 20 markets / 70% wins was
+    invisible to the ladder as four sub-bar cells.)"""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        settings = _settings(min_markets=100,
+                             min_markets_overrides={"agent_x": 6},
+                             strategy_level_strategies=["agent_x"])
+        ladder = GraduationLadder(db, settings)
+
+        # 4 profitable paper markets in weather + 3 in crypto: no single
+        # category reaches 6, the strategy total (7) does.
+        await _seed(db, "agent_x", "weather", n=4, pnl_each=2.0, is_paper=1)
+        await _seed(db, "agent_x", "crypto", n=3, pnl_each=2.0, is_paper=1)
+        d = await ladder.decide("agent_x", "weather")
+        assert d.force_paper is False and d.status == "probation"
+        # Same decision from any category cell of the strategy.
+        d2 = await ladder.decide("agent_x", "crypto")
+        assert d2.status == "probation"
+
+        # Control: identical evidence, NOT strategy-level -> per-cell grain
+        # keeps it unproven.
+        settings2 = _settings(min_markets=100,
+                              min_markets_overrides={"agent_y": 6})
+        ladder2 = GraduationLadder(db, settings2)
+        await _seed(db, "agent_y", "weather", n=4, pnl_each=2.0, is_paper=1)
+        await _seed(db, "agent_y", "crypto", n=3, pnl_each=2.0, is_paper=1)
+        d3 = await ladder2.decide("agent_y", "weather")
+        assert d3.force_paper is True and d3.status == "unproven"
+        await db.close()
+    asyncio.run(run())
+

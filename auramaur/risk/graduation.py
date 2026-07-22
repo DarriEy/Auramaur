@@ -90,14 +90,29 @@ class GraduationLadder:
     # ------------------------------------------------------------------
 
     async def _cell_stats(self, strategy: str, category: str) -> dict:
-        rows = await self._db.fetchall(
-            """SELECT market_id, is_paper, SUM(pnl) AS pnl
-               FROM pnl_ledger
-               WHERE strategy_source = ? AND category = ?
-                 AND realized_at >= datetime('now', ?)
-               GROUP BY market_id, is_paper""",
-            (strategy, category, f"-{int(self._settings.graduation.window_days)} days"),
-        )
+        # Strategy-grain election: aggregate the whole strategy's record
+        # (category ignored) — every cell of the strategy then shares one
+        # decision. See GraduationConfig.strategy_level_strategies.
+        if strategy in self._settings.graduation.strategy_level_strategies:
+            rows = await self._db.fetchall(
+                """SELECT market_id, is_paper, SUM(pnl) AS pnl
+                   FROM pnl_ledger
+                   WHERE strategy_source = ?
+                     AND realized_at >= datetime('now', ?)
+                   GROUP BY market_id, is_paper""",
+                (strategy,
+                 f"-{int(self._settings.graduation.window_days)} days"),
+            )
+        else:
+            rows = await self._db.fetchall(
+                """SELECT market_id, is_paper, SUM(pnl) AS pnl
+                   FROM pnl_ledger
+                   WHERE strategy_source = ? AND category = ?
+                     AND realized_at >= datetime('now', ?)
+                   GROUP BY market_id, is_paper""",
+                (strategy, category,
+                 f"-{int(self._settings.graduation.window_days)} days"),
+            )
         live = [float(r["pnl"] or 0.0) for r in rows or [] if not r["is_paper"]]
         paper = [float(r["pnl"] or 0.0) for r in rows or [] if r["is_paper"]]
 

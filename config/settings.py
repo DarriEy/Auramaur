@@ -1097,6 +1097,14 @@ class GraduationConfig(BaseModel):
     # Keyed by strategy_source; unlisted strategies use min_markets. The
     # tracked default stays empty — fresh clones keep the strict bar.
     min_markets_overrides: dict[str, int] = {}
+    # Strategies elected at STRATEGY grain: evidence aggregates across all
+    # categories into one record instead of per (strategy x category) cell.
+    # Right-grained for cross-model experiments (agent_trader_*): the
+    # hypothesis is "does this model tier have edge", and per-cell grain
+    # fragmented a 20-market 70%-win record into four sub-bar cells
+    # (2026-07-22). Per-cell remains the default — it stops a strategy
+    # riding one category's luck into live capital in another.
+    strategy_level_strategies: list[str] = []
     window_days: int = 90
     confidence_z: float = 1.645
     min_mean_pnl_lower_bound: float = 0.0
