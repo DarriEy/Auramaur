@@ -21,6 +21,7 @@ class Database:
         self._db: aiosqlite.Connection | None = None
         self._txn_lock = asyncio.Lock()
         self._txn_task: asyncio.Task | None = None
+        self._txn_owner: str | None = None
 
     async def connect(self, ensure_schema: bool = True) -> None:
         """Open the connection.
@@ -75,7 +76,7 @@ class Database:
         return current >= SCHEMA_VERSION
 
     @asynccontextmanager
-    async def transaction(self):
+    async def transaction(self, owner: str | None = None):
         """Serialized, atomic write transaction on the shared connection.
 
         ~30 pillar tasks share ONE aiosqlite connection with implicit
@@ -96,6 +97,7 @@ class Database:
         if self._txn_task is not None and self._txn_task is asyncio.current_task():
             yield self
             return
+        requested_owner = owner or asyncio.current_task().get_name()
         async with self._txn_lock:
             # A legacy autocommit-style writer may be mid-flight (implicit
             # txn open, its commit() imminent). Wait it out rather than
@@ -109,9 +111,26 @@ class Database:
             deadline = time.monotonic() + 15.0
             while self._db._conn.in_transaction and time.monotonic() < deadline:
                 await asyncio.sleep(0.005)
+            waited = time.monotonic() - (deadline - 15.0)
+            if self._db._conn.in_transaction:
+                log.error("database.transaction_legacy_wait_timeout",
+                          requested_owner=requested_owner,
+                          requested_task=asyncio.current_task().get_name(),
+                          waited_seconds=round(waited, 3),
+                          active_owner=self._txn_owner or "legacy/unknown")
             started = time.monotonic()
-            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                await self.db.execute("BEGIN IMMEDIATE")
+            except Exception as exc:
+                log.error("database.transaction_begin_failed",
+                          requested_owner=requested_owner,
+                          requested_task=asyncio.current_task().get_name(),
+                          active_owner=self._txn_owner or "legacy/unknown",
+                          in_transaction=self._db._conn.in_transaction,
+                          error=str(exc))
+                raise
             self._txn_task = asyncio.current_task()
+            self._txn_owner = requested_owner
             try:
                 yield self
             except BaseException:
@@ -128,13 +147,23 @@ class Database:
                     # atomicity was violated. Log loudly (this is the bleed
                     # phase 5 exists to retire) without failing the writer —
                     # failing here reports durable writes as failures.
-                    log.warning("database.transaction_commit_bled")
+                    log.warning(
+                        "database.transaction_commit_bled",
+                        owner=self._txn_owner,
+                        task=asyncio.current_task().get_name(),
+                    )
             finally:
+                finished_owner = self._txn_owner
                 self._txn_task = None
+                self._txn_owner = None
                 held = time.monotonic() - started
                 if held > 0.25:
-                    log.warning("database.transaction_held_long",
-                                seconds=round(held, 3))
+                    log.warning(
+                        "database.transaction_held_long",
+                        seconds=round(held, 3),
+                        owner=finished_owner,
+                        task=asyncio.current_task().get_name(),
+                    )
 
     async def close(self) -> None:
         if self._db:
@@ -239,6 +268,33 @@ class Database:
             await self._migrate_v36_to_v37()
         if from_version < 38:
             await self._migrate_v37_to_v38()
+        if from_version < 39:
+            await self._migrate_v38_to_v39()
+
+    async def _migrate_v38_to_v39(self) -> None:
+        """Durable lifecycle for graduated IBKR broker orders."""
+        await self._db.executescript("""
+            CREATE TABLE IF NOT EXISTS ibkr_execution_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                execution_ref TEXT NOT NULL UNIQUE,
+                book TEXT NOT NULL, instrument_key TEXT NOT NULL,
+                side TEXT NOT NULL CHECK(side IN ('BUY', 'SELL')),
+                requested_quantity REAL NOT NULL,
+                order_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'submitting',
+                filled_quantity REAL NOT NULL DEFAULT 0,
+                avg_fill_price REAL NOT NULL DEFAULT 0,
+                accounted INTEGER NOT NULL DEFAULT 0,
+                error TEXT NOT NULL DEFAULT '',
+                submitted_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_ibkr_execution_unaccounted
+                ON ibkr_execution_orders(book,instrument_key,side,accounted,updated_at);
+        """)
+        await self._db.execute("UPDATE schema_version SET version = 39")
+        await self._db.commit()
+        log.info("database.migrated", from_version=38, to_version=39)
 
     async def _migrate_v29_to_v30(self) -> None:
         """Add cost-adjusted IBKR round-trip observations."""

@@ -57,13 +57,14 @@ class IBKRMultiAssetPaperBook:
     execution_mode = ExecutionMode.PAPER_SIMULATED
 
     def __init__(self, settings, client, db, book: IBKRBook,
-                 rates_provider=None):
+                 rates_provider=None, executor=None):
         self._settings = settings
         self._client = client
         self._db = db
         self.book = book
         self.name = f"ibkr_{book.value}_paper"
         self._rates_provider = rates_provider
+        self._executor = executor
 
     @property
     def config(self):
@@ -178,10 +179,38 @@ class IBKRMultiAssetPaperBook:
     async def _fill(self, spec, quote, side: str, quantity: float,
                     fx: float, entry_price: float | None = None,
                     stop_price: float = 0, initial_risk_usd: float = 0) -> None:
-        price = adverse_fill(quote.bid, quote.ask, side, self.config.slippage_bps)
+        execution_ref = ""
+        broker_price = 0.0
+        requested_quantity = quantity
+        if (self._executor is not None
+                and not self._executor.gate_reason(self.book)
+                and await self._executor.graduated(self.book)):
+            result = await self._executor.place(spec, side, quantity)
+            if not result.accepted:
+                raise RuntimeError(f"IBKR live execution rejected: {result.reason}")
+            quantity = result.filled_quantity
+            if requested_quantity > 0 and quantity < requested_quantity:
+                initial_risk_usd *= quantity / requested_quantity
+            broker_price = result.filled_price
+            execution_ref = result.execution_ref
+        price = broker_price or adverse_fill(
+            quote.bid, quote.ask, side, self.config.slippage_bps)
+        position = None
+        held_quantity = quantity
+        if side == "SELL":
+            position = await self._db.fetchone(
+                "SELECT quantity, entry_commission_usd, entry_fill_ref, opened_at "
+                "FROM ibkr_paper_positions WHERE book=? AND instrument_key=?",
+                (self.book.value, spec.key))
+            held_quantity = float(position["quantity"] or 0) if position else quantity
+            if quantity > held_quantity + 1e-9:
+                log.critical("ibkr_multiasset.live_overfill",
+                             book=self.book.value, key=spec.key,
+                             filled=quantity, tracked=held_quantity)
+            quantity = min(quantity, held_quantity)
         capital = quantity * self._capital_per_unit(spec, price, fx)
         fee = self._commission(spec, quantity, capital)
-        fill_ref = f"ibkr-{self.book.value}-paper-{uuid4().hex}"
+        fill_ref = execution_ref or f"ibkr-{self.book.value}-paper-{uuid4().hex}"
         await self._db.execute(
             """INSERT INTO ibkr_paper_fills
                (book, instrument_key, con_id, side, quantity, multiplier, price,
@@ -209,12 +238,9 @@ class IBKRMultiAssetPaperBook:
             await self._db.execute(
                 "INSERT INTO ibkr_paper_ledger (book, kind, pnl_usd, source_ref) VALUES (?, 'trade', ?, ?)",
                 (self.book.value, pnl, f"{fill_ref}:trade"))
-            position = await self._db.fetchone(
-                "SELECT entry_commission_usd, entry_fill_ref, opened_at "
-                "FROM ibkr_paper_positions "
-                "WHERE book = ? AND instrument_key = ?",
-                (self.book.value, spec.key))
             entry_fee = float(position["entry_commission_usd"] or 0) if position else 0.0
+            allocated_entry_fee = (entry_fee * quantity / held_quantity
+                                   if held_quantity > 0 else entry_fee)
             entry_fill_ref = str(position["entry_fill_ref"] or "") if position else ""
             if position is None:
                 # Understates elapsed_days for the evidence contract; loud so a
@@ -230,12 +256,24 @@ class IBKRMultiAssetPaperBook:
                     entry_commission_usd, exit_commission_usd, net_pnl_usd,
                     opened_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (self.book.value, spec.key, entry_fill_ref, fill_ref, pnl, entry_fee, fee,
-                 pnl - entry_fee - fee, opened_at))
-            await self._db.execute(
-                "DELETE FROM ibkr_paper_positions WHERE book = ? AND instrument_key = ?",
-                (self.book.value, spec.key))
+                (self.book.value, spec.key, entry_fill_ref, fill_ref, pnl,
+                 allocated_entry_fee, fee, pnl - allocated_entry_fee - fee, opened_at))
+            remaining = max(0.0, held_quantity - quantity)
+            if remaining > 1e-9:
+                await self._db.execute(
+                    """UPDATE ibkr_paper_positions
+                          SET quantity=?, entry_commission_usd=?, current_price=?,
+                              updated_at=datetime('now')
+                        WHERE book=? AND instrument_key=?""",
+                    (remaining, max(0.0, entry_fee - allocated_entry_fee), price,
+                     self.book.value, spec.key))
+            else:
+                await self._db.execute(
+                    "DELETE FROM ibkr_paper_positions WHERE book=? AND instrument_key=?",
+                    (self.book.value, spec.key))
         await self._db.commit()
+        if execution_ref:
+            await self._executor.acknowledge(execution_ref)
 
     async def run_once(self) -> int:
         cfg = self.config

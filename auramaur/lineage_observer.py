@@ -120,7 +120,7 @@ class LineageObserver:
                                observed_at: str, fetch_rows: list[tuple],
                                raw_items: int, items: list[dict],
                                active_sources: list[dict]) -> None:
-        async with self.db.transaction():
+        async with self.db.transaction(owner="lineage"):
             await self.db.execute(
                 "INSERT INTO ingestion_runs "
                 "(id,query,category,market_id,started_at,completed_at,status,active_sources,raw_items,unique_items) "
@@ -173,7 +173,7 @@ class LineageObserver:
         p.setdefault("evidence_run_ids", [])
         p.setdefault("model", "")
         p.setdefault("strategy_source", "")
-        async with self.db.transaction():
+        async with self.db.transaction(owner="lineage"):
             await self.db.execute(
                 """INSERT INTO forecast_snapshots
                    (market_id,exchange,category,forecast_purpose,raw_probability,
@@ -188,7 +188,7 @@ class LineageObserver:
 
     async def _write_resolution(self, market_id: str, outcome: bool) -> None:
         actual = int(outcome)
-        async with self.db.transaction():
+        async with self.db.transaction(owner="lineage"):
             await self.db.execute(
                 "UPDATE forecast_snapshots SET actual_outcome=?,resolved_at=datetime('now') "
                 "WHERE market_id=? AND actual_outcome IS NULL", (actual, market_id),

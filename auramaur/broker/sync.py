@@ -344,7 +344,7 @@ class PositionSyncer:
         # serialized transaction (contention plan, Phase 2). No network awaits
         # may ever run inside this block.
         if positions:
-            async with self._db.transaction():
+            async with self._db.transaction(owner="position_sync"):
                 for pos in positions:
                     side = OrderSide.BUY.value
                     token = pos.token.value if pos.token else "YES"
@@ -430,7 +430,7 @@ class PositionSyncer:
         # can run inside this block. The delete pass and the upsert pass land
         # (or roll back) atomically instead of straddling other tasks' commits.
         stale = db_market_ids - live_market_ids
-        async with self._db.transaction():
+        async with self._db.transaction(owner="position_sync"):
             # DELETE positions no longer held (Polymarket, current mode only)
             for market_id in stale:
                 await self._db.execute(
@@ -557,7 +557,7 @@ class KalshiPositionSyncer:
         # PaperTrader state is in memory, so the whole upsert+cleanup pass is
         # db-only — one short, serialized transaction (contention plan,
         # Phase 2). No network awaits may ever run inside this block.
-        async with self._db.transaction():
+        async with self._db.transaction(owner="position_sync"):
             for market_id, pos in self._paper.positions.items():
                 if market_id not in kalshi_ids:
                     continue

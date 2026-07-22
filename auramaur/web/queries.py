@@ -111,7 +111,65 @@ async def ibkr_paper_books(db: ReadOnlyDatabase) -> list[dict]:
     ]
 
 
-async def strategy_breakdown(db: ReadOnlyDatabase, is_paper_flag: int) -> list[dict]:
+async def _ibkr_strategy_breakdown(db: ReadOnlyDatabase, settings) -> list[dict]:
+    """Translate isolated IBKR ledgers into the common comparison contract."""
+    from auramaur.risk.ibkr_evidence import (
+        evaluate_ibkr_daily_evidence, evaluate_ibkr_evidence,
+    )
+
+    rows: list[dict] = []
+    for book in ("global_etf", "futures", "international_equity"):
+        cfg = settings.ibkr.multiasset_books[book]
+        fills = await db.fetchone(
+            """SELECT COUNT(*) AS entries,
+                      COALESCE(SUM(commission_usd), 0) AS fees,
+                      MAX(filled_at) AS latest_observed
+                 FROM ibkr_paper_fills WHERE book = ?""", (book,))
+        ledger = await db.fetchone(
+            """SELECT COALESCE(SUM(CASE WHEN kind='trade' THEN pnl_usd ELSE 0 END), 0) AS pnl
+                 FROM ibkr_paper_ledger WHERE book = ?""", (book,))
+        positions = await db.fetchone(
+            """SELECT COUNT(*) AS open_positions,
+                      COALESCE(SUM(unrealized_pnl_usd), 0) AS unrealized,
+                      MAX(updated_at) AS latest_mark
+                 FROM ibkr_paper_positions WHERE book = ?""", (book,))
+        marks = await db.fetchall(
+            "SELECT mark_date,equity_usd FROM ibkr_paper_daily_marks "
+            "WHERE book=? ORDER BY mark_date", (book,))
+        equities = [float(row["equity_usd"]) for row in marks]
+        daily = [b - a for a, b in zip(equities, equities[1:])]
+        elapsed = 0
+        if marks:
+            first = datetime.fromisoformat(str(marks[0]["mark_date"])[:10]).date()
+            elapsed = max(0, (datetime.now(timezone.utc).date() - first).days)
+        daily_evidence = evaluate_ibkr_daily_evidence(
+            daily, elapsed_days=elapsed, budget_usd=cfg.budget_usd)
+        trips_rows = await db.fetchall(
+            "SELECT net_pnl_usd FROM ibkr_paper_round_trips "
+            "WHERE book=? ORDER BY closed_at,id", (book,))
+        trips = evaluate_ibkr_evidence(
+            [float(row["net_pnl_usd"]) for row in trips_rows],
+            elapsed_days=elapsed, budget_usd=cfg.budget_usd,
+            min_observations=30)
+        reasons = daily_evidence.reasons + trips.reasons
+        latest = max(filter(None, [fills["latest_observed"], positions["latest_mark"]]),
+                     default=None)
+        rows.append({
+            "strategy": f"ibkr_{book}", "entries": int(fills["entries"] or 0),
+            "pnl": float(ledger["pnl"] or 0), "fees": float(fills["fees"] or 0),
+            "unrealized": float(positions["unrealized"] or 0),
+            "open_positions": int(positions["open_positions"] or 0),
+            "observations": len(daily), "round_trips": len(trips_rows),
+            "latest_observed": latest, "venues": ["ibkr"],
+            "graduation_status": "graduated" if not reasons else "collecting",
+            "graduation_reasons": list(reasons),
+        })
+    return rows
+
+
+async def strategy_breakdown(
+    db: ReadOnlyDatabase, is_paper_flag: int, settings=None,
+) -> list[dict]:
     """Realized ledger P&L plus open-book unrealized P&L by entry strategy."""
     rows = await db.fetchall(
         """SELECT COALESCE(NULLIF(strategy_source, ''), 'llm') AS strategy,
@@ -176,6 +234,13 @@ async def strategy_breakdown(db: ReadOnlyDatabase, is_paper_flag: int) -> list[d
         })
         entry["unrealized"] = r["unrealized"] or 0.0
         entry["open_positions"] = r["open_positions"] or 0
+    if is_paper_flag == 1 and settings is not None:
+        try:
+            for row in await _ibkr_strategy_breakdown(db, settings):
+                out[row["strategy"]] = row
+        except Exception:
+            # Older databases may not have the additive IBKR schema yet.
+            pass
     return sorted(out.values(), key=lambda e: e["pnl"], reverse=True)
 
 
@@ -195,7 +260,13 @@ async def strategy_heartbeats(db: ReadOnlyDatabase) -> dict[str, dict]:
         return {}
     out: dict[str, dict] = {}
     for r in rows or []:
-        out[r["strategy"]] = {
+        strategy = str(r["strategy"])
+        if strategy in {
+            "ibkr_global_etf_paper", "ibkr_fx_paper", "ibkr_futures_paper",
+            "ibkr_international_equity_paper",
+        }:
+            strategy = strategy.removesuffix("_paper")
+        out[strategy] = {
             "last_beat_at": r["last_beat_at"],
             "status": r["status"],
             "entries": r["entries"],

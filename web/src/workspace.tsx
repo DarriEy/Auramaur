@@ -449,7 +449,9 @@ function Opportunities({ s, onInspect }: { s: DashboardState; onInspect: (i: Ins
   );
 }
 
-function Compare({ s, onView }: { s: DashboardState; onView: (v: View) => void }) {
+function Compare({ s, scope, onView }: {
+  s: DashboardState; scope: string; onView: (v: View) => void;
+}) {
   const [mode, setMode] = useStored("auramaur.compare.mode", "strategies");
   const strategyRows = useMemo(() => {
     const names = new Set([
@@ -460,28 +462,32 @@ function Compare({ s, onView }: { s: DashboardState; onView: (v: View) => void }
     return [...names].map((name) => {
       const realized = s.strategies.find((row) => row.strategy === name);
       const signals = s.signals.filter((row) => row.strategy_source === name);
-      const latest = signals.map((row) => row.timestamp).filter(Boolean).sort().at(-1);
-      const venues = [...new Set(signals.map((row) => row.exchange).filter(Boolean))];
+      const latest = realized?.latest_observed
+        ?? signals.map((row) => row.timestamp).filter(Boolean).sort().at(-1);
+      const venues = realized?.venues
+        ?? [...new Set(signals.map((row) => row.exchange).filter(Boolean))] as string[];
       const heartbeat = s.heartbeats?.[name] ?? null;
       return { name, realized, signals, latest, venues, heartbeat };
     }).sort((a, b) => (b.realized?.pnl ?? 0) - (a.realized?.pnl ?? 0));
   }, [s.strategies, s.signals, s.heartbeats]);
   const venueRows = Object.entries(s.venues).sort(([a], [b]) => a.localeCompare(b));
-  return <Workspace title="Compare" subtitle="Put strategies or venues side by side using the same current snapshot.">
+  const bookLabel = scope === "live" ? "LIVE" : scope === "paper" ? "PAPER" : scope.toUpperCase();
+  return <Workspace title={`Compare · ${bookLabel} book`} subtitle={`Put strategies or venues side by side using the same current ${bookLabel.toLowerCase()} snapshot. Paper and live histories are intentionally isolated.`}>
     <div className="segmented" role="group" aria-label="Comparison type">
       <button className={mode === "strategies" ? "active" : ""} onClick={() => setMode("strategies")}>Strategies</button>
       <button className={mode === "venues" ? "active" : ""} onClick={() => setMode("venues")}>Venues</button>
     </div>
-    {mode === "strategies" ? <DataTable headers={["Strategy", "Health", "Evaluations", "Venues", "Entries", "Fees", "Realized", "Unrealized", "Latest observed"]}
+    {mode === "strategies" ? <DataTable headers={["Strategy", "Health", "Evaluations", "Venues", "Entries", "Fees", "Realized", "Unrealized", "Graduation", "Latest observed"]}
       empty={!strategyRows.length ? "No strategy data is available to compare." : undefined}>
       {strategyRows.map((row) => {
         const age = row.latest ? (new Date(s.now).getTime() - new Date(row.latest).getTime()) / 1000 : null;
         return <tr key={row.name}><td><StrategyName name={row.name} /></td>
           <td>{row.heartbeat ? <PillarStatus heartbeat={row.heartbeat} /> : <Status age={age} />}</td>
-          <td className="num">{row.signals.length}</td><td>{row.venues.join(", ") || "—"}</td>
+          <td className="num" title={row.realized?.round_trips != null ? `${row.realized.round_trips} round trips` : undefined}>{row.realized?.observations ?? row.signals.length}</td><td>{row.venues.join(", ") || "—"}</td>
           <td className="num">{row.realized?.entries ?? 0}</td><td className="num">{money(row.realized?.fees ?? 0)}</td>
           <td className={`num ${deltaClass(row.realized?.pnl ?? null)}`}>{money(row.realized?.pnl ?? 0, true)}</td>
           <td className={`num ${deltaClass(row.realized?.unrealized ?? null)}`} title={`${row.realized?.open_positions ?? 0} open position(s)`}>{money(row.realized?.unrealized ?? 0, true)}</td>
+          <td title={row.realized?.graduation_reasons?.join("; ")}>{row.realized?.graduation_status ?? "—"}</td>
           <td title={row.latest ? isoAge(row.latest) : undefined}>{utcTime(row.latest)}</td></tr>;
       })}</DataTable> : <DataTable headers={["Venue", "Health", "Balance detail", "Available", "Equity", "Snapshot UTC"]}
         empty={!venueRows.length ? "No venue snapshots are available to compare." : undefined}>
@@ -733,7 +739,7 @@ export function OperatorWorkspace({ s, scope = "default", historyIsCurrent = tru
     {view === "overview" && <main id="main-content" tabIndex={-1}><Overview s={s} scope={scope} historyIsCurrent={historyIsCurrent} onView={changeView} onInspect={setInspect} /></main>}
     {view === "portfolio" && <Portfolio s={s} onInspect={setInspect} />}
     {view === "opportunities" && <Opportunities s={s} onInspect={setInspect} />}
-    {view === "compare" && <Compare s={s} onView={changeView} />}
+    {view === "compare" && <Compare s={s} scope={scope} onView={changeView} />}
     {view === "execution" && <Execution s={s} onInspect={setInspect} />}
     {view === "intelligence" && <Intelligence s={s} />}
     {view === "system" && <System s={s} onInspect={setInspect} />}

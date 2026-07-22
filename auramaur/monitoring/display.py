@@ -146,6 +146,10 @@ def show_order(status: str, order_id: str, side: str, size: float, price: float,
     # SKIP_DUP is the sentinel order_id returned when the exchange's duplicate
     # guard suppresses an order because an equivalent resting order already
     # exists — the "failure" is actually our own prior request still working.
+    if order_id == "SKIP_CASH":
+        # The first rejection printed the actionable balance/required values.
+        # Identical retries are suppressed until authoritative paper cash moves.
+        return
     if order_id == "SKIP_DUP":
         console.print(
             f"         [yellow]EXIT PENDING[/] {mode} {ex}[{side_color}]{side}[/] "

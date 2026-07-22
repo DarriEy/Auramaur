@@ -23,6 +23,10 @@ class PaperTrader:
         self.positions: dict[str, Position] = {}
         self.trade_count = 0
         self.pending_orders: list[tuple[Order, str]] = []  # (order, order_id)
+        # market_id -> (required cost, observed spendable cash). A strategy can
+        # revisit the same candidate every few seconds; once cash has rejected
+        # it, suppress identical attempts until authoritative cash changes.
+        self._cash_blocks: dict[str, tuple[float, float]] = {}
 
     async def load_state(self) -> None:
         """Load paper trading state from database."""
@@ -73,19 +77,35 @@ class PaperTrader:
         # stale incrementally-mutated cache.
         spendable = await self._compute_balance()
         if order.side == OrderSide.BUY and cost > spendable:
-            log.warning(
-                "paper.insufficient_balance",
-                market_id=order.market_id,
-                cost=round(cost, 2),
-                balance=round(spendable, 2),
-                shortfall=round(cost - spendable, 2),
+            block = (round(cost, 8), round(spendable, 8))
+            repeated = self._cash_blocks.get(order.market_id) == block
+            self._cash_blocks[order.market_id] = block
+            message = (
+                f"insufficient paper balance: ${spendable:.2f}, "
+                f"requires ${cost:.2f}"
             )
+            if repeated:
+                log.debug("paper.insufficient_balance_suppressed",
+                          market_id=order.market_id, cost=round(cost, 2),
+                          balance=round(spendable, 2))
+            else:
+                log.warning(
+                    "paper.insufficient_balance",
+                    market_id=order.market_id,
+                    cost=round(cost, 2),
+                    balance=round(spendable, 2),
+                    shortfall=round(cost - spendable, 2),
+                )
             return OrderResult(
-                order_id=order_id,
+                order_id="SKIP_CASH" if repeated else order_id,
                 market_id=order.market_id,
                 status="rejected",
                 is_paper=True,
+                error_message=message,
             )
+
+        # A deposit, settlement, or smaller resized order unblocks this market.
+        self._cash_blocks.pop(order.market_id, None)
 
         # In-memory display balance (the authoritative gate above is
         # _compute_balance; this cache self-corrects on the next load_state).
