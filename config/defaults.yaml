@@ -525,6 +525,11 @@ intelligence_eval:
   markets_per_cycle: 8
   min_liquidity: 1000.0
   max_concurrency: 1
+  market_concurrency: 2
+  reprice_threshold: 0.03
+  reevaluate_after_hours: 24
+  near_resolution_days: 14
+  expensive_fraction: 0.25
   prompt_version: "forecast-v1"
   output_schema_version: "binary-v1"
   treatments:

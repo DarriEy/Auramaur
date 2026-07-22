@@ -944,6 +944,23 @@ CREATE TABLE IF NOT EXISTS evaluation_forecasts (
 CREATE INDEX IF NOT EXISTS idx_evaluation_forecasts_episode
     ON evaluation_forecasts(episode_hash);
 
+CREATE TABLE IF NOT EXISTS evaluation_attempts (
+    attempt_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, episode_hash TEXT NOT NULL,
+    stage TEXT NOT NULL, sample_index INTEGER, seed INTEGER NOT NULL,
+    prob_yes REAL, action TEXT, confidence REAL, thesis TEXT NOT NULL DEFAULT '',
+    telemetry_json TEXT NOT NULL DEFAULT '{}', error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(run_id, stage, sample_index)
+);
+CREATE INDEX IF NOT EXISTS idx_evaluation_attempts_run ON evaluation_attempts(run_id);
+CREATE TABLE IF NOT EXISTS evaluation_cycles (
+    cycle_id TEXT PRIMARY KEY, started_at TEXT NOT NULL, completed_at TEXT NOT NULL,
+    eligible_markets INTEGER NOT NULL, selected_markets INTEGER NOT NULL,
+    unique_families INTEGER NOT NULL, forecasts INTEGER NOT NULL,
+    attempts INTEGER NOT NULL, failed_attempts INTEGER NOT NULL,
+    duration_ms INTEGER NOT NULL, compute_seconds REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS evaluation_outcomes (
     episode_hash TEXT PRIMARY KEY,
     outcome INTEGER NOT NULL CHECK(outcome IN (0, 1)),

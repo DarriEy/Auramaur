@@ -11,6 +11,7 @@ import hashlib
 import inspect
 import json
 import math
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
@@ -219,8 +220,11 @@ class IntelligenceEvalRunner:
         return tuple(await asyncio.gather(*(self._run_treatment(episode, t) for t in treatments)))
 
     async def _invoke(self, spec: TreatmentSpec, request: GenerationRequest) -> ForecastAttempt:
+        queued_at = time.monotonic()
+        queue_ms = 0
         try:
             async with self._semaphore:
+                queue_ms = int((time.monotonic() - queued_at) * 1000)
                 adapter = spec.arm.adapter
                 call = adapter.generate if hasattr(adapter, "generate") else adapter
                 response = call(request)
@@ -228,7 +232,9 @@ class IntelligenceEvalRunner:
                     response = await response
             if not isinstance(response, AdapterResponse):
                 raise TypeError("adapter must return AdapterResponse")
-            telemetry = _freeze(response.telemetry)
+            telemetry_values = dict(response.telemetry)
+            telemetry_values["queue_ms"] = queue_ms
+            telemetry = _freeze(telemetry_values)
             forecast = _parse(response.output)
             return ForecastAttempt(request.stage, request.sample_index, request.seed, forecast, telemetry)
         except Exception as exc:  # Model, transport, and parse failures are observations.
@@ -237,7 +243,7 @@ class IntelligenceEvalRunner:
                 request.sample_index,
                 request.seed,
                 None,
-                MappingProxyType({}),
+                MappingProxyType({"queue_ms": queue_ms}),
                 f"{type(exc).__name__}: {exc}",
             )
 

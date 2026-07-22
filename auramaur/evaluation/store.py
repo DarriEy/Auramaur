@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 from auramaur.evaluation.domain import (
@@ -82,6 +83,43 @@ class EvaluationStore:
                  forecast.max_acceptable_price, forecast.thesis,
                  forecast.uncertainty, json.dumps(forecast.evidence_ids)),
             )
+
+    async def put_attempt(self, run_id, episode_hash, attempt) -> None:
+        """Retain raw samples, critics, telemetry, and failures."""
+        attempt_id = hashlib.sha256(
+            f"{run_id}:{attempt.stage}:{attempt.sample_index}".encode()).hexdigest()
+        forecast = attempt.forecast
+        async with self._db.transaction():
+            await self._db.execute(
+                """INSERT OR REPLACE INTO evaluation_attempts
+                   (attempt_id,run_id,episode_hash,stage,sample_index,seed,prob_yes,
+                    action,confidence,thesis,telemetry_json,error)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (attempt_id, run_id, episode_hash, attempt.stage, attempt.sample_index,
+                 attempt.seed, None if forecast is None else forecast.prob_yes,
+                 None if forecast is None else forecast.action,
+                 None if forecast is None else forecast.confidence,
+                 "" if forecast is None else (forecast.thesis or ""),
+                 json.dumps(dict(attempt.telemetry), sort_keys=True), attempt.error or ""))
+
+    async def latest_market_observations(self) -> dict[tuple[str, str], dict]:
+        rows = await self._db.fetchall(
+            """SELECT e.venue,e.market_id,e.observed_at,e.market_prob_yes,e.event_family
+                 FROM evaluation_episodes e JOIN
+                 (SELECT venue,market_id,MAX(observed_at) observed_at
+                    FROM evaluation_episodes GROUP BY venue,market_id) latest
+                 ON latest.venue=e.venue AND latest.market_id=e.market_id
+                 AND latest.observed_at=e.observed_at""")
+        return {(r["venue"].lower(), r["market_id"]): dict(r) for r in rows}
+
+    async def put_cycle(self, values: dict) -> None:
+        keys = ("cycle_id","started_at","completed_at","eligible_markets",
+                "selected_markets","unique_families","forecasts","attempts",
+                "failed_attempts","duration_ms","compute_seconds")
+        async with self._db.transaction():
+            await self._db.execute(
+                "INSERT INTO evaluation_cycles VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                tuple(values[key] for key in keys))
 
     async def settle(self, outcome: EvaluationOutcome) -> None:
         if await self.get_episode(outcome.episode_hash) is None:

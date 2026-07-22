@@ -124,11 +124,15 @@ class StrategyTaskMixin:
         while self._running:
             if await self._check_kill_switch():
                 return
+            started = asyncio.get_running_loop().time()
             try:
                 await service.run_once()
             except Exception as exc:  # noqa: BLE001 — shadow task fails isolated
                 log.error("intelligence_eval.cycle_error", error=str(exc))
-            await asyncio.sleep(interval)
+            # Fixed-start cadence: cycle runtime consumes its interval instead of
+            # being added to it. Overruns restart immediately without overlap.
+            elapsed = asyncio.get_running_loop().time() - started
+            await asyncio.sleep(max(0, interval - elapsed))
 
     async def _task_term_structure(self) -> None:
         """Periodic deadline-ladder curve reader (paper-forced; one LLM read

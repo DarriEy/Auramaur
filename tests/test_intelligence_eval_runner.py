@@ -59,6 +59,7 @@ async def test_stable_seeds_aggregation_and_concurrency():
     assert first.final_forecast.prob_yes == pytest.approx(.5)
     assert first.final_forecast.action == "ABSTAIN"
     assert a.peak <= 2
+    assert all(item.telemetry["queue_ms"] >= 0 for item in first.attempts)
 
 
 @pytest.mark.asyncio
@@ -94,6 +95,7 @@ async def test_partial_and_parse_failures_are_recorded():
     assert [x.succeeded for x in result.attempts] == [False, False, True]
     assert "invalid JSON" in result.attempts[0].error
     assert "provider down" in result.attempts[1].error
+    assert result.attempts[1].telemetry["queue_ms"] >= 0
     assert result.final_forecast.prob_yes == .75
 
 
