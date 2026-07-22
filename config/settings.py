@@ -574,7 +574,18 @@ class LongHorizonConfig(BaseModel):
     band_hi: float = 0.92
     min_edge: float = 0.03
     stake_usd: float = 10.0
+    # Open-book cap RAMPS from max_open toward max_open_plateau at
+    # max_open_ramp_per_week slots/week (anchored to the pillar's first trade).
+    # A truly long-horizon book holds positions for months — a flat cap freezes
+    # the book at day-one size and starves the graduation ledger (3 resolved
+    # events/90d against a bar of 30); ramping keeps NEW entries flowing while
+    # early holdings age toward resolution, and the plateau bounds capital
+    # lock-up. Set ramp to 0 for the old flat-cap behavior. Per-venue: the
+    # Polymarket and Kalshi instances each run their own ramp off their own
+    # first trade.
     max_open: int = 30
+    max_open_plateau: int = 60
+    max_open_ramp_per_week: float = 3.0
     max_entries_per_cycle: int = 5
     # Raised 300->500 (2026-06-29): the binding constraint on data collection was
     # Pagination depth for the DATED scan (see _scan_long_dated). The 06-29

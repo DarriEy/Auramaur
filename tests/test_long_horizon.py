@@ -398,3 +398,88 @@ async def test_decay_harvest_skips_below_floor_and_stale_marks():
         assert await db.fetchone("SELECT 1 FROM pnl_ledger") is None
     finally:
         await db.close()
+
+
+# ----------------------------------------------------------------------
+# Ramped book cap — max_open grows toward the plateau as the book ages
+# ----------------------------------------------------------------------
+
+def test_ramp_cap_is_flat_before_first_trade():
+    """With no trade history the cap stays at max_open."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            pillar, _ = _pillar(db, _settings(max_open=30, max_open_plateau=60,
+                                              max_open_ramp_per_week=3.0), [])
+            cap = await pillar._effective_max_open(pillar._settings.long_horizon)
+            assert cap == 30
+        finally:
+            await db.close()
+    asyncio.run(run())
+
+
+def test_ramp_cap_grows_with_book_age_and_plateaus():
+    """Cap = max_open + ramp*weeks since the pillar's first trade, clamped."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            five_weeks_ago = (datetime.now(timezone.utc)
+                              - timedelta(weeks=5)).isoformat()
+            await db.execute(
+                """INSERT INTO trades (market_id, side, size, price, is_paper,
+                       status, exchange, strategy_source, timestamp)
+                   VALUES ('m-old', 'BUY', 10, 0.7, 1, 'paper', 'polymarket',
+                       'long_horizon', ?)""", (five_weeks_ago,))
+            await db.commit()
+            cfg_kw = dict(max_open=30, max_open_plateau=60,
+                          max_open_ramp_per_week=3.0)
+            pillar, _ = _pillar(db, _settings(**cfg_kw), [])
+            cap = await pillar._effective_max_open(pillar._settings.long_horizon)
+            assert cap == 45  # 30 + 3*5
+
+            # A much older anchor clamps at the plateau.
+            pillar2, _ = _pillar(db, _settings(**cfg_kw), [])
+            pillar2._first_trade_ts = (datetime.now(timezone.utc)
+                                       - timedelta(weeks=52)).isoformat()
+            cap2 = await pillar2._effective_max_open(pillar2._settings.long_horizon)
+            assert cap2 == 60
+
+            # Ramp disabled -> old flat behavior regardless of history.
+            pillar3, _ = _pillar(db, _settings(max_open=30, max_open_plateau=60,
+                                               max_open_ramp_per_week=0.0), [])
+            cap3 = await pillar3._effective_max_open(pillar3._settings.long_horizon)
+            assert cap3 == 30
+        finally:
+            await db.close()
+    asyncio.run(run())
+
+
+def test_ramp_anchor_is_per_venue_tag():
+    """The Kalshi instance ramps off long_horizon_kalshi trades only — a
+    Polymarket trade history must not age the Kalshi book's cap."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            await db.execute(
+                """INSERT INTO trades (market_id, side, size, price, is_paper,
+                       status, exchange, strategy_source, timestamp)
+                   VALUES ('m-poly', 'BUY', 10, 0.7, 1, 'paper', 'polymarket',
+                       'long_horizon', ?)""",
+                ((datetime.now(timezone.utc) - timedelta(weeks=8)).isoformat(),))
+            await db.commit()
+            s = _settings(max_open=30, max_open_plateau=60,
+                          max_open_ramp_per_week=3.0)
+            disc = MagicMock(); disc.get_markets = AsyncMock(return_value=[])
+            cal = MagicMock(); cal.record_prediction = AsyncMock()
+            kalshi = LongHorizonPillar(
+                db=db, settings=s, discovery=disc, exchange=_exchange(),
+                risk_manager=_risk(), pnl_tracker=PnLTracker(db, s),
+                calibration=cal, venue="kalshi")
+            cap = await kalshi._effective_max_open(s.long_horizon)
+            assert cap == 30  # no long_horizon_kalshi trades -> unramped
+        finally:
+            await db.close()
+    asyncio.run(run())
