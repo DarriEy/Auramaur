@@ -133,3 +133,40 @@ async def test_ensure_schema_false_still_initializes_fresh_file(tmp_path):
         assert row is not None  # full init ran despite the flag
     finally:
         await db.close()
+
+@pytest.mark.asyncio
+async def test_order_position_heartbeat_and_lineage_writes_serialize(tmp_path):
+    """The four writers active in a trading cycle cannot nest/bleed on the
+    shared connection, even when they all become runnable together."""
+    from auramaur.broker.execution_gateway import ExecutionGateway
+    from auramaur.monitoring.heartbeat import beat
+
+    db = await _fresh_db(tmp_path)
+    gateway = object.__new__(ExecutionGateway)
+    gateway.db = db
+
+    async def owned_writer(owner: str, key: str):
+        async with db.transaction(owner=owner):
+            await db.execute("INSERT INTO t (k, v) VALUES (?, 1)", (key,))
+            await asyncio.sleep(0.01)
+
+    try:
+        await asyncio.gather(
+            gateway._serialized_write(
+                "INSERT INTO t (k, v) VALUES (?, 1)", ("order",)),
+            owned_writer("position_sync", "position"),
+            beat(db, "concurrent_heartbeat", entries=1),
+            owned_writer("lineage", "lineage"),
+        )
+        rows = await db.fetchall("SELECT k FROM t ORDER BY k")
+        assert [row["k"] for row in rows] == ["lineage", "order", "position"]
+        heartbeat = await db.fetchone(
+            "SELECT cycles FROM strategy_heartbeats WHERE strategy = ?",
+            ("concurrent_heartbeat",),
+        )
+        assert heartbeat["cycles"] == 1
+        assert db._txn_task is None
+        assert db._txn_owner is None
+        assert db.db._conn.in_transaction is False
+    finally:
+        await db.close()

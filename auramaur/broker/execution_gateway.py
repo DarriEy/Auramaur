@@ -295,6 +295,11 @@ class ExecutionGateway:
                                 order_id=res_a.result.order_id, error=str(e))
         return res_a, res_b
 
+    async def _serialized_write(self, sql: str, params: tuple = ()) -> None:
+        """Land gateway bookkeeping without bleeding across shared writers."""
+        async with self.db.transaction(owner="execution_gateway"):
+            await self.db.execute(sql, params)
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
@@ -329,13 +334,12 @@ class ExecutionGateway:
             )
             try:
                 # Shorter block than build failures: the book can move.
-                await self.db.execute(
+                await self._serialized_write(
                     """INSERT OR REPLACE INTO order_build_drops
                        (market_id, blocked_until, reason)
                        VALUES (?, datetime('now', '+30 minutes'), ?)""",
                     (market.id, f"unmarketable: {skip}"),
                 )
-                await self.db.commit()
             except Exception:
                 pass
             return None
@@ -352,13 +356,12 @@ class ExecutionGateway:
             # order here is a genuine build failure (bad price/token). Block
             # only briefly so a transient issue can retry next cycle.
             try:
-                await self.db.execute(
+                await self._serialized_write(
                     """INSERT OR REPLACE INTO order_build_drops
                        (market_id, blocked_until, reason)
                        VALUES (?, datetime('now', '+2 hours'), ?)""",
                     (market.id, f"order build failed at ${size_dollars:.2f}"),
                 )
-                await self.db.commit()
             except Exception:
                 pass  # Table may not exist yet
             return None
@@ -489,13 +492,12 @@ class ExecutionGateway:
         # Cooldown on API errors — retry in 30 min, not every cycle
         if result.status == "rejected" and result.order_id == "ERROR":
             try:
-                await self.db.execute(
+                await self._serialized_write(
                     """INSERT OR REPLACE INTO order_build_drops
                        (market_id, blocked_until, reason)
                        VALUES (?, datetime('now', '+30 minutes'), ?)""",
                     (order.market_id, "place_order API error"),
                 )
-                await self.db.commit()
             except Exception:
                 pass
 
@@ -506,14 +508,13 @@ class ExecutionGateway:
             if order.side == OrderSide.SELL:
                 slippage_bps = -slippage_bps  # For sells, lower fill = worse
             try:
-                await self.db.execute(
+                await self._serialized_write(
                     """INSERT INTO slippage_log (market_id, exchange, side, expected_price, filled_price, slippage_bps, size, order_type)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                     (order.market_id, order.exchange or exchange_name, order.side.value,
                      order.price, result.filled_price, round(slippage_bps, 2), order.size,
                      order.order_type.value if hasattr(order, 'order_type') else 'limit'),
                 )
-                await self.db.commit()
             except Exception:
                 pass
 
@@ -554,7 +555,7 @@ class ExecutionGateway:
             # PnLTracker writes authoritative execution rows to `fills`.
             try:
                 trade_status = "filled" if result.status == "paper" else result.status
-                await self.db.execute(
+                await self._serialized_write(
                     """INSERT INTO trades
                        (market_id, signal_id, side, size, price, is_paper,
                         order_id, status, kelly_fraction, exchange, strategy_source)
@@ -573,7 +574,6 @@ class ExecutionGateway:
                         strategy_source,
                     ),
                 )
-                await self.db.commit()
             except Exception as e:
                 log.debug("engine.trade_mirror_error", error=str(e))
 

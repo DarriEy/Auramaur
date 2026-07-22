@@ -16,7 +16,7 @@ execution:
   # Exits always bypass it.
   polymarket_geoblock_mode: "advisory"
   polymarket_geoblock_ttl_seconds: 300
-  paper_initial_balance: 111.0
+  paper_initial_balance: 10111.0
   limit_order_ttl_seconds: 120
   # Max cents above the reference price the router may pay to lift the ask;
   # crossing additionally requires post-cross edge >= risk.min_edge_pct.

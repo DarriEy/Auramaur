@@ -41,7 +41,7 @@ async def beat(db, strategy: str, *, status: str = "ok",
     to kill the pillar it monitors."""
     try:
         if not getattr(db, "_heartbeat_schema_ready", False):
-            async with db.transaction():
+            async with db.transaction(owner="heartbeat"):
                 await db.execute(_SCHEMA)
             db._heartbeat_schema_ready = True
         detail_json = ""
@@ -50,7 +50,7 @@ async def beat(db, strategy: str, *, status: str = "ok",
                 detail_json = json.dumps(detail, default=str)[:2000]
             except Exception:
                 detail_json = ""
-        async with db.transaction():
+        async with db.transaction(owner="heartbeat"):
             await db.execute(
                 """INSERT INTO strategy_heartbeats
                        (strategy, last_beat_at, status, entries, cycles,

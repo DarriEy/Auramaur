@@ -111,3 +111,22 @@ async def test_resolved_position_does_not_drain_balance():
     # Spendable = 1000 - 30 = 970 (NOT 1000 - 100 the BUY cost): cash recovered.
     assert await pt._compute_balance() == pytest.approx(970)
     await db.close()
+
+@pytest.mark.asyncio
+async def test_insufficient_balance_reports_amount_and_suppresses_unchanged_retry(paper):
+    paper._compute_balance = AsyncMock(side_effect=[5.72, 5.72, 20.0])
+    order = Order(market_id="cash-blocked", side=OrderSide.BUY, size=10, price=1.0)
+
+    first = await paper.execute(order)
+    repeated = await paper.execute(order)
+    after_cash_change = await paper.execute(order)
+
+    assert first.status == "rejected"
+    assert first.error_message == (
+        "insufficient paper balance: $5.72, requires $10.00")
+    assert first.order_id.startswith("PAPER-")
+    assert repeated.status == "rejected"
+    assert repeated.order_id == "SKIP_CASH"
+    assert repeated.error_message == first.error_message
+    assert after_cash_change.status == "paper"
+    assert paper.trade_count == 1
