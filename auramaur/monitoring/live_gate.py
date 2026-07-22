@@ -46,9 +46,14 @@ class PreflightReport:
         return [r for r in self.results if r.severity == "WARN"]
 
 
-async def preflight(settings, db: Database) -> PreflightReport:
+async def preflight(settings, db: Database, tracker=None) -> PreflightReport:
     """Run the operational live-readiness checks. Never raises — a check that
-    can't evaluate degrades to WARN rather than crashing the gate."""
+    can't evaluate degrades to WARN rather than crashing the gate.
+
+    ``tracker`` is the risk manager's own PortfolioTracker when available: its
+    equity-fed drawdown (note_equity) is what the in-cycle gates read, so the
+    preflight should judge the same number instead of re-deriving a cold one.
+    """
     report = PreflightReport()
 
     def add(name: str, severity: Severity, detail: str) -> None:
@@ -83,9 +88,15 @@ async def preflight(settings, db: Database) -> PreflightReport:
         add("fee_model", "BLOCK", f"unavailable: {str(e)[:80]}")
 
     # 4. Drawdown — never arm fresh entries through a breached drawdown limit.
+    # The cold-start fallback must be scoped to the armed book (settings ->
+    # _mode_flag): the unscoped estimate summed PAPER unrealised marks into the
+    # LIVE gate — the same leak get_daily_pnl fixed for the daily-loss gate —
+    # and latched a phantom block at every startup.
     try:
         from auramaur.risk.portfolio import PortfolioTracker
-        dd = await PortfolioTracker(db).get_drawdown()
+        if tracker is None:
+            tracker = PortfolioTracker(db, settings=settings)
+        dd = await tracker.get_drawdown()
         maxdd = float(settings.risk.max_drawdown_pct)
         if dd >= maxdd:
             add("drawdown", "BLOCK", f"{dd:.1f}% >= limit {maxdd:.1f}%")

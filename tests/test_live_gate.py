@@ -91,6 +91,64 @@ async def test_zero_marked_live_positions_block(tmp_path, monkeypatch):
         await db.close()
 
 
+@pytest.mark.asyncio
+async def test_paper_book_losses_do_not_block_live_drawdown(tmp_path, monkeypatch):
+    """Regression (2026-07-22): the cold-start drawdown fallback summed PAPER
+    unrealised marks into the LIVE gate and latched a phantom block at every
+    startup. Deep paper losses + a healthy live book must read OK."""
+    monkeypatch.chdir(tmp_path)
+    db = await _db()
+    try:
+        s = Settings()
+        s.auramaur_live = True
+        s.execution.live = True
+        assert s.is_live
+        await db.execute(
+            "INSERT INTO daily_stats (date, peak_balance) VALUES (date('now'), 2000.0)")
+        # Paper book down 600 (30% of peak — would BLOCK if it leaked in)
+        await db.execute(
+            """INSERT INTO portfolio
+               (market_id, exchange, side, size, avg_price, current_price,
+                token, is_paper, updated_at)
+               VALUES ('paper1', 'polymarket', 'BUY', 2000, 0.5, 0.2, 'YES', 1,
+                       datetime('now'))""")
+        # Live book slightly up
+        await db.execute(
+            """INSERT INTO portfolio
+               (market_id, exchange, side, size, avg_price, current_price,
+                token, is_paper, updated_at)
+               VALUES ('live1', 'polymarket', 'BUY', 100, 0.5, 0.6, 'YES', 0,
+                       datetime('now'))""")
+        await db.commit()
+        rep = await preflight(s, db)
+        sev = {r.name: r.severity for r in rep.results}
+        assert sev["drawdown"] == "OK", [r for r in rep.results if r.name == "drawdown"]
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_preflight_prefers_warm_tracker(tmp_path, monkeypatch):
+    """A provided (risk-manager) tracker's equity-fed drawdown is authoritative:
+    the preflight must judge the number the in-cycle gates read."""
+    from auramaur.risk.portfolio import PortfolioTracker
+
+    monkeypatch.chdir(tmp_path)
+    db = await _db()
+    try:
+        s = Settings()
+        tracker = PortfolioTracker(db, settings=s)
+        tracker._current_drawdown_pct = 20.0  # breached (limit 15%)
+        rep = await preflight(s, db, tracker=tracker)
+        assert any(b.name == "drawdown" for b in rep.blocks)
+        tracker._current_drawdown_pct = 1.0
+        rep = await preflight(s, db, tracker=tracker)
+        sev = {r.name: r.severity for r in rep.results}
+        assert sev["drawdown"] == "OK"
+    finally:
+        await db.close()
+
+
 def test_committed_defaults_yaml_is_not_live():
     """The TRACKED config/defaults.yaml must ship with execution.live: false.
 

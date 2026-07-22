@@ -88,6 +88,30 @@ async def test_recent_persisted_peak_still_binds_across_restart():
 
 
 @pytest.mark.asyncio
+async def test_cold_fallback_scopes_to_the_armed_book():
+    """With settings attached, the legacy peak+unrealised fallback only sums
+    the armed book's positions — paper marks must not read as live drawdown."""
+
+    class _Live:
+        is_live = True
+
+    db = Database(":memory:")
+    await db.connect()
+    tracker = PortfolioTracker(db, settings=_Live())
+    await db.execute(
+        "INSERT INTO daily_stats (date, peak_balance) VALUES (date('now'), 2000.0)")
+    await db.execute(
+        """INSERT INTO portfolio
+           (market_id, exchange, side, size, avg_price, current_price,
+            token, is_paper, updated_at)
+           VALUES ('paper1', 'polymarket', 'BUY', 2000, 0.5, 0.2, 'YES', 1,
+                   datetime('now'))""")
+    await db.commit()
+    assert await tracker.get_drawdown() == pytest.approx(0.0)
+    await db.close()
+
+
+@pytest.mark.asyncio
 async def test_zero_or_negative_equity_is_ignored():
     db, tracker = await _tracker()
     for _ in range(3):

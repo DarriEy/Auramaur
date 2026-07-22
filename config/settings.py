@@ -227,6 +227,10 @@ class IntervalsConfig(BaseModel):
     analysis_seconds: int = 180
     portfolio_check_seconds: int = 60
     dashboard_refresh_seconds: int = 5
+    # Live-readiness preflight re-check (monitoring/live_gate): clears a
+    # startup BLOCK once conditions recover (equity feed warm, IB Gateway
+    # re-authenticated) and latches a new BLOCK without waiting for a restart.
+    live_gate_recheck_seconds: int = 600
     # Adaptive scheduling — scale intensity by market activity
     adaptive_enabled: bool = True
     peak_hours_utc: list[int] = Field(
