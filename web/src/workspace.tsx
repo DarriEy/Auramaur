@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { DashboardState, HealthTop, Position, Signal } from "./types";
 import { ago, compactNumber, deltaClass, exactTime, humanize, money, price } from "./format";
 
-export type View = "overview" | "portfolio" | "opportunities" | "execution" | "intelligence" | "system";
+export type View = "overview" | "portfolio" | "opportunities" | "compare" | "execution" | "intelligence" | "system";
 type Inspectable =
   | { kind: "position"; value: Position }
   | { kind: "signal"; value: Signal; related?: Signal[] }
@@ -13,10 +13,39 @@ const VIEWS: { id: View; label: string }[] = [
   { id: "overview", label: "Overview" },
   { id: "portfolio", label: "Portfolio" },
   { id: "opportunities", label: "Opportunities" },
+  { id: "compare", label: "Compare" },
   { id: "execution", label: "Execution" },
   { id: "intelligence", label: "Intelligence" },
   { id: "system", label: "System" },
 ];
+
+const STRATEGY_HELP: Record<string, { family: string; description: string }> = {
+  llm: { family: "Forecast", description: "General model-assisted probability estimate." },
+  bias_harvest: { family: "Relative value", description: "Looks for repeatable market-pricing bias." },
+  long_horizon: { family: "Forecast", description: "Targets slower-moving, longer-dated mispricing." },
+  market_maker: { family: "Liquidity", description: "Two-sided quoting intended to capture spread." },
+  cross_exchange_arb: { family: "Arbitrage", description: "Compares equivalent outcomes across venues." },
+  entailment_arb: { family: "Arbitrage", description: "Checks logically related markets for inconsistent prices." },
+  resolution_lens: { family: "Event-driven", description: "Focuses on resolution mechanics and near-expiry evidence." },
+};
+
+function strategyHelp(name: string) {
+  const base = name.replace(/_(kalshi|polymarket|haiku|opus|gpro|wide)$/, "");
+  return STRATEGY_HELP[name] ?? STRATEGY_HELP[base] ?? {
+    family: humanize(base), description: `Signals emitted by the ${humanize(name)} strategy.`,
+  };
+}
+
+function StrategyName({ name }: { name: string }) {
+  const help = strategyHelp(name);
+  return <span className="strategy-name" title={help.description}><strong>{humanize(name)}</strong><small>{help.family}</small></span>;
+}
+
+function utcTime(value?: string | null) {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? `${date.toISOString().slice(0, 19).replace("T", " ")} UTC` : value;
+}
 
 function useStored(key: string, fallback: string) {
   const [value, setValue] = useState(() => typeof localStorage === "undefined" ? fallback : localStorage.getItem(key) ?? fallback);
@@ -159,6 +188,25 @@ function Sparkline({ values }: { values: number[] }) {
   );
 }
 
+function BotLoopFeed({ s, onInspect }: { s: DashboardState; onInspect: (i: Inspectable) => void }) {
+  const signals = s.signals.slice(0, 7);
+  const repeated = signals.length >= 3 && new Set(signals.slice(0, 3).map((item) => item.market_id)).size === 1;
+  return <section className="loop-feed" aria-labelledby="loop-title">
+    <header className="section-heading"><div><span className="eyebrow">Live market loop</span>
+      <h2 id="loop-title">{signals.length ? "Latest market evaluations" : "Waiting for an evaluation"}</h2></div>
+      <span className="live-indicator"><span /> Streaming</span></header>
+    {repeated && <p className="loop-warning">The latest evaluations repeat one market. Review the decision timeline for possible lack of progress.</p>}
+    {signals.length ? <ol>{signals.map((signal, index) => <li key={`${signal.market_id}-${signal.timestamp}-${index}`}>
+      <button onClick={() => onInspect({ kind: "signal", value: signal,
+        related: s.signals.filter((item) => item.market_id === signal.market_id) })}>
+        <time title={isoAge(signal.timestamp)}>{utcTime(signal.timestamp)}</time>
+        <span className="loop-market"><strong>{signal.question}</strong><small>{signal.exchange ?? "Unknown venue"} · <StrategyName name={signal.strategy_source} /></small></span>
+        <span className="action-chip">{signal.action}</span><span className={deltaClass(signal.edge)}>{signal.edge == null ? "—" : `${signal.edge.toFixed(1)}%`}</span>
+      </button>
+    </li>)}</ol> : <div className="empty-state">No market evaluations are present in the current snapshot.</div>}
+  </section>;
+}
+
 function Overview({ s, scope, historyIsCurrent, onView, onInspect }: {
   s: DashboardState; scope: string; historyIsCurrent: boolean;
   onView: (v: View) => void; onInspect: (i: Inspectable) => void;
@@ -175,6 +223,7 @@ function Overview({ s, scope, historyIsCurrent, onView, onInspect }: {
         <p>Current posture, changes since your last browser visit, and work requiring attention.</p></div></header>
       <SinceLastVisit s={s} scope={scope} />
       <AttentionCenter s={s} onView={onView} onInspect={onInspect} />
+      <BotLoopFeed s={s} onInspect={onInspect} />
       <section className="hero-metrics" aria-label="Account summary">
         <article><span>Capital</span><strong>{money(s.balance)}</strong><small>{money(s.position_value)} deployed</small></article>
         <article><span>Total P&amp;L</span><strong className={deltaClass(s.total_pnl)}>{money(s.total_pnl, true)}</strong>
@@ -195,7 +244,7 @@ function Overview({ s, scope, historyIsCurrent, onView, onInspect }: {
           {newest && <button className="summary-row" onClick={() => onInspect({ kind: "signal", value: newest })}>
             <span>{newest.question}</span><strong>{newest.edge == null ? "—" : `${newest.edge.toFixed(1)}% edge`}</strong>
           </button>}
-          <p>{newest ? `${newest.strategy_source} · ${isoAge(newest.timestamp)}` : "No recent signals"}</p>
+          <p>{newest ? <><StrategyName name={newest.strategy_source} /> · {utcTime(newest.timestamp)}</> : "No recent signals"}</p>
         </SummaryCard>
         <SummaryCard title="Execution" status={s.reconciliation?.in_sync ? "In sync" : "Review required"} onOpen={() => onView("execution")}>
           <p>{s.trade_count} fills · {Object.keys(s.venues).length} venues</p>
@@ -297,7 +346,7 @@ function Portfolio({ s, onInspect }: { s: DashboardState; onInspect: (i: Inspect
         </section>
         <section className="section-block"><h2>Strategy realized performance</h2>
           <DataTable headers={["Strategy", "Entries", "Fees", "Realized"]}>
-            {s.strategies.map((row) => <tr key={row.strategy}><td>{row.strategy}</td>
+            {s.strategies.map((row) => <tr key={row.strategy}><td><StrategyName name={row.strategy} /></td>
               <td className="num">{row.entries}</td><td className="num">{money(row.fees)}</td>
               <td className={`num ${deltaClass(row.pnl)}`}>{money(row.pnl, true)}</td></tr>)}
           </DataTable>
@@ -311,50 +360,129 @@ function Opportunities({ s, onInspect }: { s: DashboardState; onInspect: (i: Ins
   const [query, setQuery] = useStored("auramaur.signals.query", "");
   const [strategy, setStrategy] = useStored("auramaur.signals.strategy", "all");
   const [action, setAction] = useStored("auramaur.signals.action", "all");
+  const [venue, setVenue] = useStored("auramaur.signals.venue", "all");
+  const [sort, setSort] = useStored("auramaur.signals.sort", "edge");
+  const [edgeFloor, setEdgeFloor] = useStored("auramaur.signals.edge", "0");
+  const [selected, setSelected] = useState<string[]>([]);
   const strategies = [...new Set(s.signals.map((signal) => signal.strategy_source))].sort();
   const actions = [...new Set(s.signals.map((signal) => signal.action))].sort();
+  const venues = [...new Set(s.signals.map((signal) => signal.exchange).filter(Boolean))].sort() as string[];
   const grouped = useMemo(() => {
     const map = new Map<string, Signal[]>();
     s.signals.filter((signal) => {
       if (strategy !== "all" && signal.strategy_source !== strategy) return false;
-      if (action !== "all" && signal.action !== action) return false;
+      if (action === "__actionable" && ["hold", "skip", "abstain", "none"].includes(signal.action.toLowerCase())) return false;
+      if (action !== "all" && action !== "__actionable" && signal.action !== action) return false;
+      if (venue !== "all" && signal.exchange !== venue) return false;
+      if (Math.abs(signal.edge ?? 0) < Number(edgeFloor)) return false;
       return !query || [signal.question, signal.market_id, signal.exchange, signal.strategy_source]
         .some((value) => value?.toLowerCase().includes(query.toLowerCase()));
     }).forEach((signal) => map.set(signal.market_id, [...(map.get(signal.market_id) ?? []), signal]));
-    return [...map.values()].sort((a, b) => Math.abs(b[0].edge ?? 0) - Math.abs(a[0].edge ?? 0));
-  }, [s.signals, query, strategy, action]);
+    return [...map.values()].sort((a, b) => sort === "recent"
+      ? new Date(b[0].timestamp ?? 0).getTime() - new Date(a[0].timestamp ?? 0).getTime()
+      : sort === "agreement" ? b.length - a.length
+      : Math.abs(b[0].edge ?? 0) - Math.abs(a[0].edge ?? 0));
+  }, [s.signals, query, strategy, action, venue, edgeFloor, sort]);
+  const latestById = new Map(grouped.map((signals) => [signals[0].market_id, signals[0]]));
+  const compared = selected.map((id) => latestById.get(id) ?? s.signals.find((signal) => signal.market_id === id)).filter(Boolean) as Signal[];
+  const actionable = grouped.filter((signals) => !["hold", "skip", "abstain", "none"].includes(signals[0].action.toLowerCase())).length;
+  const averageEdge = grouped.length ? grouped.reduce((sum, signals) => sum + Math.abs(signals[0].edge ?? 0), 0) / grouped.length : 0;
+  const toggleCompare = (id: string) => setSelected((current) => current.includes(id)
+    ? current.filter((item) => item !== id) : current.length < 3 ? [...current, id] : current);
   return (
     <Workspace title="Opportunities" subtitle="Signals grouped by market so repeated evaluations read as one decision timeline."
       action={<button onClick={() => download("auramaur-signals.json", s.signals)}>Export JSON</button>}>
+      <div className="opportunity-metrics" aria-label="Opportunity summary">
+        <button onClick={() => { setAction("all"); setEdgeFloor("0"); }}><span>Markets</span><strong>{grouped.length}</strong><small>{s.signals.length} evaluations</small></button>
+        <button onClick={() => setEdgeFloor("5")}><span>Meaningful edge</span><strong>{grouped.filter((rows) => Math.abs(rows[0].edge ?? 0) >= 5).length}</strong><small>At least 5 percentage points</small></button>
+        <button onClick={() => setAction("__actionable")}><span>Actionable</span><strong>{actionable}</strong><small>Excludes hold and abstain</small></button>
+        <div><span>Average absolute edge</span><strong>{averageEdge.toFixed(1)}%</strong><small>Current filtered set</small></div>
+      </div>
       <div className="toolbar">
         <input aria-label="Search opportunities" placeholder="Search market, ID, venue, strategy…" value={query} onChange={(e) => setQuery(e.target.value)} />
         <select aria-label="Filter signal strategy" value={strategy} onChange={(e) => setStrategy(e.target.value)}>
           <option value="all">All strategies</option>{strategies.map((value) => <option key={value}>{value}</option>)}
         </select>
         <select aria-label="Filter signal action" value={action} onChange={(e) => setAction(e.target.value)}>
-          <option value="all">All actions</option>{actions.map((value) => <option key={value}>{value}</option>)}
+          <option value="all">All actions</option><option value="__actionable">Actionable only</option>{actions.map((value) => <option key={value}>{value}</option>)}
         </select>
-        <button className="secondary-button" disabled={!query && strategy === "all" && action === "all"}
-          onClick={() => { setQuery(""); setStrategy("all"); setAction("all"); }}>Clear filters</button>
+        <select aria-label="Filter signal venue" value={venue} onChange={(e) => setVenue(e.target.value)}>
+          <option value="all">All venues</option>{venues.map((value) => <option key={value}>{value}</option>)}
+        </select>
+        <select aria-label="Minimum absolute edge" value={edgeFloor} onChange={(e) => setEdgeFloor(e.target.value)}>
+          <option value="0">Any edge</option><option value="2">Edge ≥ 2%</option><option value="5">Edge ≥ 5%</option><option value="10">Edge ≥ 10%</option>
+        </select>
+        <select aria-label="Sort opportunities" value={sort} onChange={(e) => setSort(e.target.value)}>
+          <option value="edge">Sort: strongest edge</option><option value="recent">Sort: most recent</option><option value="agreement">Sort: most evaluated</option>
+        </select>
+        <button className="secondary-button" disabled={!query && strategy === "all" && action === "all" && venue === "all" && edgeFloor === "0" && sort === "edge"}
+          onClick={() => { setQuery(""); setStrategy("all"); setAction("all"); setVenue("all"); setEdgeFloor("0"); setSort("edge"); }}>Clear filters</button>
       </div>
-      <p className="result-count">{grouped.length} markets from {s.signals.length} evaluations</p>
-      <DataTable headers={["Market", "Evaluations", "Strategy", "Model probability", "Market probability", "Edge", "Action", "Observed"]}
+      <p className="result-count">{grouped.length} markets · select up to three to compare · click a row for its timeline and evidence</p>
+      {compared.length > 0 && <section className="compare-tray" aria-label="Selected opportunity comparison"><header><div><span className="eyebrow">Side-by-side</span><h2>{compared.length} selected</h2></div><button className="text-button" onClick={() => setSelected([])}>Clear comparison</button></header>
+        <div>{compared.map((sig) => <article key={sig.market_id}><button className="remove-compare" aria-label={`Remove ${sig.question} from comparison`} onClick={() => toggleCompare(sig.market_id)}>×</button>
+          <strong>{sig.question}</strong><small>{sig.exchange ?? "Unknown venue"} · {utcTime(sig.timestamp)}</small>
+          <dl><div><dt>Model</dt><dd>{price(sig.claude_prob)}</dd></div><div><dt>Market</dt><dd>{price(sig.market_prob)}</dd></div>
+            <div><dt>Edge</dt><dd className={deltaClass(sig.edge)}>{sig.edge == null ? "—" : `${sig.edge.toFixed(1)}%`}</dd></div><div><dt>Action</dt><dd>{sig.action}</dd></div></dl>
+          <p>{sig.evidence_summary || "No evidence summary was recorded."}</p></article>)}</div>
+      </section>}
+      <DataTable headers={["Compare", "Market", "Venue", "Evaluations", "Strategy", "Confidence", "Model probability", "Market probability", "Edge", "Action", "Observed"]}
         empty={grouped.length === 0 ? "No opportunities match these filters." : undefined}>
         {grouped.map((signals) => {
           const sig = signals[0];
           const open = () => onInspect({ kind: "signal", value: sig, related: signals });
           return <tr key={sig.market_id} tabIndex={0} role="button" aria-label={`Inspect signal timeline for ${sig.question}`}
             onClick={open} onKeyDown={(event) => activateRow(event, open)}>
-            <td data-label="Market" className="market">{sig.question}</td><td data-label="Evaluations" className="num">{signals.length}</td><td data-label="Strategy">{sig.strategy_source}</td>
+            <td data-label="Compare"><input type="checkbox" aria-label={`Compare ${sig.question}`} checked={selected.includes(sig.market_id)} disabled={!selected.includes(sig.market_id) && selected.length >= 3}
+              onClick={(event) => event.stopPropagation()} onChange={() => toggleCompare(sig.market_id)} /></td>
+            <td data-label="Market" className="market"><strong>{sig.question}</strong>{sig.evidence_summary && <small className="evidence-preview">{sig.evidence_summary}</small>}</td>
+            <td data-label="Venue">{sig.exchange ?? "—"}</td><td data-label="Evaluations" className="num">{signals.length}</td><td data-label="Strategy"><StrategyName name={sig.strategy_source} /></td>
+            <td data-label="Confidence">{sig.confidence ? humanize(sig.confidence) : "—"}</td>
             <td data-label="Model probability" className="num">{price(sig.claude_prob)}</td><td data-label="Market probability" className="num">{price(sig.market_prob)}</td>
             <td data-label="Edge" className={`num ${deltaClass(sig.edge)}`}>{sig.edge == null ? "—" : `${sig.edge.toFixed(1)}%`}</td>
             <td data-label="Action"><span className="action-chip">{sig.action}</span></td>
-            <td data-label="Observed" title={exactTime(sig.timestamp)}>{isoAge(sig.timestamp)}</td>
+            <td data-label="Observed" title={isoAge(sig.timestamp)}>{utcTime(sig.timestamp)}</td>
           </tr>;
         })}
       </DataTable>
     </Workspace>
   );
+}
+
+function Compare({ s, onView }: { s: DashboardState; onView: (v: View) => void }) {
+  const [mode, setMode] = useStored("auramaur.compare.mode", "strategies");
+  const strategyRows = useMemo(() => {
+    const names = new Set([...s.strategies.map((row) => row.strategy), ...s.signals.map((row) => row.strategy_source)]);
+    return [...names].map((name) => {
+      const realized = s.strategies.find((row) => row.strategy === name);
+      const signals = s.signals.filter((row) => row.strategy_source === name);
+      const latest = signals.map((row) => row.timestamp).filter(Boolean).sort().at(-1);
+      const venues = [...new Set(signals.map((row) => row.exchange).filter(Boolean))];
+      return { name, realized, signals, latest, venues };
+    }).sort((a, b) => (b.realized?.pnl ?? 0) - (a.realized?.pnl ?? 0));
+  }, [s.strategies, s.signals]);
+  const venueRows = Object.entries(s.venues).sort(([a], [b]) => a.localeCompare(b));
+  return <Workspace title="Compare" subtitle="Put strategies or venues side by side using the same current snapshot.">
+    <div className="segmented" role="group" aria-label="Comparison type">
+      <button className={mode === "strategies" ? "active" : ""} onClick={() => setMode("strategies")}>Strategies</button>
+      <button className={mode === "venues" ? "active" : ""} onClick={() => setMode("venues")}>Venues</button>
+    </div>
+    {mode === "strategies" ? <DataTable headers={["Strategy", "Health", "Evaluations", "Venues", "Entries", "Fees", "Realized", "Latest observed"]}
+      empty={!strategyRows.length ? "No strategy data is available to compare." : undefined}>
+      {strategyRows.map((row) => {
+        const age = row.latest ? (new Date(s.now).getTime() - new Date(row.latest).getTime()) / 1000 : null;
+        return <tr key={row.name}><td><StrategyName name={row.name} /></td><td><Status age={age} /></td>
+          <td className="num">{row.signals.length}</td><td>{row.venues.join(", ") || "—"}</td>
+          <td className="num">{row.realized?.entries ?? 0}</td><td className="num">{money(row.realized?.fees ?? 0)}</td>
+          <td className={`num ${deltaClass(row.realized?.pnl ?? null)}`}>{money(row.realized?.pnl ?? 0, true)}</td>
+          <td title={row.latest ? isoAge(row.latest) : undefined}>{utcTime(row.latest)}</td></tr>;
+      })}</DataTable> : <DataTable headers={["Venue", "Health", "Balance detail", "Available", "Equity", "Snapshot UTC"]}
+        empty={!venueRows.length ? "No venue snapshots are available to compare." : undefined}>
+        {venueRows.map(([name, venue]) => <tr key={name}><td><strong>{humanize(name)}</strong></td><td><Status age={venue.age_seconds} /></td>
+          <td>{venue.detail}</td><td className="num">{venue.available == null ? "—" : money(venue.available)}</td>
+          <td className="num">{venue.equity == null ? "—" : money(venue.equity)}</td><td title={ago(venue.age_seconds)}>{utcTime(venue.fetched_at)}</td></tr>)}</DataTable>}
+    <p className="comparison-link">Need detail? <button className="text-button" onClick={() => onView(mode === "strategies" ? "opportunities" : "execution")}>Open the {mode === "strategies" ? "signal explorer" : "execution workspace"} →</button></p>
+  </Workspace>;
 }
 
 function Execution({ s, onInspect }: { s: DashboardState; onInspect: (i: Inspectable) => void }) {
@@ -370,7 +498,7 @@ function Execution({ s, onInspect }: { s: DashboardState; onInspect: (i: Inspect
       action={<button disabled={!recon} onClick={() => recon && download("auramaur-reconciliation.json", recon)}>Export reconciliation</button>}>
       <div className="venue-grid">{venues.map(([name, venue]) =>
         <article className="venue-card" key={name}><header><strong>{name}</strong><Status age={venue.age_seconds} /></header>
-          <p>{venue.detail}</p><small title={exactTime(venue.fetched_at)}>Recorded {ago(venue.age_seconds)}</small></article>)}</div>
+          <p>{venue.detail}</p><small title={ago(venue.age_seconds)}>Recorded {utcTime(venue.fetched_at)}</small></article>)}</div>
       <section className="section-block"><header className="section-heading"><div><span className="eyebrow">Reconciliation</span>
         <h2>{!recon?.available ? "Reconciliation unavailable" : recon.in_sync ? "Venue and ledger agree" : `${discrepancies.length} discrepancies`}</h2></div>
         {recon && <small title={exactTime(recon.fetched_at)}>Snapshot {isoAge(recon.fetched_at)}</small>}</header>
@@ -579,6 +707,7 @@ export function OperatorWorkspace({ s, scope = "default", historyIsCurrent = tru
     {view === "overview" && <main id="main-content" tabIndex={-1}><Overview s={s} scope={scope} historyIsCurrent={historyIsCurrent} onView={changeView} onInspect={setInspect} /></main>}
     {view === "portfolio" && <Portfolio s={s} onInspect={setInspect} />}
     {view === "opportunities" && <Opportunities s={s} onInspect={setInspect} />}
+    {view === "compare" && <Compare s={s} onView={changeView} />}
     {view === "execution" && <Execution s={s} onInspect={setInspect} />}
     {view === "intelligence" && <Intelligence s={s} />}
     {view === "system" && <System s={s} onInspect={setInspect} />}
