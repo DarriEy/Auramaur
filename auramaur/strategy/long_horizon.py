@@ -96,6 +96,9 @@ class LongHorizonPillar:
             router=None, exchange=exchange, exchange_name=venue,
             settings=settings, db=db, pnl_tracker=pnl_tracker,
         )
+        # First-trade anchor for the ramped book cap; resolved lazily from the
+        # trades ledger (None = not looked up yet, "" = no trades exist).
+        self._first_trade_ts: str | None = None
 
     # ------------------------------------------------------------------
     # Scan cycle
@@ -110,9 +113,10 @@ class LongHorizonPillar:
         except Exception as e:
             log.error("long_horizon.harvest_error", error=str(e))
         open_count = await self._open_position_count()
-        if open_count >= cfg.max_open:
+        cap = await self._effective_max_open(cfg)
+        if open_count >= cap:
             log.info("long_horizon.cycle", venue=self._venue, scanned=0, in_band=0,
-                     open=open_count, entered=0, book_full=True)
+                     open=open_count, cap=cap, entered=0, book_full=True)
             return 0
         markets = await self._scan_long_dated(cfg)
         entered = 0
@@ -122,7 +126,7 @@ class LongHorizonPillar:
                 band += 1
             if entered >= cfg.max_entries_per_cycle:
                 break
-            if open_count + entered >= cfg.max_open:
+            if open_count + entered >= cap:
                 break
             try:
                 if await self._try_enter(market):
@@ -133,8 +137,41 @@ class LongHorizonPillar:
         # be distinguishable from a dead task, and the funnel numbers are the
         # diagnosis when a venue instance silently finds nothing.
         log.info("long_horizon.cycle", venue=self._venue, scanned=len(markets),
-                 in_band=band, open=open_count, entered=entered)
+                 in_band=band, open=open_count, cap=cap, entered=entered)
         return entered
+
+    async def _effective_max_open(self, cfg) -> int:
+        """Ramped open-book cap: max_open + ramp*weeks-since-first-trade,
+        clamped to max_open_plateau.
+
+        A long-horizon book holds positions for months, so a flat cap freezes
+        the book at day-one size — no new entries, near-zero ledger accrual,
+        and a graduation bar it can never reach. Anchoring to the pillar's own
+        first trade makes the ramp deterministic from the ledger (no new
+        state), and each venue instance ramps off its own tag's history.
+        """
+        rate = float(cfg.max_open_ramp_per_week)
+        plateau = max(int(cfg.max_open), int(cfg.max_open_plateau))
+        if rate <= 0 or plateau <= cfg.max_open:
+            return cfg.max_open
+        if self._first_trade_ts is None:
+            row = await self._db.fetchone(
+                "SELECT MIN(timestamp) AS t FROM trades WHERE strategy_source = ?",
+                (self._tag,))
+            self._first_trade_ts = str(row["t"]) if row and row["t"] else ""
+        if not self._first_trade_ts:
+            return cfg.max_open
+        try:
+            first = datetime.fromisoformat(
+                self._first_trade_ts.replace("Z", "+00:00"))
+            if first.tzinfo is None:
+                first = first.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return cfg.max_open
+        weeks = max(
+            0.0,
+            (datetime.now(timezone.utc) - first).total_seconds() / 604800.0)
+        return min(plateau, cfg.max_open + int(weeks * rate))
 
     async def _scan_long_dated(self, cfg) -> list[Market]:
         """Fetch the LONG-DATED slice directly via Gamma's resolution-date window,
