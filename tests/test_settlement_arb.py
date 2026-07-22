@@ -197,6 +197,33 @@ async def test_print_not_published_never_trades():
     p._risk.evaluate.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_cycle_funnel_stages_are_counted():
+    """The cycle log's stage counters tell WHY predicated markets didn't enter
+    ("222 with_predicate / 0 entered" was previously unexplainable from logs)."""
+    obs = _obs(("2025-06", 100.0), ("2026-06", 103.0))
+    p, _ = _pillar(fred_obs=obs)
+    p._stages = {}
+    base_pred = {"indicator": "KXCPIYOY", "operator": ">=", "threshold": 3.0,
+                 "reference_period": "2026-06"}
+
+    # Print not out yet -> print_pending
+    pending = SimpleNamespace(id="m5", outcome_yes_price=0.5, outcome_no_price=0.5)
+    await p._maybe_enter(pending, {**base_pred, "reference_period": "2027-01"})
+
+    # Locked but already converged -> converged
+    conv = SimpleNamespace(id="m6", outcome_yes_price=0.99, outcome_no_price=0.01)
+    await p._maybe_enter(conv, base_pred)
+
+    # Locked, lag present, risk gate declines -> risk_rejected
+    rej = SimpleNamespace(id="m7", outcome_yes_price=0.80, outcome_no_price=0.20)
+    p._risk.evaluate = AsyncMock(return_value=SimpleNamespace(
+        approved=False, position_size=0, reason="stop"))
+    await p._maybe_enter(rej, base_pred)
+
+    assert p._stages == {"print_pending": 1, "converged": 1, "risk_rejected": 1}
+
+
 # ---------------------------------------------------------------------------
 # Candidate scan — admit illiquid tail bins (NBER w34702), reject only dust
 # ---------------------------------------------------------------------------
