@@ -239,6 +239,33 @@ class Database:
             await self._migrate_v36_to_v37()
         if from_version < 38:
             await self._migrate_v37_to_v38()
+        if from_version < 39:
+            await self._migrate_v38_to_v39()
+
+    async def _migrate_v38_to_v39(self) -> None:
+        """Durable lifecycle for graduated IBKR broker orders."""
+        await self._db.executescript("""
+            CREATE TABLE IF NOT EXISTS ibkr_execution_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                execution_ref TEXT NOT NULL UNIQUE,
+                book TEXT NOT NULL, instrument_key TEXT NOT NULL,
+                side TEXT NOT NULL CHECK(side IN ('BUY', 'SELL')),
+                requested_quantity REAL NOT NULL,
+                order_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'submitting',
+                filled_quantity REAL NOT NULL DEFAULT 0,
+                avg_fill_price REAL NOT NULL DEFAULT 0,
+                accounted INTEGER NOT NULL DEFAULT 0,
+                error TEXT NOT NULL DEFAULT '',
+                submitted_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_ibkr_execution_unaccounted
+                ON ibkr_execution_orders(book,instrument_key,side,accounted,updated_at);
+        """)
+        await self._db.execute("UPDATE schema_version SET version = 39")
+        await self._db.commit()
+        log.info("database.migrated", from_version=38, to_version=39)
 
     async def _migrate_v29_to_v30(self) -> None:
         """Add cost-adjusted IBKR round-trip observations."""

@@ -53,6 +53,12 @@ export interface StrategyStat {
   /** Open-book mark-to-market, attributed to the position's entry strategy. */
   unrealized?: number;
   open_positions?: number;
+  observations?: number;
+  round_trips?: number;
+  latest_observed?: string | null;
+  venues?: string[];
+  graduation_status?: "collecting" | "graduated";
+  graduation_reasons?: string[];
 }
 
 export interface StrategyHeartbeat {

@@ -85,7 +85,8 @@ class StateBroker:
             await cockpit.gather_state(self.db, self.settings, self._cache, book=book)
         )
         flag = 0 if book == "live" else 1
-        state["strategies"] = await queries.strategy_breakdown(self.db, flag)
+        state["strategies"] = await queries.strategy_breakdown(
+            self.db, flag, self.settings)
         state["heartbeats"] = await queries.strategy_heartbeats(self.db)
         state["categories"] = await queries.category_exposure(self.db, flag)
         if book == "paper":

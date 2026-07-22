@@ -270,6 +270,14 @@ ibkr:
   multiasset_preflight_client_id: 97
   # Ship disabled; enable deliberately in defaults.local.yaml after preflight.
   multiasset_paper_enabled: false
+  # A graduated paper book still cannot trade until BOTH this gate and its
+  # explicit allowlist entry are set. Global live gates and readonly=false
+  # remain mandatory as well.
+  multiasset_execution_enabled: false
+  multiasset_execution_confirm_live: false
+  multiasset_execution_books: []
+  multiasset_execution_client_id: 4
+  multiasset_execution_fill_timeout_seconds: 30
   multiasset_cycle_seconds: 900
   multiasset_refreshes_per_cycle: 12
   # Delayed/frozen quotes may be observed, but cannot create credible fills.

@@ -811,6 +811,11 @@ class AuramaurBot(
         from auramaur.strategy.ibkr_multiasset_paper import IBKRMultiAssetPaperBook
 
         client = IBKRReadOnlyMarketData(self.settings)
+        executor = None
+        if self.settings.ibkr.multiasset_execution_enabled:
+            from auramaur.exchange.ibkr_multiasset_execution import IBKRMultiAssetExecution
+            executor = IBKRMultiAssetExecution(
+                self.settings, client, self._components.get("db"))
         rates_provider = None
         if self.settings.fred_api_key:
             from auramaur.data_sources.fred import FREDSource
@@ -819,7 +824,7 @@ class AuramaurBot(
                 FREDSource(api_key=self.settings.fred_api_key))
         books = [IBKRMultiAssetPaperBook(
             self.settings, client, self._components.get("db"), book,
-            rates_provider=rates_provider)
+            rates_provider=rates_provider, executor=executor)
             for book in IBKRBook
             if self.settings.ibkr.multiasset_books[book.value].enabled]
         from auramaur.strategy.ibkr_multiasset_paper import warn_stranded_positions
@@ -841,6 +846,8 @@ class AuramaurBot(
                 await asyncio.sleep(self.settings.ibkr.multiasset_cycle_seconds)
         finally:
             await client.close()
+            if executor is not None:
+                await executor.close()
 
     async def _task_balance_recorder(self) -> None:
         """Record venue cash to the ``venue_balances`` table so read-only

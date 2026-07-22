@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 38
+SCHEMA_VERSION = 39
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -616,6 +616,27 @@ CREATE TABLE IF NOT EXISTS ibkr_paper_ledger (
 );
 CREATE INDEX IF NOT EXISTS idx_ibkr_paper_ledger_book_day
     ON ibkr_paper_ledger(book, realized_at);
+
+-- Durable broker-order lifecycle for graduated IBKR books. An unaccounted
+-- row suppresses duplicate submission across cycle retries and process restarts.
+CREATE TABLE IF NOT EXISTS ibkr_execution_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    execution_ref TEXT NOT NULL UNIQUE,
+    book TEXT NOT NULL,
+    instrument_key TEXT NOT NULL,
+    side TEXT NOT NULL CHECK(side IN ('BUY', 'SELL')),
+    requested_quantity REAL NOT NULL,
+    order_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'submitting',
+    filled_quantity REAL NOT NULL DEFAULT 0,
+    avg_fill_price REAL NOT NULL DEFAULT 0,
+    accounted INTEGER NOT NULL DEFAULT 0,
+    error TEXT NOT NULL DEFAULT '',
+    submitted_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ibkr_execution_unaccounted
+    ON ibkr_execution_orders(book, instrument_key, side, accounted, updated_at);
 
 CREATE TABLE IF NOT EXISTS ibkr_paper_round_trips (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

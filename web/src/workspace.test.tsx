@@ -44,4 +44,12 @@ describe("operator workspace", () => {
     expect(html).toContain("No resolved forecasts are available yet");
     expect(html).not.toContain("Open workspace");
   });
+
+  it("names the selected book inside Compare", () => {
+    const html = renderToStaticMarkup(
+      <OperatorWorkspace s={state} scope="live" initialView="compare" />
+    );
+    expect(html).toContain("Compare · LIVE book");
+    expect(html).toContain("Paper and live histories are intentionally isolated");
+  });
 });

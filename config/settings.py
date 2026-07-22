@@ -1266,6 +1266,13 @@ class IBKRConfig(BaseModel):
     # it can never bump a trading/quote session off the gateway.
     balance_client_id: int = 98
     multiasset_paper_enabled: bool = False
+    # Promotion is independent from data collection. All gates below default
+    # closed; paper books continue collecting evidence when execution is off.
+    multiasset_execution_enabled: bool = False
+    multiasset_execution_confirm_live: bool = False
+    multiasset_execution_books: list[str] = []
+    multiasset_execution_client_id: int = 4
+    multiasset_execution_fill_timeout_seconds: float = 30.0
     multiasset_cycle_seconds: int = 900
     multiasset_refreshes_per_cycle: int = 12
     multiasset_max_quote_age_seconds: int = 120
@@ -1334,9 +1341,16 @@ class IBKRConfig(BaseModel):
             raise ValueError("IBKR multi-asset config must define exactly six books")
         client_ids = {self.client_id, self.equity_client_id,
                       self.multiasset_client_id, self.multiasset_preflight_client_id,
-                      self.balance_client_id}
-        if len(client_ids) != 5:
+                      self.multiasset_execution_client_id, self.balance_client_id}
+        if len(client_ids) != 6:
             raise ValueError("IBKR API client ids must be unique")
+        executable = {"global_etf", "futures", "international_equity"}
+        if len(self.multiasset_execution_books) != len(set(self.multiasset_execution_books)):
+            raise ValueError("IBKR execution books must be unique")
+        if not set(self.multiasset_execution_books) <= executable:
+            raise ValueError("IBKR execution supports only ETF, futures, and international equity")
+        if self.multiasset_execution_fill_timeout_seconds <= 0:
+            raise ValueError("IBKR execution fill timeout must be positive")
         if self.multiasset_cycle_seconds <= 0 or self.multiasset_refreshes_per_cycle <= 0:
             raise ValueError("IBKR multi-asset cycle and refresh limits must be positive")
         if (self.multiasset_max_quote_age_seconds <= 0
