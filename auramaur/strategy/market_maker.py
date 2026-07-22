@@ -417,6 +417,17 @@ class MarketMaker:
         our_bid = max(0.01, min(0.99, our_bid))
         our_ask = max(0.01, min(0.99, our_ask))
 
+        # Post-only crossing clamp: skew (above) can push a joined/improved
+        # quote onto or through the live BBO on tight books, and the venue
+        # then 400-rejects the leg as 'invalid post-only order: order
+        # crosses book' — one market ground through reject+partial-cancel
+        # every ~34s for hours (2299992, 2026-07-22). A maker order must
+        # rest strictly inside the opposite side of the book.
+        if our_bid >= best_ask:
+            our_bid = round(best_ask - 0.01, 2)
+        if our_ask <= best_bid:
+            our_ask = round(best_bid + 0.01, 2)
+
         # Sanity: bid must be strictly less than ask
         if our_bid >= our_ask:
             log.debug(
