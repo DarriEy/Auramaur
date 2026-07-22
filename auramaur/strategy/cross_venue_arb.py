@@ -337,6 +337,10 @@ class CrossVenueArbPillar:
         await self._ensure_schema()
         pairs = await self._candidate_pairs()
         if not pairs:
+            # Log EVERY cycle (the settlement_arb #246 lesson): this early
+            # return was silent, so a pillar whose pair discovery never fires
+            # is indistinguishable from a dead task.
+            log.info("cross_venue.cycle", pairs=0, entered=0)
             return 0
         entered = 0
         for a, b in pairs:
