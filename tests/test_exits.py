@@ -63,6 +63,36 @@ def _make_market(market_id: str, yes_price: float, end_date: datetime | None = N
 
 
 @pytest.mark.asyncio
+async def test_unmarkable_position_warns_and_throttles(mock_db, settings, monkeypatch):
+    """A position whose market discovery no longer returns must be surfaced
+    (it freezes marks and exit checks — the 2026-07-22 stale-paper-marks rot),
+    but only once per throttle window, not every monitor tick."""
+    from unittest.mock import patch
+
+    mock_db.fetchall = AsyncMock(return_value=[
+        _make_position("gone1", avg_price=0.50),
+    ])
+    gamma = AsyncMock()
+    gamma.get_market = AsyncMock(return_value=None)  # dropped from discovery
+
+    tracker = PortfolioTracker(db=mock_db)
+    with patch("auramaur.risk.portfolio.log") as mock_log:
+        exits = await tracker.check_exits(settings, gamma)
+        assert exits == []
+        warns = [c for c in mock_log.warning.call_args_list
+                 if c.args and c.args[0] == "check_exits.unmarkable_positions"]
+        assert len(warns) == 1
+        assert warns[0].kwargs["count"] == 1
+        assert warns[0].kwargs["sample"] == ["gone1"]
+
+        # Second run inside the throttle window: no new warning.
+        await tracker.check_exits(settings, gamma)
+        warns = [c for c in mock_log.warning.call_args_list
+                 if c.args and c.args[0] == "check_exits.unmarkable_positions"]
+        assert len(warns) == 1
+
+
+@pytest.mark.asyncio
 async def test_stop_loss_triggered(mock_db, settings):
     """Position at -35% → STOP_LOSS."""
     mock_db.fetchall = AsyncMock(return_value=[
