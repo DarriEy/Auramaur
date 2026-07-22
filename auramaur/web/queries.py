@@ -134,12 +134,14 @@ async def strategy_breakdown(db: ReadOnlyDatabase, is_paper_flag: int) -> list[d
 async def category_exposure(db: ReadOnlyDatabase, is_paper_flag: int) -> list[dict]:
     """Open exposure (position value at mark) per market category."""
     rows = await db.fetchall(
-        """SELECT COALESCE(NULLIF(category, ''), 'uncategorized') AS category,
+        """SELECT COALESCE(NULLIF(p.category, ''), NULLIF(m.category, ''),
+                            'other') AS category,
                   COUNT(*) AS positions,
-                  SUM(COALESCE(current_price, avg_price) * size) AS value
-           FROM portfolio
-           WHERE is_paper = ?
-           GROUP BY category
+                  SUM(COALESCE(p.current_price, p.avg_price) * p.size) AS value
+           FROM portfolio p
+           LEFT JOIN markets m ON m.id = p.market_id
+           WHERE p.is_paper = ?
+           GROUP BY 1
            ORDER BY value DESC""",
         (is_paper_flag,),
     )

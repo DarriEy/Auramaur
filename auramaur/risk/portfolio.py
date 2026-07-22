@@ -47,14 +47,21 @@ class PortfolioTracker:
         params: list[object] = []
 
         if exchange:
-            clauses.append("exchange = ?")
+            clauses.append("p.exchange = ?")
             params.append(exchange)
         mode_flag = self._mode_flag(is_paper)
         if mode_flag is not None:
-            clauses.append("is_paper = ?")
+            clauses.append("p.is_paper = ?")
             params.append(mode_flag)
 
-        sql = "SELECT * FROM portfolio"
+        # Venue position APIs do not reliably carry taxonomy. Resolve from the
+        # authoritative market row so concentration risk cannot accumulate in
+        # an empty-string bucket after reconciliation.
+        sql = """SELECT p.*,
+                        COALESCE(NULLIF(p.category, ''),
+                                 NULLIF(m.category, ''), 'other') AS resolved_category
+                   FROM portfolio p
+                   LEFT JOIN markets m ON m.id = p.market_id"""
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
         rows = await self.db.fetchall(sql, tuple(params))
@@ -73,7 +80,10 @@ class PortfolioTracker:
                 size=row["size"],
                 avg_price=row["avg_price"],
                 current_price=row["current_price"] or 0.0,
-                category=row["category"] or "",
+                # Unit-test/legacy row adapters may not expose computed SQL
+                # aliases; retain compatibility while real DB reads always do.
+                category=(row["resolved_category"] if "resolved_category" in keys
+                          else (row["category"] or "other")),
                 token=TokenType(token_str) if token_str else TokenType.YES,
                 token_id=token_id or "",
             ))
