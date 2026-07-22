@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from datetime import datetime, timezone
 
 import structlog
@@ -19,6 +20,7 @@ class PortfolioTracker:
     def __init__(self, db: Database, settings=None):
         self.db = db
         self.settings = settings
+        self._equity_window: deque[float] = deque(maxlen=self._PEAK_CONFIRM_TICKS)
 
     def _mode_flag(self, is_paper: bool | None = None) -> int | None:
         """Return the paper/live DB flag, or None for legacy unscoped reads."""
@@ -215,6 +217,15 @@ class PortfolioTracker:
     # ------------------------------------------------------------------
 
     _current_drawdown_pct: float | None = None
+    # A single optimistic tick (thin-book mark spike, venue glitch) must not
+    # ratchet the peak the gate measures drawdown against, so the ratchet uses
+    # the minimum of the last N samples: a spike only counts once it has
+    # persisted a full window of monitor ticks.
+    _PEAK_CONFIRM_TICKS = 3
+    # Drawdown is measured against the peak over this window, not all time —
+    # an all-time ratchet never forgives a one-off inflated sample and turns
+    # any capital withdrawal into permanent phantom drawdown.
+    _PEAK_WINDOW_DAYS = 30
 
     async def note_equity(self, equity: float) -> None:
         """Record current equity: maintain the daily peak and the live
@@ -226,19 +237,30 @@ class PortfolioTracker:
         this once per tick with venue cash + position marks; the peak
         persists across restarts via daily_stats, the current drawdown is
         held in memory (staleness bounded by the monitor interval).
+
+        Asymmetric by design: the latest equity is compared against the peak
+        immediately (a real crash trips the gate within one tick), but the
+        peak only rises to a level sustained for ``_PEAK_CONFIRM_TICKS``
+        consecutive ticks, and only the last ``_PEAK_WINDOW_DAYS`` days of
+        peaks bind.
         """
         if equity is None or equity <= 0:
             return
-        async with self.db.transaction():
-            await self.db.execute(
-                """INSERT INTO daily_stats (date, total_pnl, trades_count, wins, losses, peak_balance)
-                   VALUES (date('now'), 0, 0, 0, 0, ?)
-                   ON CONFLICT(date) DO UPDATE SET
-                       peak_balance = MAX(COALESCE(peak_balance, 0), excluded.peak_balance)""",
-                (equity,),
-            )
+        self._equity_window.append(equity)
+        if len(self._equity_window) == self._PEAK_CONFIRM_TICKS:
+            sustained = min(self._equity_window)
+            async with self.db.transaction():
+                await self.db.execute(
+                    """INSERT INTO daily_stats (date, total_pnl, trades_count, wins, losses, peak_balance)
+                       VALUES (date('now'), 0, 0, 0, 0, ?)
+                       ON CONFLICT(date) DO UPDATE SET
+                           peak_balance = MAX(COALESCE(peak_balance, 0), excluded.peak_balance)""",
+                    (sustained,),
+                )
         row = await self.db.fetchone(
-            "SELECT MAX(peak_balance) AS peak FROM daily_stats")
+            "SELECT MAX(peak_balance) AS peak FROM daily_stats "
+            "WHERE date >= date('now', ?)",
+            (f"-{self._PEAK_WINDOW_DAYS} days",))
         peak = float(row["peak"] or 0.0) if row else 0.0
         self._current_drawdown_pct = (
             max(0.0, (peak - equity) / peak * 100.0) if peak > 0 else 0.0)

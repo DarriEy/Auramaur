@@ -351,6 +351,7 @@ class AuramaurBot(
             try:
                 all_positions = []
                 per_exchange_cash: dict[str, float] = {}
+                sync_failures: list[str] = []
 
                 for syncer in syncers:
                     name = getattr(syncer, "exchange_name", "polymarket")
@@ -359,6 +360,7 @@ class AuramaurBot(
                         cash = await syncer.get_cash_balance()
                     except Exception as e:
                         log.debug("portfolio_monitor.sync_error", exchange=name, error=str(e))
+                        sync_failures.append(name)
                         continue
 
                     per_exchange_cash[name] = cash
@@ -401,12 +403,19 @@ class AuramaurBot(
                 # daily_stats.peak_balance, so get_drawdown() returned 0.0
                 # forever and check_max_drawdown / check_drawdown_heat could
                 # never trip (2026-07-20 audit, confirmed critical).
-                try:
-                    equity = total_cash + sum(
-                        p.size * p.current_price for p in all_positions)
-                    await portfolio_tracker.note_equity(equity)
-                except Exception as e:
-                    log.debug("drawdown.note_equity_error", error=str(e))
+                # Complete ticks only: with any venue missing, "equity" is just
+                # the venues that answered, and those partial sums recorded
+                # phantom 75-92% drawdowns in daily_stats on 2026-07-21/22.
+                if sync_failures:
+                    log.debug("drawdown.equity_tick_skipped",
+                              failed_venues=sync_failures)
+                else:
+                    try:
+                        equity = total_cash + sum(
+                            p.size * p.current_price for p in all_positions)
+                        await portfolio_tracker.note_equity(equity)
+                    except Exception as e:
+                        log.debug("drawdown.note_equity_error", error=str(e))
 
                 if first_tick:
                     first_tick = False
@@ -666,6 +675,57 @@ class AuramaurBot(
             if await self._check_kill_switch():
                 return
             await asyncio.sleep(1)
+
+    async def _run_live_gate(self, *, startup: bool = False) -> None:
+        """Evaluate the live-readiness preflight and move the risk manager's
+        ``live_entries_blocked`` latch in BOTH directions.
+
+        The latch was previously set once at startup and never cleared, so a
+        cold-start BLOCK (equity feed not yet warm, IB Gateway awaiting its
+        manual re-login) paper-forced live entries until the next restart —
+        and every restart re-blocked.
+        """
+        from auramaur.monitoring.live_gate import preflight
+
+        rm = self._components.risk_manager
+        report = await preflight(
+            self.settings, self._components.db,
+            tracker=rm.portfolio if rm is not None else None)
+        blocked_now = not report.live_allowed
+        was_blocked = bool(rm.live_entries_blocked) if rm is not None else False
+        if rm is not None:
+            rm.live_entries_blocked = blocked_now
+        alerts = self._components.alerts
+
+        if blocked_now and (startup or not was_blocked):
+            blocked = ", ".join(b.name for b in report.blocks)
+            log.error("live_gate.entries_blocked",
+                      blocks=[f"{b.name}: {b.detail}" for b in report.blocks])
+            console.print(f"  [bold red]LIVE ENTRIES BLOCKED by preflight:[/] "
+                          f"{blocked} — exits stay live")
+            if alerts is not None:
+                await alerts.send(
+                    f"LIVE ENTRIES BLOCKED by preflight: {blocked}", level="critical")
+        elif not blocked_now and was_blocked:
+            log.info("live_gate.entries_unblocked", warnings=len(report.warnings))
+            console.print("  [green]live entries unblocked — preflight passes[/]")
+            if alerts is not None:
+                await alerts.send(
+                    "Live entries unblocked — preflight passes", level="warning")
+        elif startup:
+            log.info("live_gate.passed", warnings=len(report.warnings))
+            if report.warnings:
+                console.print(f"  [yellow]preflight OK, {len(report.warnings)} warning(s)[/]")
+
+    async def _task_live_gate_monitor(self) -> None:
+        """Periodic live-readiness re-check (armed-live runs only)."""
+        interval = max(60, int(self.settings.intervals.live_gate_recheck_seconds))
+        while self._running:
+            await asyncio.sleep(interval)
+            try:
+                await self._run_live_gate()
+            except Exception as e:
+                log.error("live_gate.error", error=str(e))
 
     async def _task_kraken_pillar(self) -> None:
         """Dual-purpose Kraken pillar: treasury (always) + directional (gated).
@@ -1510,28 +1570,12 @@ class AuramaurBot(
         # Operational live-readiness preflight. If any BLOCK condition is present
         # while armed live, force new ENTRIES to paper (exits bypass the risk
         # manager, so held positions can still get out). Same checks as
-        # `auramaur health`; a "refuse to fool itself" gate.
+        # `auramaur health`; a "refuse to fool itself" gate. Re-evaluated
+        # periodically by _task_live_gate_monitor so the latch moves in BOTH
+        # directions without a restart.
         if self.settings.is_live:
             try:
-                from auramaur.monitoring.live_gate import preflight
-                report = await preflight(self.settings, self._components.db)
-                if not report.live_allowed:
-                    rm = self._components.risk_manager
-                    if rm is not None:
-                        rm.live_entries_blocked = True
-                    blocked = ", ".join(b.name for b in report.blocks)
-                    log.error("live_gate.entries_blocked",
-                              blocks=[f"{b.name}: {b.detail}" for b in report.blocks])
-                    console.print(f"  [bold red]LIVE ENTRIES BLOCKED by preflight:[/] "
-                                  f"{blocked} — exits stay live")
-                    alerts = self._components.alerts
-                    if alerts is not None:
-                        await alerts.send(
-                            f"LIVE ENTRIES BLOCKED by preflight: {blocked}", level="critical")
-                else:
-                    log.info("live_gate.passed", warnings=len(report.warnings))
-                    if report.warnings:
-                        console.print(f"  [yellow]preflight OK, {len(report.warnings)} warning(s)[/]")
+                await self._run_live_gate(startup=True)
             except Exception as e:
                 log.error("live_gate.error", error=str(e))
 
@@ -1540,6 +1584,9 @@ class AuramaurBot(
             asyncio.create_task(self._task_cache_cleanup(), name="cache_cleanup"),
             asyncio.create_task(self._task_recalibrate(), name="recalibrate"),
         ]
+        if self.settings.is_live:
+            tasks.append(asyncio.create_task(
+                self._task_live_gate_monitor(), name="live_gate"))
 
         # Portfolio monitor runs whenever any exchange syncer is present so
         # Kalshi-only runs still populate `_last_known_cash` and exits fire.

@@ -227,6 +227,10 @@ class IntervalsConfig(BaseModel):
     analysis_seconds: int = 180
     portfolio_check_seconds: int = 60
     dashboard_refresh_seconds: int = 5
+    # Live-readiness preflight re-check (monitoring/live_gate): clears a
+    # startup BLOCK once conditions recover (equity feed warm, IB Gateway
+    # re-authenticated) and latches a new BLOCK without waiting for a restart.
+    live_gate_recheck_seconds: int = 600
     # Adaptive scheduling — scale intensity by market activity
     adaptive_enabled: bool = True
     peak_hours_utc: list[int] = Field(
@@ -1258,6 +1262,11 @@ class IBKRConfig(BaseModel):
     multiasset_preflight_concurrency: int = 2
     multiasset_preflight_pacing_retries: int = 2
     multiasset_preflight_retry_seconds: float = 2.0
+    # Per-request deadline for preflight quote/history probes. The gateway's
+    # historical farm routinely takes >30s around IB's nightly reset
+    # (~03:45-05:00 UTC); a too-short deadline cancels the request client-side,
+    # which IB reports as "Error 162 ... query cancelled".
+    multiasset_preflight_timeout_seconds: float = 60.0
     # Require a current broker-qualified identity before opening new risk.
     # Kept false in model defaults so isolated test/library users can opt in;
     # tracked deployment defaults enable it.
@@ -1324,7 +1333,8 @@ class IBKRConfig(BaseModel):
             raise ValueError("IBKR multi-asset quote/cache limits must be positive")
         if (self.multiasset_preflight_concurrency <= 0
                 or self.multiasset_preflight_pacing_retries < 0
-                or self.multiasset_preflight_retry_seconds < 0):
+                or self.multiasset_preflight_retry_seconds < 0
+                or self.multiasset_preflight_timeout_seconds <= 0):
             raise ValueError("IBKR multi-asset preflight pacing limits are invalid")
         if len(self.multiasset_disabled_instruments) != len(
                 set(self.multiasset_disabled_instruments)):
