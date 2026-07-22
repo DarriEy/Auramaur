@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import math
+
 import structlog
 
 from auramaur.exchange.models import Order, OrderSide, OrderType, TokenType
