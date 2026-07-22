@@ -118,8 +118,12 @@ async def test_confirmed_fill_is_durable_and_replayed_without_duplicate(tmp_path
     adapter = IBKRMultiAssetExecution(settings, resolver, db)
     adapter._ib = fake_ib
     adapter.graduated = AsyncMock(return_value=True)
-    with patch("auramaur.exchange.ibkr_multiasset_execution.kill_switch_present",
-               return_value=False):
+    fake_ib_async = SimpleNamespace(
+        MarketOrder=lambda side, qty: SimpleNamespace(
+            action=side, totalQuantity=qty, orderRef=""))
+    with (patch.dict("sys.modules", {"ib_async": fake_ib_async}),
+          patch("auramaur.exchange.ibkr_multiasset_execution.kill_switch_present",
+                return_value=False)):
         first = await adapter.place(GLOBAL_ETFS[0], "BUY", 1.5)
         replay = await adapter.place(GLOBAL_ETFS[0], "BUY", 1.5)
     assert first.accepted and first.filled_quantity == 1.5
