@@ -429,3 +429,54 @@ async def test_fx_research_recorder_records_trend_and_carry_once_daily():
     gbpjpy = next(r for r in carry if r["instrument_key"] == "GBPJPY")
     assert gbpjpy["direction"] == 1  # positive carry + uptrend agree
     await db.close()
+
+
+def test_stranded_positions_in_disabled_book_warn():
+    """Positions in a book that is not running must be surfaced — a disabled
+    book never cycles, so its positions are never re-marked or exit-managed."""
+    import asyncio
+    from unittest.mock import patch
+    from auramaur.db.database import Database
+    from auramaur.strategy.ibkr_multiasset_paper import warn_stranded_positions
+
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            await db.execute(
+                """INSERT INTO ibkr_paper_positions
+                   (book, instrument_key, con_id, currency, quantity, multiplier,
+                    fx_to_usd, avg_cost, current_price, price_source,
+                    instrument_spec_json, stop_price, initial_risk_usd,
+                    entry_commission_usd, entry_fill_ref)
+                   VALUES ('international_equity', 'SHEL.L', 1, 'GBP', 0.1, 1.0,
+                           1.35, 3200.0, 3200.0, 'ibkr_live', '{}', 3100.0,
+                           12.0, 1.0, 'ref-1')""")
+            await db.execute(
+                """INSERT INTO ibkr_paper_positions
+                   (book, instrument_key, con_id, currency, quantity, multiplier,
+                    fx_to_usd, avg_cost, current_price, price_source,
+                    instrument_spec_json, stop_price, initial_risk_usd,
+                    entry_commission_usd, entry_fill_ref)
+                   VALUES ('fx', 'USDCAD', 2, 'CAD', 1.0, 1000.0, 0.71,
+                           1.40, 1.40, 'ibkr_live', '{}', 1.39, 5.0, 0.2,
+                           'ref-2')""")
+            await db.commit()
+            with patch("auramaur.strategy.ibkr_multiasset_paper.log") as mock_log:
+                stranded = await warn_stranded_positions(db, {"fx"})
+            assert stranded == ["international_equity"]
+            warns = [c for c in mock_log.warning.call_args_list
+                     if c.args and c.args[0] == "ibkr_multiasset.stranded_positions"]
+            assert len(warns) == 1
+            assert warns[0].kwargs["book"] == "international_equity"
+            assert warns[0].kwargs["count"] == 1
+
+            # All books enabled -> nothing stranded, no warning.
+            with patch("auramaur.strategy.ibkr_multiasset_paper.log") as mock_log:
+                stranded = await warn_stranded_positions(
+                    db, {"fx", "international_equity"})
+            assert stranded == []
+            assert not mock_log.warning.called
+        finally:
+            await db.close()
+    asyncio.run(run())

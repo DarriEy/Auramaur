@@ -23,6 +23,34 @@ from auramaur.risk.ibkr_math import (
 log = structlog.get_logger()
 
 
+async def warn_stranded_positions(db, enabled_books: set[str]) -> list[str]:
+    """Warn for paper positions stranded in books that are NOT running.
+
+    A disabled book never cycles, so its open positions are never re-marked
+    and never exit-managed (2026-07-22: a SHEL.L row sat frozen in the held
+    international_equity book from the day of the hold). Visibility only —
+    flattening stays an operator decision, because a temporary hold must not
+    destroy positions. Returns the stranded book names (for tests)."""
+    stranded: list[str] = []
+    try:
+        rows = await db.fetchall(
+            "SELECT book, COUNT(*) AS n FROM ibkr_paper_positions GROUP BY book")
+    except Exception as e:
+        log.debug("ibkr_multiasset.stranded_check_error", error=str(e))
+        return stranded
+    for row in rows or []:
+        book = str(row["book"] or "")
+        if book and book not in enabled_books and int(row["n"] or 0) > 0:
+            stranded.append(book)
+            log.warning(
+                "ibkr_multiasset.stranded_positions",
+                book=book, count=int(row["n"]),
+                detail="book disabled — positions stay unmarked and "
+                       "unmanaged until the book is re-enabled or the "
+                       "operator closes them")
+    return stranded
+
+
 class IBKRMultiAssetPaperBook:
     """One asset-specific ledger; this class has no broker order capability."""
 

@@ -818,6 +818,9 @@ class AuramaurBot(
             rates_provider=rates_provider)
             for book in IBKRBook
             if self.settings.ibkr.multiasset_books[book.value].enabled]
+        from auramaur.strategy.ibkr_multiasset_paper import warn_stranded_positions
+        await warn_stranded_positions(
+            self._components.get("db"), {b.book.value for b in books})
         try:
             while self._running:
                 if await self._check_kill_switch():
