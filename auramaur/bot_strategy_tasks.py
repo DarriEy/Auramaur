@@ -14,6 +14,8 @@ import asyncio
 
 import structlog
 
+from auramaur.monitoring.heartbeat import run_pillar_once
+
 log = structlog.get_logger()
 
 
@@ -38,7 +40,7 @@ class StrategyTaskMixin:
             if await self._check_kill_switch():
                 return
             try:
-                await pillar.run_once()
+                await run_pillar_once(self._components.db, pillar, interval_seconds=interval)
             except Exception as e:
                 log.error("bias_harvest.cycle_error", error=str(e))
             await asyncio.sleep(interval)
@@ -81,7 +83,7 @@ class StrategyTaskMixin:
                 return
             for pillar in pillars:
                 try:
-                    await pillar.run_once()
+                    await run_pillar_once(self._components.db, pillar, interval_seconds=interval)
                 except Exception as e:
                     log.error("long_horizon.cycle_error", venue=pillar._venue,
                               error=str(e))
@@ -106,7 +108,7 @@ class StrategyTaskMixin:
             if await self._check_kill_switch():
                 return
             try:
-                await pillar.run_once()
+                await run_pillar_once(self._components.db, pillar, interval_seconds=interval)
             except Exception as e:
                 log.error("agent_trader.cycle_error", error=str(e))
             await asyncio.sleep(interval)
@@ -153,7 +155,7 @@ class StrategyTaskMixin:
             if await self._check_kill_switch():
                 return
             try:
-                await pillar.run_once()
+                await run_pillar_once(self._components.db, pillar, interval_seconds=interval)
             except Exception as e:
                 log.error("term_structure.cycle_error", error=str(e))
             await asyncio.sleep(interval)
@@ -177,7 +179,7 @@ class StrategyTaskMixin:
             if await self._check_kill_switch():
                 return
             try:
-                await pillar.run_once()
+                await run_pillar_once(self._components.db, pillar, interval_seconds=interval)
             except Exception as e:
                 log.error("vol_anchor.cycle_error", error=str(e))
             await asyncio.sleep(interval)
@@ -206,7 +208,7 @@ class StrategyTaskMixin:
             if await self._check_kill_switch():
                 return
             try:
-                await pillar.run_once()
+                await run_pillar_once(self._components.db, pillar, interval_seconds=interval)
             except Exception as e:
                 log.error("informed_flow.cycle_error", error=str(e))
             await asyncio.sleep(interval)
@@ -233,7 +235,7 @@ class StrategyTaskMixin:
             if await self._check_kill_switch():
                 return
             try:
-                await pillar.run_once()
+                await run_pillar_once(self._components.db, pillar, interval_seconds=interval)
             except Exception as e:
                 log.error("entailment.cycle_error", error=str(e))
             await asyncio.sleep(interval)
@@ -259,7 +261,7 @@ class StrategyTaskMixin:
             if await self._check_kill_switch():
                 return
             try:
-                await pillar.run_once()
+                await run_pillar_once(self._components.db, pillar, interval_seconds=interval)
             except Exception as e:
                 log.error("cross_venue.cycle_error", error=str(e))
             await asyncio.sleep(interval)
@@ -289,7 +291,7 @@ class StrategyTaskMixin:
             if await self._check_kill_switch():
                 return
             try:
-                await pillar.run_once()
+                await run_pillar_once(self._components.db, pillar, interval_seconds=interval)
             except Exception as e:
                 log.error("econ_indicator.cycle_error", error=str(e))
             await asyncio.sleep(interval)
@@ -312,7 +314,7 @@ class StrategyTaskMixin:
             if await self._check_kill_switch():
                 return
             try:
-                await pillar.run_once()
+                await run_pillar_once(self._components.db, pillar, interval_seconds=interval)
             except Exception as e:
                 log.error("interim_manager.cycle_error", error=str(e))
             await asyncio.sleep(interval)
@@ -345,7 +347,7 @@ class StrategyTaskMixin:
             if await self._check_kill_switch():
                 return
             try:
-                await pillar.run_once()
+                await run_pillar_once(self._components.db, pillar, interval_seconds=interval)
             except Exception as e:
                 log.error("settlement_arb.cycle_error", error=str(e))
             await asyncio.sleep(interval)
@@ -410,7 +412,7 @@ class StrategyTaskMixin:
             if await self._check_kill_switch():
                 return
             try:
-                await pillar.run_once()
+                await run_pillar_once(self._components.db, pillar, interval_seconds=interval)
             except Exception as e:
                 log.error("weather_temp.cycle_error", error=str(e))
             await asyncio.sleep(interval)
@@ -436,7 +438,7 @@ class StrategyTaskMixin:
             if await self._check_kill_switch():
                 return
             try:
-                await pillar.run_once()
+                await run_pillar_once(self._components.db, pillar, interval_seconds=interval)
             except Exception as e:
                 log.error("lens.cycle_error", error=str(e), exc_info=True)
             await asyncio.sleep(interval)
@@ -476,7 +478,7 @@ class StrategyTaskMixin:
             if await self._check_kill_switch():
                 return
             try:
-                await pillar.run_once()
+                await run_pillar_once(self._components.db, pillar, interval_seconds=interval)
             except Exception as e:
                 # exc_info: 'database is locked' with no stack burned an
                 # evening of diagnosis — always capture where a cycle died.
@@ -508,7 +510,7 @@ class StrategyTaskMixin:
                 if await self._check_kill_switch():
                     return
                 try:
-                    await pillar.run_once()
+                    await run_pillar_once(self._components.db, pillar, interval_seconds=interval)
                 except Exception as e:
                     log.error("oddlot.cycle_error", error=str(e))
                 await asyncio.sleep(interval)
@@ -530,7 +532,7 @@ class StrategyTaskMixin:
             if await self._check_kill_switch():
                 return
             try:
-                await pillar.run_once()
+                await run_pillar_once(self._components.db, pillar, interval_seconds=interval)
             except Exception as e:
                 log.error("distiller.cycle_error", error=str(e), exc_info=True)
             await asyncio.sleep(interval)
@@ -556,7 +558,7 @@ class StrategyTaskMixin:
                 if await self._check_kill_switch():
                     return
                 try:
-                    await pillar.run_once()
+                    await run_pillar_once(self._components.db, pillar, interval_seconds=interval)
                 except Exception as e:
                     log.error("platform_consensus.cycle_error", error=str(e))
                 await asyncio.sleep(interval)

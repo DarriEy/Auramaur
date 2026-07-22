@@ -39,15 +39,19 @@ from auramaur.bot_exits import ExitExecutionMixin
 from auramaur.bot_strategy_tasks import StrategyTaskMixin
 from auramaur.bot_arb import ArbExecutionMixin
 from auramaur.bot_order_monitor import OrderMonitorMixin
+from auramaur.monitoring.heartbeat import run_pillar_once
 
 log = structlog.get_logger()
 
 
-async def run_ibkr_etf_arms_once(pillars) -> None:
+async def run_ibkr_etf_arms_once(pillars, db=None) -> None:
     """Run every intelligence arm independently; one failure cannot stop peers."""
     for pillar in pillars:
         try:
-            await pillar.run_once()
+            if db is not None:
+                await run_pillar_once(db, pillar)
+            else:
+                await pillar.run_once()
         except Exception as e:  # noqa: BLE001 — isolation is the contract
             log.error("ibkr_etf.arm_cycle_error", model_alias=pillar.model_alias,
                       error=str(e), exc_info=True)
@@ -755,7 +759,7 @@ class AuramaurBot(
             while self._running:
                 if await self._check_kill_switch():
                     return
-                await pillar.run_once()
+                await run_pillar_once(self._components.db, pillar, interval_seconds=interval)
                 await asyncio.sleep(interval)
         finally:
             await client.close()
@@ -793,7 +797,7 @@ class AuramaurBot(
                 if await self._check_kill_switch():
                     return
                 evidence_cache.clear()
-                await run_ibkr_etf_arms_once(pillars)
+                await run_ibkr_etf_arms_once(pillars, db=self._components.get("db"))
                 await asyncio.sleep(self.settings.ibkr.etf_cycle_seconds)
         finally:
             await client.close()
@@ -827,7 +831,9 @@ class AuramaurBot(
                     return
                 for book in books:
                     try:
-                        await book.run_once()
+                        await run_pillar_once(
+                            self._components.get("db"), book,
+                            interval_seconds=self.settings.ibkr.multiasset_cycle_seconds)
                     except Exception as exc:  # noqa: BLE001
                         log.error("ibkr_multiasset.book_cycle_error",
                                   book=book.book.value, error=str(exc),
@@ -873,7 +879,7 @@ class AuramaurBot(
             if await self._check_kill_switch():
                 return
             try:
-                await pillar.run_once()
+                await run_pillar_once(self._components.db, pillar, interval_seconds=interval)
             except Exception as e:  # noqa: BLE001
                 log.error("coupling.error", error=str(e))
             await asyncio.sleep(interval)
