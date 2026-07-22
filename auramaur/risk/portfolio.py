@@ -309,6 +309,41 @@ class PortfolioTracker:
     # Exit checks
     # ------------------------------------------------------------------
 
+    # Throttle for the unmarkable-positions warning: once per exchange per hour,
+    # not once per 60s monitor tick.
+    _UNMARKABLE_WARN_SECONDS = 3600.0
+
+    async def _warn_unmarkable(self, exchange: str | None, market_ids: list[str]) -> None:
+        """Warn (throttled) about positions whose market discovery no longer
+        returns — their marks and exit checks are frozen until the market
+        reappears or an operator intervenes."""
+        if not hasattr(self, "_unmarkable_last_warn"):
+            self._unmarkable_last_warn: dict[str, float] = {}
+        key = exchange or "*"
+        now = datetime.now(timezone.utc).timestamp()
+        last = self._unmarkable_last_warn.get(key, 0.0)
+        if now - last < self._UNMARKABLE_WARN_SECONDS:
+            return
+        self._unmarkable_last_warn[key] = now
+        oldest = None
+        try:
+            placeholders = ",".join("?" for _ in market_ids)
+            row = await self.db.fetchone(
+                f"SELECT MIN(updated_at) AS oldest FROM portfolio "
+                f"WHERE market_id IN ({placeholders})",
+                tuple(market_ids),
+            )
+            oldest = row["oldest"] if row else None
+        except Exception:
+            pass
+        log.warning(
+            "check_exits.unmarkable_positions",
+            exchange=key,
+            count=len(market_ids),
+            oldest_mark=oldest,
+            sample=market_ids[:5],
+        )
+
     @staticmethod
     def _resolve_mark_price(pos: Position, market) -> float | None:
         """Price of the token the position actually holds, or None to keep
@@ -379,11 +414,17 @@ class PortfolioTracker:
         peak_prices = await self._get_peak_prices()
         prices_updated = False
 
+        unmarkable: list[str] = []
         for pos in positions:
             # Refresh current price from discovery client
             try:
                 market = await discovery_client.get_market(pos.market_id)
                 if market is None:
+                    # The position freezes here: no re-mark, no exit
+                    # evaluation, and nothing ever closes it (149 paper
+                    # positions rotted this way for 3 days carrying -$553
+                    # of stale marks, 2026-07-22). Surface it below.
+                    unmarkable.append(pos.market_id)
                     continue
                 # IBKR holds options priced in premium dollars, not 0-1 resolution
                 # probabilities, and its discovery returns the *reframed* binary
@@ -576,6 +617,9 @@ class PortfolioTracker:
                     )
                     exits.append((pos, ExitReason.DUST_CLEANUP))
                     continue
+
+        if unmarkable:
+            await self._warn_unmarkable(exchange, unmarkable)
 
         if prices_updated:
             await self.db.commit()
