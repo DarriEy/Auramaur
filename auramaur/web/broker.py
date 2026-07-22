@@ -86,6 +86,7 @@ class StateBroker:
         )
         flag = 0 if book == "live" else 1
         state["strategies"] = await queries.strategy_breakdown(self.db, flag)
+        state["heartbeats"] = await queries.strategy_heartbeats(self.db)
         state["categories"] = await queries.category_exposure(self.db, flag)
         if book == "paper":
             # Kraken's directional paper book lives in its own table and is

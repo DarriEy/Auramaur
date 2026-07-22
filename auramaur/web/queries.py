@@ -131,15 +131,45 @@ async def strategy_breakdown(db: ReadOnlyDatabase, is_paper_flag: int) -> list[d
     ]
 
 
+async def strategy_heartbeats(db: ReadOnlyDatabase) -> dict[str, dict]:
+    """Per-strategy liveness written by the bot's run_pillar_once wrapper.
+
+    Keyed by strategy name; tolerant of the table not existing yet (older
+    deployments) — absence degrades to the pre-heartbeat behavior."""
+    try:
+        rows = await db.fetchall(
+            """SELECT strategy, last_beat_at, status, entries, cycles,
+                      interval_seconds, detail,
+                      (julianday('now') - julianday(last_beat_at)) * 86400.0
+                          AS age_seconds
+               FROM strategy_heartbeats""")
+    except Exception:
+        return {}
+    out: dict[str, dict] = {}
+    for r in rows or []:
+        out[r["strategy"]] = {
+            "last_beat_at": r["last_beat_at"],
+            "status": r["status"],
+            "entries": r["entries"],
+            "cycles": r["cycles"],
+            "interval_seconds": r["interval_seconds"],
+            "age_seconds": r["age_seconds"],
+            "detail": r["detail"] or "",
+        }
+    return out
+
+
 async def category_exposure(db: ReadOnlyDatabase, is_paper_flag: int) -> list[dict]:
     """Open exposure (position value at mark) per market category."""
     rows = await db.fetchall(
-        """SELECT COALESCE(NULLIF(category, ''), 'uncategorized') AS category,
+        """SELECT COALESCE(NULLIF(p.category, ''), NULLIF(m.category, ''),
+                            'other') AS category,
                   COUNT(*) AS positions,
-                  SUM(COALESCE(current_price, avg_price) * size) AS value
-           FROM portfolio
-           WHERE is_paper = ?
-           GROUP BY category
+                  SUM(COALESCE(p.current_price, p.avg_price) * p.size) AS value
+           FROM portfolio p
+           LEFT JOIN markets m ON m.id = p.market_id
+           WHERE p.is_paper = ?
+           GROUP BY 1
            ORDER BY value DESC""",
         (is_paper_flag,),
     )

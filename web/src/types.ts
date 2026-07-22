@@ -52,6 +52,16 @@ export interface StrategyStat {
   fees: number;
 }
 
+export interface StrategyHeartbeat {
+  last_beat_at: string;
+  status: string;
+  entries: number | null;
+  cycles: number;
+  interval_seconds: number | null;
+  age_seconds: number | null;
+  detail: string;
+}
+
 export interface CategoryStat {
   category: string;
   positions: number;
@@ -122,6 +132,8 @@ export interface DashboardState {
   drawdown: number;
   balance: number | null;
   strategies: StrategyStat[];
+  /** Per-strategy liveness written by the bot every pillar cycle. */
+  heartbeats?: Record<string, StrategyHeartbeat>;
   categories: CategoryStat[];
   /** Present on the paper book only — Kraken's isolated directional book. */
   kraken_paper?: KrakenPaperPosition[];

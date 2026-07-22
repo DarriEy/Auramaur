@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { DashboardState, HealthTop, Position, Signal } from "./types";
+import type { DashboardState, HealthTop, Position, Signal, StrategyHeartbeat } from "./types";
 import { ago, compactNumber, deltaClass, exactTime, humanize, money, price } from "./format";
 
 export type View = "overview" | "portfolio" | "opportunities" | "compare" | "execution" | "intelligence" | "system";
@@ -452,15 +452,20 @@ function Opportunities({ s, onInspect }: { s: DashboardState; onInspect: (i: Ins
 function Compare({ s, onView }: { s: DashboardState; onView: (v: View) => void }) {
   const [mode, setMode] = useStored("auramaur.compare.mode", "strategies");
   const strategyRows = useMemo(() => {
-    const names = new Set([...s.strategies.map((row) => row.strategy), ...s.signals.map((row) => row.strategy_source)]);
+    const names = new Set([
+      ...s.strategies.map((row) => row.strategy),
+      ...s.signals.map((row) => row.strategy_source),
+      ...Object.keys(s.heartbeats ?? {}),
+    ]);
     return [...names].map((name) => {
       const realized = s.strategies.find((row) => row.strategy === name);
       const signals = s.signals.filter((row) => row.strategy_source === name);
       const latest = signals.map((row) => row.timestamp).filter(Boolean).sort().at(-1);
       const venues = [...new Set(signals.map((row) => row.exchange).filter(Boolean))];
-      return { name, realized, signals, latest, venues };
+      const heartbeat = s.heartbeats?.[name] ?? null;
+      return { name, realized, signals, latest, venues, heartbeat };
     }).sort((a, b) => (b.realized?.pnl ?? 0) - (a.realized?.pnl ?? 0));
-  }, [s.strategies, s.signals]);
+  }, [s.strategies, s.signals, s.heartbeats]);
   const venueRows = Object.entries(s.venues).sort(([a], [b]) => a.localeCompare(b));
   return <Workspace title="Compare" subtitle="Put strategies or venues side by side using the same current snapshot.">
     <div className="segmented" role="group" aria-label="Comparison type">
@@ -471,7 +476,8 @@ function Compare({ s, onView }: { s: DashboardState; onView: (v: View) => void }
       empty={!strategyRows.length ? "No strategy data is available to compare." : undefined}>
       {strategyRows.map((row) => {
         const age = row.latest ? (new Date(s.now).getTime() - new Date(row.latest).getTime()) / 1000 : null;
-        return <tr key={row.name}><td><StrategyName name={row.name} /></td><td><Status age={age} /></td>
+        return <tr key={row.name}><td><StrategyName name={row.name} /></td>
+          <td>{row.heartbeat ? <PillarStatus heartbeat={row.heartbeat} /> : <Status age={age} />}</td>
           <td className="num">{row.signals.length}</td><td>{row.venues.join(", ") || "—"}</td>
           <td className="num">{row.realized?.entries ?? 0}</td><td className="num">{money(row.realized?.fees ?? 0)}</td>
           <td className={`num ${deltaClass(row.realized?.pnl ?? null)}`}>{money(row.realized?.pnl ?? 0, true)}</td>
@@ -588,6 +594,25 @@ function System({ s, onInspect }: { s: DashboardState; onInspect: (i: Inspectabl
 function Status({ age }: { age: number | null }) {
   const state = age == null ? "unknown" : age < 90 ? "fresh" : age < 600 ? "stale" : "dead";
   return <span className={`status ${state}`}><span aria-hidden="true" />{state}</span>;
+}
+
+/** Heartbeat-aware pillar health: measured against the pillar's OWN cadence,
+ *  not a global freshness threshold — a 2h-cycle pillar is not "dead" at 10
+ *  minutes. "silent" (beyond 5x its interval) is the state that used to be
+ *  indistinguishable from "never ran". */
+function PillarStatus({ heartbeat }: { heartbeat: StrategyHeartbeat }) {
+  const interval = heartbeat.interval_seconds || 3600;
+  const age = heartbeat.age_seconds;
+  const state = heartbeat.status === "error" ? "error"
+    : age == null ? "unknown"
+    : age < interval * 2 ? "fresh"
+    : age < interval * 5 ? "stale"
+    : "silent";
+  const cls = state === "error" ? "dead" : state === "silent" ? "dead" : state;
+  const title = `${heartbeat.cycles} cycles · last beat ${heartbeat.last_beat_at} UTC`
+    + (heartbeat.entries != null ? ` · ${heartbeat.entries} entries last cycle` : "")
+    + (heartbeat.detail ? ` · ${heartbeat.detail}` : "");
+  return <span className={`status ${cls}`} title={title}><span aria-hidden="true" />{state}</span>;
 }
 
 function Workspace({ title, subtitle, action, children }: {
