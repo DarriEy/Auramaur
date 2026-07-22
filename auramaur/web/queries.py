@@ -112,7 +112,7 @@ async def ibkr_paper_books(db: ReadOnlyDatabase) -> list[dict]:
 
 
 async def strategy_breakdown(db: ReadOnlyDatabase, is_paper_flag: int) -> list[dict]:
-    """Realized P&L per strategy from the authoritative pnl_ledger."""
+    """Realized ledger P&L plus open-book unrealized P&L by entry strategy."""
     rows = await db.fetchall(
         """SELECT COALESCE(NULLIF(strategy_source, ''), 'llm') AS strategy,
                   COUNT(*) AS entries,
@@ -124,11 +124,59 @@ async def strategy_breakdown(db: ReadOnlyDatabase, is_paper_flag: int) -> list[d
            ORDER BY pnl DESC""",
         (is_paper_flag,),
     )
-    return [
-        {"strategy": r["strategy"], "entries": r["entries"],
-         "pnl": r["pnl"] or 0.0, "fees": r["fees"] or 0.0}
+    out: dict[str, dict] = {
+        r["strategy"]: {
+            "strategy": r["strategy"], "entries": r["entries"],
+            "pnl": r["pnl"] or 0.0, "fees": r["fees"] or 0.0,
+            "unrealized": 0.0, "open_positions": 0,
+        }
         for r in rows
-    ]
+    }
+    try:
+        open_rows = await db.fetchall(
+            """SELECT strategy, COUNT(*) AS open_positions,
+                      SUM(unrealized) AS unrealized
+               FROM (
+                   SELECT COALESCE(
+                              (SELECT NULLIF(t.strategy_source, '')
+                                 FROM trades t
+                                WHERE t.market_id = p.market_id
+                                  AND t.is_paper = p.is_paper
+                                  AND t.strategy_source IS NOT NULL
+                                  AND t.strategy_source != 'order_monitor'
+                                ORDER BY t.timestamp ASC, t.id ASC LIMIT 1),
+                              'llm'
+                          ) AS strategy,
+                          CASE WHEN p.side = 'BUY'
+                               THEN (COALESCE(p.current_price, p.avg_price)
+                                     - COALESCE(NULLIF(cb.avg_cost, 0), p.avg_price))
+                                    * p.size
+                               ELSE (COALESCE(NULLIF(cb.avg_cost, 0), p.avg_price)
+                                     - COALESCE(p.current_price, p.avg_price))
+                                    * p.size
+                          END AS unrealized
+                     FROM portfolio p
+                     LEFT JOIN cost_basis cb
+                       ON cb.market_id = p.market_id
+                      AND cb.token = p.token
+                      AND cb.is_paper = p.is_paper
+                    WHERE p.is_paper = ?
+               )
+              GROUP BY strategy""",
+            (is_paper_flag,),
+        )
+    except Exception:
+        # Older databases may not yet have cost_basis or strategy_source.
+        open_rows = []
+    for r in open_rows or []:
+        entry = out.setdefault(r["strategy"], {
+            "strategy": r["strategy"], "entries": 0,
+            "pnl": 0.0, "fees": 0.0,
+            "unrealized": 0.0, "open_positions": 0,
+        })
+        entry["unrealized"] = r["unrealized"] or 0.0
+        entry["open_positions"] = r["open_positions"] or 0
+    return sorted(out.values(), key=lambda e: e["pnl"], reverse=True)
 
 
 async def strategy_heartbeats(db: ReadOnlyDatabase) -> dict[str, dict]:

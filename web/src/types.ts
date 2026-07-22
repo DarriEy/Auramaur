@@ -50,6 +50,9 @@ export interface StrategyStat {
   entries: number;
   pnl: number;
   fees: number;
+  /** Open-book mark-to-market, attributed to the position's entry strategy. */
+  unrealized?: number;
+  open_positions?: number;
 }
 
 export interface StrategyHeartbeat {

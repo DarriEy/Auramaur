@@ -472,7 +472,7 @@ function Compare({ s, onView }: { s: DashboardState; onView: (v: View) => void }
       <button className={mode === "strategies" ? "active" : ""} onClick={() => setMode("strategies")}>Strategies</button>
       <button className={mode === "venues" ? "active" : ""} onClick={() => setMode("venues")}>Venues</button>
     </div>
-    {mode === "strategies" ? <DataTable headers={["Strategy", "Health", "Evaluations", "Venues", "Entries", "Fees", "Realized", "Latest observed"]}
+    {mode === "strategies" ? <DataTable headers={["Strategy", "Health", "Evaluations", "Venues", "Entries", "Fees", "Realized", "Unrealized", "Latest observed"]}
       empty={!strategyRows.length ? "No strategy data is available to compare." : undefined}>
       {strategyRows.map((row) => {
         const age = row.latest ? (new Date(s.now).getTime() - new Date(row.latest).getTime()) / 1000 : null;
@@ -481,6 +481,7 @@ function Compare({ s, onView }: { s: DashboardState; onView: (v: View) => void }
           <td className="num">{row.signals.length}</td><td>{row.venues.join(", ") || "—"}</td>
           <td className="num">{row.realized?.entries ?? 0}</td><td className="num">{money(row.realized?.fees ?? 0)}</td>
           <td className={`num ${deltaClass(row.realized?.pnl ?? null)}`}>{money(row.realized?.pnl ?? 0, true)}</td>
+          <td className={`num ${deltaClass(row.realized?.unrealized ?? null)}`} title={`${row.realized?.open_positions ?? 0} open position(s)`}>{money(row.realized?.unrealized ?? 0, true)}</td>
           <td title={row.latest ? isoAge(row.latest) : undefined}>{utcTime(row.latest)}</td></tr>;
       })}</DataTable> : <DataTable headers={["Venue", "Health", "Balance detail", "Available", "Equity", "Snapshot UTC"]}
         empty={!venueRows.length ? "No venue snapshots are available to compare." : undefined}>
@@ -623,7 +624,7 @@ function Workspace({ title, subtitle, action, children }: {
 
 function DataTable({ headers, children, empty }: { headers: string[]; children: React.ReactNode; empty?: string }) {
   return <div className="data-table-wrap"><table className="data-table"><thead><tr>{headers.map((header) =>
-    <th key={header} className={["Exposure", "Mark", "P&L", "Edge", "Model probability", "Market probability", "Occurrences", "Forecasts", "Brier", "Market Brier", "Abstains", "Venue qty", "Ledger qty", "Evaluations", "Positions", "Entries", "Fees", "Realized", "Quantity", "Entry", "Peak gain"].includes(header) ? "num" : ""}>{header}</th>)}
+    <th key={header} className={["Exposure", "Mark", "P&L", "Edge", "Model probability", "Market probability", "Occurrences", "Forecasts", "Brier", "Market Brier", "Abstains", "Venue qty", "Ledger qty", "Evaluations", "Positions", "Entries", "Fees", "Realized", "Unrealized", "Quantity", "Entry", "Peak gain"].includes(header) ? "num" : ""}>{header}</th>)}
   </tr></thead><tbody>{empty ? <tr className="empty-row"><td colSpan={headers.length}>{empty}</td></tr> : children}</tbody></table></div>;
 }
 
