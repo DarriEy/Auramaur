@@ -351,6 +351,7 @@ class AuramaurBot(
             try:
                 all_positions = []
                 per_exchange_cash: dict[str, float] = {}
+                sync_failures: list[str] = []
 
                 for syncer in syncers:
                     name = getattr(syncer, "exchange_name", "polymarket")
@@ -359,6 +360,7 @@ class AuramaurBot(
                         cash = await syncer.get_cash_balance()
                     except Exception as e:
                         log.debug("portfolio_monitor.sync_error", exchange=name, error=str(e))
+                        sync_failures.append(name)
                         continue
 
                     per_exchange_cash[name] = cash
@@ -401,12 +403,19 @@ class AuramaurBot(
                 # daily_stats.peak_balance, so get_drawdown() returned 0.0
                 # forever and check_max_drawdown / check_drawdown_heat could
                 # never trip (2026-07-20 audit, confirmed critical).
-                try:
-                    equity = total_cash + sum(
-                        p.size * p.current_price for p in all_positions)
-                    await portfolio_tracker.note_equity(equity)
-                except Exception as e:
-                    log.debug("drawdown.note_equity_error", error=str(e))
+                # Complete ticks only: with any venue missing, "equity" is just
+                # the venues that answered, and those partial sums recorded
+                # phantom 75-92% drawdowns in daily_stats on 2026-07-21/22.
+                if sync_failures:
+                    log.debug("drawdown.equity_tick_skipped",
+                              failed_venues=sync_failures)
+                else:
+                    try:
+                        equity = total_cash + sum(
+                            p.size * p.current_price for p in all_positions)
+                        await portfolio_tracker.note_equity(equity)
+                    except Exception as e:
+                        log.debug("drawdown.note_equity_error", error=str(e))
 
                 if first_tick:
                     first_tick = False

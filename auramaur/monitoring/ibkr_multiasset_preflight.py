@@ -34,9 +34,11 @@ class MultiAssetPreflightReport:
         return not any(result.severity == "BLOCK" for result in self.results)
 
 
-async def preflight(settings, db, *, client=None, timeout_seconds: int = 30,
+async def preflight(settings, db, *, client=None, timeout_seconds: float | None = None,
                     books: tuple[IBKRBook, ...] | None = None):
     cfg = settings.ibkr
+    if timeout_seconds is None:
+        timeout_seconds = cfg.multiasset_preflight_timeout_seconds
     results: list[MultiAssetPreflightResult] = []
 
     def add(book, severity, detail):
@@ -96,20 +98,30 @@ async def preflight(settings, db, *, client=None, timeout_seconds: int = 30,
                                         has_history=True)
                 return None, source, None
             except Exception as exc:  # noqa: BLE001
-                if pacing_error(exc) and attempt + 1 < attempts:
+                # A wait_for deadline cancels the pending IB request, which the
+                # gateway logs as "Error 162 ... query cancelled" — same
+                # transient class as pacing, so it gets the same backoff.
+                timed_out = isinstance(exc, TimeoutError)
+                if (pacing_error(exc) or timed_out) and attempt + 1 < attempts:
                     delay = cfg.multiasset_preflight_retry_seconds * (2 ** attempt)
-                    log.warning("ibkr_multiasset.preflight_pacing_retry", key=spec.key,
+                    log.warning("ibkr_multiasset.preflight_transient_retry", key=spec.key,
                                 attempt=attempt + 1, delay_seconds=delay,
-                                error=str(exc)[:160])
+                                timed_out=timed_out, error=str(exc)[:160])
                     await asyncio.sleep(delay)
                     continue
-                prefix = "pacing exhausted" if pacing_error(exc) else "probe failed"
+                if timed_out:
+                    prefix = f"no gateway response within {timeout_seconds:.0f}s"
+                elif pacing_error(exc):
+                    prefix = "pacing exhausted"
+                else:
+                    prefix = "probe failed"
+                detail = str(exc)[:140] or exc.__class__.__name__
                 await record_validation(
                     db, spec, SimpleNamespace(conId=0, exchange=spec.exchange,
                                               currency=spec.currency,
                                               multiplier=spec.multiplier),
-                    quote_source="none", has_history=False, error=str(exc))
-                return f"{spec.key}: {prefix}: {str(exc)[:140]}", None, None
+                    quote_source="none", has_history=False, error=f"{prefix}: {detail}")
+                return f"{spec.key}: {prefix}: {detail}", None, None
         return f"{spec.key}: pacing retry exhausted", None, None  # pragma: no cover
     if not getattr(client, "readonly", False) or hasattr(client, "place_order"):
         add("isolation", "BLOCK", "market-data client is not structurally read-only")

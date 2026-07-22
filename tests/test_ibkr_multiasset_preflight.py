@@ -136,6 +136,46 @@ async def test_preflight_retries_transient_pacing_errors():
 
 
 @pytest.mark.asyncio
+async def test_preflight_retries_gateway_timeouts():
+    class SlowOnceClient(ReadyClient):
+        def __init__(self):
+            self.attempts = set()
+
+        async def get_daily_bars(self, spec):
+            if spec.key not in self.attempts:
+                self.attempts.add(spec.key)
+                raise TimeoutError
+            return await super().get_daily_bars(spec)
+
+    db = Database(":memory:")
+    await db.connect()
+    settings = Settings()
+    settings.ibkr.enabled = True
+    settings.ibkr.multiasset_preflight_retry_seconds = 0
+    report = await preflight(settings, db, client=SlowOnceClient())
+    assert report.ready
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_preflight_reports_exhausted_timeouts_as_gateway_unresponsive():
+    class DeadGatewayClient(ReadyClient):
+        async def get_daily_bars(self, spec):
+            raise TimeoutError
+
+    db = Database(":memory:")
+    await db.connect()
+    settings = Settings()
+    settings.ibkr.enabled = True
+    settings.ibkr.multiasset_preflight_pacing_retries = 0
+    report = await preflight(settings, db, client=DeadGatewayClient())
+    assert not report.ready
+    blocked = [r for r in report.results if r.severity == "BLOCK"]
+    assert any("no gateway response within" in r.detail for r in blocked)
+    await db.close()
+
+
+@pytest.mark.asyncio
 async def test_entitlement_quarantine_skips_instrument_but_reports_coverage():
     class EntitledClient(ReadyClient):
         async def get_quote(self, spec):

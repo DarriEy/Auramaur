@@ -280,6 +280,9 @@ ibkr:
   multiasset_preflight_concurrency: 2
   multiasset_preflight_pacing_retries: 2
   multiasset_preflight_retry_seconds: 2.0
+  # Probe deadline; the gateway's history farm exceeds 30s around IB's
+  # nightly reset, and shorter deadlines self-cancel (IB "Error 162").
+  multiasset_preflight_timeout_seconds: 60.0
   # Runtime universe = deterministic manifest intersected with this machine's
   # qualified, approved broker registry. Run preflight before enabling books.
   multiasset_registry_required: true
