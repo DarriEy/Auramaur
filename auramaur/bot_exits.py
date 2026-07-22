@@ -222,15 +222,23 @@ class ExitExecutionMixin:
                 )
                 return False
             # Cross to the bid: a marketable SELL that actually fills.
+            # FLOOR to the tick, never round: round(0.066)=0.07 and
+            # round(0.989)=0.99 lifted the limit ABOVE the bid, so the
+            # "marketable" sell rested unfilled, the stale-cancel reaped it,
+            # and the exit re-triggered every ~2.5 min forever (676519 /
+            # 2947127, 2026-07-22). A marketable limit fills AT the book's
+            # bid regardless of how far below it the limit sits — flooring
+            # costs nothing and guarantees the cross.
+            marketable = max(0.01, min(0.99, math.floor(best_bid * 100) / 100))
             if best_bid < sell_price:
                 log.info(
                     "exit.priced_to_bid",
                     market_id=pos.market_id,
                     snapshot=sell_price,
                     bid=best_bid,
-                    price=round(best_bid, 2),
+                    price=marketable,
                 )
-            sell_price = max(0.01, min(0.99, round(best_bid, 2)))
+            sell_price = marketable
         sell_order = Order(
             market_id=pos.market_id,
             token_id=token_id,
