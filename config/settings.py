@@ -1653,6 +1653,11 @@ class IntelligenceEvalConfig(BaseModel):
     markets_per_cycle: int = Field(default=8, ge=1, le=100)
     min_liquidity: float = Field(default=1000.0, ge=0)
     max_concurrency: int = Field(default=1, ge=1, le=16)
+    market_concurrency: int = Field(default=2, ge=1, le=16)
+    reprice_threshold: float = Field(default=0.03, ge=0, le=1)
+    reevaluate_after_hours: float = Field(default=24.0, ge=0)
+    near_resolution_days: float = Field(default=14.0, ge=0)
+    expensive_fraction: float = Field(default=0.25, ge=0, le=1)
     prompt_version: str = "forecast-v1"
     output_schema_version: str = "binary-v1"
     treatments: list[IntelligenceEvalTreatment] = Field(default_factory=lambda: [

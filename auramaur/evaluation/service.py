@@ -6,8 +6,10 @@ no broker, risk, exchange execution, or production portfolio dependencies.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import math
 import time
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -104,6 +106,8 @@ class IntelligenceEvalService:
         self._runner = IntelligenceEvalRunner(self._cfg.max_concurrency)
 
     async def run_once(self) -> int:
+        cycle_started = datetime.now(timezone.utc)
+        wall_started = time.monotonic()
         # ResolutionTracker owns venue truth. Refreshing here makes newly
         # canonicalized results visible even during quiet/no-resolution cycles.
         await self._score_materializer.refresh()
@@ -114,14 +118,88 @@ class IntelligenceEvalService:
             and market.liquidity >= self._cfg.min_liquidity
             and 0 < market.outcome_yes_price < 1
         )]
-        eligible.sort(key=lambda market: market.volume, reverse=True)
-        recorded = 0
-        for market in eligible[:self._cfg.markets_per_cycle]:
-            recorded += await self._evaluate_market(market)
-        log.info("intelligence_eval.cycle", markets=len(eligible), forecasts=recorded)
+        selected = await self._select_markets(eligible, cycle_started)
+        expensive_n = math.ceil(len(selected) * self._cfg.expensive_fraction)
+        informative = sorted(selected, key=self._information_priority)[:expensive_n]
+        expensive_ids = {market.id for market in informative}
+        semaphore = asyncio.Semaphore(self._cfg.market_concurrency)
+
+        async def evaluate(market):
+            async with semaphore:
+                treatments = (self._treatments if market.id in expensive_ids
+                              else self._treatments[:1])
+                return await self._evaluate_market(market, treatments)
+
+        results = await asyncio.gather(*(evaluate(market) for market in selected))
+        recorded = sum(item[0] for item in results)
+        attempts = sum(item[1] for item in results)
+        failed = sum(item[2] for item in results)
+        compute = sum(item[3] for item in results)
+        completed = datetime.now(timezone.utc)
+        metrics = dict(
+            cycle_id=hashlib.sha256(cycle_started.isoformat().encode()).hexdigest(),
+            started_at=cycle_started.isoformat(), completed_at=completed.isoformat(),
+            eligible_markets=len(eligible), selected_markets=len(selected),
+            unique_families=len({self._family(m) for m in selected}),
+            forecasts=recorded, attempts=attempts, failed_attempts=failed,
+            duration_ms=int((time.monotonic() - wall_started) * 1000),
+            compute_seconds=compute,
+        )
+        await self._store.put_cycle(metrics)
+        log.info("intelligence_eval.cycle", **metrics)
         return recorded
 
-    async def _evaluate_market(self, market) -> int:
+    @staticmethod
+    def _family(market) -> str:
+        return market.neg_risk_market_id or market.id
+
+    def _information_priority(self, market):
+        end = market.end_date or datetime.max.replace(tzinfo=timezone.utc)
+        days = (end - datetime.now(timezone.utc)).total_seconds() / 86400
+        horizon_bucket = 0 if 0 <= days <= self._cfg.near_resolution_days else 1
+        ambiguity = abs(float(market.outcome_yes_price) - 0.5)
+        return (horizon_bucket, end, ambiguity, -float(market.volume or 0))
+
+    async def _select_markets(self, eligible, now):
+        """Select changed/novel markets, one per family, with category rotation."""
+        latest = await self._store.latest_market_observations()
+        candidates = []
+        for market in eligible:
+            venue = (market.exchange or "polymarket").lower()
+            previous = latest.get((venue, market.id))
+            if previous:
+                observed = datetime.fromisoformat(previous["observed_at"])
+                age_hours = (now - observed.astimezone(timezone.utc)).total_seconds() / 3600
+                moved = abs(float(market.outcome_yes_price)
+                            - float(previous["market_prob_yes"]))
+                if (age_hours < self._cfg.reevaluate_after_hours
+                        and moved < self._cfg.reprice_threshold):
+                    continue
+            candidates.append(market)
+
+        candidates.sort(key=self._information_priority)
+        families, categories, selected = set(), {}, []
+        for market in candidates:
+            family = self._family(market)
+            if family in families:
+                continue
+            categories.setdefault(market.category or "unknown", []).append(market)
+        queues = list(categories.values())
+        while queues and len(selected) < self._cfg.markets_per_cycle:
+            next_queues = []
+            for queue in queues:
+                if queue and len(selected) < self._cfg.markets_per_cycle:
+                    market = queue.pop(0)
+                    family = self._family(market)
+                    if family not in families:
+                        selected.append(market)
+                        families.add(family)
+                if queue:
+                    next_queues.append(queue)
+            queues = next_queues
+        return selected
+
+    async def _evaluate_market(self, market, treatments=None) -> tuple[int, int, int, float]:
         now = datetime.now(timezone.utc)
         spread = max(0.0, float(market.spread or 0))
         mid = float(market.outcome_yes_price)
@@ -141,13 +219,19 @@ class IntelligenceEvalService:
         await self._store.put_episode(snapshot)
         payload = json.loads(snapshot.canonical_json())
         episode = Episode(snapshot.episode_hash, payload)
-        results = await self._runner.run(episode, self._treatments)
+        treatments = treatments or self._treatments
+        results = await self._runner.run(episode, treatments)
         written = 0
-        for treatment, result in zip(self._treatments, results, strict=True):
+        attempt_count = failed_count = 0
+        compute_seconds = 0.0
+        for treatment, result in zip(treatments, results, strict=True):
             run_id = hashlib.sha256(
                 f"{snapshot.episode_hash}:{treatment.treatment_id}".encode()).hexdigest()
             duration_ms = sum(int(attempt.telemetry.get("duration_ms", 0))
                               for attempt in result.attempts)
+            compute_seconds += duration_ms / 1000
+            attempt_count += len(result.attempts)
+            failed_count += sum(not attempt.succeeded for attempt in result.attempts)
             status = RunStatus.SUCCEEDED if result.succeeded else RunStatus.FAILED
             errors = "; ".join(attempt.error for attempt in result.attempts
                                if attempt.error)
@@ -162,6 +246,8 @@ class IntelligenceEvalService:
                 compute_seconds=duration_ms / 1000, error=errors,
                 started_at=now, completed_at=datetime.now(timezone.utc),
             ))
+            for attempt in result.attempts:
+                await self._store.put_attempt(run_id, snapshot.episode_hash, attempt)
             if result.final_forecast is None:
                 continue
             forecast_id = hashlib.sha256(f"{run_id}:forecast".encode()).hexdigest()
@@ -174,4 +260,4 @@ class IntelligenceEvalService:
                 else 1 - forecast.confidence,
             ))
             written += 1
-        return written
+        return written, attempt_count, failed_count, compute_seconds
