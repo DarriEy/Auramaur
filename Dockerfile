@@ -55,6 +55,13 @@ RUN groupadd --gid 10001 auramaur \
 
 COPY --chown=auramaur:auramaur deploy/docker/auramaur-entrypoint.sh \
      deploy/docker/auramaur-web-entrypoint.sh /usr/local/bin/
+# Docker Desktop can feed a CRLF working-tree copy into the Linux build context
+# even though .gitattributes declares shell scripts as LF. Normalize at the
+# image boundary so the kernel can always resolve the /bin/sh shebang.
+RUN sed -i 's/\r$//' /usr/local/bin/auramaur-entrypoint.sh \
+                       /usr/local/bin/auramaur-web-entrypoint.sh \
+    && chmod 0755 /usr/local/bin/auramaur-entrypoint.sh \
+                  /usr/local/bin/auramaur-web-entrypoint.sh
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/auramaur-entrypoint.sh"]
 CMD ["auramaur", "run", "--hybrid"]
 
