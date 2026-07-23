@@ -16,6 +16,7 @@ display layer two tools:
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 
@@ -86,10 +87,18 @@ class LoopWatchdog(threading.Thread):
         stall_seconds: float = 180.0,
         check_interval: float = 30.0,
         alert=None,
+        hard_exit_seconds: float = 900.0,
     ):
         super().__init__(name="loop-watchdog", daemon=True)
         self.stall_seconds = stall_seconds
         self.check_interval = check_interval
+        # A stall this long means exits and risk checks have been dead for
+        # its whole duration and self-recovery is no longer worth waiting
+        # for: exit nonzero so Docker's restart:on-failure revives the bot
+        # (the 2026-07-23 wedges each froze the book 25-35 min and needed
+        # manual restarts; the container healthcheck cannot see a stall).
+        # Set <= 0 to disable.
+        self.hard_exit_seconds = hard_exit_seconds
         self._alert = alert or (lambda msg: None)
         self._last_beat = time.monotonic()
         self._stalled_since: float | None = None
@@ -97,6 +106,14 @@ class LoopWatchdog(threading.Thread):
 
     def beat(self) -> None:
         self._last_beat = time.monotonic()
+
+    @staticmethod
+    def _hard_exit() -> None:  # pragma: no cover - patched in tests
+        # os._exit, not sys.exit: the event loop is dead, so graceful
+        # shutdown would hang behind the very stall being escaped. State is
+        # safe — every completed write is committed, and the WAL recovers
+        # anything mid-flight on the next open.
+        os._exit(70)
 
     def stop(self) -> None:
         self._stop.set()
@@ -107,6 +124,18 @@ class LoopWatchdog(threading.Thread):
 
     def _check(self) -> None:
         gap = time.monotonic() - self._last_beat
+        if (
+            self.hard_exit_seconds > 0
+            and gap >= self.hard_exit_seconds
+            and not self._stop.is_set()
+        ):
+            self._alert(
+                f"EVENT LOOP DEAD for {gap:.0f}s — exiting so the "
+                f"container restart policy can revive the bot."
+            )
+            log.critical("watchdog.hard_exit", gap_seconds=round(gap))
+            self._hard_exit()
+            return
         if gap >= self.stall_seconds and self._stalled_since is None:
             self._stalled_since = self._last_beat
             self._alert(
