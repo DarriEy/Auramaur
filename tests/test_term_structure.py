@@ -33,6 +33,19 @@ def test_parse_deadline_variants():
     assert parse_deadline("") is None
 
 
+def test_parse_deadline_extended_ladder_variants():
+    assert parse_deadline("Event by end of 2026?") == datetime(
+        2026, 12, 31, tzinfo=timezone.utc)
+    assert parse_deadline("Event by Q3 2026?") == datetime(
+        2026, 9, 30, tzinfo=timezone.utc)
+    assert parse_deadline("Event before September 2026?") == datetime(
+        2026, 9, 1, tzinfo=timezone.utc)
+    assert parse_deadline("Event by February 2028?") == datetime(
+        2028, 2, 29, tzinfo=timezone.utc)
+    assert family_key("Event by Q3 2026?") == "event"
+    assert family_key("Event before September 2026?") == "event"
+
+
 def test_family_key_strips_deadline_and_normalizes():
     a = family_key("US x Iran diplomatic meeting by July 10, 2026?")
     b = family_key("US x Iran diplomatic meeting by July 17, 2026?")
@@ -85,13 +98,20 @@ def _settings():
     cfg.max_entries_per_family = 2
     cfg.stake_usd = 10.0
     cfg.min_liquidity = 1000.0
+    cfg.context_min_liquidity = 100.0
     cfg.min_days = 0.25
     cfg.max_days = 90.0
     cfg.min_edge_pts = 8.0
     cfg.llm_timeout_seconds = 420
+    cfg.gemini_fallback = True
+    cfg.gemini_daily_call_limit = 30
+    cfg.gemini_price_per_mtok = [2.0, 12.0]
     cfg.exclude_categories = []
     s.risk.blocked_categories = []
     s.nlp.daily_claude_call_budget = 0
+    s.gemini.enabled = True
+    s.gemini.model = "gemini-test"
+    s.gemini_api_key = "test-key"
     return s
 
 
@@ -250,5 +270,66 @@ async def test_seed_and_search_completes_a_family(tmp_path):
         sigs = {r["market_id"] for r in await db.fetchall(
             "SELECT market_id FROM signals")}
         assert sigs == {"a", "b"}
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_thin_strike_informs_curve_but_is_not_traded(tmp_path):
+    strikes = _ladder()
+    strikes[1].liquidity = 200.0  # context floor passes; execution floor fails
+    reply = ('{"thesis": "t", "curve": [{"market_id": "a", "prob": 0.40},'
+             '{"market_id": "b", "prob": 0.90}, '
+             '{"market_id": "c", "prob": 0.72}]}')
+    pillar, db, _ = await _pillar(tmp_path, strikes, reply)
+    try:
+        assert await pillar.run_once() == 2
+        traded = {r["market_id"] for r in await db.fetchall(
+            "SELECT market_id FROM signals")}
+        assert traded == {"a", "c"}
+        row = await db.fetchone(
+            """SELECT disposition FROM term_structure_observations
+                WHERE market_id='b' ORDER BY id DESC LIMIT 1""")
+        assert row["disposition"] == "context_only"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_changed_strike_set_invalidates_cached_curve(tmp_path):
+    reply = ('{"thesis": "t", "curve": [{"market_id": "a", "prob": 0.40},'
+             '{"market_id": "b", "prob": 0.70}, '
+             '{"market_id": "c", "prob": 0.72}]}')
+    pillar, db, _ = await _pillar(tmp_path, _ladder(), reply)
+    try:
+        await pillar._ensure_schema()
+        await pillar._read_family("event", _ladder(), pillar._settings.term_structure)
+        expanded = _ladder() + [_strike("d", 28, 0.60)]
+        cached = await pillar._cached_curve(
+            "event", expanded, pillar._settings.term_structure)
+        assert cached is None
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_grounded_gemini_fallback_records_cost(tmp_path):
+    pillar, db, _ = await _pillar(tmp_path, _ladder(), "")
+    pillar._gemini_request = AsyncMock(return_value={
+        "candidates": [{"content": {"parts": [{"text": '{"curve": []}'}]}}],
+        "usageMetadata": {"promptTokenCount": 1000, "candidatesTokenCount": 500},
+    })
+    try:
+        text = await pillar._call_gemini(
+            "prompt", pillar._settings.term_structure, "test")
+        assert text == '{"curve": []}'
+        assert pillar._last_reader == ("gemini", "gemini-test")
+        row = await db.fetchone(
+            """SELECT calls, usd FROM agent_trader_costs
+                WHERE model_alias='term_structure_gemini'""")
+        assert row["calls"] == 1
+        assert row["usd"] == pytest.approx(0.008)
+        body = pillar._gemini_request.await_args.args[1]
+        assert body["tools"] == [{"google_search": {}}]
     finally:
         await db.close()

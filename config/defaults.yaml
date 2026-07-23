@@ -784,7 +784,7 @@ term_structure:
   interval_seconds: 7200
   model: claude-opus-4-8
   effort: medium
-  scan_limit: 300
+  scan_limit: 750
   min_strikes: 3
   # Throughput raised 2026-07-15 (12->16 families, 3->5 fresh reads/cycle):
   # the pillar's early ledger is the strongest of the new cells and its
@@ -795,11 +795,19 @@ term_structure:
   curve_ttl_hours: 24.0
   max_entries_per_family: 2
   stake_usd: 10.0
+  # Thin siblings may inform the curve, but cannot be traded. This avoids
+  # discarding an otherwise valid ladder because a deep strike is illiquid.
+  context_min_liquidity: 100.0
   min_liquidity: 1000.0
   min_days: 0.25
-  max_days: 90.0
+  max_days: 180.0
   min_edge_pts: 8.0
   llm_timeout_seconds: 420
+  # Claude weekly/daily exhaustion must not starve exploration. The grounded
+  # Gemini fallback shares the agent-trader's paid-call ceiling.
+  gemini_fallback: true
+  gemini_daily_call_limit: 30
+  gemini_price_per_mtok: [2.0, 12.0]
   exclude_categories: []
 
 vol_anchor:
