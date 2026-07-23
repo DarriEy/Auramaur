@@ -769,11 +769,18 @@ class AuramaurBot(
     async def _task_ibkr_etf_paper(self) -> None:
         """OpenAI intelligence-cap A/B over the paper-only ETF mandate."""
         from auramaur.exchange.ibkr_equity import IBKREquityClient
+        from auramaur.exchange.equity_market_data import (
+            AlpacaIEXMarketData, ResearchEquityMarketData,
+        )
         from auramaur.nlp.openai_etf import OpenAIETFAnalyzer
         from auramaur.strategy.ibkr_etf_controls import MomentumETFAnalyzer
         from auramaur.strategy.ibkr_etf_paper import IBKRETFPaperPillar
 
-        client = IBKREquityClient(self.settings, force_paper_readonly=True)
+        ibkr_client = IBKREquityClient(self.settings, force_paper_readonly=True)
+        client = ResearchEquityMarketData(ibkr_client, AlpacaIEXMarketData(
+            self.settings.alpaca_api_key, self.settings.alpaca_api_secret,
+            base_url=self.settings.alpaca_data_url,
+            timeout=self.settings.alpaca_timeout_seconds))
         evidence_cache = {}
         analyzers = [OpenAIETFAnalyzer(
             self.settings.openai_api_key, spec.model, spec.effort,

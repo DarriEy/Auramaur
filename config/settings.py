@@ -1761,6 +1761,10 @@ class Settings(BaseSettings):
     anthropic_api_key_primary: str = Field(default="", repr=False, exclude=True)
     anthropic_api_key_secondary: str = Field(default="", repr=False, exclude=True)
     openai_api_key: str = Field(default="", repr=False, exclude=True)
+    alpaca_api_key: str = Field(default="", repr=False, exclude=True)
+    alpaca_api_secret: str = Field(default="", repr=False, exclude=True)
+    alpaca_data_url: str = "https://data.alpaca.markets"
+    alpaca_timeout_seconds: float = 10.0
     polygon_private_key: str = Field(default="", repr=False, exclude=True)
     polymarket_api_key: str = Field(default="", repr=False, exclude=True)
     polymarket_api_secret: str = Field(default="", repr=False, exclude=True)
