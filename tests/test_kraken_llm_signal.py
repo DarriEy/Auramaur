@@ -108,6 +108,27 @@ def test_llm_view_pins_primary_to_claude():
     asyncio.run(run())
 
 
+def test_llm_view_uses_dedicated_analyzer_without_claude_kwarg():
+    agg = MagicMock()
+    agg.gather = AsyncMock(return_value=[])
+    analysis = SimpleNamespace(probability=0.64, confidence="HIGH",
+                               skipped_reason=None)
+    dedicated = MagicMock()
+    dedicated.analyze = AsyncMock(return_value=analysis)
+    bot = SimpleNamespace(_components=Components({
+        "aggregator": agg, "analyzer": MagicMock(), "cache": None,
+        "calibration": None,
+    }))
+    p = KrakenPillar(_settings(), MagicMock(), bot=bot,
+                     directional_analyzer=dedicated)
+
+    async def run():
+        assert await p._llm_view("XBTUSDC") == (0.64, "HIGH")
+        assert dedicated.analyze.await_args.kwargs == {}
+
+    asyncio.run(run())
+
+
 def test_llm_view_unknown_pair_returns_none():
     bot = SimpleNamespace(_components=Components({}))
     p = _pillar(bot=bot)

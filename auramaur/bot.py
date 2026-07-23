@@ -739,6 +739,7 @@ class AuramaurBot(
         spot trading runs only when kraken.directional_enabled (off by default).
         """
         from auramaur.exchange.kraken import KrakenSpotClient
+        from auramaur.nlp.openai_etf import OpenAIETFAnalyzer
         from auramaur.treasury.kraken_pillar import KrakenPillar
         from auramaur.monitoring.display import console
 
@@ -751,9 +752,27 @@ class AuramaurBot(
             coinbase_client = CoinbasePublicClient()
             comparator = CoinbasePaperBook(
                 self.settings, coinbase_client, self._components.get("db"))
+        directional_analyzer = None
+        if self.settings.kraken.directional_llm_enabled:
+            spec = self.settings.ibkr.etf_models[1]
+            directional_analyzer = OpenAIETFAnalyzer(
+                self.settings.openai_api_key, spec.model, spec.effort,
+                self.settings.ibkr.etf_openai_timeout_seconds,
+                db=self._components.get("db"), model_alias="kraken_directional",
+                input_cost_per_million=spec.input_cost_per_million,
+                output_cost_per_million=spec.output_cost_per_million,
+                instructions=(
+                    "You are a calibrated short-horizon crypto spot forecaster "
+                    "in a strict paper-trading experiment. Estimate whether the "
+                    "named asset will trade higher at the stated horizon using "
+                    "only supplied evidence. Return calibrated probability and "
+                    "confidence, not a trade recommendation. Weak or conflicting "
+                    "evidence should remain near 0.50 with LOW confidence."
+                ))
         pillar = KrakenPillar(
             self.settings, client, bot=self, console=console,
-            paper_comparator=comparator)
+            paper_comparator=comparator,
+            directional_analyzer=directional_analyzer)
         interval = self.settings.kraken.treasury_interval_seconds
         try:
             while self._running:
@@ -763,6 +782,8 @@ class AuramaurBot(
                 await asyncio.sleep(interval)
         finally:
             await client.close()
+            if directional_analyzer is not None:
+                await directional_analyzer.close()
             if coinbase_client is not None:
                 await coinbase_client.close()
 
