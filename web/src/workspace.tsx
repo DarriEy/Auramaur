@@ -345,10 +345,12 @@ function Portfolio({ s, onInspect }: { s: DashboardState; onInspect: (i: Inspect
           </DataTable>
         </section>
         <section className="section-block"><h2>Strategy realized performance</h2>
-          <DataTable headers={["Strategy", "Entries", "Fees", "Realized"]}>
+          <DataTable headers={["Strategy", "Entries", "Open", "Fees", "Realized", "Unrealized"]}>
             {s.strategies.map((row) => <tr key={row.strategy}><td><StrategyName name={row.strategy} /></td>
-              <td className="num">{row.entries}</td><td className="num">{money(row.fees)}</td>
-              <td className={`num ${deltaClass(row.pnl)}`}>{money(row.pnl, true)}</td></tr>)}
+              <td className="num">{row.entries}</td><td className="num">{row.open_positions ?? 0}</td>
+              <td className="num">{money(row.fees)}</td>
+              <td className={`num ${deltaClass(row.pnl)}`}>{money(row.pnl, true)}</td>
+              <td className={`num ${deltaClass(row.unrealized ?? 0)}`}>{money(row.unrealized ?? 0, true)}</td></tr>)}
           </DataTable>
         </section>
       </div>

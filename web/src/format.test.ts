@@ -12,6 +12,7 @@ describe("dashboard formatting", () => {
     expect(money(null)).toBe("n/a");
     expect(money(12.5, true)).toBe("+$12.50");
     expect(money(-12.5, true)).toBe("-$12.50");
+    expect(money(-1.3e-15, true)).toBe("$0.00");
     expect(price(null)).toBe("—");
     expect(price(0.625)).toBe("0.625");
   });

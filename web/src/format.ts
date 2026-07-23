@@ -1,7 +1,8 @@
 export function money(v: number | null | undefined, signed = false): string {
   if (v === null || v === undefined) return "n/a";
-  const sign = signed && v > 0 ? "+" : v < 0 ? "-" : "";
-  return `${sign}$${Math.abs(v).toLocaleString("en-US", {
+  const rounded = Math.round(v * 100) / 100;
+  const sign = signed && rounded > 0 ? "+" : rounded < 0 ? "-" : "";
+  return `${sign}$${Math.abs(rounded).toLocaleString("en-US", {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })}`;

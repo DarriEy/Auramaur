@@ -68,7 +68,8 @@ class TestKalshiPositionSyncerPaperSync:
         db.commit = AsyncMock()
         # _sync_paper scopes the shared PaperTrader book to markets known as
         # exchange='kalshi' (2026-07-20 audit fix).
-        db.fetchall = AsyncMock(return_value=[{"id": mid} for mid in kalshi_ids])
+        db.fetchall = AsyncMock(return_value=[
+            {"id": mid, "category": "economics"} for mid in kalshi_ids])
         return db
 
     @pytest.mark.asyncio
