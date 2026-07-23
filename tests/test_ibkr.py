@@ -230,8 +230,8 @@ class TestIBKRConfig:
     def test_ibkr_config_defaults(self):
         from config.settings import Settings
         s = Settings()
-        # Fail-closed by default; operators explicitly enable the paper setup.
-        assert s.ibkr.enabled is False
+        # Read-only paper connectivity is active; live execution remains gated.
+        assert s.ibkr.enabled is True
         assert s.ibkr.environment == "paper"
         assert s.ibkr.readonly is True
         assert s.ibkr.paper_trade is True
@@ -248,6 +248,6 @@ class TestIBKRConfig:
         with open(defaults_path) as f:
             raw = yaml.safe_load(f)
 
-        assert raw["ibkr"]["enabled"] is False
+        assert raw["ibkr"]["enabled"] is True
         assert raw["ibkr"]["environment"] == "paper"
         assert raw["ibkr"]["paper_trade"] is True

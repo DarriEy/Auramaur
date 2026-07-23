@@ -28,13 +28,13 @@ Everything below the operator steps is already built and tested.
    option scanner spams errors by design.
 3. **Enable only the venue** in `config/defaults.local.yaml`:
    `ibkr: {enabled: true}` (environment stays paper). In Docker, set
-   `IBKR_ENABLED=true`; do not change `IBKR_QUOTE_ENVIRONMENT` from `paper`.
+   `IBKR_ENABLED=true` is now the default; do not change `IBKR_QUOTE_ENVIRONMENT` from `paper`.
 4. **Smoke-test**: `python scripts/preflight_venues.py` (has an IBKR probe),
    then run the relevant `auramaur ibkr-etf-preflight` or
    `auramaur ibkr-multiasset-preflight` command.
 5. **Enable exactly one paper experiment** in the local override
    (`etf_paper_enabled: true` or `multiasset_paper_enabled: true`). For Docker,
-   use `IBKR_MULTIASSET_PAPER_ENABLED=true` only after preflight. Restart.
+   `IBKR_MULTIASSET_PAPER_ENABLED=true` is the default; preflight still fails closed before any paper cycle. Restart after overrides.
 
 ## The graduation paths
 

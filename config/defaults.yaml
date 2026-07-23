@@ -218,7 +218,7 @@ cryptodotcom:
   environment: "sandbox"
 
 ibkr:
-  # Shared IBKR operational defaults are inert. The ETF experiment below forces
+  # Shared IBKR operational defaults activate read-only paper books. The ETF experiment below forces
   # its own paper-port, read-only quote connection in code, so it cannot silently
   # alter or arm the independently configured options/odd-lot paths.
   #
@@ -237,9 +237,9 @@ ibkr:
   # NOTE: before scaling beyond the starter budget, expose the isolated IBKR
   # ledgers through a report that calls the evidence contract above.
   # Ports: TWS 7497 paper / 7496 live; IB Gateway 4002 / 4001.
-  # Deliberate operator opt-in only. A fresh checkout must not connect to IBKR
-  # or start an experiment merely because TWS/Gateway is reachable.
-  enabled: false
+  # Read-only paper connectivity is enabled by default. Live execution remains
+  # impossible unless its independent gates and allowlists are explicitly armed.
+  enabled: true
   # Master switch above just connects. The two books are gated independently
   # (both also need enabled:true): options_enabled = the option-chain scanner
   # (needs OPRA data; off = no Error 200/10091 scan spam); the odd-lot
@@ -260,7 +260,7 @@ ibkr:
   paper_budget_usd: 5000.0
   # Structurally paper-only ETF book. The quote session may use a live TWS
   # login, but the API connection stays read-only and fills remain local-only.
-  etf_paper_enabled: false
+  etf_paper_enabled: true
   # TWS is logged into the live account but exposes this read-only API socket.
   etf_quote_port: 7497
   # Six isolated local paper books. TWS supplies read-only market data only.
@@ -268,8 +268,8 @@ ibkr:
   # still fail closed without fresh native executable quotes.
   multiasset_client_id: 3
   multiasset_preflight_client_id: 97
-  # Ship disabled; enable deliberately in defaults.local.yaml after preflight.
-  multiasset_paper_enabled: false
+  # Paper books start by default and still fail closed unless preflight succeeds.
+  multiasset_paper_enabled: true
   # A graduated paper book still cannot trade until BOTH this gate and its
   # explicit allowlist entry are set. Global live gates and readonly=false
   # remain mandatory as well.
