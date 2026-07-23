@@ -718,7 +718,7 @@ class TermStructureConfig(BaseModel):
     interval_seconds: int = 7200
     model: str = "claude-opus-4-8"
     effort: str = "medium"
-    scan_limit: int = 300
+    scan_limit: int = 750
     min_strikes: int = 3
     max_families: int = 16
     families_per_cycle: int = 5   # fresh LLM reads per cycle (cached fams free)
@@ -727,9 +727,13 @@ class TermStructureConfig(BaseModel):
     stake_usd: float = 10.0
     min_liquidity: float = 1000.0
     min_days: float = 0.25
-    max_days: float = 90.0
+    max_days: float = 180.0
+    context_min_liquidity: float = 100.0
     min_edge_pts: float = 8.0
     llm_timeout_seconds: int = 420
+    gemini_fallback: bool = True
+    gemini_daily_call_limit: int = 30
+    gemini_price_per_mtok: list[float] = [2.0, 12.0]
     exclude_categories: list[str] = []
 
 

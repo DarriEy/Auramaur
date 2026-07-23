@@ -36,6 +36,7 @@ stacks; see agent_trader for the same rule and rationale).
 from __future__ import annotations
 
 import asyncio
+import calendar
 import json
 import re
 import tempfile
@@ -54,8 +55,20 @@ _MONTHS = {m.lower(): i + 1 for i, m in enumerate(
      "August", "September", "October", "November", "December"])}
 
 # "... by July 10, 2026?" / "... by July 10?" / "... by end of 2026?"
-_BY_DATE_RE = re.compile(
+_BY_DAY_RE = re.compile(
     r"\bby\s+([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s*(\d{4}))?\s*\??\s*$",
+    re.IGNORECASE,
+)
+_BY_END_YEAR_RE = re.compile(
+    r"\bby\s+(?:the\s+)?end\s+of\s+(\d{4})\s*\??\s*$", re.IGNORECASE)
+_BY_QUARTER_RE = re.compile(
+    r"\bby\s+(?:the\s+end\s+of\s+)?q([1-4])\s+(\d{4})\s*\??\s*$",
+    re.IGNORECASE,
+)
+_BEFORE_MONTH_RE = re.compile(
+    r"\bbefore\s+([A-Za-z]+)\s+(\d{4})\s*\??\s*$", re.IGNORECASE)
+_BY_MONTH_RE = re.compile(
+    r"\bby\s+(?:the\s+end\s+of\s+)?([A-Za-z]+)\s+(\d{4})\s*\??\s*$",
     re.IGNORECASE,
 )
 
@@ -92,7 +105,37 @@ CREATE TABLE IF NOT EXISTS term_structure_curves (
     model_prob REAL,
     market_prob REAL,
     thesis TEXT DEFAULT '',
+    provider TEXT NOT NULL DEFAULT 'claude',
+    model TEXT NOT NULL DEFAULT '',
     created_at TEXT DEFAULT (datetime('now'))
+)
+"""
+
+_OBSERVATIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS term_structure_observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    family TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    deadline TEXT DEFAULT '',
+    model_prob REAL NOT NULL,
+    market_prob REAL NOT NULL,
+    gap_pts REAL NOT NULL,
+    provider TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    claimed INTEGER NOT NULL DEFAULT 0,
+    execution_liquid INTEGER NOT NULL DEFAULT 0,
+    disposition TEXT NOT NULL DEFAULT '',
+    observed_at TEXT NOT NULL DEFAULT (datetime('now'))
+)
+"""
+
+_COSTS_TABLE = """
+CREATE TABLE IF NOT EXISTS agent_trader_costs (
+    day TEXT NOT NULL,
+    model_alias TEXT NOT NULL,
+    calls INTEGER NOT NULL DEFAULT 0,
+    usd REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, model_alias)
 )
 """
 
@@ -101,14 +144,33 @@ def parse_deadline(question: str) -> datetime | None:
     """Deadline from the question tail ('… by July 10, 2026?'). The stored
     end_date is unreliable for ladder strikes (NULL/wrong), so the question
     text is the source of truth."""
-    m = _BY_DATE_RE.search(question or "")
-    if not m:
+    text = question or ""
+    m = _BY_DAY_RE.search(text)
+    if m:
+        month = _MONTHS.get(m.group(1).lower())
+        if month is None:
+            return None
+        day = int(m.group(2))
+        year = int(m.group(3)) if m.group(3) else datetime.now(timezone.utc).year
+    elif m := _BY_END_YEAR_RE.search(text):
+        year, month, day = int(m.group(1)), 12, 31
+    elif m := _BY_QUARTER_RE.search(text):
+        quarter, year = int(m.group(1)), int(m.group(2))
+        month = quarter * 3
+        day = calendar.monthrange(year, month)[1]
+    elif m := _BEFORE_MONTH_RE.search(text):
+        month = _MONTHS.get(m.group(1).lower())
+        if month is None:
+            return None
+        year, day = int(m.group(2)), 1
+    elif m := _BY_MONTH_RE.search(text):
+        month = _MONTHS.get(m.group(1).lower())
+        if month is None:
+            return None
+        year = int(m.group(2))
+        day = calendar.monthrange(year, month)[1]
+    else:
         return None
-    month = _MONTHS.get(m.group(1).lower())
-    if month is None:
-        return None
-    day = int(m.group(2))
-    year = int(m.group(3)) if m.group(3) else datetime.now(timezone.utc).year
     try:
         return datetime(year, month, day, tzinfo=timezone.utc)
     except ValueError:
@@ -117,10 +179,13 @@ def parse_deadline(question: str) -> datetime | None:
 
 def family_key(question: str) -> str | None:
     """Normalized family identity: the question up to its ' by <date>' tail."""
-    m = _BY_DATE_RE.search(question or "")
-    if not m:
-        return None
-    return question[: m.start()].strip().lower()
+    for pattern in (
+        _BY_DAY_RE, _BY_END_YEAR_RE, _BY_QUARTER_RE,
+        _BEFORE_MONTH_RE, _BY_MONTH_RE,
+    ):
+        if m := pattern.search(question or ""):
+            return question[: m.start()].strip().lower()
+    return None
 
 
 def parse_curve(raw: str, strikes: list[Market]) -> tuple[str, dict[str, float]]:
@@ -179,11 +244,28 @@ class TermStructurePillar:
             settings=settings, db=db, pnl_tracker=pnl_tracker,
         )
         self._schema_ready = False
+        self._claude_blocked_until: datetime | None = None
+        self._last_reader = ("claude", str(settings.term_structure.model))
 
     async def _ensure_schema(self) -> None:
         if self._schema_ready:
             return
         await self._db.execute(_CURVES_TABLE)
+        for column in (
+            "provider TEXT NOT NULL DEFAULT 'claude'",
+            "model TEXT NOT NULL DEFAULT ''",
+        ):
+            try:
+                await self._db.execute(
+                    f"ALTER TABLE term_structure_curves ADD COLUMN {column}")
+            except Exception as exc:  # noqa: BLE001 - additive compatibility
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+        await self._db.execute(_OBSERVATIONS_TABLE)
+        await self._db.execute(_COSTS_TABLE)
+        await self._db.execute(
+            """CREATE INDEX IF NOT EXISTS idx_term_observations_market
+               ON term_structure_observations(market_id, observed_at)""")
         await self._db.commit()
         self._schema_ready = True
 
@@ -204,7 +286,7 @@ class TermStructurePillar:
         calls = 0
         for fam, strikes in families:
             try:
-                curve = await self._cached_curve(fam, cfg)
+                curve = await self._cached_curve(fam, strikes, cfg)
                 if curve is None:
                     if calls >= cfg.families_per_cycle:
                         continue  # fresh reads capped; cached fams still trade
@@ -303,7 +385,7 @@ class TermStructurePillar:
             return False
         if (market.exchange or "polymarket") != "polymarket":
             return False
-        if market.liquidity < cfg.min_liquidity:
+        if market.liquidity < cfg.context_min_liquidity:
             return False
         if not (0.02 <= market.outcome_yes_price <= 0.98):
             return False
@@ -329,15 +411,28 @@ class TermStructurePillar:
     # Curve read — one LLM call per family, cached
     # ------------------------------------------------------------------
 
-    async def _cached_curve(self, fam: str, cfg) -> tuple[str, dict[str, float]] | None:
+    async def _cached_curve(
+        self, fam: str, strikes: list[Market], cfg,
+    ) -> tuple[str, dict[str, float]] | None:
         rows = await self._db.fetchall(
-            """SELECT market_id, model_prob, thesis FROM term_structure_curves
-               WHERE family = ? AND created_at > datetime('now', ?)""",
-            (fam, f"-{float(cfg.curve_ttl_hours)} hours"),
+            """SELECT market_id, model_prob, thesis, provider, model
+                 FROM term_structure_curves
+                WHERE family = ? AND created_at = (
+                    SELECT MAX(created_at) FROM term_structure_curves
+                     WHERE family = ? AND created_at > datetime('now', ?)
+                )""",
+            (fam, fam, f"-{float(cfg.curve_ttl_hours)} hours"),
         )
         if not rows:
             return None
         probs = {r["market_id"]: float(r["model_prob"]) for r in rows}
+        if not {m.id for m in strikes} <= set(probs):
+            log.info("term_structure.cache_strike_set_changed", family=fam)
+            return None
+        self._last_reader = (
+            rows[0]["provider"] or "claude",
+            rows[0]["model"] or str(cfg.model),
+        )
         return (rows[0]["thesis"] or "", probs)
 
     async def _read_family(self, fam: str, strikes: list[Market],
@@ -355,19 +450,21 @@ class TermStructurePillar:
         if not probs:
             log.info("term_structure.unparseable_curve", family=fam)
             return None
+        provider, model = self._last_reader
         for m in strikes:
             if m.id in probs:
                 d = parse_deadline(m.question)
                 await self._db.execute(
                     """INSERT INTO term_structure_curves
-                       (family, market_id, deadline, model_prob, market_prob, thesis)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
+                       (family, market_id, deadline, model_prob, market_prob,
+                        thesis, provider, model)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                     (fam, m.id, d.strftime("%Y-%m-%d"), probs[m.id],
-                     m.outcome_yes_price, thesis[:400]),
+                     m.outcome_yes_price, thesis[:400], provider, model),
                 )
         await self._db.commit()
-        log.info("term_structure.curve_read", family=fam,
-                 strikes=len(probs))
+        log.info("term_structure.curve_read", family=fam, strikes=len(probs),
+                 provider=provider, model=model)
         return thesis, probs
 
     async def _call_model(self, prompt: str, cfg) -> str:
@@ -375,10 +472,16 @@ class TermStructurePillar:
         from auramaur.nlp.errors import BudgetExhausted
         from auramaur.subprocess_security import analysis_subprocess_env
 
+        now = datetime.now(timezone.utc)
+        if self._claude_blocked_until and now < self._claude_blocked_until:
+            return await self._call_gemini(prompt, cfg, "claude_quota_circuit")
         budget = self._settings.nlp.daily_claude_call_budget
         if budget > 0:
             limit = call_budget.non_reserved_limit(self._settings)
             if call_budget.calls_today() >= limit:
+                if cfg.gemini_fallback:
+                    return await self._call_gemini(
+                        prompt, cfg, "claude_daily_budget")
                 raise BudgetExhausted(
                     f"non-reserved Claude budget ({limit}/{budget}, paced) exhausted")
         # Neutral cwd: `claude -p` loads CLAUDE.md + project memory from its
@@ -402,8 +505,80 @@ class TermStructurePillar:
             raise RuntimeError("curve read timed out")
         call_budget.record_call()
         if proc.returncode != 0:
-            raise RuntimeError(f"curve read failed: {stderr.decode()[:200]}")
+            detail = (stderr.decode().strip() or stdout.decode().strip())[:300]
+            if "weekly limit" in detail.lower() or "usage limit" in detail.lower():
+                self._claude_blocked_until = now + timedelta(hours=12)
+            if cfg.gemini_fallback:
+                log.warning(
+                    "term_structure.claude_fallback", error=detail,
+                    blocked_until=(self._claude_blocked_until.isoformat()
+                                   if self._claude_blocked_until else ""),
+                )
+                return await self._call_gemini(prompt, cfg, "claude_call_failed")
+            raise RuntimeError(f"curve read failed: {detail}")
+        self._last_reader = ("claude", str(cfg.model))
         return stdout.decode()
+
+    async def _call_gemini(self, prompt: str, cfg, reason: str) -> str:
+        """Grounded Gemini fallback with the agent-trader's shared cost cap."""
+        await self._ensure_schema()
+        key = self._settings.gemini_api_key
+        if not key or not self._settings.gemini.enabled:
+            raise RuntimeError("term-structure Gemini fallback is unavailable")
+        row = await self._db.fetchone(
+            """SELECT COALESCE(SUM(calls), 0) AS n FROM agent_trader_costs
+                WHERE day = date('now')""")
+        calls = int(row["n"]) if row else 0
+        if (cfg.gemini_daily_call_limit > 0
+                and calls >= cfg.gemini_daily_call_limit):
+            raise RuntimeError("shared Gemini daily call limit exhausted")
+        model = str(self._settings.gemini.model)
+        url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+               f"{model}:generateContent?key={key}")
+        body = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "tools": [{"google_search": {}}],
+            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048},
+        }
+        data = await self._gemini_request(
+            url, body, int(cfg.llm_timeout_seconds))
+        try:
+            parts = data["candidates"][0]["content"]["parts"]
+            text = "".join(part.get("text", "") for part in parts).strip()
+        except (KeyError, IndexError, TypeError):
+            raise RuntimeError(
+                f"term-structure Gemini reply: {str(data)[:200]}")
+        usage = data.get("usageMetadata", {}) or {}
+        prices = cfg.gemini_price_per_mtok
+        usd = (
+            float(usage.get("promptTokenCount", 0)) * float(prices[0])
+            + float(usage.get("candidatesTokenCount", 0)) * float(prices[1])
+        ) / 1e6
+        await self._db.execute(
+            """INSERT INTO agent_trader_costs (day, model_alias, calls, usd)
+               VALUES (date('now'), 'term_structure_gemini', 1, ?)
+               ON CONFLICT(day, model_alias) DO UPDATE SET
+                   calls=calls+1, usd=usd+excluded.usd""",
+            (usd,),
+        )
+        await self._db.commit()
+        self._last_reader = ("gemini", model)
+        log.info("term_structure.gemini_call", model=model, reason=reason,
+                 usd=round(usd, 5))
+        return text
+
+    async def _gemini_request(
+        self, url: str, body: dict, timeout_seconds: int,
+    ) -> dict:
+        """One grounded Gemini request, split out for deterministic tests."""
+        import aiohttp
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url, json=body,
+                timeout=aiohttp.ClientTimeout(total=timeout_seconds),
+            ) as response:
+                return await response.json()
 
     # ------------------------------------------------------------------
     # Trading the curve — standard rails per strike
@@ -417,16 +592,35 @@ class TermStructurePillar:
             if m.id not in probs:
                 continue
             gap = abs(probs[m.id] - m.outcome_yes_price) * 100.0
-            if gap >= cfg.min_edge_pts:
+            claimed = await self._market_claimed(m.id)
+            liquid = m.liquidity >= cfg.min_liquidity
+            if claimed:
+                disposition = "claimed"
+            elif not liquid:
+                disposition = "context_only"
+            elif gap < cfg.min_edge_pts:
+                disposition = "below_edge"
+            else:
+                disposition = "candidate"
+            deadline = parse_deadline(m.question)
+            provider, model = self._last_reader
+            await self._db.execute(
+                """INSERT INTO term_structure_observations
+                   (family, market_id, deadline, model_prob, market_prob,
+                    gap_pts, provider, model, claimed, execution_liquid,
+                    disposition)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (fam, m.id, deadline.strftime("%Y-%m-%d") if deadline else "",
+                 probs[m.id], m.outcome_yes_price, gap, provider, model,
+                 int(claimed), int(liquid), disposition),
+            )
+            if disposition == "candidate":
                 gaps.append((gap, m))
+        await self._db.commit()
         gaps.sort(reverse=True, key=lambda g: g[0])
         for gap, market in gaps:
             if entered >= cfg.max_entries_per_family:
                 break
-            # Claimed markets don't consume an entry slot — the cap applies
-            # to entries actually made, largest gaps first.
-            if await self._market_claimed(market.id):
-                continue
             if await self._try_enter(market, probs[market.id], thesis, cfg):
                 entered += 1
         return entered
