@@ -360,6 +360,8 @@ class IBKRETFPaperPillar:
             quote_age = time.time() - quote.timestamp if quote is not None else None
             if quote is None or quote_age is None or quote_age < -60 or quote_age > 20 * 60:
                 continue
+            if getattr(quote, "source", "ibkr_live") not in {"ibkr_live", "alpaca_iex"}:
+                continue
             mid = (quote.bid + quote.ask) / 2
             await self._resolve_forecasts(symbol)
             spread_bps = (quote.ask - quote.bid) / mid * 10_000

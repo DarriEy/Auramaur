@@ -34,6 +34,15 @@ class EquityQuote:
     bid: float
     ask: float
     timestamp: float
+    source: str = "ibkr_live"
+
+    @property
+    def research_ready(self) -> bool:
+        return self.source in {"ibkr_live", "alpaca_iex"}
+
+    @property
+    def execution_ready(self) -> bool:
+        return self.source == "ibkr_live"
 
 
 class IBKREquityClient:
@@ -126,7 +135,10 @@ class IBKREquityClient:
             timestamp = tick_time.timestamp()
             if not math.isfinite(timestamp):
                 return None
-            return EquityQuote(bid=bid, ask=ask, timestamp=timestamp)
+            market_data_type = int(getattr(ticker, "marketDataType", 0) or 0)
+            source = {1: "ibkr_live", 2: "ibkr_frozen", 3: "ibkr_delayed",
+                      4: "ibkr_delayed_frozen"}.get(market_data_type, "ibkr_unknown")
+            return EquityQuote(bid=bid, ask=ask, timestamp=timestamp, source=source)
         except Exception as e:  # noqa: BLE001
             log.warning("ibkr_equity.quote_error", symbol=symbol, error=str(e)[:100])
             return None
