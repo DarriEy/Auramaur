@@ -7,7 +7,7 @@ import pytest
 
 from auramaur.broker.sync import PositionSyncer
 from auramaur.db.database import Database
-from auramaur.exchange.models import LivePosition
+from auramaur.exchange.models import LivePosition, OrderSide, Position, TokenType
 from auramaur.risk.portfolio import PortfolioTracker
 from auramaur.web.queries import category_exposure
 
@@ -75,5 +75,38 @@ async def test_reconciler_does_not_erase_existing_category():
         row = await db.fetchone(
             "SELECT category FROM portfolio WHERE market_id = 'm1'")
         assert row["category"] == "crypto"
+    finally:
+        await db.close()
+
+@pytest.mark.asyncio
+async def test_paper_polymarket_sync_filters_kalshi_and_enriches_category():
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        await db.execute(
+            """INSERT INTO markets
+               (id, exchange, question, description, category, active, last_updated)
+               VALUES ('poly1', 'polymarket', 'Will Bitcoin rise?', '', 'crypto', 1,
+                       datetime('now')),
+                      ('KXTEST', 'kalshi', 'Kalshi test?', '', 'economics', 1,
+                       datetime('now'))""")
+        await db.commit()
+        poly = Position(market_id="poly1", side=OrderSide.BUY, size=10,
+                        avg_price=.4, current_price=.5, category="")
+        kalshi = Position(market_id="KXTEST", side=OrderSide.BUY, size=5,
+                          avg_price=.3, current_price=.35, category="")
+        syncer = PositionSyncer.__new__(PositionSyncer)
+        syncer._db = db
+        syncer._paper = SimpleNamespace(
+            positions={"poly1": poly, "KXTEST": kalshi})
+        syncer._pnl = SimpleNamespace(
+            get_cost_basis=AsyncMock(return_value=(0, 0)),
+            get_token_info=AsyncMock(return_value=(TokenType.YES, "tok")),
+        )
+
+        positions = await syncer._sync_paper()
+
+        assert [p.market_id for p in positions] == ["poly1"]
+        assert positions[0].category == "crypto"
     finally:
         await db.close()

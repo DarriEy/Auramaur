@@ -12,6 +12,7 @@ from auramaur.db.database import Database
 from auramaur.exchange.client import PolymarketClient
 from auramaur.exchange.models import LivePosition, OrderSide, TokenType
 from auramaur.exchange.paper import PaperTrader
+from auramaur.strategy.classifier import ensure_category
 from config.settings import Settings
 
 log = structlog.get_logger()
@@ -262,16 +263,38 @@ class PositionSyncer:
     async def _sync_paper(self) -> list[LivePosition]:
         """Convert ``PaperTrader.positions`` dict to ``LivePosition`` list."""
         positions: list[LivePosition] = []
+        market_ids = list(self._paper.positions)
+        metadata: dict[str, dict] = {}
+        if market_ids:
+            placeholders = ",".join("?" for _ in market_ids)
+            rows = await self._db.fetchall(
+                f"SELECT id, exchange, question, description, category "
+                f"FROM markets WHERE id IN ({placeholders})",
+                tuple(market_ids),
+            )
+            metadata = {row["id"]: row for row in rows}
 
         for market_id, pos in self._paper.positions.items():
-            # Look up cost basis from PnLTracker for more accurate avg cost
-            # and to get the token type/ID
+            market = metadata.get(market_id)
+            exchange = (market["exchange"] if market else "") or ""
+            # PaperTrader is shared by every venue. Polymarket reconciliation
+            # must never claim Kalshi tickers or overwrite their venue/category.
+            if exchange == "kalshi" or market_id.upper().startswith("KX"):
+                continue
+
             avg_cost, cb_size = await self._pnl.get_cost_basis(market_id)
             token, token_id = await self._pnl.get_token_info(market_id)
             if cb_size <= 0:
-                # Fall back to paper trader's own tracking
                 avg_cost = pos.avg_price
 
+            question = market["question"] if market else market_id
+            description = market["description"] if market else ""
+            stored_category = market["category"] if market else ""
+            category = ensure_category(
+                question or market_id,
+                description or "",
+                stored_category or getattr(pos, "category", "") or "",
+            )
             positions.append(
                 LivePosition(
                     market_id=market_id,
@@ -280,10 +303,9 @@ class PositionSyncer:
                     size=pos.size,
                     avg_cost=avg_cost,
                     current_price=pos.current_price,
-                    category=pos.category,
+                    category=category,
                 ),
             )
-
         log.info("sync.paper.done", positions=len(positions))
         return positions
 
@@ -551,8 +573,9 @@ class KalshiPositionSyncer:
         # tracked in PaperTrader memory (2026-07-20 audit). Scope this pass
         # to markets discovery knows as Kalshi.
         kalshi_rows = await self._db.fetchall(
-            "SELECT id FROM markets WHERE exchange = 'kalshi'")
-        kalshi_ids = {r["id"] for r in kalshi_rows}
+            "SELECT id, category FROM markets WHERE exchange = 'kalshi'")
+        kalshi_categories = {r["id"]: (r["category"] or "") for r in kalshi_rows}
+        kalshi_ids = set(kalshi_categories)
 
         # PaperTrader state is in memory, so the whole upsert+cleanup pass is
         # db-only — one short, serialized transaction (contention plan,
@@ -563,7 +586,8 @@ class KalshiPositionSyncer:
                     continue
                 token = pos.token if pos.token else TokenType.YES
                 token_id = pos.token_id or market_id
-                category = getattr(pos, "category", "") or ""
+                category = (getattr(pos, "category", "") or
+                            kalshi_categories.get(market_id, ""))
                 current_ids.add(market_id)
 
                 await self._db.execute(
@@ -578,7 +602,8 @@ class KalshiPositionSyncer:
                            avg_price = excluded.avg_price,
                            current_price = excluded.current_price,
                            unrealized_pnl = excluded.unrealized_pnl,
-                           category = excluded.category,
+                           category = COALESCE(NULLIF(excluded.category, ''),
+                                               portfolio.category),
                            token = excluded.token,
                            token_id = excluded.token_id,
                            is_paper = excluded.is_paper,
