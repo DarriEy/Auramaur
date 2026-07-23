@@ -54,7 +54,8 @@ class OpenAIETFAnalyzer:
     def __init__(self, api_key: str, model: str, effort: str,
                  timeout_seconds: int = 120, db=None,
                  model_alias: str = "", input_cost_per_million: float = 0.0,
-                 output_cost_per_million: float = 0.0) -> None:
+                 output_cost_per_million: float = 0.0,
+                 instructions: str = _INSTRUCTIONS) -> None:
         self.model = model
         self.effort = effort
         self._api_key = api_key
@@ -65,6 +66,7 @@ class OpenAIETFAnalyzer:
         self._model_alias = model_alias
         self._input_cost_per_million = input_cost_per_million
         self._output_cost_per_million = output_cost_per_million
+        self._instructions = instructions
 
     async def _start_attempt(self) -> int | None:
         if self._db is None:
@@ -141,7 +143,7 @@ class OpenAIETFAnalyzer:
         )
         payload = {
             "model": self.model,
-            "instructions": _INSTRUCTIONS,
+            "instructions": self._instructions,
             "input": prompt,
             "reasoning": {"effort": self.effort},
             "text": {"format": {"type": "json_schema", "name": "etf_forecast",

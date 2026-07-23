@@ -31,12 +31,13 @@ log = structlog.get_logger()
 
 class KrakenPillar:
     def __init__(self, settings, kraken_client, bot=None, console=None,
-                 paper_comparator=None):
+                 paper_comparator=None, directional_analyzer=None):
         self._s = settings
         self._k = kraken_client
         self._bot = bot          # for _last_known_cash
         self._console = console
         self._paper_comparator = paper_comparator
+        self._directional_analyzer = directional_analyzer
         # Open directional longs: pair -> entry-price proxy. Reconciled from
         # actual Kraken balances each cycle (see _reconcile_positions), so it
         # survives restarts instead of silently over-allocating.
@@ -1014,7 +1015,7 @@ class KrakenPillar:
 
         comp = self._bot._components
         aggregator = comp.get("aggregator")
-        analyzer = comp.get("analyzer")
+        analyzer = self._directional_analyzer or comp.get("analyzer")
         cache = comp.get("cache")
         if aggregator is None or analyzer is None:
             return None
@@ -1047,8 +1048,11 @@ class KrakenPillar:
             # evaluations in [0.50, 0.51] while the non-reserved budget was
             # exhausted and everything routed to Gemini). Same treatment as the
             # resolution lens: never let bulk consumers starve it.
-            analysis = await analyzer.analyze(market, evidence, cache,
-                                              pin_claude=True)
+            if self._directional_analyzer is not None:
+                analysis = await analyzer.analyze(market, evidence, cache)
+            else:
+                analysis = await analyzer.analyze(market, evidence, cache,
+                                                  pin_claude=True)
         except Exception as e:
             log.warning("kraken.llm_view_error", pair=pair, error=str(e))
             return None
