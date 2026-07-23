@@ -497,18 +497,18 @@ class IBKRMultiAssetPaperBook:
 
             from auramaur.research.ibkr_signals import PricePoint, fx_carry_trend
             now = datetime.now(timezone.utc)
+            # Gather all bars/rates over the network FIRST; the write+commit
+            # span at the end stays pure-DB so the shared connection never
+            # holds an open transaction across gateway/rates awaits.
+            signal_rows: list[tuple] = []
             for spec in BY_BOOK[self.book]:
                 try:
                     bars = await self._client.get_daily_bars(spec)
                     closes = closes_from_bars(bars)
                     momentum = normalized_momentum(closes)
                     if momentum is not None:
-                        await self._db.execute(
-                            """INSERT OR IGNORE INTO ibkr_research_signals
-                               (instrument_key, signal_date, signal_name,
-                                direction, strength, detail)
-                               VALUES (?, date('now'), 'trend_normalized', ?, ?, ?)""",
-                            (spec.key,
+                        signal_rows.append(
+                            (spec.key, "trend_normalized",
                              1 if momentum > 0 else -1 if momentum < 0 else 0,
                              abs(momentum), f"normalized_momentum={momentum:.4f}"))
                     if self._rates_provider is None or len(spec.key) < 6:
@@ -525,16 +525,19 @@ class IBKRMultiAssetPaperBook:
                         for i, c in enumerate(window)]
                     signal = fx_carry_trend(points, as_of=now, base_rate=base_rate,
                                             quote_rate=quote_rate)
-                    await self._db.execute(
-                        """INSERT OR IGNORE INTO ibkr_research_signals
-                           (instrument_key, signal_date, signal_name,
-                            direction, strength, detail)
-                           VALUES (?, date('now'), 'fx_carry_trend', ?, ?, ?)""",
-                        (spec.key, signal.direction, signal.score,
-                         signal.rationale[:200]))
+                    signal_rows.append(
+                        (spec.key, "fx_carry_trend", signal.direction,
+                         signal.score, signal.rationale[:200]))
                 except Exception as e:  # noqa: BLE001 - one pair must not stop the sweep
                     log.warning("ibkr_multiasset.research_signal_error",
                               key=spec.key, error=str(e)[:100])
+            for key, name, direction, strength, detail in signal_rows:
+                await self._db.execute(
+                    """INSERT OR IGNORE INTO ibkr_research_signals
+                       (instrument_key, signal_date, signal_name,
+                        direction, strength, detail)
+                       VALUES (?, date('now'), ?, ?, ?, ?)""",
+                    (key, name, direction, strength, detail))
             await self._db.commit()
         except Exception as e:  # noqa: BLE001 - research-only
             log.warning("ibkr_multiasset.research_error", error=str(e)[:120])

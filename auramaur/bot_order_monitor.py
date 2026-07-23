@@ -339,17 +339,16 @@ class OrderMonitorMixin:
         # kalshi row did exactly that); mark them terminal instead.
         sentinel_ids = {"unknown", "ERROR", "BLOCKED", "INSUFFICIENT_BALANCE",
                         "SKIP_DUP", "POST_ONLY_REJECTED"}
-        fixed = 0
+        # Resolve every terminal status over the network FIRST, then apply
+        # the UPDATEs in one tight write span — get_order_status must never
+        # be awaited while the shared connection holds an open transaction.
+        updates: list[tuple[str, str]] = []  # (new_status, order_id)
         for row in rows:
             order_id = row["order_id"]
             if order_id in tracked or order_id.startswith("PAPER"):
                 continue
             if order_id in sentinel_ids:
-                await db.execute(
-                    "UPDATE trades SET status = 'error' WHERE order_id = ? AND status = 'pending'",
-                    (order_id,),
-                )
-                fixed += 1
+                updates.append(("error", order_id))
                 continue
             client = clients_by_name.get(row["exchange"] or "polymarket")
             if client is None or not hasattr(client, "get_order_status"):
@@ -359,16 +358,23 @@ class OrderMonitorMixin:
             except Exception:
                 continue
             if result.status in ("filled", "cancelled", "expired", "rejected"):
-                await db.execute(
-                    "UPDATE trades SET status = ? WHERE order_id = ?",
-                    (result.status, order_id),
-                )
-                fixed += 1
-            if fixed >= 5:
+                updates.append((result.status, order_id))
+            if len(updates) >= 5:
                 break
-        if fixed:
+        if updates:
+            for new_status, order_id in updates:
+                if new_status == "error":
+                    await db.execute(
+                        "UPDATE trades SET status = 'error' WHERE order_id = ? AND status = 'pending'",
+                        (order_id,),
+                    )
+                else:
+                    await db.execute(
+                        "UPDATE trades SET status = ? WHERE order_id = ?",
+                        (new_status, order_id),
+                    )
             await db.commit()
-            log.info("order_monitor.orphans_reconciled", count=fixed)
+            log.info("order_monitor.orphans_reconciled", count=len(updates))
 
     async def _task_resolution_checker(self) -> None:
         """Poll for resolved markets and record calibration outcomes.

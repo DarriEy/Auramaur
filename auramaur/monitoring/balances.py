@@ -96,7 +96,10 @@ async def record_venue_balances(db, settings, *, include_ibkr: bool = True) -> N
     if include_ibkr and settings.ibkr.enabled:
         fetchers["ibkr"] = ibkr_balance
 
-    wrote = False
+    # All venue fetches complete BEFORE the first write: a slow/hung venue
+    # API (the 2026-07-21 gateway outage ran 8h) must never be awaited while
+    # the shared connection holds an open write transaction.
+    fetched: list[tuple[str, str]] = []
     for venue, fetch in fetchers.items():
         try:
             detail = await fetch(settings)
@@ -107,13 +110,14 @@ async def record_venue_balances(db, settings, *, include_ibkr: bool = True) -> N
             log.warning("balance_recorder.fetch_error", venue=venue,
                         error=str(exc)[:120])
             continue
-        await db.execute(
-            """INSERT INTO venue_balances (venue, detail, fetched_at)
-               VALUES (?, ?, ?)
-               ON CONFLICT(venue) DO UPDATE SET
-                   detail = excluded.detail, fetched_at = excluded.fetched_at""",
-            (venue, detail, datetime.now(timezone.utc).isoformat()),
-        )
-        wrote = True
-    if wrote:
+        fetched.append((venue, detail))
+    if fetched:
+        for venue, detail in fetched:
+            await db.execute(
+                """INSERT INTO venue_balances (venue, detail, fetched_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(venue) DO UPDATE SET
+                       detail = excluded.detail, fetched_at = excluded.fetched_at""",
+                (venue, detail, datetime.now(timezone.utc).isoformat()),
+            )
         await db.commit()
