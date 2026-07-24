@@ -270,6 +270,41 @@ class Database:
             await self._migrate_v37_to_v38()
         if from_version < 39:
             await self._migrate_v38_to_v39()
+        if from_version < 40:
+            await self._migrate_v39_to_v40()
+
+    async def _migrate_v39_to_v40(self) -> None:
+        """Unified LLM cost/quota ledger view (llm_costs_daily)."""
+        await self._db.executescript("""
+            CREATE TABLE IF NOT EXISTS agent_trader_costs (
+                day TEXT NOT NULL,
+                model_alias TEXT NOT NULL,
+                calls INTEGER NOT NULL DEFAULT 0,
+                usd REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (day, model_alias)
+            );
+            CREATE TABLE IF NOT EXISTS llm_call_counter (
+                day TEXT PRIMARY KEY,
+                claude_calls INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE VIEW IF NOT EXISTS llm_costs_daily AS
+            SELECT day, 'gemini:' || model_alias AS source, calls, usd AS cost_usd
+              FROM agent_trader_costs
+            UNION ALL
+            SELECT date(started_at) AS day, 'openai:' || model_alias AS source,
+                   COUNT(*) AS calls, COALESCE(SUM(cost_usd), 0) AS cost_usd
+              FROM ibkr_etf_openai_attempts GROUP BY date(started_at), model_alias
+            UNION ALL
+            SELECT day, 'claude_cli(quota)' AS source, claude_calls AS calls, 0.0 AS cost_usd
+              FROM llm_call_counter
+            UNION ALL
+            SELECT date(created_at) AS day, 'local:' || model AS source,
+                   COUNT(*) AS calls, 0.0 AS cost_usd
+              FROM local_llm_calls GROUP BY date(created_at), model;
+        """)
+        await self._db.execute("UPDATE schema_version SET version = 40")
+        await self._db.commit()
+        log.info("database.migrated", from_version=39, to_version=40)
 
     async def _migrate_v38_to_v39(self) -> None:
         """Durable lifecycle for graduated IBKR broker orders."""
