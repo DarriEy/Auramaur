@@ -138,3 +138,18 @@ def test_registry_marks_alpaca_sourced_stock_eligible(tmp_path):
         finally:
             await db.close()
     asyncio.run(run())
+
+
+def test_quote_fresh_tolerates_small_forward_clock_skew():
+    from auramaur.strategy.ibkr_multiasset_paper import IBKRMultiAssetPaperBook
+    from config.settings import Settings
+
+    book = IBKRMultiAssetPaperBook.__new__(IBKRMultiAssetPaperBook)
+    book._settings = Settings()
+    now = time.time()
+    ahead = MarketDataQuote("SPY", 1, 2, now + 1.0, 0, "USD", 1.0,
+                            source="alpaca_iex")
+    assert book._quote_fresh(ahead) is True  # ~1s server-ahead stamp is normal
+    absurd = MarketDataQuote("SPY", 1, 2, now + 60.0, 0, "USD", 1.0,
+                             source="alpaca_iex")
+    assert book._quote_fresh(absurd) is False

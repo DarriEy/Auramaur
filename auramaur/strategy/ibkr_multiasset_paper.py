@@ -126,8 +126,11 @@ class IBKRMultiAssetPaperBook:
         age = time.time() - float(quote.timestamp)
         # alpaca_iex is real-time IEX bid/ask — credible for PAPER fills with
         # its provenance recorded (2026-07-24 bridge); delayed/frozen stay out.
+        # Small NEGATIVE age is normal cross-server clock skew (Alpaca stamps
+        # ran ~1s ahead of this host and the strict 0 bound rejected 29/35
+        # instruments as "stale (-1s old)"); only implausible skew is invalid.
         return (getattr(quote, "source", "") in ("ibkr_live", "alpaca_iex")
-                and 0 <= age <= self._settings.ibkr.multiasset_max_quote_age_seconds)
+                and -5 <= age <= self._settings.ibkr.multiasset_max_quote_age_seconds)
 
     @staticmethod
     def _serialize_spec(spec: InstrumentSpec) -> str:
