@@ -235,6 +235,14 @@ class BiasHarvestPillar:
             log.debug("bias_harvest.book_fetch_failed", market_id=market.id, error=str(e))
             return None
         best_bid, best_ask = book.best_bid, book.best_ask
+        from auramaur.data_edge import DataDelivery, record_delivery
+        await record_delivery(self._db, DataDelivery(
+            strategy=self.name, component="order_book",
+            status="ok" if best_bid is not None and best_ask is not None else "empty",
+            provider="polymarket_clob", market_id=market.id,
+            item_count=len(book.bids) + len(book.asks),
+            required_fields=("best_bid", "best_ask"),
+        ))
         if best_bid is None or best_ask is None:
             return None
         if (best_ask - best_bid) < cfg.maker_min_spread:

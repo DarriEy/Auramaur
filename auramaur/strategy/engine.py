@@ -413,6 +413,38 @@ class TradingEngine(CycleOrchestrationMixin):
             await self.db.execute(
                 "DELETE FROM price_history WHERE recorded_at < datetime('now', '-30 days')"
             )
+            # Delivery telemetry is high-volume (per-book, per-gather rows);
+            # readiness only reads latest-row and 24h windows, so 14 days is
+            # ample for debugging while bounding growth.
+            await self.db.execute(
+                "DELETE FROM strategy_data_deliveries "
+                "WHERE observed_at < datetime('now', '-14 days')"
+            )
+
+        # Consumer telemetry uses one snapshot id for the market rows and their
+        # contemporaneous price-history points, making as-of joins explicit.
+        from auramaur.data_edge import DataDelivery, record_delivery, snapshot_id
+        observed = datetime.now(timezone.utc)
+        sid = snapshot_id(self.exchange_name, observed.isoformat(), len(markets))
+        missing_prices = sum(
+            1 for market in markets
+            if market.outcome_yes_price is None or market.outcome_no_price is None
+        )
+        await record_delivery(self.db, DataDelivery(
+            strategy="strategic", component="market_snapshot",
+            status=("empty" if not markets else "partial" if missing_prices else "ok"),
+            provider=self.exchange_name or "discovery", snapshot_id=sid,
+            source_at=observed, item_count=len(markets),
+            required_fields=("outcome_yes_price", "outcome_no_price"),
+            missing_fields=(("outcome_prices",) if missing_prices else ()),
+            detail={"missing_market_count": missing_prices},
+        ))
+        await record_delivery(self.db, DataDelivery(
+            strategy="technical", component="price_history",
+            status="empty" if not markets else "ok",
+            provider=self.exchange_name or "discovery", snapshot_id=sid,
+            source_at=observed, item_count=len(markets),
+        ))
 
         return markets
 
@@ -596,6 +628,7 @@ class TradingEngine(CycleOrchestrationMixin):
             items = await self.aggregator.gather(
                 query, limit_per_source=per_query_limit, category=market.category or None,
                 market_id=market.id, market_price=market.outcome_yes_price,
+                consumer=strategy_source or "llm",
             )
             for item in items:
                 if item.id not in seen_ids:

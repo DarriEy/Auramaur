@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 43
+SCHEMA_VERSION = 44
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -213,6 +213,36 @@ CREATE TABLE IF NOT EXISTS source_fetches (
     item_count INTEGER NOT NULL DEFAULT 0, latency_ms INTEGER NOT NULL DEFAULT 0,
     error TEXT DEFAULT '', observed_at TEXT NOT NULL,
     information_mode TEXT NOT NULL DEFAULT 'production', PRIMARY KEY (run_id, source)
+);
+
+CREATE TABLE IF NOT EXISTS strategy_data_deliveries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    delivery_id TEXT NOT NULL,
+    strategy TEXT NOT NULL,
+    component TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN
+        ('ok','empty','stale','partial','timeout','error','unavailable')),
+    provider TEXT NOT NULL DEFAULT '', market_id TEXT NOT NULL DEFAULT '',
+    snapshot_id TEXT NOT NULL DEFAULT '', observed_at TEXT NOT NULL,
+    source_at TEXT, age_seconds REAL, latency_ms INTEGER NOT NULL DEFAULT 0,
+    item_count INTEGER NOT NULL DEFAULT 0,
+    required_fields TEXT NOT NULL DEFAULT '[]',
+    missing_fields TEXT NOT NULL DEFAULT '[]',
+    fallback_used TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_delivery_consumer_time
+    ON strategy_data_deliveries(strategy, component, observed_at);
+CREATE INDEX IF NOT EXISTS idx_strategy_delivery_status_time
+    ON strategy_data_deliveries(status, observed_at);
+CREATE INDEX IF NOT EXISTS idx_strategy_delivery_snapshot
+    ON strategy_data_deliveries(snapshot_id);
+
+CREATE TABLE IF NOT EXISTS strategy_heartbeats (
+    strategy TEXT PRIMARY KEY,
+    last_beat_at TEXT NOT NULL DEFAULT (datetime('now')),
+    status TEXT NOT NULL DEFAULT 'ok', entries INTEGER,
+    cycles INTEGER NOT NULL DEFAULT 0, interval_seconds REAL,
+    detail TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS evidence_observations (

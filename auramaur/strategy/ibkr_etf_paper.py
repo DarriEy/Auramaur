@@ -133,7 +133,9 @@ class IBKRETFPaperPillar:
             try:
                 if query not in self._evidence_cache:
                     self._evidence_cache[query] = await self._aggregator.gather(
-                        query, limit_per_source=3, category="finance")
+                        query, limit_per_source=3, category="finance",
+                        market_id=symbol, market_price=reference_price,
+                        consumer="ibkr_etf")
                 items = self._evidence_cache[query]
             except Exception as exc:  # noqa: BLE001
                 log.warning("ibkr_etf.paper.evidence_error", symbol=symbol,

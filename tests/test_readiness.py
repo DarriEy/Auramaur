@@ -501,16 +501,17 @@ async def test_divergence_fail_when_median_high(db: Database):
 
 
 @pytest.mark.asyncio
-async def test_evaluate_readiness_aggregates_all_eight_criteria(db: Database, tmp_path):
+async def test_evaluate_readiness_aggregates_all_nine_criteria(db: Database, tmp_path):
     log_file = tmp_path / "auramaur.log"
     log_file.write_text("")
     report = await evaluate_readiness(db, log_file=log_file, exchange="kalshi", days=7)
-    assert len(report.criteria) == 8
+    assert len(report.criteria) == 9
     assert not report.overall_pass
     names = [c.name for c in report.criteria]
     assert names == [
         "cycle_health",
         "data_sources",
+        "strategy_data_delivery",
         "pass_rate",
         "brier_absolute",
         "brier_vs_market",

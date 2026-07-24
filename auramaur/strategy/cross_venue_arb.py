@@ -141,6 +141,16 @@ class CrossVenueArbPillar:
         except Exception as e:
             log.debug("cross_venue.scan_error", error=str(e))
             return []
+        from auramaur.data_edge import DataDelivery, record_delivery, snapshot_id
+        observed = datetime.now(timezone.utc)
+        await record_delivery(self._db, DataDelivery(
+            strategy=self.name, component="cross_venue_snapshot",
+            status="ok" if poly and kalshi else "partial",
+            provider="polymarket+kalshi",
+            snapshot_id=snapshot_id("cross_venue", observed.isoformat()),
+            source_at=observed, item_count=len(poly) + len(kalshi),
+            detail={"polymarket": len(poly), "kalshi": len(kalshi)},
+        ))
         poly = [m for m in poly if self._real_book(m)]
         kalshi = [m for m in kalshi if self._real_book(m)]
         pairs: list[tuple[Market, Market, float]] = []

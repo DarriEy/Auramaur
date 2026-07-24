@@ -403,6 +403,12 @@ class SettlementArbPillar:
             return await self._fred.get_observations(series, n=history_n)
         if series not in cache:
             cache[series] = await self._fred.get_observations(series, n=history_n)
+            from auramaur.data_edge import DataDelivery, record_delivery
+            await record_delivery(self._db, DataDelivery(
+                strategy=self.name, component="fred_observations",
+                status="ok" if cache[series] else "empty", provider="fred",
+                market_id=series, item_count=len(cache[series] or []),
+            ))
         return cache[series]
 
     async def _maybe_enter(self, m, pred: dict) -> bool:

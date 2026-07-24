@@ -203,6 +203,12 @@ class VolAnchorPillar:
                         error=str(e)[:120])
             return None
         closes = [p[1] for p in (data.get("prices") or []) if p and p[1]]
+        from auramaur.data_edge import DataDelivery, record_delivery
+        await record_delivery(self._db, DataDelivery(
+            strategy=self.name, component="spot_volatility",
+            status="ok" if len(closes) >= 10 else "partial",
+            provider="coingecko", market_id=cg_id, item_count=len(closes),
+        ))
         if len(closes) < 10:
             return None
         rets = [math.log(closes[i] / closes[i - 1])
