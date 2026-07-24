@@ -67,6 +67,34 @@ class AlpacaMultiAssetQuotes:
             int(getattr(quote, "con_id", 0) or 0),
             spec.currency, spec.multiplier, source="alpaca_iex")
 
+    async def get_quote_by_con_id(self, spec: InstrumentSpec, con_id: int):
+        """Held-position mark path — the pillar quotes open positions by
+        con_id (ibkr_multiasset_paper.py:330), which delegation previously
+        passed through UNBOUNDED: with the UUP position open, the mark hung
+        the whole multiasset task exactly like the discovery path did
+        (2026-07-24 17:42 boot — zero cycle events, heartbeats silent).
+        Same bound + Alpaca fallback as get_quote."""
+        quote = None
+        try:
+            quote = await asyncio.wait_for(
+                self._ibkr.get_quote_by_con_id(spec, con_id),
+                timeout=self._IBKR_QUOTE_TIMEOUT_SECONDS)
+        except (TimeoutError, asyncio.TimeoutError):
+            log.debug("alpaca_bridge.ibkr_conid_quote_timeout", key=spec.key)
+        except Exception as exc:  # noqa: BLE001 — fallback path handles it
+            log.debug("alpaca_bridge.ibkr_conid_quote_error", key=spec.key,
+                      error=str(exc)[:120])
+        if quote is not None and getattr(quote, "source", "") == "ibkr_live":
+            return quote
+        if spec.kind is not ContractKind.STOCK or spec.currency != "USD":
+            return quote
+        eq = await self._alpaca.get_quote(spec.symbol)
+        if eq is None:
+            return quote
+        return MarketDataQuote(
+            spec.key, eq.bid, eq.ask, eq.timestamp, int(con_id or 0),
+            spec.currency, spec.multiplier, source="alpaca_iex")
+
     async def close(self) -> None:
         await self._alpaca.close()
         await self._ibkr.close()
