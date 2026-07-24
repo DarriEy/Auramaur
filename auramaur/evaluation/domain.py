@@ -80,6 +80,8 @@ class EvaluationRun(FrozenRecord):
     error: str = ""
     started_at: datetime
     completed_at: datetime | None = None
+    treatment_payload_json: str = "{}"
+    treatment_payload_hash: str = ""
 
     _started_utc = field_validator("started_at")(_utc)
     _completed_utc = field_validator("completed_at")(

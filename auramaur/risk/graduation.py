@@ -28,6 +28,8 @@ Safety properties:
 """
 
 from __future__ import annotations
+from datetime import datetime
+from statistics import NormalDist
 
 import math
 import time
@@ -133,9 +135,71 @@ class GraduationLadder:
             "paper_lcb": lower_bound(paper),
         }
 
+    async def _prospective_stats(self, strategy: str, category: str) -> dict:
+        """Independent-family, executable, locked-holdout evidence."""
+        cfg = self._settings.graduation
+        evidence = list(cfg.credible_fill_evidence)
+        marks = ", ".join("?" for _ in evidence)
+        filters = ""
+        tail: list[object] = []
+        if cfg.require_executable_fills:
+            filters += f" AND d.filled = 1 AND d.fill_evidence IN ({marks})"
+            tail.extend(evidence)
+        if strategy not in cfg.strategy_level_strategies:
+            filters += " AND COALESCE(m.category, '') = ?"
+            tail.append(category)
+        rows = await self._db.fetchall(
+            f"""WITH latest AS (
+                    SELECT strategy_version FROM strategy_experiments
+                    WHERE strategy_source = ? ORDER BY registered_at DESC LIMIT 1
+                ), pnl AS (
+                    SELECT market_id, is_paper, SUM(pnl - fees) AS net_pnl
+                    FROM pnl_ledger WHERE strategy_source = ?
+                    GROUP BY market_id, is_paper
+                )
+                SELECT d.market_id, d.is_paper, d.observed_at,
+                       COALESCE(NULLIF(d.event_family, ''), d.market_id) AS family,
+                       ((d.reference_price-o.outcome)*(d.reference_price-o.outcome)
+                        -(d.fair_probability-o.outcome)*(d.fair_probability-o.outcome)) AS brier_edge,
+                       COALESCE(p.net_pnl, 0) AS net_pnl
+                FROM decision_snapshots d
+                JOIN latest x ON x.strategy_version = d.strategy_version
+                JOIN market_outcomes o ON o.event_key=lower(d.venue)||':'||d.market_id
+                LEFT JOIN markets m ON m.id=d.market_id
+                LEFT JOIN pnl p ON p.market_id=d.market_id AND p.is_paper=d.is_paper
+                WHERE d.strategy_source=? AND d.is_holdout=1
+                  AND d.observed_at >= datetime('now', ?) {filters}
+                ORDER BY d.observed_at, d.id""",
+            (strategy, strategy, strategy, f"-{int(cfg.window_days)} days", *tail),
+        )
+        grouped: dict[int, dict[str, dict]] = {0: {}, 1: {}}
+        for row in rows or []:
+            grouped[int(bool(row["is_paper"]))].setdefault(row["family"], row)
+        alpha = cfg.familywise_alpha / max(1, cfg.max_hypotheses*cfg.sequential_looks_per_window)
+        z = max(cfg.confidence_z, NormalDist().inv_cdf(1.0-alpha))
+
+        def summarize(items: list[dict]) -> dict:
+            pnl = [float(r["net_pnl"] or 0) for r in items]
+            brier = [float(r["brier_edge"] or 0) for r in items]
+            def lcb(values: list[float]) -> float:
+                if len(values) < 2:
+                    return float("-inf")
+                mean = sum(values)/len(values)
+                variance = sum((x-mean)**2 for x in values)/(len(values)-1)
+                return mean-z*math.sqrt(variance/len(values))
+            dates = [datetime.fromisoformat(str(r["observed_at"]).replace("Z", "+00:00")) for r in items]
+            return {"n": len(items), "pnl": sum(pnl), "lcb": lcb(pnl),
+                    "brier_lcb": lcb(brier),
+                    "days": (max(dates)-min(dates)).days if len(dates)>1 else 0,
+                    "regimes": len({(d.year, d.month) for d in dates})}
+        live = summarize(list(grouped[0].values()))
+        paper = summarize(list(grouped[1].values()))
+        return ({f"live_{k}": v for k, v in live.items()} |
+                {f"paper_{k}": v for k, v in paper.items()})
     async def _paper_breadth(self) -> int:
         """Concurrent open PAPER/exploratory positions — the spray breadth. Cached
         for cache_seconds (a soft cap doesn't need an exact live count)."""
+
         now = time.monotonic()
         if self._breadth and now - self._breadth[0] < self._settings.graduation.cache_seconds:
             return self._breadth[1]
@@ -150,45 +214,46 @@ class GraduationLadder:
 
     async def _compute(self, strategy: str, category: str) -> CellDecision:
         cfg = self._settings.graduation
-        s = await self._cell_stats(strategy, category)
-        # Per-strategy evidence bar (falls back to the global min_markets):
-        # slow-accruing books earn evaluation at a reachable n instead of
-        # feeding a gate only high-volume books can clear. The statistical
-        # contract is unchanged — the one-sided LCB still must clear zero,
-        # it just gets computed once n is plausible for the book's cadence.
+        s = (await self._prospective_stats(strategy, category)
+             if cfg.prospective_only else await self._cell_stats(strategy, category))
         min_markets = cfg.min_markets_overrides.get(strategy, cfg.min_markets)
+        min_evidence = cfg.min_paired_forecasts or min_markets
 
-        if s["live_n"] >= min_markets:
-            if s["live_lcb"] > cfg.min_mean_pnl_lower_bound:
+        def qualifies(mode: str) -> bool:
+            return (s[f"{mode}_n"] >= min_evidence
+                    and s.get(f"{mode}_days", 0) >= cfg.min_calendar_days
+                    and s.get(f"{mode}_regimes", 1) >= cfg.min_regime_months
+                    and s[f"{mode}_lcb"] > cfg.min_mean_pnl_lower_bound
+                    and (not cfg.require_market_brier_edge
+                         or s.get(f"{mode}_brier_lcb", float("-inf")) > 0))
+
+        def evidence_reason(mode: str) -> str:
+            return (f"{s[f'{mode}_n']} independent families; "
+                    f"{s.get(f'{mode}_days', 0)}d/"
+                    f"{s.get(f'{mode}_regimes', 1)} regimes; "
+                    f"P&L LCB ${s[f'{mode}_lcb']:+.3f}; "
+                    f"Brier-edge LCB "
+                    f"{s.get(f'{mode}_brier_lcb', float('-inf')):+.4f}")
+
+        if s["live_n"] >= min_evidence:
+            if qualifies("live"):
                 return _LIVE_FULL
-            return CellDecision(
-                True, 1.0, "demoted",
-                f"live evidence insufficient (mean-P&L LCB ${s['live_lcb']:+.3f}; "
-                f"${s['live_pnl']:+.2f} over {s['live_n']} independent markets)")
-        if s["paper_n"] >= min_markets:
-            if s["paper_lcb"] > cfg.min_mean_pnl_lower_bound:
-                return CellDecision(
-                    False, cfg.probation_multiplier, "probation",
-                    f"graduated from paper (mean-P&L LCB ${s['paper_lcb']:+.3f}; "
-                    f"${s['paper_pnl']:+.2f} over {s['paper_n']} independent markets)")
-            return CellDecision(
-                True, 1.0, "paper_negative",
-                f"paper evidence insufficient (mean-P&L LCB ${s['paper_lcb']:+.3f}; "
-                f"${s['paper_pnl']:+.2f} over {s['paper_n']} independent markets)")
-        # Unproven (still exploring). Restrict the spray: if the open paper book is
-        # already at the breadth cap, skip NEW unproven entries (size x0) so
-        # exploration concentrates instead of spraying. Restriction only — proven/
-        # probation/exempt cells and exits are never affected.
+            return CellDecision(True, 1.0, "demoted",
+                                f"live evidence insufficient ({evidence_reason('live')})")
+        if s["paper_n"] >= min_evidence:
+            if qualifies("paper"):
+                return CellDecision(False, cfg.probation_multiplier, "probation",
+                                    f"graduated from paper ({evidence_reason('paper')})")
+            return CellDecision(True, 1.0, "paper_negative",
+                                f"paper evidence insufficient ({evidence_reason('paper')})")
         cap = cfg.max_unproven_positions
         if cap > 0 and await self._paper_breadth() >= cap:
-            return CellDecision(
-                True, 0.0, "unproven_capped",
-                f"unproven spray cap hit (>= {cap} open paper positions) — "
-                f"concentrating; skip new unproven entry")
-        return CellDecision(
-            True, 1.0, "unproven",
-            f"insufficient record (live {s['live_n']}, paper {s['paper_n']} "
-            f"< {cfg.min_markets} markets in {cfg.window_days}d)")
+            return CellDecision(True, 0.0, "unproven_capped",
+                                f"unproven spray cap hit (>= {cap} open paper positions) — "
+                                "concentrating; skip new unproven entry")
+        return CellDecision(True, 1.0, "unproven",
+                            f"insufficient record (live {s['live_n']}, paper {s['paper_n']} "
+                            f"< {min_evidence} independent families in {cfg.window_days}d)")
 
     # ------------------------------------------------------------------
     # Reporting (CLI)

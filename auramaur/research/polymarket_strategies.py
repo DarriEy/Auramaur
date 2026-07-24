@@ -6,6 +6,7 @@ remain behind the normal strategy protocol, risk manager, and graduation gate.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import dataclass
@@ -209,21 +210,48 @@ class DecisionTracker:
         side: str, fair_probability: float, reference_price: float,
         executable_price: float | None, best_bid: float | None,
         best_ask: float | None, requested_size: float, fee_estimate: float,
-        filled: bool = False,
-    ) -> None:
+        venue: str = "", event_family: str = "", strategy_version: str = "",
+        cohort_id: str = "", config_json: str = "{}", is_paper: bool = True,
+        holdout_warmup_days: int = 0,
+    ) -> int | None:
+        if not strategy_version:
+            strategy_version = hashlib.sha256(
+                f"legacy:{strategy_source}:{config_json}".encode()).hexdigest()
+        await self.db.execute(
+            """INSERT OR IGNORE INTO strategy_experiments
+               (strategy_version,strategy_source,config_json,holdout_starts_at)
+               VALUES (?,?,?,datetime('now', ?))""",
+            (strategy_version, strategy_source, config_json,
+             f"+{max(0, holdout_warmup_days)} days"),
+        )
         await self.db.execute(
             """INSERT OR IGNORE INTO decision_snapshots
                (market_id, strategy_source, signal_id, side, fair_probability,
                 reference_price, executable_price, best_bid, best_ask,
-                requested_size, fee_estimate, filled)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                requested_size, fee_estimate, venue, event_family,
+                strategy_version, cohort_id, is_paper, is_holdout)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                       CASE WHEN datetime('now') >= (SELECT holdout_starts_at
+                         FROM strategy_experiments WHERE strategy_version=?)
+                       THEN 1 ELSE 0 END)""",
             (market_id, strategy_source, signal_id, side, fair_probability,
              reference_price, executable_price, best_bid, best_ask,
-             requested_size, fee_estimate, int(filled)),
+             requested_size, fee_estimate, venue, event_family,
+             strategy_version, cohort_id, int(is_paper), strategy_version),
         )
-        # Deliberately durable at the decision boundary. This path is currently
-        # low-volume; if capture moves into a high-frequency scanner, batch it
-        # behind a non-blocking writer rather than adding latency here.
+        await self.db.commit()
+        row = await self.db.fetchone(
+            "SELECT id FROM decision_snapshots WHERE signal_id IS ? "
+            "AND strategy_source=? ORDER BY id DESC LIMIT 1",
+            (signal_id, strategy_source),
+        )
+        return int(row["id"]) if row else None
+
+    async def mark_fill(self, decision_id: int, *, filled_price: float,
+                        evidence: str) -> None:
+        await self.db.execute(
+            "UPDATE decision_snapshots SET filled=1,filled_price=?,fill_evidence=? "
+            "WHERE id=?", (filled_price, evidence, decision_id))
         await self.db.commit()
 
     async def mark(self, decision_id: int, horizon_seconds: int, *,

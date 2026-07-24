@@ -48,13 +48,21 @@ class EvaluationStore:
 
     async def put_run(self, run: EvaluationRun) -> None:
         async with self._db.transaction():
+            existing = await self._db.fetchone(
+                "SELECT treatment_payload_hash FROM evaluation_runs WHERE run_id=?",
+                (run.run_id,),
+            )
+            if (existing is not None
+                    and existing["treatment_payload_hash"] != run.treatment_payload_hash):
+                raise ValueError("immutable treatment payload conflict")
             await self._db.execute(
                 """INSERT INTO evaluation_runs
                    (run_id, arm_name, model, quantization, exploration_policy,
                     seed, prompt_version, output_schema_version, status,
                     input_tokens, output_tokens, tool_calls, duration_ms,
-                    compute_seconds, error, started_at, completed_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    compute_seconds, treatment_payload_json, treatment_payload_hash,
+                    error, started_at, completed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(run_id) DO UPDATE SET status=excluded.status,
                     input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens,
                     tool_calls=excluded.tool_calls, duration_ms=excluded.duration_ms,
@@ -64,7 +72,8 @@ class EvaluationStore:
                  run.exploration_policy, run.seed, run.prompt_version,
                  run.output_schema_version, run.status.value, run.input_tokens,
                  run.output_tokens, run.tool_calls, run.duration_ms,
-                 run.compute_seconds, run.error, _ts(run.started_at),
+                 run.compute_seconds, run.treatment_payload_json,
+                 run.treatment_payload_hash, run.error, _ts(run.started_at),
                  None if run.completed_at is None else _ts(run.completed_at)),
             )
 
@@ -161,18 +170,23 @@ class EvaluationStore:
     async def summary(self) -> list[dict]:
         """Read-only per-arm resolved scorecard for CLI/reporting consumers."""
         rows = await self._db.fetchall(
-            """WITH ranked AS (
+            """WITH resolved AS (
                  SELECT u.*, ROW_NUMBER() OVER (
                    PARTITION BY u.arm,u.event_family
                    ORDER BY u.observed_at ASC,u.forecast_key ASC) AS rn
                  FROM unified_forecast_evidence u
                  WHERE u.stream='intelligence_eval' AND u.outcome IS NOT NULL
+               ), ranked AS (SELECT * FROM resolved WHERE rn=1),
+               arm_count AS (SELECT COUNT(DISTINCT arm) AS n FROM ranked),
+               paired AS (
+                 SELECT event_family FROM ranked GROUP BY event_family
+                 HAVING COUNT(DISTINCT arm)=(SELECT n FROM arm_count)
                )
                SELECT arm AS arm_name,model,COUNT(*) AS forecasts,
                       AVG((probability-outcome)*(probability-outcome)) AS brier,
                       AVG((market_probability-outcome)*
                           (market_probability-outcome)) AS market_brier,
                       SUM(abstained) AS abstains
-                 FROM ranked WHERE rn=1
+                 FROM ranked JOIN paired USING(event_family)
                 GROUP BY arm,model ORDER BY brier ASC""")
         return [dict(row) for row in rows]

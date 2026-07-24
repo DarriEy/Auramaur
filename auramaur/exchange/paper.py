@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import random
 import uuid
 
 import structlog
@@ -154,42 +153,31 @@ class PaperTrader:
 
 
     async def check_fills(self, current_prices: dict[str, float]) -> list[OrderResult]:
-        """Check pending limit orders for simulated fills.
+        """Fill maker orders only after strict trade-through evidence.
 
-        Fill probability depends on distance from midpoint:
-        closer to midpoint = lower fill probability.
+        Merely touching the limit is not evidence that our queue position
+        executed, so no random fill credit is awarded.
         """
         filled: list[OrderResult] = []
         remaining: list[tuple[Order, str]] = []
-
         for order, order_id in self.pending_orders:
             market_price = current_prices.get(order.market_id)
             if market_price is None:
                 remaining.append((order, order_id))
                 continue
-
-            # Simulate fill: BUY fills if market price drops to our limit
-            # SELL fills if market price rises to our limit
-            should_fill = False
-            if order.side == OrderSide.BUY and market_price <= order.price:
-                should_fill = True
-            elif order.side == OrderSide.SELL and market_price >= order.price:
-                should_fill = True
-
-            # Add probabilistic element: closer to midpoint = less likely
+            should_fill = (
+                order.side == OrderSide.BUY and market_price < order.price
+            ) or (
+                order.side == OrderSide.SELL and market_price > order.price
+            )
             if should_fill:
-                # 70-100% fill probability based on price distance
-                fill_prob = 0.7 + random.random() * 0.3
-                if random.random() < fill_prob:
-                    result = await self.execute(order)
-                    result.order_id = order_id
-                    result.status = "filled"
-                    filled.append(result)
-                    log.info("paper.limit_filled", order_id=order_id, price=order.price)
-                    continue
-
+                result = await self.execute(order)
+                result.order_id = order_id
+                result.status = "filled"
+                filled.append(result)
+                log.info("paper.limit_filled", order_id=order_id, price=order.price)
+                continue
             remaining.append((order, order_id))
-
         self.pending_orders = remaining
         return filled
 

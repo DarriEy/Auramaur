@@ -278,6 +278,50 @@ class Database:
             await self._migrate_v40_to_v41()
         if from_version < 42:
             await self._migrate_v41_to_v42()
+        if from_version < 43:
+            await self._migrate_v42_to_v43()
+
+    async def _migrate_v42_to_v43(self) -> None:
+        """Prospective, versioned and execution-supported edge evidence."""
+        additions = {
+            "decision_snapshots": (
+                ("venue", "TEXT NOT NULL DEFAULT ''"),
+                ("event_family", "TEXT NOT NULL DEFAULT ''"),
+                ("strategy_version", "TEXT NOT NULL DEFAULT ''"),
+                ("cohort_id", "TEXT NOT NULL DEFAULT ''"),
+                ("is_holdout", "INTEGER NOT NULL DEFAULT 0"),
+                ("fill_evidence", "TEXT NOT NULL DEFAULT 'unverified'"),
+                ("filled_price", "REAL"),
+                ("is_paper", "INTEGER NOT NULL DEFAULT 1"),
+            ),
+            "evaluation_runs": (
+                ("treatment_payload_json", "TEXT NOT NULL DEFAULT '{}'"),
+                ("treatment_payload_hash", "TEXT NOT NULL DEFAULT ''"),
+            ),
+        }
+        for table, columns in additions.items():
+            existing = {row["name"] for row in
+                        await self.fetchall(f"PRAGMA table_info({table})")}
+            for name, definition in columns:
+                if name not in existing:
+                    await self._db.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+        await self._db.executescript("""
+            CREATE TABLE IF NOT EXISTS strategy_experiments (
+                strategy_version TEXT PRIMARY KEY,
+                strategy_source TEXT NOT NULL,
+                config_json TEXT NOT NULL,
+                registered_at TEXT NOT NULL DEFAULT (datetime('now')),
+                holdout_starts_at TEXT NOT NULL,
+                UNIQUE(strategy_source, strategy_version));
+            CREATE INDEX IF NOT EXISTS idx_strategy_experiments_source
+                ON strategy_experiments(strategy_source, registered_at);
+            CREATE INDEX IF NOT EXISTS idx_decision_experiment
+                ON decision_snapshots(strategy_version,is_holdout,fill_evidence,observed_at);
+            UPDATE schema_version SET version = 43;
+        """)
+        await self._db.commit()
+        log.info("database.migrated", from_version=42, to_version=43)
 
     async def _migrate_v41_to_v42(self) -> None:
         """Make ambiguous historical attribution explicit."""

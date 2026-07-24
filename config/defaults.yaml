@@ -161,6 +161,20 @@ graduation:
      "informed_flow", "entailment_arb", "cross_venue_arb", "settlement_arb",
      "resolution_lens", "resolution_lens_kalshi", "platform_consensus"]
   confidence_z: 1.645
+  # Prospective proof contract: old/backfilled rows remain reportable but cannot
+  # graduate a strategy whose parameters and execution provenance were not frozen.
+  prospective_only: true
+  require_market_brier_edge: true
+  require_executable_fills: true
+  min_calendar_days: 30
+  min_regime_months: 2
+  holdout_warmup_days: 14
+  familywise_alpha: 0.05
+  max_hypotheses: 50
+  sequential_looks_per_window: 90
+  min_paired_forecasts: 30
+  credible_fill_evidence: ["venue_fill", "book_cross", "trade_through"]
+
   min_mean_pnl_lower_bound: 0.0
   probation_multiplier: 0.5
   cache_seconds: 300
