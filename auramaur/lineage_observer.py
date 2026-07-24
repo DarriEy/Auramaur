@@ -126,7 +126,8 @@ class LineageObserver:
                 "(id,query,category,market_id,started_at,completed_at,status,active_sources,raw_items,unique_items) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (run_id, query, category, market_id, started_at, observed_at,
-                 "partial" if any(row[2] == "error" for row in fetch_rows) else "ok",
+                 "partial" if any(row[2] in {"error", "timeout"}
+                                  for row in fetch_rows) else "ok",
                  len(active_sources), raw_items,
                  sum(i["rank_position"] is not None for i in items)),
             )

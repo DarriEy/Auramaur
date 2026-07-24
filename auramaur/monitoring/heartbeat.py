@@ -17,6 +17,8 @@ Read-only consumers (the web dashboard) read this table via their normal
 from __future__ import annotations
 
 import json
+import time
+from datetime import datetime, timezone
 
 import structlog
 
@@ -78,15 +80,30 @@ async def run_pillar_once(db, pillar, *,
     loop's own error handling still runs.
     """
     name = getattr(pillar, "name", type(pillar).__name__)
+    started = time.monotonic()
     try:
         entered = await pillar.run_once()
     except Exception as e:
         await beat(db, name, status="error",
                    interval_seconds=interval_seconds,
                    detail={"error": str(e)[:300]})
+        from auramaur.data_edge import DataDelivery, record_delivery
+        await record_delivery(db, DataDelivery(
+            strategy=name, component="strategy_cycle", status="error",
+            latency_ms=round((time.monotonic() - started) * 1000),
+            detail={"error": str(e)[:300]},
+        ))
         raise
     await beat(db, name, status="ok",
                entries=int(entered) if isinstance(entered, (int, float)) else None,
                interval_seconds=interval_seconds,
                detail=getattr(pillar, "last_cycle_detail", None))
+    from auramaur.data_edge import DataDelivery, record_delivery
+    await record_delivery(db, DataDelivery(
+        strategy=name, component="strategy_cycle", status="ok",
+        source_at=datetime.now(timezone.utc),
+        latency_ms=round((time.monotonic() - started) * 1000),
+        item_count=int(entered) if isinstance(entered, (int, float)) else 0,
+        detail=getattr(pillar, "last_cycle_detail", None) or {},
+    ))
     return entered if isinstance(entered, int) else 0

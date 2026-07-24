@@ -336,7 +336,9 @@ class ResolutionLensPillar:
             per_q = max(1, self._settings.nlp.evidence_per_source)
             for q in (queries or [m.question])[:3]:
                 for it in await self._aggregator.gather(
-                        q, limit_per_source=per_q, category=m.category or None):
+                        q, limit_per_source=per_q, category=m.category or None,
+                        market_id=m.id, market_price=m.outcome_yes_price,
+                        consumer=self.name):
                     if it.id not in seen:
                         seen.add(it.id)
                         items.append(it)

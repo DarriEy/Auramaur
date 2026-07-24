@@ -299,6 +299,18 @@ class MarketMaker:
         # Fetch YES order book to determine BBO
         book = await self._exchange.get_order_book(market.clob_token_yes)
 
+        if getattr(self, "_db", None) is not None:
+            from auramaur.data_edge import DataDelivery, record_delivery
+            await record_delivery(self._db, DataDelivery(
+                strategy=self.name, component="order_book",
+                status="ok" if book.bids and book.asks else "empty",
+                provider="polymarket_clob", market_id=market.id,
+                item_count=len(book.bids) + len(book.asks),
+                required_fields=("best_bid", "best_ask"),
+                missing_fields=(() if book.bids and book.asks
+                                else ("best_bid", "best_ask")),
+            ))
+
         if not book.bids or not book.asks:
             log.debug("market_maker.empty_book", market_id=market.id)
             return None, "empty_book"

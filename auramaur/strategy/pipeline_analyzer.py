@@ -95,6 +95,8 @@ class PipelineAnalyzer:
                 for query in queries:
                     items = await self.aggregator.gather(
                         query, limit_per_source=3, category=market.category or None,
+                        market_id=market.id, market_price=market.outcome_yes_price,
+                        consumer="strategic",
                     )
                     for item in items:
                         if item.id not in seen_ids:
@@ -194,6 +196,8 @@ class PipelineAnalyzer:
         for query in queries:
             items = await self.aggregator.gather(
                 query, limit_per_source=per_query_limit, category=market.category or None,
+                market_id=market.id, market_price=market.outcome_yes_price,
+                consumer="llm",
             )
             for item in items:
                 if item.id not in seen_ids:

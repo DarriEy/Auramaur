@@ -24,6 +24,12 @@ log = structlog.get_logger()
 
 # Recency half-life in hours: a story this old counts for half a fresh one.
 _RECENCY_HALFLIFE_HOURS = 36.0
+_TIMESTAMP_QUALITY_WEIGHT = {
+    "exact": 1.0,
+    "inferred": 0.75,
+    "provider_seen": 0.45,
+    "unknown": 0.20,
+}
 
 
 def _recency_decay(item: NewsItem, now: datetime) -> float:
@@ -63,7 +69,9 @@ def rank_evidence(
 
     scored: list[tuple[float, NewsItem]] = []
     for item, r in zip(items, rel):
-        score = _recency_decay(item, now) * authority(item.source, item.url) * (1.0 + r)
+        timestamp_weight = _TIMESTAMP_QUALITY_WEIGHT.get(item.timestamp_quality, 0.20)
+        score = (_recency_decay(item, now) * timestamp_weight
+                 * authority(item.source, item.url) * (1.0 + r))
         scored.append((score, item))
 
     scored.sort(key=lambda x: x[0], reverse=True)

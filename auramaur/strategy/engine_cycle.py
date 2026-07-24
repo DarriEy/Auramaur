@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import uuid
 from typing import TYPE_CHECKING
 
 import structlog
@@ -580,6 +581,7 @@ class CycleOrchestrationMixin:
         _EVIDENCE_CONCURRENCY = 6
         sem = asyncio.Semaphore(_EVIDENCE_CONCURRENCY)
         clob_lock = asyncio.Lock()
+        evidence_snapshot_id = uuid.uuid4().hex
 
         async def _gather_market_evidence(market) -> tuple[str, list] | None:
             if self._is_junk_market(market):
@@ -617,6 +619,8 @@ class CycleOrchestrationMixin:
                     for query in queries:
                         items = await self.aggregator.gather(
                             query, limit_per_source=per_query_limit, category=market.category or None,
+                            market_id=market.id, market_price=market.outcome_yes_price,
+                            consumer="strategic", snapshot_id=evidence_snapshot_id,
                         )
                         for item in items:
                             if item.id not in seen_ids:
@@ -643,9 +647,14 @@ class CycleOrchestrationMixin:
 
         gathered = await asyncio.gather(*[_gather_market_evidence(m) for m in markets])
         evidence_map: dict[str, list] = {}
+        evidence_run_ids: dict[str, list[str]] = {}
         for _res in gathered:
             if _res is not None:
                 evidence_map[_res[0]] = _res[1]
+                evidence_run_ids[_res[0]] = sorted({
+                    item.ingestion_run_id for item in _res[1]
+                    if item.ingestion_run_id
+                })
 
         # Filter to markets with evidence gathered
         batch_markets = [m for m in markets if m.id in evidence_map]
@@ -733,7 +742,7 @@ class CycleOrchestrationMixin:
                         market_yes_price=market.outcome_yes_price,
                         market_no_price=market.outcome_no_price,
                         observed_at=_dt.now(_tz.utc).isoformat(),
-                        evidence_run_ids=[],
+                        evidence_run_ids=evidence_run_ids.get(market.id, []),
                         model=getattr(getattr(self, "analyzer", None), "_model", ""),
                         strategy_source="strategic",
                         config=self.settings.nlp.model_dump(mode="json"),

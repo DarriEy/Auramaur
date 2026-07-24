@@ -30,6 +30,25 @@ async def audit_data_contracts(db: Database) -> list[ContractViolation]:
         ("incomplete_ingestion",
          "SELECT COUNT(*) n FROM ingestion_runs WHERE completed_at IS NULL OR status='running'",
          "persisted ingestion row is incomplete"),
+        ("unlinked_strategic_forecast",
+         """SELECT COUNT(*) n FROM forecast_snapshots
+            WHERE strategy_source='strategic' AND evidence_run_ids='[]'""",
+         "strategic forecast has no point-in-time evidence lineage"),
+        ("weak_timestamp_ranked_first",
+         """SELECT COUNT(*) n FROM evidence_observations
+            WHERE rank_position=1 AND timestamp_quality IN ('unknown','provider_seen')""",
+         "top-ranked evidence has weak publication-time semantics"),
+        ("invalid_delivery_age",
+         """SELECT COUNT(*) n FROM strategy_data_deliveries
+            WHERE age_seconds < 0 OR latency_ms < 0 OR item_count < 0""",
+         "strategy delivery contains invalid age, latency, or coverage"),
+        ("failed_latest_delivery",
+         """SELECT COUNT(*) n FROM strategy_data_deliveries d
+            WHERE d.id=(SELECT d2.id FROM strategy_data_deliveries d2
+                        WHERE d2.strategy=d.strategy AND d2.component=d.component
+                        ORDER BY d2.observed_at DESC,d2.id DESC LIMIT 1)
+              AND d.status NOT IN ('ok','empty')""",
+         "latest strategy-facing dataset delivery is unhealthy"),
     ]
     violations = []
     for name, sql, detail in checks:

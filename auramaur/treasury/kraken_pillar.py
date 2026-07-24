@@ -1038,7 +1038,9 @@ class KrakenPillar:
             evidence: list = []
             seen: set[str] = set()
             for q in queries:
-                items = await aggregator.gather(q, limit_per_source=3, category="crypto")
+                items = await aggregator.gather(
+                    q, limit_per_source=3, category="crypto",
+                    market_id=pair, consumer="kraken_treasury")
                 for it in items:
                     if it.id not in seen:
                         seen.add(it.id)

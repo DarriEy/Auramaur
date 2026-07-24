@@ -267,6 +267,78 @@ async def check_data_sources(
     )
 
 
+async def check_strategy_data_delivery(
+    db: Database, *, since: datetime,
+) -> CriterionResult:
+    """Verify the datasets consumed by recently-running strategies.
+
+    Missing telemetry is reported honestly as insufficient data; once a
+    component has emitted, stale or failed deliveries are a hard failure.
+    """
+    from auramaur.data_edge import requirements_for
+
+    heartbeats = await db.fetchall(
+        "SELECT strategy,interval_seconds FROM strategy_heartbeats "
+        "WHERE datetime(last_beat_at) >= datetime(?)", (since.isoformat(),))
+    if not heartbeats:
+        return CriterionResult(
+            name="strategy_data_delivery", status="INSUFFICIENT_DATA",
+            value="0 active strategies", threshold="fresh required datasets",
+            detail="no recent strategy heartbeats")
+
+    now = datetime.now(timezone.utc)
+    failures: list[str] = []
+    unobserved: list[str] = []
+    checked = 0
+    for heartbeat in heartbeats:
+        strategy = heartbeat["strategy"]
+        for requirement in requirements_for(strategy):
+            row = await db.fetchone(
+                """SELECT status,observed_at,age_seconds,item_count,missing_fields
+                   FROM strategy_data_deliveries
+                   WHERE strategy=? AND component=?
+                   ORDER BY observed_at DESC LIMIT 1""",
+                (strategy, requirement.component))
+            label = f"{strategy}:{requirement.component}"
+            if row is None:
+                unobserved.append(label)
+                continue
+            checked += 1
+            try:
+                observed = datetime.fromisoformat(
+                    row["observed_at"].replace("Z", "+00:00"))
+                if observed.tzinfo is None:
+                    observed = observed.replace(tzinfo=timezone.utc)
+                delivery_age = max(0.0, (now - observed).total_seconds())
+            except (TypeError, ValueError):
+                failures.append(f"{label}=bad timestamp")
+                continue
+            allowed = max(requirement.max_age_seconds,
+                          float(heartbeat["interval_seconds"] or 0) * 2)
+            source_age = row["age_seconds"]
+            if (row["status"] != "ok" or delivery_age > allowed
+                    or (source_age is not None and source_age > requirement.max_age_seconds)
+                    or int(row["item_count"] or 0) < requirement.min_items):
+                failures.append(f"{label}={row['status']} age={delivery_age:.0f}s")
+
+    if failures:
+        return CriterionResult(
+            name="strategy_data_delivery", status="FAIL",
+            value=f"{len(failures)} unhealthy datasets",
+            threshold="all observed requirements fresh and complete",
+            detail="; ".join(failures[:12]), n_samples=checked)
+    if unobserved:
+        return CriterionResult(
+            name="strategy_data_delivery", status="INSUFFICIENT_DATA",
+            value=f"{len(unobserved)} datasets not yet observed",
+            threshold="telemetry for every required dataset",
+            detail=", ".join(unobserved[:12]), n_samples=checked)
+    return CriterionResult(
+        name="strategy_data_delivery", status="PASS",
+        value=f"{checked} datasets fresh", threshold="all requirements fresh",
+        n_samples=checked)
+
+
 # ---------------------------------------------------------------------------
 # Criterion 3 — risk gate pass rate
 # ---------------------------------------------------------------------------
@@ -591,6 +663,7 @@ async def evaluate_readiness(
     criteria = [
         await check_cycle_health(log_file, since_window),
         await check_data_sources(db, since_24h=since_24h, since_window=since_window),
+        await check_strategy_data_delivery(db, since=since_24h),
         await check_pass_rate(db, since=since_window, exchange=exchange),
         await check_brier_absolute(db, since=since_window),
         await check_brier_vs_market(db, since=since_window),

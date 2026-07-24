@@ -32,9 +32,11 @@ class Aggregator:
     source_name: str = "aggregator"
 
     def __init__(self, sources: list[DataSource],
-                 observer: LineageObserver | None = None) -> None:
+                 observer: LineageObserver | None = None,
+                 source_timeout_seconds: float = 20.0) -> None:
         self._sources = sources
         self.observer = observer
+        self._source_timeout_seconds = source_timeout_seconds
 
     @staticmethod
     def _source_matches_category(source: DataSource, category: str | None) -> bool:
@@ -60,6 +62,8 @@ class Aggregator:
         category: str | None = None,
         market_id: str = "",
         market_price: float | None = None,
+        consumer: str = "",
+        snapshot_id: str = "",
     ) -> list[NewsItem]:
         """Fetch from matching sources concurrently, deduplicate, and rank.
 
@@ -70,20 +74,30 @@ class Aggregator:
 
         run_id = uuid.uuid4().hex
         started = datetime.now(tz=timezone.utc)
+        gather_started = time.monotonic()
         fetch_rows: list[tuple] = []
 
         async def _safe_fetch(source: DataSource) -> list[NewsItem]:
             source_name = getattr(source, "source_name", str(source))
             before = time.monotonic()
             try:
-                items = await source.fetch(query, limit=limit_per_source)
+                async with asyncio.timeout(self._source_timeout_seconds):
+                    items = await source.fetch(query, limit=limit_per_source)
                 mode = getattr(source, "information_mode", "production")
                 for item in items:
                     item.information_mode = mode
-                fetch_rows.append((run_id, source_name, "ok", len(items),
+                fetch_rows.append((run_id, source_name, "ok" if items else "empty", len(items),
                                    round((time.monotonic() - before) * 1000), "",
                                    datetime.now(tz=timezone.utc).isoformat(), mode))
                 return items
+            except TimeoutError as exc:
+                fetch_rows.append((run_id, source_name, "timeout", 0,
+                                   round((time.monotonic() - before) * 1000), str(exc)[:500],
+                                   datetime.now(tz=timezone.utc).isoformat(),
+                                   getattr(source, "information_mode", "production")))
+                logger.warning("aggregator_source_timeout", source=source_name,
+                               timeout_seconds=self._source_timeout_seconds)
+                return []
             except Exception as exc:
                 fetch_rows.append((run_id, source_name, "error", 0,
                                    round((time.monotonic() - before) * 1000), str(exc)[:500],
@@ -134,7 +148,11 @@ class Aggregator:
             # captured for offline trials, not allowed to alter proven books.
             recency = 1.0 / age_hours
             source_weight = authority(item.source, item.url)
-            return (recency * source_weight) + item.relevance_score
+            timestamp_weight = {
+                "exact": 1.0, "inferred": 0.75,
+                "provider_seen": 0.45, "unknown": 0.20,
+            }.get(item.timestamp_quality, 0.20)
+            return (recency * timestamp_weight * source_weight) + item.relevance_score
 
         unique.sort(key=_rank, reverse=True)
 
@@ -179,6 +197,23 @@ class Aggregator:
             category=category,
             active_sources=len(active_sources),
         )
+        if consumer and self.observer is not None:
+            from auramaur.data_edge import DataDelivery, record_delivery
+
+            statuses = {row[2] for row in fetch_rows}
+            status = ("empty" if not unique else
+                      "partial" if statuses & {"error", "timeout"} else "ok")
+            published = [item.published_at for item in unique if item.published_at]
+            source_at = max(published) if published else None
+            await record_delivery(self.observer.db, DataDelivery(
+                strategy=consumer, component="evidence", status=status,
+                provider="aggregator", market_id=market_id,
+                snapshot_id=snapshot_id or run_id, source_at=source_at,
+                item_count=len(unique), latency_ms=round(
+                    (time.monotonic() - gather_started) * 1000),
+                detail={"run_id": run_id, "active_sources": len(active_sources),
+                        "source_statuses": sorted(statuses)},
+            ))
         return unique
 
     # Implement the DataSource protocol's fetch as well, delegating to gather

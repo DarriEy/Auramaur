@@ -85,6 +85,13 @@ class WeatherTempPillar:
         cfg = self._settings.weather_temp
         members = await self._weather.daily_ensemble(
             spec.lat, spec.lon, spec.target, spec.kind, spec.unit)
+        from auramaur.data_edge import DataDelivery, record_delivery
+        await record_delivery(self._db, DataDelivery(
+            strategy=self.name, component="weather_ensemble",
+            status="ok" if members else "empty", provider="openmeteo",
+            market_id=market.id, item_count=len(members),
+            detail={"target": spec.target.isoformat(), "city": spec.city},
+        ))
         model_p = bin_probability(members, spec.lo, spec.hi)
         if model_p is None:
             return False
