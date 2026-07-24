@@ -164,3 +164,23 @@ async def test_order_position_heartbeat_and_lineage_writes_serialize(tmp_path):
         assert db.db._conn.in_transaction is False
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_commit_never_lands_an_adopters_open_batch(tmp_path):
+    """Database.commit() must be a no-op while a transaction() adopter holds
+    an explicit BEGIN — a legacy commit mid-adoption used to land the
+    adopter's half-finished batch (31 bleeds in 25 min, 2026-07-24)."""
+    db = await _fresh_db(tmp_path)
+    try:
+        async with db.transaction(owner="adopter"):
+            await db.execute("INSERT INTO t (k, v) VALUES ('half', 1)")
+            # Legacy caller fires commit() mid-adoption.
+            await db.commit()
+            # The adopter's batch must still be open (not landed early).
+            assert db.db.in_transaction is True
+            await db.execute("INSERT INTO t (k, v) VALUES ('done', 1)")
+        rows = await db.fetchall("SELECT k FROM t ORDER BY k")
+        assert [r["k"] for r in rows] == ["done", "half"]
+    finally:
+        await db.close()

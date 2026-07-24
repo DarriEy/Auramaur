@@ -1156,18 +1156,18 @@ class Database:
         return await cursor.fetchall()
 
     async def commit(self) -> None:
-        try:
-            await self.db.commit()
-        except Exception as exc:  # noqa: BLE001 — narrow re-raise below
-            if "no transaction is active" in str(exc).lower():
-                # A transaction() adopter's COMMIT already landed these rows
-                # (legacy commit interleaved with an explicit transaction on
-                # the shared connection). The data is durable; only this
-                # caller's notion of "its own" commit was stale. Full adopter
-                # migration (contention plan phase 5) retires this path.
-                log.debug("database.commit_already_landed")
-                return
-            raise
+        # Deliberate no-op. Under the autocommit connection every legacy
+        # execute() is already durable, so a legacy commit() has exactly one
+        # remaining effect: when it interleaves with a transaction() adopter's
+        # explicit BEGIN on the shared connection it COMMITS THE ADOPTER'S
+        # HALF-FINISHED BATCH — observed 31 times in 25 minutes on 2026-07-24
+        # (victims: intelligence_eval, heartbeat, trade_kalshi). A
+        # check-then-commit still races an adopter's BEGIN across the await
+        # boundary, so the only race-free form is to never issue the commit:
+        # transaction()'s own COMMIT (raw execute) is the sole legitimate one.
+        if self._db is not None and self._db._conn.in_transaction:
+            log.debug("database.legacy_commit_skipped_mid_transaction",
+                      active_owner=self._txn_owner or "unknown")
 
     async def rollback(self) -> None:
         await self.db.rollback()
