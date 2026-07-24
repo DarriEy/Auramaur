@@ -40,6 +40,7 @@ def _opt_float(v) -> float | None:
 
 # Kalshi basic tier: 20 reads/sec
 _RATE_LIMIT = 20
+_DISCOVERY_CACHE_TTL = 15.0
 
 # (connect, read) seconds applied to every Kalshi request. Without this a
 # stalled Cloudflare/Kalshi connection mid-body-read hangs forever — and since
@@ -76,6 +77,7 @@ class KalshiClient:
         # clients without it). Kalshi previously lacked it entirely, so its
         # orders were never monitored and their trade rows stayed 'pending'.
         self._live_pending: dict[str, Order] = {}
+        self._discovery_cache: dict[tuple[bool, int], tuple[float, list[Market]]] = {}
 
     def _init_api(self):
         """Lazily initialize the kalshi-python client."""
@@ -260,6 +262,10 @@ class KalshiClient:
 
     async def get_markets(self, active: bool = True, limit: int = 100) -> list[Market]:
         """Fetch markets from Kalshi API."""
+        cache_key = (active, limit)
+        cached = self._discovery_cache.get(cache_key)
+        if cached and time.monotonic() - cached[0] <= _DISCOVERY_CACHE_TTL:
+            return [market.model_copy(deep=True) for market in cached[1]]
         self._init_api()
         try:
             # Kalshi API caps events at 200
@@ -283,6 +289,8 @@ class KalshiClient:
                     break
 
             log.info("kalshi.markets_fetched", count=len(markets))
+            self._discovery_cache[cache_key] = (
+                time.monotonic(), [market.model_copy(deep=True) for market in markets])
             return markets
         except Exception as e:
             log.error("kalshi.fetch_error", error=str(e))

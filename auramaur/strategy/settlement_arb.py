@@ -34,6 +34,7 @@ from auramaur.strategy.protocols import ExecutionMode
 
 import json
 import re
+from datetime import datetime, timezone
 
 import structlog
 
@@ -235,6 +236,9 @@ class SettlementArbPillar:
         self._fred_cycle_cache = {}
         self._stages = {}
         markets = await self._candidates()
+        from auramaur.data_edge import record_market_snapshot
+        await record_market_snapshot(self._db, self.name, markets,
+                                     provider="db+kalshi")
         entered = 0
         with_pred = 0
         for m in markets:
@@ -407,7 +411,8 @@ class SettlementArbPillar:
             await record_delivery(self._db, DataDelivery(
                 strategy=self.name, component="fred_observations",
                 status="ok" if cache[series] else "empty", provider="fred",
-                market_id=series, item_count=len(cache[series] or []),
+                market_id=series, source_at=datetime.now(timezone.utc),
+                item_count=len(cache[series] or []),
             ))
         return cache[series]
 

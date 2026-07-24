@@ -199,6 +199,9 @@ class LongHorizonPillar:
             # A discovery without the date-window kwargs (older client / test stub):
             # fall back to the plain scan so the pillar still runs.
             out = await self._discovery.get_markets(limit=cfg.scan_limit)
+        from auramaur.data_edge import record_market_snapshot
+        await record_market_snapshot(self._db, self.name, out,
+                                     provider=self._venue)
         return out
 
     # ------------------------------------------------------------------

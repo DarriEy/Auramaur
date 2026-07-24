@@ -319,6 +319,8 @@ class IBKRMultiAssetPaperBook:
         unmarked_positions = set(positions)
         entries = 0
         error = ""
+        valid_quotes = 0
+        quote_sources: set[str] = set()
         candidates: list = []
         for spec in selected:
             try:
@@ -332,6 +334,8 @@ class IBKRMultiAssetPaperBook:
                     else await self._client.get_quote(spec))
                 if quote is None or not self._quote_fresh(quote):
                     continue
+                valid_quotes += 1
+                quote_sources.add(str(getattr(quote, "source", "")))
                 if held and int(quote.con_id) != held_con_id:
                     raise RuntimeError(
                         f"held contract mismatch: expected {held_con_id}, got {quote.con_id}")
@@ -442,6 +446,16 @@ class IBKRMultiAssetPaperBook:
                  last_error=excluded.last_error, updated_at=datetime('now')""",
             (self.book.value, next_cursor, error))
         await self._db.commit()
+        from auramaur.data_edge import DataDelivery, record_delivery
+        await record_delivery(self._db, DataDelivery(
+            strategy=self.name, component="multiasset_quote",
+            status=("ok" if valid_quotes else "error" if error else "empty"),
+            provider="+".join(sorted(quote_sources)), market_id=self.book.value,
+            source_at=datetime.now(timezone.utc) if valid_quotes else None,
+            item_count=valid_quotes,
+            required_fields=("bid", "ask", "timestamp"),
+            detail={"selected": len(selected), "last_error": error},
+        ))
         await self._record_daily_mark()
         await self._record_research_signals()
         loss_exposure = await self._loss_exposure()

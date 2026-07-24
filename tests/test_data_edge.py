@@ -101,7 +101,7 @@ async def test_strategy_readiness_parses_sqlite_heartbeat_timestamp(db):
 
 
 @pytest.mark.asyncio
-async def test_strategy_readiness_treats_old_healthy_record_as_unobserved(db):
+async def test_strategy_readiness_fails_old_required_record(db):
     """Conditional emitters (FRED cache hits, weather priced on demand) stop
     recording between events; an aged 'ok' record is missing telemetry, not a
     delivery failure."""
@@ -122,12 +122,12 @@ async def test_strategy_readiness_treats_old_healthy_record_as_unobserved(db):
         (datetime.now(timezone.utc).isoformat(),))
     result = await check_strategy_data_delivery(
         db, since=datetime.now(timezone.utc) - timedelta(hours=1))
-    assert result.status == "INSUFFICIENT_DATA"
+    assert result.status == "FAIL"
     assert "settlement_arb:fred_observations" in result.detail
 
 
 @pytest.mark.asyncio
-async def test_strategy_readiness_accepts_fresh_partial_delivery(db):
+async def test_strategy_readiness_rejects_fresh_partial_delivery(db):
     await db.execute(
         "INSERT INTO strategy_heartbeats "
         "(strategy,last_beat_at,interval_seconds) VALUES ('market_maker',?,30)",
@@ -137,7 +137,34 @@ async def test_strategy_readiness_accepts_fresh_partial_delivery(db):
         source_at=datetime.now(timezone.utc), item_count=0))
     result = await check_strategy_data_delivery(
         db, since=datetime.now(timezone.utc) - timedelta(hours=1))
-    assert result.status == "PASS"
+    assert result.status == "FAIL"
+
+
+@pytest.mark.asyncio
+async def test_strategy_readiness_rejects_missing_source_timestamp(db):
+    await db.execute(
+        "INSERT INTO strategy_heartbeats "
+        "(strategy,last_beat_at,interval_seconds) VALUES ('market_maker',?,30)",
+        (datetime.now(timezone.utc).isoformat(),))
+    await record_delivery(db, DataDelivery(
+        strategy="market_maker", component="order_book", status="ok",
+        item_count=2))
+    result = await check_strategy_data_delivery(
+        db, since=datetime.now(timezone.utc) - timedelta(hours=1))
+    assert result.status == "FAIL"
+    assert "missing source time" in result.detail
+
+
+@pytest.mark.asyncio
+async def test_strategy_readiness_rejects_unknown_strategy_contract(db):
+    await db.execute(
+        "INSERT INTO strategy_heartbeats "
+        "(strategy,last_beat_at,interval_seconds) VALUES ('new_book',?,30)",
+        (datetime.now(timezone.utc).isoformat(),))
+    result = await check_strategy_data_delivery(
+        db, since=datetime.now(timezone.utc) - timedelta(hours=1))
+    assert result.status == "FAIL"
+    assert "unknown data contract" in result.detail
 
 
 @pytest.mark.asyncio

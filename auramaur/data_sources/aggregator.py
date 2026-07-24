@@ -33,10 +33,13 @@ class Aggregator:
 
     def __init__(self, sources: list[DataSource],
                  observer: LineageObserver | None = None,
-                 source_timeout_seconds: float = 20.0) -> None:
+                 source_timeout_seconds: float = 20.0,
+                 cache_ttl_seconds: float = 60.0) -> None:
         self._sources = sources
         self.observer = observer
         self._source_timeout_seconds = source_timeout_seconds
+        self._cache_ttl_seconds = max(0.0, cache_ttl_seconds)
+        self._cache: dict[tuple[str, int, str | None], tuple[float, list[NewsItem]]] = {}
 
     @staticmethod
     def _source_matches_category(source: DataSource, category: str | None) -> bool:
@@ -71,6 +74,24 @@ class Aggregator:
         sources are only invoked when ``category`` matches their
         ``categories`` set; category-agnostic sources always fire.
         """
+
+        cache_key = (_normalise_title(query), limit_per_source, category)
+        cached = self._cache.get(cache_key)
+        if cached and time.monotonic() - cached[0] <= self._cache_ttl_seconds:
+            items = [item.model_copy(deep=True) for item in cached[1]]
+            if consumer and self.observer is not None:
+                from auramaur.data_edge import DataDelivery, record_delivery
+                published = [item.published_at for item in items if item.published_at]
+                await record_delivery(self.observer.db, DataDelivery(
+                    strategy=consumer, component="evidence",
+                    status="ok" if items else "empty", provider="aggregator_cache",
+                    market_id=market_id,
+                    snapshot_id=(snapshot_id or (items[0].ingestion_run_id if items else "")),
+                    source_at=max(published) if published else datetime.now(timezone.utc),
+                    item_count=len(items), fallback_used="ttl_cache",
+                    detail={"cache_age_seconds": round(time.monotonic() - cached[0], 3)},
+                ))
+            return items
 
         run_id = uuid.uuid4().hex
         started = datetime.now(tz=timezone.utc)
@@ -152,10 +173,15 @@ class Aggregator:
             return (recency * source_weight) + item.relevance_score
 
         unique.sort(key=_rank, reverse=True)
-
         observed_at = datetime.now(tz=timezone.utc).isoformat()
         for item in unique:
             item.ingestion_run_id = run_id
+        statuses = {row[2] for row in fetch_rows}
+        # Never prolong a transient outage. Successful empty results may be
+        # cached, but any timeout/error forces the next consumer to retry.
+        if not statuses.intersection({"timeout", "error"}):
+            self._cache[cache_key] = (
+                time.monotonic(), [item.model_copy(deep=True) for item in unique])
         if self.observer is not None:
             ranks = {item.id: rank for rank, item in enumerate(unique, start=1)}
             persisted = list({(item.source, item.id): item for item in all_items}.values())
@@ -197,7 +223,6 @@ class Aggregator:
         if consumer and self.observer is not None:
             from auramaur.data_edge import DataDelivery, record_delivery
 
-            statuses = {row[2] for row in fetch_rows}
             status = ("empty" if not unique else
                       "partial" if statuses & {"error", "timeout"} else "ok")
             published = [item.published_at for item in unique if item.published_at]

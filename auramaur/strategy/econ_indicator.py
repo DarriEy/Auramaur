@@ -83,6 +83,14 @@ class EconIndicatorPillar:
         if spec is None:
             return 0
         obs = await self._fred.get_observations(spec.fred_series, n=cfg.history_n)
+        from auramaur.data_edge import DataDelivery, record_delivery
+        observed = datetime.now(timezone.utc)
+        await record_delivery(self._db, DataDelivery(
+            strategy=self.name, component="fred_observations",
+            status="ok" if obs else "empty", provider="fred",
+            market_id=spec.fred_series, source_at=observed,
+            item_count=len(obs),
+        ))
         if len(obs) < 4:
             log.debug("econ_indicator.thin_history", series=prefix, n=len(obs))
             return 0
@@ -92,6 +100,9 @@ class EconIndicatorPillar:
             return 0
 
         bins = await self._kalshi.get_markets_by_series(prefix)
+        from auramaur.data_edge import record_market_snapshot
+        await record_market_snapshot(self._db, self.name, bins,
+                                     provider="kalshi")
         period = self._nearest_period(bins)
         if period is None:
             return 0

@@ -378,7 +378,13 @@ class TermStructurePillar:
         # Widest ladders first — the most opinion per read.
         out.sort(key=lambda fs: (len(fs[1]), sum(m.volume for m in fs[1])),
                  reverse=True)
-        return out[: cfg.max_families]
+        selected = out[: cfg.max_families]
+        from auramaur.data_edge import record_market_snapshot
+        await record_market_snapshot(
+            self._db, self.name,
+            [market for _, markets in selected for market in markets],
+        )
+        return selected
 
     def _eligible(self, market: Market, cfg) -> bool:
         if not market.active:

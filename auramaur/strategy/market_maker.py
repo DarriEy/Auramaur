@@ -305,6 +305,7 @@ class MarketMaker:
                 strategy=self.name, component="order_book",
                 status="ok" if book.bids and book.asks else "empty",
                 provider="polymarket_clob", market_id=market.id,
+                source_at=datetime.now(timezone.utc),
                 item_count=len(book.bids) + len(book.asks),
                 required_fields=("best_bid", "best_ask"),
                 missing_fields=(() if book.bids and book.asks

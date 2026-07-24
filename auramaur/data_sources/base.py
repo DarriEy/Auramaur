@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class NewsItem(BaseModel):
@@ -22,6 +22,14 @@ class NewsItem(BaseModel):
     keywords: list[str] = Field(default_factory=list)
     ingestion_run_id: str = ""
     information_mode: str = "production"  # production | shadow | paired
+
+    @field_validator("published_at")
+    @classmethod
+    def _published_at_is_utc_aware(cls, value: datetime) -> datetime:
+        """Normalize provider timestamps once at the ingestion boundary."""
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
 
 
 @runtime_checkable

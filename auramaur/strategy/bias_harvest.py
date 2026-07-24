@@ -120,6 +120,8 @@ class BiasHarvestPillar:
             return 0
 
         markets = await self._discovery.get_markets(limit=cfg.scan_limit)
+        from auramaur.data_edge import record_market_snapshot
+        await record_market_snapshot(self._db, self.name, markets)
         entered = 0
         for market in markets:
             if entered >= cfg.max_entries_per_cycle:
@@ -240,6 +242,7 @@ class BiasHarvestPillar:
             strategy=self.name, component="order_book",
             status="ok" if best_bid is not None and best_ask is not None else "empty",
             provider="polymarket_clob", market_id=market.id,
+            source_at=datetime.now(timezone.utc),
             item_count=len(book.bids) + len(book.asks),
             required_fields=("best_bid", "best_ask"),
         ))

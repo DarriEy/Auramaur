@@ -200,6 +200,8 @@ class AgentTraderPillar:
             return 0
         await self._ensure_schema()
         candidates = await self._candidates(cfg)
+        from auramaur.data_edge import record_market_snapshot
+        await record_market_snapshot(self._db, self.name, candidates)
         if not candidates:
             log.info("agent_trader.no_candidates")
             return 0
@@ -267,6 +269,13 @@ class AgentTraderPillar:
         else:
             raw = await self._call_model(prompt, spec.model, spec.effort, cfg)
         decisions = parse_decisions(raw, cfg.max_entries_per_cycle)
+        from auramaur.data_edge import DataDelivery, record_delivery
+        await record_delivery(self._db, DataDelivery(
+            strategy=self.name, component="model_response", status="ok",
+            provider=str(getattr(spec, "provider", "claude")),
+            market_id=alias, source_at=datetime.now(timezone.utc),
+            item_count=1, detail={"model": spec.model, "decisions": len(decisions)},
+        ))
 
         # The model actually saw and passed on these — remember the pass for
         # decline_ttl_hours. Only after a SUCCESSFUL call: a budget/timeout

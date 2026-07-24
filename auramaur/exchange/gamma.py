@@ -19,6 +19,7 @@ GAMMA_API_BASE = "https://gamma-api.polymarket.com"
 # How long (seconds) to remember that a market_id returned 4xx, so we don't
 # re-hit the API every cycle for dead/orphaned IDs.
 _NEGATIVE_CACHE_TTL = 3600.0
+_DISCOVERY_CACHE_TTL = 15.0
 
 # Gamma sits behind Cloudflare. When CF throttles/challenges the client it can
 # half-close the socket (CLOSE_WAIT) and leave a read hanging indefinitely,
@@ -48,6 +49,7 @@ class GammaClient:
         self._session: aiohttp.ClientSession | None = None
         # market_id -> expiry timestamp for ids that returned 4xx
         self._negative_cache: dict[str, float] = {}
+        self._discovery_cache: dict[tuple, tuple[float, list[Market]]] = {}
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -75,6 +77,11 @@ class GammaClient:
         14-365d favorites) can fetch the right markets directly instead of the
         default top-100-by-volume page, which never contains them.
         """
+        cache_key = (active, limit, offset, order, ascending,
+                     end_date_min, end_date_max)
+        cached = self._discovery_cache.get(cache_key)
+        if cached and time.monotonic() - cached[0] <= _DISCOVERY_CACHE_TTL:
+            return [market.model_copy(deep=True) for market in cached[1]]
         session = await self._ensure_session()
         params = {
             "limit": limit,
@@ -101,6 +108,8 @@ class GammaClient:
                     markets.append(market)
 
             log.info("gamma.markets_fetched", count=len(markets))
+            self._discovery_cache[cache_key] = (
+                time.monotonic(), [market.model_copy(deep=True) for market in markets])
             return markets
 
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
