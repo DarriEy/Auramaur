@@ -842,11 +842,11 @@ class AuramaurBot(
 
     async def _task_ibkr_multiasset_paper(self) -> None:
         """Six read-only quote feeds with isolated local paper accounting."""
+        from auramaur.exchange.alpaca_multiasset import build_multiasset_market_data
         from auramaur.exchange.ibkr_instruments import IBKRBook
-        from auramaur.exchange.ibkr_market_data import IBKRReadOnlyMarketData
         from auramaur.strategy.ibkr_multiasset_paper import IBKRMultiAssetPaperBook
 
-        client = IBKRReadOnlyMarketData(self.settings)
+        client = build_multiasset_market_data(self.settings)
         executor = None
         if self.settings.ibkr.multiasset_execution_enabled:
             from auramaur.exchange.ibkr_multiasset_execution import IBKRMultiAssetExecution
