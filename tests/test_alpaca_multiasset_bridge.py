@@ -175,3 +175,25 @@ def test_hung_ibkr_quote_times_out_and_falls_back_to_alpaca(monkeypatch):
         quote = await asyncio.wait_for(bridge.get_quote(GBPJPY), timeout=5)
         assert quote is None
     asyncio.run(run())
+
+
+def test_hung_conid_quote_times_out_and_falls_back(monkeypatch):
+    """The held-position mark path quotes by con_id; delegation passed it
+    through unbounded and the UUP mark hung the task (2026-07-24 17:42)."""
+    async def run():
+        class HangingIBKR(FakeIBKR):
+            async def get_quote_by_con_id(self, spec, con_id):
+                await asyncio.Event().wait()
+
+        monkeypatch.setattr(
+            AlpacaMultiAssetQuotes, "_IBKR_QUOTE_TIMEOUT_SECONDS", 0.05)
+        alpaca = FakeAlpaca(EquityQuote(28.5, 28.52, time.time(), "alpaca_iex"))
+        bridge = AlpacaMultiAssetQuotes(HangingIBKR(None), alpaca)
+        quote = await asyncio.wait_for(
+            bridge.get_quote_by_con_id(SPY, 756733), timeout=5)
+        assert quote is not None and quote.source == "alpaca_iex"
+        assert quote.con_id == 756733
+        quote = await asyncio.wait_for(
+            bridge.get_quote_by_con_id(GBPJPY, 14321015), timeout=5)
+        assert quote is None
+    asyncio.run(run())
