@@ -14,6 +14,8 @@ IEX and keep waiting on IBKR entitlements.
 
 from __future__ import annotations
 
+import asyncio
+
 import structlog
 
 from auramaur.exchange.equity_market_data import AlpacaIEXMarketData
@@ -35,10 +37,21 @@ class AlpacaMultiAssetQuotes:
         # except the quote path stays IBKR's (history needs no subscription).
         return getattr(self._ibkr, name)
 
+    # The IBKR attempt must be BOUNDED: an unentitled instrument's ticker can
+    # await forever, and before this bound the whole multiasset task hung on
+    # the first eligible stock quote (2026-07-24 15:12 — heartbeats silent for
+    # 2h across restarts; the preflight never hit it because it wraps quotes
+    # in wait_for). On timeout we fall through to Alpaca exactly as on error.
+    _IBKR_QUOTE_TIMEOUT_SECONDS = 15.0
+
     async def get_quote(self, spec: InstrumentSpec) -> MarketDataQuote | None:
         quote = None
         try:
-            quote = await self._ibkr.get_quote(spec)
+            quote = await asyncio.wait_for(
+                self._ibkr.get_quote(spec),
+                timeout=self._IBKR_QUOTE_TIMEOUT_SECONDS)
+        except (TimeoutError, asyncio.TimeoutError):
+            log.debug("alpaca_bridge.ibkr_quote_timeout", key=spec.key)
         except Exception as exc:  # noqa: BLE001 — fallback path handles it
             log.debug("alpaca_bridge.ibkr_quote_error", key=spec.key,
                       error=str(exc)[:120])
