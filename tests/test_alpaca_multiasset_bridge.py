@@ -197,3 +197,32 @@ def test_hung_conid_quote_times_out_and_falls_back(monkeypatch):
             bridge.get_quote_by_con_id(GBPJPY, 14321015), timeout=5)
         assert quote is None
     asyncio.run(run())
+
+
+def test_every_pillar_await_is_bounded(monkeypatch):
+    """Bounding piecemeal was whack-a-mole (#358 quotes, #360 by-con-id, then
+    a third hang in the bars path). Every IBKR await the pillar makes must
+    time out to a skip-this-instrument value, never hang the task."""
+    async def run():
+        class HangingIBKR(FakeIBKR):
+            async def get_quote(self, spec): await asyncio.Event().wait()
+            async def get_quote_by_con_id(self, spec, con_id): await asyncio.Event().wait()
+            async def get_daily_bars(self, spec, duration="3 M"): await asyncio.Event().wait()
+            async def get_daily_bars_by_con_id(self, spec, con_id, duration="3 M"):
+                await asyncio.Event().wait()
+            async def is_market_open(self, spec): await asyncio.Event().wait()
+            async def get_fx_to_usd(self, currency): await asyncio.Event().wait()
+
+        monkeypatch.setattr(AlpacaMultiAssetQuotes, "_IBKR_QUOTE_TIMEOUT_SECONDS", 0.05)
+        monkeypatch.setattr(AlpacaMultiAssetQuotes, "_IBKR_HISTORY_TIMEOUT_SECONDS", 0.05)
+        monkeypatch.setattr(AlpacaMultiAssetQuotes, "_IBKR_MISC_TIMEOUT_SECONDS", 0.05)
+        bridge = AlpacaMultiAssetQuotes(HangingIBKR(None), FakeAlpaca(None))
+        assert await asyncio.wait_for(bridge.get_daily_bars(SPY), timeout=5) == []
+        assert await asyncio.wait_for(
+            bridge.get_daily_bars_by_con_id(SPY, 756733), timeout=5) == []
+        assert await asyncio.wait_for(bridge.is_market_open(SPY), timeout=5) is True
+        assert await asyncio.wait_for(bridge.get_fx_to_usd("JPY"), timeout=5) is None
+        assert await asyncio.wait_for(bridge.get_quote(GBPJPY), timeout=5) is None
+        assert await asyncio.wait_for(
+            bridge.get_quote_by_con_id(GBPJPY, 1), timeout=5) is None
+    asyncio.run(run())
