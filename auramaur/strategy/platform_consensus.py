@@ -111,6 +111,10 @@ class PlatformConsensusPillar:
         # Log EVERY cycle (the settlement_arb #246 lesson): the previous
         # entered>0 guard made zero-entry cycles silent, so weeks of "running
         # fine, entering nothing" were indistinguishable from a dead task.
+        self.last_cycle_detail = {"scanned": len(markets),
+                                  "eligible": len(eligible_markets),
+                                  "evaluated": eval_limit,
+                                  "entered": entered, "open": open_count}
         log.info("platform_consensus.cycle_done", scanned=len(markets),
                  eligible=len(eligible_markets), evaluated=eval_limit,
                  entered=entered, open=open_count)

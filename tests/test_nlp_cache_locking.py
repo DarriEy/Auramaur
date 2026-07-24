@@ -94,7 +94,9 @@ async def test_cache_lock_does_not_rollback_sibling_transaction(monkeypatch):
     await db.execute("CREATE TABLE sibling_write (value TEXT)")
     await db.commit()
     await db.execute("INSERT INTO sibling_write VALUES ('must survive')")
-    assert db.db.in_transaction
+    # Shared Database uses true autocommit: this sibling write is already
+    # durable and cannot be rolled back by a cache failure.
+    assert not db.db.in_transaction
 
     original_execute = db.execute
 
@@ -108,10 +110,9 @@ async def test_cache_lock_does_not_rollback_sibling_transaction(monkeypatch):
 
     await NLPCache(db).put("key", "market", {"probability": 0.7}, 300)
 
-    assert db.db.in_transaction
+    assert not db.db.in_transaction
     row = await db.fetchone("SELECT value FROM sibling_write")
     assert row["value"] == "must survive"
-    await db.db.rollback()
     await db.close()
 
 

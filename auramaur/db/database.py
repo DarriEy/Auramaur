@@ -33,7 +33,14 @@ class Database:
         database still gets the full init — the flag can never leave a caller
         on a stale schema.
         """
-        self._db = await aiosqlite.connect(self.db_path)
+        # True autocommit is required on the shared connection. Hundreds of
+        # older one-statement writers still call execute()+commit(); with
+        # sqlite's default implicit-deferred mode, an exception/cancellation
+        # between those calls strands the ONE shared connection inside a
+        # transaction and blocks every transaction() adopter for 15 seconds.
+        # Atomic multi-statement paths use transaction() below, whose explicit
+        # BEGIN IMMEDIATE/COMMIT semantics are unchanged by autocommit.
+        self._db = await aiosqlite.connect(self.db_path, isolation_level=None)
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("PRAGMA journal_mode=WAL")
         # foreign_keys stays OFF by design, NOT as repair debt. The markets
@@ -99,15 +106,10 @@ class Database:
             return
         requested_owner = owner or asyncio.current_task().get_name()
         async with self._txn_lock:
-            # A legacy autocommit-style writer may be mid-flight (implicit
-            # txn open, its commit() imminent). Wait it out rather than
-            # committing on its behalf — that would be the exact bleed this
-            # context manager exists to remove. Bounded so a genuinely wedged
-            # writer still fails loudly in BEGIN — but the bound must OUTLAST
-            # real write bursts: measured engine bursts run 1-3.4s, and a 2s
-            # bound turned every unlucky overlap into a position_sync error
-            # (2026-07-20). 15s clears every burst ever observed while still
-            # bounding a true wedge.
+            # Autocommit legacy writes cannot strand an implicit transaction.
+            # Keep this check as a corruption/concurrency tripwire: the only
+            # legitimate active transaction is owned by transaction(), which
+            # also owns _txn_lock and therefore cannot reach this block.
             deadline = time.monotonic() + 15.0
             while self._db._conn.in_transaction and time.monotonic() < deadline:
                 await asyncio.sleep(0.005)

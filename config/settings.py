@@ -393,6 +393,9 @@ class MarketMakerConfig(BaseModel):
     quote_size: float = 10.0  # tokens per side
     max_inventory: float = 50.0  # max directional exposure per market
     max_markets: int = 5  # max simultaneous MM markets
+    # Discovery must be wider than max_markets: only a small fraction of the
+    # venue clears category, token, liquidity, spread, and expiry filters.
+    market_scan_limit: int = Field(default=200, ge=50, le=1000)
     # Live-cash floor MM must leave untouched: no NEW quote pairs while
     # spendable collateral <= this (exits/cancels never gated). Stops MM —
     # the only always-live cell — from auto-claiming every deposited dollar

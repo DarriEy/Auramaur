@@ -562,6 +562,7 @@ market_maker:
   quote_size: 10.0          # tokens per side
   max_inventory: 50.0       # max directional exposure per market
   max_markets: 5            # max simultaneous MM markets
+  market_scan_limit: 200    # widen discovery; downstream safety filters still apply
   # No NEW quote pairs while spendable live cash <= this floor (exits and
   # cancels never gated). MM is the only always-live cell, so without a
   # floor it auto-claims every free dollar as inventory working capital.

@@ -51,13 +51,17 @@ class TestArbitrageExecutor:
         db = executor._db
         # Market A (primary): 70% — too high if it implies B
         run(db.execute(
-            """INSERT INTO markets (id, condition_id, question, active, outcome_yes_price, outcome_no_price, last_updated)
-               VALUES ('primary', 'c1', 'Win primary?', 1, 0.70, 0.30, datetime('now'))"""
+            """INSERT INTO markets (id, condition_id, question, active, outcome_yes_price, outcome_no_price,
+                                     clob_token_yes, clob_token_no, last_updated)
+               VALUES ('primary', 'c1', 'Win primary?', 1, 0.70, 0.30,
+                       'primary-yes', 'primary-no', datetime('now'))"""
         ), event_loop)
         # Market B (general): 60% — if A implies B, P(A) should be <= P(B)
         run(db.execute(
-            """INSERT INTO markets (id, condition_id, question, active, outcome_yes_price, outcome_no_price, last_updated)
-               VALUES ('general', 'c2', 'Win general?', 1, 0.60, 0.40, datetime('now'))"""
+            """INSERT INTO markets (id, condition_id, question, active, outcome_yes_price, outcome_no_price,
+                                     clob_token_yes, clob_token_no, last_updated)
+               VALUES ('general', 'c2', 'Win general?', 1, 0.60, 0.40,
+                       'general-yes', 'general-no', datetime('now'))"""
         ), event_loop)
         # Conditional relationship
         run(db.execute(
@@ -80,12 +84,16 @@ class TestArbitrageExecutor:
         """Same-event divergence should buy cheap and sell expensive."""
         db = executor._db
         run(db.execute(
-            """INSERT INTO markets (id, condition_id, question, active, outcome_yes_price, outcome_no_price, last_updated)
-               VALUES ('cheap', 'c1', 'Event?', 1, 0.45, 0.55, datetime('now'))"""
+            """INSERT INTO markets (id, condition_id, question, active, outcome_yes_price, outcome_no_price,
+                                     clob_token_yes, clob_token_no, last_updated)
+               VALUES ('cheap', 'c1', 'Event?', 1, 0.45, 0.55,
+                       'cheap-yes', 'cheap-no', datetime('now'))"""
         ), event_loop)
         run(db.execute(
-            """INSERT INTO markets (id, condition_id, question, active, outcome_yes_price, outcome_no_price, last_updated)
-               VALUES ('expensive', 'c2', 'Event?', 1, 0.55, 0.45, datetime('now'))"""
+            """INSERT INTO markets (id, condition_id, question, active, outcome_yes_price, outcome_no_price,
+                                     clob_token_yes, clob_token_no, last_updated)
+               VALUES ('expensive', 'c2', 'Event?', 1, 0.55, 0.45,
+                       'expensive-yes', 'expensive-no', datetime('now'))"""
         ), event_loop)
         run(db.execute(
             """INSERT INTO market_relationships
@@ -157,6 +165,21 @@ class TestArbitrageExecutor:
 
         pairs = run(executor.generate_arb_signals(), event_loop)
         assert len(pairs) == 0
+
+    def test_missing_execution_metadata_suppressed_before_bot(self, executor, event_loop):
+        db = executor._db
+        for mid, price in (("primary", 0.70), ("general", 0.60)):
+            run(db.execute(
+                """INSERT INTO markets
+                   (id, exchange, question, active, outcome_yes_price,
+                    outcome_no_price, last_updated)
+                   VALUES (?, 'polymarket', ?, 1, ?, ?, datetime('now'))""",
+                (mid, mid, price, 1 - price)), event_loop)
+        run(db.execute(
+            """INSERT INTO market_relationships
+               (market_id_a, market_id_b, relationship_type, strength, description)
+               VALUES ('primary','general','conditional',0.9,'A implies B')"""), event_loop)
+        assert run(executor.generate_arb_signals(), event_loop) == []
 
 
 # --- Category gate (2026-06-12): exempt books still respect category bans ---

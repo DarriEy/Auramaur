@@ -131,6 +131,7 @@ class BiasHarvestPillar:
                     entered += 1
             except Exception as e:
                 log.error("bias_harvest.entry_error", market_id=market.id, error=str(e))
+        self.last_cycle_detail = {"scanned": len(markets), "entered": entered}
         log.info("bias_harvest.cycle", scanned=len(markets), entered=entered)
         return entered
 

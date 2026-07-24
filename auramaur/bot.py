@@ -1163,7 +1163,9 @@ class AuramaurBot(
                 # Fetch liquid markets sorted by volume
                 try:
                     markets = await asyncio.wait_for(
-                        discovery.get_markets(limit=50, order="liquidity"),
+                        discovery.get_markets(
+                            limit=self.settings.market_maker.market_scan_limit,
+                            order="liquidity"),
                         timeout=op_timeout)
                 except asyncio.TimeoutError:
                     log.warning("market_maker.op_timeout", op="get_markets",
