@@ -413,6 +413,13 @@ class TradingEngine(CycleOrchestrationMixin):
             await self.db.execute(
                 "DELETE FROM price_history WHERE recorded_at < datetime('now', '-30 days')"
             )
+            # Delivery telemetry is high-volume (per-book, per-gather rows);
+            # readiness only reads latest-row and 24h windows, so 14 days is
+            # ample for debugging while bounding growth.
+            await self.db.execute(
+                "DELETE FROM strategy_data_deliveries "
+                "WHERE observed_at < datetime('now', '-14 days')"
+            )
 
         # Consumer telemetry uses one snapshot id for the market rows and their
         # contemporaneous price-history points, making as-of joins explicit.

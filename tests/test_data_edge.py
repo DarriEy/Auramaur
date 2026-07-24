@@ -101,6 +101,46 @@ async def test_strategy_readiness_parses_sqlite_heartbeat_timestamp(db):
 
 
 @pytest.mark.asyncio
+async def test_strategy_readiness_treats_old_healthy_record_as_unobserved(db):
+    """Conditional emitters (FRED cache hits, weather priced on demand) stop
+    recording between events; an aged 'ok' record is missing telemetry, not a
+    delivery failure."""
+    await db.execute(
+        "INSERT INTO strategy_heartbeats "
+        "(strategy,last_beat_at,interval_seconds) VALUES ('settlement_arb',?,30)",
+        (datetime.now(timezone.utc).isoformat(),))
+    old = datetime.now(timezone.utc) - timedelta(hours=3)
+    await db.execute(
+        "INSERT INTO strategy_data_deliveries "
+        "(delivery_id,strategy,component,status,observed_at,item_count) "
+        "VALUES ('d1','settlement_arb','fred_observations','ok',?,5)",
+        (old.isoformat(),))
+    await db.execute(
+        "INSERT INTO strategy_data_deliveries "
+        "(delivery_id,strategy,component,status,observed_at,item_count) "
+        "VALUES ('d2','settlement_arb','market_snapshot','ok',?,10)",
+        (datetime.now(timezone.utc).isoformat(),))
+    result = await check_strategy_data_delivery(
+        db, since=datetime.now(timezone.utc) - timedelta(hours=1))
+    assert result.status == "INSUFFICIENT_DATA"
+    assert "settlement_arb:fred_observations" in result.detail
+
+
+@pytest.mark.asyncio
+async def test_strategy_readiness_accepts_fresh_partial_delivery(db):
+    await db.execute(
+        "INSERT INTO strategy_heartbeats "
+        "(strategy,last_beat_at,interval_seconds) VALUES ('market_maker',?,30)",
+        (datetime.now(timezone.utc).isoformat(),))
+    await record_delivery(db, DataDelivery(
+        strategy="market_maker", component="order_book", status="partial",
+        source_at=datetime.now(timezone.utc), item_count=0))
+    result = await check_strategy_data_delivery(
+        db, since=datetime.now(timezone.utc) - timedelta(hours=1))
+    assert result.status == "PASS"
+
+
+@pytest.mark.asyncio
 async def test_healthy_book_pulses_are_throttled_but_failure_is_kept(db):
     _last_healthy_recorded.clear()
     healthy = DataDelivery(

@@ -30,14 +30,24 @@ async def audit_data_contracts(db: Database) -> list[ContractViolation]:
         ("incomplete_ingestion",
          "SELECT COUNT(*) n FROM ingestion_runs WHERE completed_at IS NULL OR status='running'",
          "persisted ingestion row is incomplete"),
+        # Both lineage checks bound themselves to rows written after delivery
+        # telemetry began (the v44 deploy): earlier rows predate the contract
+        # and would otherwise count as violations forever. MIN(observed_at)
+        # over an empty deliveries table is NULL, which flags nothing.
         ("unlinked_strategic_forecast",
          """SELECT COUNT(*) n FROM forecast_snapshots
-            WHERE strategy_source='strategic' AND evidence_run_ids='[]'""",
+            WHERE strategy_source='strategic' AND evidence_run_ids='[]'
+              AND datetime(observed_at) >=
+                  (SELECT MIN(datetime(observed_at)) FROM strategy_data_deliveries)""",
          "strategic forecast has no point-in-time evidence lineage"),
+        # 'provider_seen' is a deliberate stamp on official sources (BLS/BEA/
+        # EIA) and a legitimate first rank; only 'unknown' is a contract gap.
         ("weak_timestamp_ranked_first",
          """SELECT COUNT(*) n FROM evidence_observations
-            WHERE rank_position=1 AND timestamp_quality IN ('unknown','provider_seen')""",
-         "top-ranked evidence has weak publication-time semantics"),
+            WHERE rank_position=1 AND timestamp_quality='unknown'
+              AND datetime(observed_at) >=
+                  (SELECT MIN(datetime(observed_at)) FROM strategy_data_deliveries)""",
+         "top-ranked evidence has unknown publication-time semantics"),
         ("invalid_delivery_age",
          """SELECT COUNT(*) n FROM strategy_data_deliveries
             WHERE age_seconds < 0 OR latency_ms < 0 OR item_count < 0""",

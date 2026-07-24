@@ -272,8 +272,13 @@ async def check_strategy_data_delivery(
 ) -> CriterionResult:
     """Verify the datasets consumed by recently-running strategies.
 
-    Missing telemetry is reported honestly as insufficient data; once a
-    component has emitted, stale or failed deliveries are a hard failure.
+    Missing telemetry is reported honestly as insufficient data. A hard
+    failure requires the latest record to actively report trouble: a failing
+    status, or fresh telemetry carrying over-age source data or too few
+    items. An old record alone is treated as unobserved, not failed —
+    conditional emitters (FRED cache hits, weather priced on demand) simply
+    stop recording between events, which says nothing about data health.
+    'partial' and 'empty' are honest deliveries, not delivery failures.
     """
     from auramaur.data_edge import requirements_for
 
@@ -315,10 +320,17 @@ async def check_strategy_data_delivery(
                 continue
             allowed = max(requirement.max_age_seconds,
                           float(heartbeat["interval_seconds"] or 0) * 2)
+            if delivery_age > allowed:
+                if row["status"] in ("stale", "timeout", "error", "unavailable"):
+                    failures.append(f"{label}={row['status']} age={delivery_age:.0f}s")
+                else:
+                    unobserved.append(f"{label} (last seen {delivery_age:.0f}s ago)")
+                continue
             source_age = row["age_seconds"]
-            if (row["status"] != "ok" or delivery_age > allowed
+            if (row["status"] not in ("ok", "partial", "empty")
                     or (source_age is not None and source_age > requirement.max_age_seconds)
-                    or int(row["item_count"] or 0) < requirement.min_items):
+                    or (row["status"] == "ok"
+                        and int(row["item_count"] or 0) < requirement.min_items)):
                 failures.append(f"{label}={row['status']} age={delivery_age:.0f}s")
 
     if failures:

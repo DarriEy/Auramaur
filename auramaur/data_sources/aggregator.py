@@ -145,14 +145,11 @@ class Aggregator:
                 pub = pub.replace(tzinfo=timezone.utc)
             age_hours = max((now - pub).total_seconds() / 3600, 0.01)
             # Preserve the production ranking formula. Timestamp quality is
-            # captured for offline trials, not allowed to alter proven books.
+            # captured for offline trials, not allowed to alter proven books;
+            # the LLM-facing evidence_ranker applies the quality weight.
             recency = 1.0 / age_hours
             source_weight = authority(item.source, item.url)
-            timestamp_weight = {
-                "exact": 1.0, "inferred": 0.75,
-                "provider_seen": 0.45, "unknown": 0.20,
-            }.get(item.timestamp_quality, 0.20)
-            return (recency * timestamp_weight * source_weight) + item.relevance_score
+            return (recency * source_weight) + item.relevance_score
 
         unique.sort(key=_rank, reverse=True)
 
