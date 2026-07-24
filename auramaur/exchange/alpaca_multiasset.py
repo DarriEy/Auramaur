@@ -32,10 +32,58 @@ class AlpacaMultiAssetQuotes:
         self._ibkr = ibkr
         self._alpaca = alpaca
 
+    # Every IBKR await the pillar makes must be BOUNDED. Bounding piecemeal
+    # was whack-a-mole: get_quote (#358), then get_quote_by_con_id (#360),
+    # then the task hung a third time on the next unbounded call in the
+    # cycle (2026-07-24 19:40 boot: 'connected' then silence, zero 10089s —
+    # hung before any quote request, i.e. in bars/market-open/fx). History
+    # gets a longer bound than quotes; each timeout degrades to the value
+    # that makes the caller SKIP the instrument rather than fabricate data.
+    _IBKR_HISTORY_TIMEOUT_SECONDS = 30.0
+    _IBKR_MISC_TIMEOUT_SECONDS = 10.0
+
     def __getattr__(self, name):
-        # resolve/is_market_open/get_daily_bars/get_fx_to_usd/... — everything
-        # except the quote path stays IBKR's (history needs no subscription).
+        # Non-await surface (readonly flag, etc.) delegates; the pillar's
+        # await surface is wrapped explicitly below.
         return getattr(self._ibkr, name)
+
+    async def get_daily_bars(self, spec: InstrumentSpec, duration: str = "3 M"):
+        try:
+            return await asyncio.wait_for(
+                self._ibkr.get_daily_bars(spec, duration),
+                timeout=self._IBKR_HISTORY_TIMEOUT_SECONDS)
+        except (TimeoutError, asyncio.TimeoutError):
+            log.debug("alpaca_bridge.ibkr_bars_timeout", key=spec.key)
+            return []
+
+    async def get_daily_bars_by_con_id(self, spec: InstrumentSpec, con_id: int,
+                                       duration: str = "3 M"):
+        try:
+            return await asyncio.wait_for(
+                self._ibkr.get_daily_bars_by_con_id(spec, con_id, duration),
+                timeout=self._IBKR_HISTORY_TIMEOUT_SECONDS)
+        except (TimeoutError, asyncio.TimeoutError):
+            log.debug("alpaca_bridge.ibkr_bars_timeout", key=spec.key)
+            return []
+
+    async def is_market_open(self, spec: InstrumentSpec) -> bool:
+        try:
+            return await asyncio.wait_for(
+                self._ibkr.is_market_open(spec),
+                timeout=self._IBKR_MISC_TIMEOUT_SECONDS)
+        except (TimeoutError, asyncio.TimeoutError):
+            log.debug("alpaca_bridge.ibkr_market_open_timeout", key=spec.key)
+            # Fail open: the bounded quote paths still gate actual fills.
+            return True
+
+    async def get_fx_to_usd(self, currency: str) -> float | None:
+        try:
+            return await asyncio.wait_for(
+                self._ibkr.get_fx_to_usd(currency),
+                timeout=self._IBKR_MISC_TIMEOUT_SECONDS)
+        except (TimeoutError, asyncio.TimeoutError):
+            log.debug("alpaca_bridge.ibkr_fx_timeout", currency=currency)
+            return None
 
     # The IBKR attempt must be BOUNDED: an unentitled instrument's ticker can
     # await forever, and before this bound the whole multiasset task hung on
