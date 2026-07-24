@@ -5,7 +5,7 @@ import pytest
 
 from auramaur.db.database import Database
 from auramaur.monitoring.candidate_dispositions import CandidateDispositionCycle
-from auramaur.strategy.engine_cycle import CycleOrchestrationMixin
+from auramaur.strategy.engine_cycle import CycleOrchestrationMixin, select_rotating_ranked
 
 
 def test_candidate_cycle_persists_terminal_rows_and_counts():
@@ -98,3 +98,22 @@ def test_candidate_cycle_prunes_expired_detail_and_summary_rows():
             "SELECT 1 FROM candidate_dispositions WHERE cycle_id='fresh-cycle'") is not None
         await db.close()
     asyncio.run(run())
+
+
+def test_rotating_selection_is_reproducible_and_changes_slots():
+    class Market:
+        def __init__(self, market_id):
+            self.id = market_id
+
+    ranked = [(Market(f"m{i}"), float(20 - i)) for i in range(12)]
+    first = select_rotating_ranked(ranked, 5, rotation_slot=100)
+    replay = select_rotating_ranked(ranked, 5, rotation_slot=100)
+    next_slot = select_rotating_ranked(ranked, 5, rotation_slot=101)
+
+    assert [m.id for m, _ in first] == [m.id for m, _ in replay]
+    assert [m.id for m, _ in first] != [m.id for m, _ in next_slot]
+    assert {m.id for m, _ in first} <= {f"m{i}" for i in range(10)}
+
+
+def test_rotating_selection_honors_zero_limit():
+    assert select_rotating_ranked([], 0, rotation_slot=1) == []

@@ -135,19 +135,40 @@ graduation:
   mode: "enforce"
   min_markets: 100
   window_days: 90
+  # Slow-cadence experiments use a pre-registered strategy-wide evidence bar.
+  min_markets_overrides:
+    agent_trader_haiku: 30
+    agent_trader_sonnet: 30
+    agent_trader_opus: 30
+    agent_trader_gflash: 30
+    agent_trader_g35flash: 30
+    agent_trader_gpro: 30
+    long_horizon: 30
+    long_horizon_kalshi: 30
+    term_structure: 30
+    vol_anchor: 30
+    informed_flow: 30
+    entailment_arb: 30
+    cross_venue_arb: 30
+    settlement_arb: 30
+    resolution_lens: 30
+    resolution_lens_kalshi: 30
+    platform_consensus: 30
+  strategy_level_strategies:
+    ["agent_trader_haiku", "agent_trader_sonnet", "agent_trader_opus",
+     "agent_trader_gflash", "agent_trader_g35flash", "agent_trader_gpro",
+     "long_horizon", "long_horizon_kalshi", "term_structure", "vol_anchor",
+     "informed_flow", "entailment_arb", "cross_venue_arb", "settlement_arb",
+     "resolution_lens", "resolution_lens_kalshi", "platform_consensus"]
   confidence_z: 1.645
   min_mean_pnl_lower_bound: 0.0
   probation_multiplier: 0.5
   cache_seconds: 300
   # Structural/two-sided strategies bypass the ladder.
   exempt_strategies: ["arbitrage", "market_maker", "order_monitor"]
-  # Unproven-spray breadth cap (open PAPER positions across ALL cells before
-  # new unproven entries are skipped). Raised from the 100 default after the
-  # Kalshi paper-book restoration legitimately re-added a large block of open
-  # positions overnight and froze every unproven cell (including a pillar on
-  # its first day). Still a hard ceiling — exploration concentrates, it just
-  # doesn't get starved by bookkeeping repairs.
-  max_unproven_positions: 175
+  # Disabled: one high-volume book must not starve unrelated experiments.
+  # Pillar and portfolio/risk ceilings remain enforced.
+  max_unproven_positions: 0
 
 information_graduation:
   # Shadow sources earn forecast influence, never capital directly.
@@ -189,6 +210,7 @@ nlp:
   api_intensity: "low"
   skip_second_opinion: false
   max_markets_per_cycle: 5
+  selection_rotation_seconds: 3600
   evidence_per_source: 5
   daily_claude_call_budget: 175
 

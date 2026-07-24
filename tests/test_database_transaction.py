@@ -184,3 +184,21 @@ async def test_legacy_commit_never_lands_an_adopters_open_batch(tmp_path):
         assert [r["k"] for r in rows] == ["done", "half"]
     finally:
         await db.close()
+
+
+async def test_v42_labels_ambiguous_legacy_attribution():
+    db = Database(":memory:")
+    await db.connect()
+    await db.execute(
+        """INSERT INTO pnl_ledger
+           (market_id, kind, pnl, strategy_source, source_ref)
+           VALUES ('old-market', 'settlement', -2.5, '', 'old-ref')"""
+    )
+    await db._migrate_v41_to_v42()
+    version = await db.fetchone("SELECT version FROM schema_version")
+    row = await db.fetchone(
+        "SELECT strategy_source FROM pnl_ledger WHERE source_ref='old-ref'"
+    )
+    assert version["version"] == 42
+    assert row["strategy_source"] == "legacy_unattributed"
+    await db.close()
