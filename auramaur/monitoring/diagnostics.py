@@ -196,16 +196,30 @@ async def gather_doctor(settings, db, *, max_bytes: int = 8_000_000) -> dict:
     # → disabled or not-yet-active, e.g. IBKR pre-funding; informational, not a
     # fault). Only the former warns.
     pillars = pillar_liveness(records)
+    monitoring = getattr(settings, "monitoring", None)
+    expected = set(getattr(monitoring, "expected_pillars", pillars.keys()))
+    stale_seconds = int(getattr(monitoring, "pillar_stale_seconds", 900))
+    unknown_expected = sorted(expected - set(pillars))
     alive, stale, dormant = [], [], []
     for p, ts in pillars.items():
         if ts is None:
             dormant.append(p)
-        elif (now - ts).total_seconds() <= 900:
+        elif (now - ts).total_seconds() <= stale_seconds:
             alive.append(p)
         else:
             stale.append(p)
     dorm_note = f" ({len(dormant)} dormant: {', '.join(dormant)})" if dormant else ""
-    if stale:
+    expected_alive = sorted(expected.intersection(alive))
+    expected_missing = sorted(expected.intersection(stale + dormant)) + unknown_expected
+    if expected and not expected_alive:
+        checks.append(_chk("pillars", "fail",
+                           "ZERO expected pillars alive; missing: "
+                           + ", ".join(expected_missing)))
+    elif expected_missing:
+        checks.append(_chk("pillars", "warn",
+                           f"{len(expected_alive)}/{len(expected)} expected alive; missing: "
+                           + ", ".join(expected_missing) + dorm_note))
+    elif stale:
         checks.append(_chk("pillars", "warn",
                            f"{len(alive)} alive; STALE (went silent): {', '.join(stale)}{dorm_note}"))
     else:

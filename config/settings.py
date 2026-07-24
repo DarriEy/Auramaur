@@ -1774,6 +1774,14 @@ class LoggingConfig(BaseModel):
     rotate_backups: int = 3
 
 
+class MonitoringConfig(BaseModel):
+    """Operator-declared runtime contract for health checks."""
+    expected_pillars: list[str] = ["polymarket", "kalshi", "news"]
+    pillar_stale_seconds: int = 900
+    candidate_retention_days: int = 30
+    candidate_summary_retention_days: int = 90
+
+
 class Settings(BaseSettings):
     # API Keys
     anthropic_api_key_primary: str = Field(default="", repr=False, exclude=True)
@@ -1899,6 +1907,7 @@ class Settings(BaseSettings):
     analysis: AnalysisConfig = Field(default_factory=lambda: AnalysisConfig(**_DEFAULTS.get("analysis", {})))
     hybrid: HybridConfig = Field(default_factory=lambda: HybridConfig(**_DEFAULTS.get("hybrid", {})))
     logging: LoggingConfig = Field(default_factory=lambda: LoggingConfig(**_DEFAULTS.get("logging", {})))
+    monitoring: MonitoringConfig = Field(default_factory=lambda: MonitoringConfig(**_DEFAULTS.get("monitoring", {})))
 
     # Resolve .env to an absolute path anchored at the repo root so Settings
     # loads the same secrets regardless of the caller's CWD. A bare ".env"

@@ -88,6 +88,7 @@ class CycleOrchestrationMixin:
         start = time.monotonic()
 
         markets = await self.scan_and_store_markets()
+        discovered_ids = {m.id for m in markets}
 
         # Kalshi's book is thinner than Polymarket's, so it gets a lower activity
         # floor (kalshi_min_liquidity) to surface more genuinely-tradeable markets.
@@ -110,6 +111,7 @@ class CycleOrchestrationMixin:
             # Skip near-dead markets (no volume = orders won't fill)
             and m.volume >= 100
         ]
+        coarse_candidate_ids = {m.id for m in candidates}
 
         # --- Load avoid-categories from performance feedback ---
         avoid_categories: set[str] = set()
@@ -310,7 +312,9 @@ class CycleOrchestrationMixin:
                     market_ids=[m.id for m, _ in flagged_entries[:5]],
                 )
 
+        results: list[dict] = []
         trade_candidates: list[TradeCandidate] = []
+        selected_ids = {m.id for m, _score in ranked[:max_markets]}
 
         if self.market_analyzer:
             # Protocol-based path: analyzer returns TradeCandidates,
@@ -373,7 +377,58 @@ class CycleOrchestrationMixin:
         trades = [r for r in results if r.get("order")]
         show_cycle_summary(len(results), len(trades), elapsed, exchange=self.exchange_name)
 
+        await self._persist_cycle_dispositions(
+            markets, discovered_ids, coarse_candidate_ids,
+            {m.id for m in fresh_candidates}, selected_ids, results)
+
         return results
+
+    async def _persist_cycle_dispositions(
+        self, markets, discovered_ids: set[str], coarse_ids: set[str],
+        fresh_ids: set[str], selected_ids: set[str], results: list[dict],
+    ) -> None:
+        """Close the discovery funnel with one terminal row per market."""
+        from auramaur.monitoring.candidate_dispositions import CandidateDispositionCycle
+
+        monitoring = getattr(getattr(self, "settings", None), "monitoring", None)
+        cycle = CandidateDispositionCycle(
+            self.db, self.exchange_name or "",
+            retention_days=getattr(monitoring, "candidate_retention_days", 30),
+            summary_retention_days=getattr(
+                monitoring, "candidate_summary_retention_days", 90),
+        )
+        for market in markets:
+            cycle.offer(market.id)
+            if market.id not in coarse_ids:
+                cycle.mark(market.id, "filtered", "market_constraints",
+                           "inactive, activity, spread, probability, or volume filter")
+            elif market.id not in fresh_ids:
+                cycle.mark(market.id, "filtered", "policy_filter",
+                           "category, quality, cooldown, held, or rebalance filter")
+            elif market.id not in selected_ids:
+                cycle.mark(market.id, "throttled", "cycle_budget",
+                           "ranked outside this cycle's analysis budget")
+            else:
+                cycle.mark(market.id, "unavailable", "analysis",
+                           "analyzer returned no terminal candidate")
+        for result in results:
+            market = result.get("market")
+            if market is None or market.id not in discovered_ids:
+                continue
+            decision, order = result.get("decision"), result.get("order")
+            if result.get("execution_error"):
+                cycle.mark(market.id, "failed", "execution", result["execution_error"])
+            elif decision is not None and not decision.approved:
+                cycle.mark(market.id, "risk-blocked", "risk", decision.reason)
+            elif order:
+                cycle.mark(market.id, "executed", "execution",
+                           str(getattr(order, "status", "submitted")))
+            elif decision is None:
+                cycle.mark(market.id, "malformed", "analysis", "missing risk decision")
+            else:
+                cycle.mark(market.id, "unavailable", "allocation_execution",
+                           "approved candidate produced no order")
+        await cycle.flush()
 
     async def _execute_candidates(
         self,
@@ -462,6 +517,10 @@ class CycleOrchestrationMixin:
                                 break
                 except Exception as e:
                     log.error("engine.execute_error", market_id=candidate.market.id, error=str(e))
+                    for r in results:
+                        if r["market"].id == candidate.market.id:
+                            r["execution_error"] = str(e)
+                            break
 
         return results
 
@@ -760,6 +819,10 @@ class CycleOrchestrationMixin:
                                 break
                 except Exception as e:
                     log.error("strategic.execute_error", market_id=candidate.market.id, error=str(e))
+                    for r in results:
+                        if r["market"].id == candidate.market.id:
+                            r["execution_error"] = str(e)
+                            break
 
         return results
 
@@ -818,6 +881,10 @@ class CycleOrchestrationMixin:
                             break
             except Exception as e:
                 log.error("engine.execute_error", market_id=candidate.market.id, error=str(e))
+                for r in results:
+                    if r["market"].id == candidate.market.id:
+                        r["execution_error"] = str(e)
+                        break
 
         return results
 

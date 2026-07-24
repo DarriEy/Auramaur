@@ -1084,6 +1084,12 @@ logging:
   json_format: true
   file: "auramaur.log"
 
+monitoring:
+  expected_pillars: ["polymarket", "kalshi", "news"]
+  pillar_stale_seconds: 900
+  candidate_retention_days: 30
+  candidate_summary_retention_days: 90
+
 cross_venue_arb:
   # Cross-venue semantic-equivalence arb (Poly x Kalshi): logically equivalent
   # but differently-worded markets priced apart. Candidate pairs pre-filtered by
