@@ -139,6 +139,25 @@ def test_doctor_distinguishes_stale_from_dormant(tmp_path):
     asyncio.run(run())
 
 
+def test_doctor_fails_when_zero_expected_pillars_are_alive(tmp_path):
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        settings = SimpleNamespace(
+            is_live=False, kill_switch_active=False,
+            logging=SimpleNamespace(file=str(tmp_path / "missing.log")),
+            monitoring=SimpleNamespace(
+                expected_pillars=["polymarket", "news"], pillar_stale_seconds=900),
+        )
+        state = await gather_doctor(settings, db)
+        pillars = next(c for c in state["checks"] if c["name"] == "pillars")
+        assert pillars["status"] == "fail"
+        assert "ZERO expected pillars alive" in pillars["detail"]
+        assert state["verdict"] == "fail"
+        await db.close()
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     test_summarize_counts_and_excludes_info()
     test_summarize_empty()

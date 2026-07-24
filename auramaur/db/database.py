@@ -274,6 +274,37 @@ class Database:
             await self._migrate_v38_to_v39()
         if from_version < 40:
             await self._migrate_v39_to_v40()
+        if from_version < 41:
+            await self._migrate_v40_to_v41()
+
+    async def _migrate_v40_to_v41(self) -> None:
+        await self._db.executescript("""
+            CREATE TABLE IF NOT EXISTS candidate_dispositions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cycle_id TEXT NOT NULL, market_id TEXT NOT NULL,
+                exchange TEXT NOT NULL DEFAULT '', strategy TEXT NOT NULL DEFAULT '',
+                disposition TEXT NOT NULL CHECK(disposition IN
+                    ('executed','risk-blocked','filtered','throttled','malformed','unavailable','failed')),
+                stage TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
+                observed_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(cycle_id, market_id, strategy));
+            CREATE INDEX IF NOT EXISTS idx_candidate_dispositions_cycle
+                ON candidate_dispositions(cycle_id, disposition);
+            CREATE INDEX IF NOT EXISTS idx_candidate_dispositions_observed
+                ON candidate_dispositions(observed_at);
+            CREATE TABLE IF NOT EXISTS candidate_cycle_summaries (
+                cycle_id TEXT PRIMARY KEY, exchange TEXT NOT NULL DEFAULT '',
+                strategy TEXT NOT NULL DEFAULT '', discovered INTEGER NOT NULL DEFAULT 0,
+                executed INTEGER NOT NULL DEFAULT 0, risk_blocked INTEGER NOT NULL DEFAULT 0,
+                filtered INTEGER NOT NULL DEFAULT 0, throttled INTEGER NOT NULL DEFAULT 0,
+                malformed INTEGER NOT NULL DEFAULT 0, unavailable INTEGER NOT NULL DEFAULT 0,
+                failed INTEGER NOT NULL DEFAULT 0,
+                completed_at TEXT NOT NULL DEFAULT (datetime('now')));
+            CREATE INDEX IF NOT EXISTS idx_candidate_cycle_summaries_completed
+                ON candidate_cycle_summaries(completed_at);
+            UPDATE schema_version SET version = 41;
+        """)
+        log.info("database.migrated", from_version=40, to_version=41)
 
     async def _migrate_v39_to_v40(self) -> None:
         """Unified LLM cost/quota ledger view (llm_costs_daily)."""

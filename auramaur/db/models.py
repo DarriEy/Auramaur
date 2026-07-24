@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 40
+SCHEMA_VERSION = 41
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -26,6 +26,29 @@ CREATE TABLE IF NOT EXISTS markets (
     last_updated TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS candidate_dispositions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cycle_id TEXT NOT NULL, market_id TEXT NOT NULL,
+    exchange TEXT NOT NULL DEFAULT '', strategy TEXT NOT NULL DEFAULT '',
+    disposition TEXT NOT NULL CHECK(disposition IN
+        ('executed','risk-blocked','filtered','throttled','malformed','unavailable','failed')),
+    stage TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
+    observed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(cycle_id, market_id, strategy)
+);
+CREATE INDEX IF NOT EXISTS idx_candidate_dispositions_cycle ON candidate_dispositions(cycle_id, disposition);
+CREATE INDEX IF NOT EXISTS idx_candidate_dispositions_observed ON candidate_dispositions(observed_at);
+CREATE TABLE IF NOT EXISTS candidate_cycle_summaries (
+    cycle_id TEXT PRIMARY KEY, exchange TEXT NOT NULL DEFAULT '', strategy TEXT NOT NULL DEFAULT '',
+    discovered INTEGER NOT NULL DEFAULT 0, executed INTEGER NOT NULL DEFAULT 0,
+    risk_blocked INTEGER NOT NULL DEFAULT 0, filtered INTEGER NOT NULL DEFAULT 0,
+    throttled INTEGER NOT NULL DEFAULT 0, malformed INTEGER NOT NULL DEFAULT 0,
+    unavailable INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0,
+    completed_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_candidate_cycle_summaries_completed
+    ON candidate_cycle_summaries(completed_at);
 
 CREATE TABLE IF NOT EXISTS news_items (
     id TEXT PRIMARY KEY,
