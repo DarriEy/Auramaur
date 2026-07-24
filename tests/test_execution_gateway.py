@@ -576,10 +576,10 @@ def test_place_quote_pair_places_bid_then_ask_and_returns_both():
         order_seen = []
         bid = Order(market_id="mm", exchange="polymarket", token_id="yes",
                     side=OrderSide.BUY, token=TokenType.YES, size=20.0, price=0.40,
-                    post_only=True, source="market_maker")
+                    post_only=True, source="market_maker", dry_run=False)
         ask = Order(market_id="mm", exchange="polymarket", token_id="no",
                     side=OrderSide.BUY, token=TokenType.NO, size=20.0, price=0.55,
-                    post_only=True, source="market_maker")
+                    post_only=True, source="market_maker", dry_run=False)
         async def _place(o):
             order_seen.append(o.token_id)
             return OrderResult(order_id=f"oid-{o.token_id}", market_id="mm",
@@ -589,4 +589,35 @@ def test_place_quote_pair_places_bid_then_ask_and_returns_both():
         bid_res, ask_res = await gw.place_quote_pair(bid, ask, exchange=ex)
         assert order_seen == ["yes", "no"]  # bid then ask
         assert bid_res.order_id == "oid-yes" and ask_res.order_id == "oid-no"
+    asyncio.run(run())
+
+
+def test_place_quote_pair_paper_quotes_rest_and_never_reach_the_client():
+    """Paper post-only quotes must NOT be placed: the client's paper branch
+    instant-fills into the shared PaperTrader book, where a two-sided quote's
+    legs merged into one blended phantom position that regrew every refresh
+    with no trades/fills provenance (the 2026-07-23 orphan-position factory).
+    They rest synthetically instead: pending, PAPER-prefixed ids (so the MM's
+    check_fills prunes and _cancel_quote skips them), and the exchange client
+    is never touched."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        bid = Order(market_id="mm", exchange="polymarket", token_id="yes",
+                    side=OrderSide.BUY, token=TokenType.YES, size=20.0, price=0.49,
+                    post_only=True, source="market_maker", dry_run=True)
+        ask = Order(market_id="mm", exchange="polymarket", token_id="no",
+                    side=OrderSide.BUY, token=TokenType.NO, size=20.0, price=0.53,
+                    post_only=True, source="market_maker", dry_run=True)
+        ex = MagicMock()
+        async def _place(o):
+            raise AssertionError("paper quote must never reach place_order")
+        ex.place_order = _place
+        gw = _gateway(db, ex)
+        bid_res, ask_res = await gw.place_quote_pair(bid, ask, exchange=ex)
+        for res in (bid_res, ask_res):
+            assert res.status == "pending"
+            assert res.is_paper is True
+            assert res.order_id.startswith("PAPER")
+        assert bid_res.order_id != ask_res.order_id
     asyncio.run(run())

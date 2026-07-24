@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 39
+SCHEMA_VERSION = 40
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -1097,4 +1097,41 @@ SELECT 'information:' || pf.trial_id || ':' || pf.arm, 'information_trial',
   LEFT JOIN markets m ON m.id=t.market_id
   LEFT JOIN market_outcomes o
     ON o.event_key=lower(COALESCE(NULLIF(m.exchange,''),'polymarket')) || ':' || t.market_id;
+
+-- Promoted from lazy runtime creation (agent_trader.py / call_budget.py) so
+-- the llm_costs_daily view below always has its tables on a fresh database.
+-- Shapes must stay identical to the lazy CREATE IF NOT EXISTS definitions.
+CREATE TABLE IF NOT EXISTS agent_trader_costs (
+    day TEXT NOT NULL,
+    model_alias TEXT NOT NULL,
+    calls INTEGER NOT NULL DEFAULT 0,
+    usd REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, model_alias)
+);
+
+CREATE TABLE IF NOT EXISTS llm_call_counter (
+    day TEXT PRIMARY KEY,
+    claude_calls INTEGER NOT NULL DEFAULT 0
+);
+
+-- Unified LLM cost/quota ledger: one row per (day, source). Marginal dollars
+-- for metered APIs (gemini/openai); call counts for the quota-bound Claude
+-- subscription and the free local tier (cost_usd 0 by definition — their
+-- scarcity is quota and hardware, not dollars). daily_stats.api_cost_estimate
+-- was never wired; this view is the authoritative answer to "what does a day
+-- of inference cost" (2026-07-24 breadth/cost audit).
+CREATE VIEW IF NOT EXISTS llm_costs_daily AS
+SELECT day, 'gemini:' || model_alias AS source, calls, usd AS cost_usd
+  FROM agent_trader_costs
+UNION ALL
+SELECT date(started_at) AS day, 'openai:' || model_alias AS source,
+       COUNT(*) AS calls, COALESCE(SUM(cost_usd), 0) AS cost_usd
+  FROM ibkr_etf_openai_attempts GROUP BY date(started_at), model_alias
+UNION ALL
+SELECT day, 'claude_cli(quota)' AS source, claude_calls AS calls, 0.0 AS cost_usd
+  FROM llm_call_counter
+UNION ALL
+SELECT date(created_at) AS day, 'local:' || model AS source,
+       COUNT(*) AS calls, 0.0 AS cost_usd
+  FROM local_llm_calls GROUP BY date(created_at), model;
 """

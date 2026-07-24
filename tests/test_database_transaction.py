@@ -70,29 +70,23 @@ async def test_rollback_discards_only_its_own_writes(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_transaction_waits_out_legacy_autocommit_writer(tmp_path):
-    """A non-adopted writer mid-flight (implicit txn open, commit imminent)
-    must NOT have its half-written rows committed or rolled back by
-    transaction() — the exact bleed the guard exists to remove."""
+async def test_legacy_write_cannot_strand_shared_connection(tmp_path):
+    """A legacy writer cannot wedge later transaction() adopters."""
     db = await _fresh_db(tmp_path)
     try:
-        legacy_committed = asyncio.Event()
-
         async def legacy_writer():
             await db.execute("INSERT INTO t (k, v) VALUES ('legacy', 1)")
-            await asyncio.sleep(0.05)  # implicit txn stays open across a yield
-            await db.commit()
-            legacy_committed.set()
+            # Deliberately yield and omit the historical commit(). True
+            # autocommit makes the statement durable and leaves no wedge.
+            await asyncio.sleep(0.05)
 
         async def adopter():
-            await asyncio.sleep(0.01)  # let the legacy txn open first
+            await asyncio.sleep(0.01)
             async with db.transaction():
-                # By the time BEGIN IMMEDIATE ran, the legacy writer must
-                # have landed its own commit.
-                assert legacy_committed.is_set()
                 await db.execute("INSERT INTO t (k, v) VALUES ('adopted', 1)")
 
         await asyncio.gather(legacy_writer(), adopter())
+        assert db.db.in_transaction is False
         rows = await db.fetchall("SELECT k FROM t ORDER BY k")
         assert [r["k"] for r in rows] == ["adopted", "legacy"]
     finally:

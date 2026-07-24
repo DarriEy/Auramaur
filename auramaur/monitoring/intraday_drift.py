@@ -115,7 +115,9 @@ class IntradayDriftTracker:
             f"""SELECT DISTINCT market_id, signal_at, estimate, p0 FROM intraday_drift_obs
                 WHERE (julianday('now') - julianday(signal_at)) * 24.0 < {cfg.time_box_hours}
                 LIMIT ?""", (cfg.max_tracks_per_cycle,))
-        observed = 0
+        # Discovery fetches complete BEFORE the first write so the shared
+        # connection never holds an open transaction across network awaits.
+        mids: list[tuple[dict, float]] = []
         for t in active or []:
             try:
                 m = await self._discovery.get_market(t["market_id"])
@@ -123,6 +125,9 @@ class IntradayDriftTracker:
                 m = None
             if m is None or not (0.0 < m.outcome_yes_price < 1.0):
                 continue
+            mids.append((t, m.outcome_yes_price))
+        observed = 0
+        for t, mid in mids:
             minutes = await self._db.fetchone(
                 "SELECT (julianday('now') - julianday(?)) * 1440.0 AS m", (t["signal_at"],))
             await self._db.execute(
@@ -130,7 +135,7 @@ class IntradayDriftTracker:
                    (market_id, signal_at, strategy, estimate, p0, obs_at, minutes, mid)
                    VALUES (?, ?, '', ?, ?, datetime('now'), ?, ?)""",
                 (t["market_id"], t["signal_at"], float(t["estimate"]), float(t["p0"]),
-                 float(minutes["m"]), m.outcome_yes_price))
+                 float(minutes["m"]), mid))
             observed += 1
         await self._db.commit()
 

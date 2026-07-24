@@ -286,7 +286,12 @@ class AuramaurBot(
                        LIMIT ?""",
                     (engine.exchange_name or "polymarket", min_liquidity, max_markets),
                 )
-                recorded = 0
+                # Fetch every book over the network FIRST, then write the
+                # batch in one tight span. Interleaving the INSERTs with the
+                # per-market fetch + sleep held the shared connection's
+                # implicit write transaction open for the entire sweep,
+                # wedging every other pillar writer for its duration.
+                snapshots = []
                 for row in rows:
                     if not self._running:
                         break
@@ -305,11 +310,7 @@ class AuramaurBot(
                     # bids[0]/asks[0] (see OrderBook docstring).
                     bids = sorted(book.bids, key=lambda lv: lv.price, reverse=True)
                     asks = sorted(book.asks, key=lambda lv: lv.price)
-                    await engine.db.execute(
-                        "INSERT INTO orderbook_snapshots "
-                        "(market_id, token_id, exchange, best_bid, best_ask, bid_size, "
-                        "ask_size, mid, bid2, ask2, bid2_size, ask2_size) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    snapshots.append(
                         (
                             market_id, token_id, engine.exchange_name or "polymarket",
                             bid, ask,
@@ -320,13 +321,20 @@ class AuramaurBot(
                             asks[1].price if len(asks) > 1 else None,
                             bids[1].size if len(bids) > 1 else None,
                             asks[1].size if len(asks) > 1 else None,
-                        ),
+                        )
                     )
-                    recorded += 1
                     await asyncio.sleep(pause)
-                if recorded:
+                if snapshots:
+                    for params in snapshots:
+                        await engine.db.execute(
+                            "INSERT INTO orderbook_snapshots "
+                            "(market_id, token_id, exchange, best_bid, best_ask, bid_size, "
+                            "ask_size, mid, bid2, ask2, bid2_size, ask2_size) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            params,
+                        )
                     await engine.db.commit()
-                    log.debug("orderbook_recorder.swept", exchange=name, recorded=recorded)
+                    log.debug("orderbook_recorder.swept", exchange=name, recorded=len(snapshots))
             except Exception as e:
                 show_error(f"Order-book recorder failed ({name}): {e}")
             await asyncio.sleep(self._adaptive_interval(interval))
@@ -1155,7 +1163,9 @@ class AuramaurBot(
                 # Fetch liquid markets sorted by volume
                 try:
                     markets = await asyncio.wait_for(
-                        discovery.get_markets(limit=50, order="liquidity"),
+                        discovery.get_markets(
+                            limit=self.settings.market_maker.market_scan_limit,
+                            order="liquidity"),
                         timeout=op_timeout)
                 except asyncio.TimeoutError:
                     log.warning("market_maker.op_timeout", op="get_markets",
@@ -1887,7 +1897,9 @@ class AuramaurBot(
                 clients.setdefault(id(client), (name, client))
 
         db = self._components.db
-        cancelled = 0
+        # Cancel over the network first, then write the batch tightly — no
+        # open transaction on the shared connection across cancel_order calls.
+        cancelled_ids: list[str] = []
         for exchange_name, client in clients.values():
             for order_id in list(getattr(client, "_live_pending", {}).keys()):
                 try:
@@ -1902,17 +1914,15 @@ class AuramaurBot(
                     continue
                 if not ok:
                     continue
-                cancelled += 1
-                if db is not None:
-                    try:
-                        await db.execute(
-                            "UPDATE trades SET status = 'cancelled' WHERE order_id = ?",
-                            (order_id,),
-                        )
-                    except Exception:
-                        pass
+                cancelled_ids.append(order_id)
+        cancelled = len(cancelled_ids)
         if cancelled and db is not None:
             try:
+                for order_id in cancelled_ids:
+                    await db.execute(
+                        "UPDATE trades SET status = 'cancelled' WHERE order_id = ?",
+                        (order_id,),
+                    )
                 await db.commit()
             except Exception:
                 pass

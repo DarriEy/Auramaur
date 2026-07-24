@@ -77,6 +77,10 @@ class TreatmentSpec:
     policy: ExplorationPolicy = ExplorationPolicy.SINGLE
     sample_count: int = 1
     base_seed: int = 0
+    # Treatment-side evidence merged into the request payload (NOT the frozen
+    # episode): the episode hash and pairing stay identical across arms, so a
+    # claims-enriched arm scores against the bare arm on the same snapshot.
+    extra_payload: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not self.treatment_id:
@@ -249,11 +253,13 @@ class IntelligenceEvalRunner:
 
     async def _run_treatment(self, episode: Episode, spec: TreatmentSpec) -> TreatmentResult:
         count = 1 if spec.policy is ExplorationPolicy.SINGLE else spec.sample_count
+        payload = (episode.payload if spec.extra_payload is None
+                   else {**dict(episode.payload), **dict(spec.extra_payload)})
         requests = [
             GenerationRequest(
                 episode.episode_id,
                 episode.payload_hash,
-                episode.payload,
+                payload,
                 spec.treatment_id,
                 spec.arm.arm_id,
                 spec.arm.model,
@@ -272,7 +278,7 @@ class IntelligenceEvalRunner:
             critic_request = GenerationRequest(
                 episode.episode_id,
                 episode.payload_hash,
-                episode.payload,
+                payload,
                 spec.treatment_id,
                 spec.arm.arm_id,
                 spec.arm.model,

@@ -7,6 +7,7 @@ no broker, risk, exchange execution, or production portfolio dependencies.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import json
 import math
@@ -103,6 +104,8 @@ class IntelligenceEvalService:
         self._treatments = tuple(TreatmentSpec(
             item.name, arm, ExplorationPolicy(item.policy), item.samples, item.base_seed,
         ) for item in self._cfg.treatments)
+        self._claims_treatments = frozenset(
+            item.name for item in self._cfg.treatments if item.claims_evidence)
         self._runner = IntelligenceEvalRunner(self._cfg.max_concurrency)
 
     async def run_once(self) -> int:
@@ -148,6 +151,34 @@ class IntelligenceEvalService:
         await self._store.put_cycle(metrics)
         log.info("intelligence_eval.cycle", **metrics)
         return recorded
+
+    async def _attach_claims(self, treatments, market_id: str):
+        """Give claims_evidence arms this market's distilled claims.
+
+        Evidence rides the REQUEST payload, never the frozen episode, so the
+        episode hash (and therefore pairing) is identical across arms. An arm
+        with no matched claims is dropped for that market — running it would
+        duplicate the bare arm and dilute the paired comparison. Claims are
+        no-lookahead by construction: only already-distilled rows exist.
+        """
+        if not self._claims_treatments or not any(
+                t.treatment_id in self._claims_treatments for t in treatments):
+            return treatments
+        rows = await self._db.fetchall(
+            """SELECT claim, source, event_date FROM distilled_claims
+               WHERE markets_affected LIKE ?
+               ORDER BY created_at DESC LIMIT 8""",
+            (f'%"{market_id}"%',))
+        claims = [{"claim": r["claim"], "source": r["source"],
+                   "event_date": r["event_date"]} for r in rows or []]
+        kept = []
+        for spec in treatments:
+            if spec.treatment_id not in self._claims_treatments:
+                kept.append(spec)
+            elif claims:
+                kept.append(dataclasses.replace(
+                    spec, extra_payload={"distilled_evidence": claims}))
+        return tuple(kept)
 
     @staticmethod
     def _family(market) -> str:
@@ -220,6 +251,7 @@ class IntelligenceEvalService:
         payload = json.loads(snapshot.canonical_json())
         episode = Episode(snapshot.episode_hash, payload)
         treatments = treatments or self._treatments
+        treatments = await self._attach_claims(treatments, market.id)
         results = await self._runner.run(episode, treatments)
         written = 0
         attempt_count = failed_count = 0

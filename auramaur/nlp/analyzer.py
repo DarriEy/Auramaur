@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import re
 
@@ -20,6 +21,11 @@ from auramaur.nlp.prompts import (
 from config.settings import Settings
 
 log = structlog.get_logger()
+
+# The Claude CLI uses one account/session directory. Parallel subprocesses
+# were exiting rc=1 with empty stderr and multiplying each logical call into
+# three retries. Serialize the process lane; callers remain async while queued.
+_CLAUDE_CLI_SEMAPHORE = asyncio.Semaphore(1)
 
 
 class AnalysisResult(BaseModel):
@@ -159,16 +165,25 @@ class ClaudeAnalyzer:
         for attempt in range(1, max_attempts + 1):
             try:
                 from auramaur.subprocess_security import analysis_subprocess_env
-                proc = await asyncio.create_subprocess_exec(
-                    "claude", "-p", prompt,
-                    "--output-format", "text",
-                    "--model", self._model,
-                    "--effort", use_effort,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    env=analysis_subprocess_env(),
-                )
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=180)
+                async with _CLAUDE_CLI_SEMAPHORE:
+                    proc = await asyncio.create_subprocess_exec(
+                        "claude", "-p", prompt,
+                        "--output-format", "text",
+                        "--model", self._model,
+                        "--effort", use_effort,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        env=analysis_subprocess_env(),
+                    )
+                    try:
+                        stdout, stderr = await asyncio.wait_for(
+                            proc.communicate(), timeout=180)
+                    except (TimeoutError, asyncio.TimeoutError):
+                        killed = proc.kill()
+                        if inspect.isawaitable(killed):  # test doubles
+                            await killed
+                        await proc.wait()
+                        raise
 
                 if proc.returncode != 0:
                     err_msg = stderr.decode().strip()

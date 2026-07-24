@@ -180,3 +180,41 @@ async def test_multi_market_rotation_family_dedup_and_successive_halving(tmp_pat
         assert cycle["selected_markets"] == 4
     finally:
         await db.close()
+
+
+async def test_claims_arm_skipped_without_claims_and_enriched_with(tmp_path):
+    """The claims_evidence arm drops out for claim-less markets and carries
+    distilled_evidence in its prompts when claims exist."""
+    db = Database(str(tmp_path / "eval-claims.db"))
+    await db.connect()
+    try:
+        settings = Settings()
+        settings.intelligence_eval.enabled = True
+        settings.intelligence_eval.markets_per_cycle = 1
+        settings.local_llm.enabled = True
+        client = LocalClient()
+        service = IntelligenceEvalService(db, settings, Discovery(), client)
+
+        # No claims in db: the claims arm must be dropped for this market.
+        kept = await service._attach_claims(service._treatments, "m1")
+        names = {spec.treatment_id for spec in kept}
+        assert "local_single_claims" not in names
+        assert "local_single" in names
+
+        # Seed a matched claim: the arm returns, enriched.
+        await db.execute(
+            """INSERT INTO distilled_claims
+               (content_hash, item_id, source, claim, entities, event_date,
+                markets_affected, model)
+               VALUES ('h1', 'i1', 'rss', 'A material claim.', '[]', '2026-07-24',
+                       '[{"market_id": "m1", "direction": "yes"}]', 'qwen3:8b')""")
+        await db.commit()
+        kept = await service._attach_claims(service._treatments, "m1")
+        by_name = {spec.treatment_id: spec for spec in kept}
+        assert "local_single_claims" in by_name
+        enriched = by_name["local_single_claims"]
+        assert enriched.extra_payload["distilled_evidence"][0]["claim"] == "A material claim."
+        # Bare arms stay untouched.
+        assert by_name["local_single"].extra_payload is None
+    finally:
+        await db.close()

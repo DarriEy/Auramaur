@@ -22,6 +22,7 @@ per-leg ``submit`` could not.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from dataclasses import dataclass
 from typing import Literal
 
@@ -476,7 +477,27 @@ class ExecutionGateway:
         returns the pair. Recording stays with the order monitor (orders carry
         ``source="market_maker"``); the gateway owns the placement so no strategy
         calls ``exchange.place_order`` directly.
+
+        PAPER quotes never reach the exchange client: the paper branch of
+        ``place_order`` fills every order INSTANTLY into the shared PaperTrader
+        book, whose in-memory positions are keyed by market_id alone — so a
+        two-sided quote's YES-bid and NO-ask legs merged into one blended
+        ~mid-priced phantom position that regrew on every refresh, was never
+        recorded to trades/fills (by design, anti-flooding), and was then
+        persisted by position_sync as an untraceable orphan (2026-07-23: 7 rows,
+        ~$700 phantom cost). A resting post-only quote must not fill at
+        placement; until the MM gets a real paper fill simulation, paper quotes
+        rest synthetically and expire without ever filling.
         """
+        if bid_order.dry_run or ask_order.dry_run:
+            def _resting(order: Order) -> OrderResult:
+                return OrderResult(
+                    order_id=f"PAPER-QUOTE-{uuid.uuid4().hex[:12]}",
+                    market_id=order.market_id,
+                    status="pending",
+                    is_paper=True,
+                )
+            return _resting(bid_order), _resting(ask_order)
         bid_result = await exchange.place_order(bid_order)
         ask_result = await exchange.place_order(ask_order)
         return bid_result, ask_result

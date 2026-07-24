@@ -340,6 +340,7 @@ class CrossVenueArbPillar:
             # Log EVERY cycle (the settlement_arb #246 lesson): this early
             # return was silent, so a pillar whose pair discovery never fires
             # is indistinguishable from a dead task.
+            self.last_cycle_detail = {"pairs": 0, "entered": 0}
             log.info("cross_venue.cycle", pairs=0, entered=0)
             return 0
         entered = 0
@@ -362,5 +363,6 @@ class CrossVenueArbPillar:
                     entered += 1
             except Exception as e:
                 log.error("cross_venue.entry_error", a=a.id, b=b.id, error=str(e))
+        self.last_cycle_detail = {"pairs": len(pairs), "entered": entered}
         log.info("cross_venue.cycle", pairs=len(pairs), entered=entered)
         return entered

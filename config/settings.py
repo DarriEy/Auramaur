@@ -393,6 +393,9 @@ class MarketMakerConfig(BaseModel):
     quote_size: float = 10.0  # tokens per side
     max_inventory: float = 50.0  # max directional exposure per market
     max_markets: int = 5  # max simultaneous MM markets
+    # Discovery must be wider than max_markets: only a small fraction of the
+    # venue clears category, token, liquidity, spread, and expiry filters.
+    market_scan_limit: int = Field(default=200, ge=50, le=1000)
     # Live-cash floor MM must leave untouched: no NEW quote pairs while
     # spendable collateral <= this (exits/cancels never gated). Stops MM —
     # the only always-live cell — from auto-claiming every deposited dollar
@@ -1675,6 +1678,11 @@ class IntelligenceEvalTreatment(BaseModel):
     policy: Literal["single", "samples", "samples_critic"] = "single"
     samples: int = Field(default=1, ge=1, le=32)
     base_seed: int = 0
+    # Inject matched distilled_claims into this arm's request payload — the
+    # direct measurement of distillation value (arm ± claims on the same
+    # episode). The arm is SKIPPED for markets with no matched claims, so its
+    # record never dilutes into a duplicate of the bare arm.
+    claims_evidence: bool = False
 
     @model_validator(mode="after")
     def single_has_one_sample(self):

@@ -151,7 +151,7 @@ class EvidenceDistiller:
                WHERE eo.observed_at >= datetime('now', ?)
                  AND eo.title != ''
                  AND (dp.content_hash IS NULL
-                      OR (dp.status = 'error' AND dp.attempts < ?))
+                      OR (dp.status IN ('error', 'empty') AND dp.attempts < ?))
                GROUP BY eo.content_hash
                ORDER BY MAX(eo.observed_at) DESC
                LIMIT ?""",

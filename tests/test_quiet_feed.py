@@ -183,3 +183,39 @@ def test_watchdog_alerts_on_stall_and_recovery():
     dog._check()
     assert len(alerts) == 2
     assert "recovered" in alerts[1]
+
+
+def test_watchdog_hard_exits_after_sustained_stall(monkeypatch):
+    alerts: list[str] = []
+    exited: list[bool] = []
+    dog = LoopWatchdog(stall_seconds=10.0, hard_exit_seconds=60.0,
+                       alert=alerts.append)
+    monkeypatch.setattr(LoopWatchdog, "_hard_exit",
+                        staticmethod(lambda: exited.append(True)))
+
+    dog.beat()
+    dog._last_beat -= 30.0  # stalled, but under the hard-exit bound
+    dog._check()
+    assert exited == [] and len(alerts) == 1  # normal stall alert only
+
+    dog._last_beat -= 40.0  # now 70s total — past hard_exit_seconds
+    dog._check()
+    assert exited == [True]
+    assert "exiting" in alerts[-1]
+
+
+def test_watchdog_hard_exit_disabled_and_not_during_shutdown(monkeypatch):
+    exited: list[bool] = []
+    monkeypatch.setattr(LoopWatchdog, "_hard_exit",
+                        staticmethod(lambda: exited.append(True)))
+
+    dog = LoopWatchdog(stall_seconds=10.0, hard_exit_seconds=0.0)
+    dog._last_beat -= 10_000.0
+    dog._check()
+    assert exited == []  # disabled by hard_exit_seconds <= 0
+
+    dog2 = LoopWatchdog(stall_seconds=10.0, hard_exit_seconds=60.0)
+    dog2.stop()  # clean shutdown in progress — never self-kill
+    dog2._last_beat -= 10_000.0
+    dog2._check()
+    assert exited == []

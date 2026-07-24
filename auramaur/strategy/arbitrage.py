@@ -57,12 +57,13 @@ class ArbitrageExecutor:
 
         if opp["type"] == "conditional_violation":
             # A implies B, but P(A) > P(B) — buy B (underpriced), sell A (overpriced)
-            return self._make_signal_pair(
+            pair = self._make_signal_pair(
                 buy_market=market_b,
                 sell_market=market_a,
                 edge=opp["price_a"] - opp["price_b"],
                 opp=opp,
             )
+            return pair if self._pair_is_executable(market_b, market_a, opp) else None
 
         elif opp["type"] == "price_divergence":
             # Same event priced differently — buy cheap, sell expensive
@@ -70,14 +71,29 @@ class ArbitrageExecutor:
                 buy_market, sell_market = market_a, market_b
             else:
                 buy_market, sell_market = market_b, market_a
-            return self._make_signal_pair(
+            pair = self._make_signal_pair(
                 buy_market=buy_market,
                 sell_market=sell_market,
                 edge=opp.get("divergence", abs(opp["price_a"] - opp["price_b"])),
                 opp=opp,
             )
+            return pair if self._pair_is_executable(buy_market, sell_market, opp) else None
 
         return None
+
+    @staticmethod
+    def _pair_is_executable(buy: Market, sell: Market, opp: dict) -> bool:
+        """Reject structurally untradeable pairs before they reach the bot loop."""
+        missing: list[tuple[str, str]] = []
+        if (buy.exchange or "polymarket") == "polymarket" and not buy.clob_token_yes:
+            missing.append((buy.id, "YES"))
+        if (sell.exchange or "polymarket") == "polymarket" and not sell.clob_token_no:
+            missing.append((sell.id, "NO"))
+        if missing:
+            log.info("arbitrage.candidate_suppressed", type=opp.get("type"),
+                     reason="missing_execution_metadata", missing_tokens=missing)
+            return False
+        return True
 
     def _make_signal_pair(
         self,

@@ -254,6 +254,10 @@ class SettlementArbPillar:
         # annual / compound-range markets) was previously SILENT, making the
         # pillar indistinguishable from dead. scanned/with_predicate/entered tell
         # the three stories apart: no candidates vs none determinable vs converged.
+        self.last_cycle_detail = {"scanned": len(markets),
+                                  "with_predicate": with_pred,
+                                  "entered": entered,
+                                  "stages": dict(self._stages)}
         log.info("settlement_arb.cycle", scanned=len(markets),
                  with_predicate=with_pred, entered=entered,
                  stages=dict(self._stages))

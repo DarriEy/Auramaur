@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -13,6 +14,13 @@ import structlog
 from auramaur.data_sources.base import NewsItem
 
 logger = structlog.get_logger(__name__)
+
+# feedparser.parse is synchronous and CPU-bound; a pathological body (observed
+# 2026-07-23: ~25-minute parse) run on the event loop freezes exits and risk
+# checks for its whole duration. Bodies are size-capped and parsed in a worker
+# thread with a deadline; a feed that trips either limit is dropped, not waited on.
+_MAX_FEED_BYTES = 3_000_000
+_PARSE_TIMEOUT_SECONDS = 60.0
 
 _DEFAULT_FEEDS: list[str] = [
     # Major news
@@ -70,7 +78,17 @@ class RSSSource:
             logger.debug("rss_feed_unreachable", url=url, error=str(e)[:60])
             return []
 
-        feed = feedparser.parse(body)
+        if len(body) > _MAX_FEED_BYTES:
+            logger.warning("rss_feed_oversized", url=url, body_bytes=len(body))
+            return []
+        try:
+            feed = await asyncio.wait_for(
+                asyncio.to_thread(feedparser.parse, body),
+                timeout=_PARSE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("rss_feed_parse_timeout", url=url, body_bytes=len(body))
+            return []
         items: list[NewsItem] = []
 
         # Build keyword set from query for fuzzy matching
