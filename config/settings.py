@@ -1675,6 +1675,11 @@ class IntelligenceEvalTreatment(BaseModel):
     policy: Literal["single", "samples", "samples_critic"] = "single"
     samples: int = Field(default=1, ge=1, le=32)
     base_seed: int = 0
+    # Inject matched distilled_claims into this arm's request payload — the
+    # direct measurement of distillation value (arm ± claims on the same
+    # episode). The arm is SKIPPED for markets with no matched claims, so its
+    # record never dilutes into a duplicate of the bare arm.
+    claims_evidence: bool = False
 
     @model_validator(mode="after")
     def single_has_one_sample(self):

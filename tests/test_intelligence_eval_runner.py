@@ -106,3 +106,38 @@ async def test_strict_schema_all_failures_yield_no_forecast():
     assert not result.succeeded
     assert result.final_forecast is None
     assert "unknown fields" in result.attempts[0].error
+
+
+@pytest.mark.asyncio
+async def test_extra_payload_enriches_requests_without_breaking_pairing():
+    """A claims_evidence arm sees episode payload + evidence in its requests,
+    while episode identity (hash) stays shared with the bare arm."""
+    episode = Episode("e", {"question": "q"})
+    bare = Adapter([{"prob_yes": .4, "action": "NO"}])
+    rich = Adapter([{"prob_yes": .6, "action": "YES"}])
+    claims = {"distilled_evidence": [{"claim": "c1", "source": "s"}]}
+    enriched = TreatmentSpec(
+        "claims", ArmSpec("claims-arm", "fake", rich),
+        ExplorationPolicy.SINGLE, 1, 42, extra_payload=claims)
+    results = await IntelligenceEvalRunner().run(
+        episode, [spec(bare, name="bare"), enriched])
+    assert len(results) == 2
+    assert "distilled_evidence" not in bare.requests[0].episode_payload
+    assert rich.requests[0].episode_payload["distilled_evidence"] == claims["distilled_evidence"]
+    assert rich.requests[0].episode_payload["question"] == "q"
+    # Pairing: both arms reference the same episode hash.
+    assert bare.requests[0].episode_hash == rich.requests[0].episode_hash
+
+
+@pytest.mark.asyncio
+async def test_extra_payload_reaches_critic_stage():
+    outputs = lambda request: {"prob_yes": .7, "action": "YES"}
+    rich = Adapter(outputs)
+    enriched = TreatmentSpec(
+        "claims_critic", ArmSpec("arm", "fake", rich),
+        ExplorationPolicy.SAMPLES_CRITIC, 2, 7,
+        extra_payload={"distilled_evidence": [{"claim": "c"}]})
+    await IntelligenceEvalRunner().run(Episode("e", {"q": 1}), [enriched])
+    stages = {r.stage for r in rich.requests}
+    assert stages == {"sample", "critic"}
+    assert all("distilled_evidence" in r.episode_payload for r in rich.requests)

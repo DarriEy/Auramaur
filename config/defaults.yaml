@@ -547,6 +547,13 @@ intelligence_eval:
     - {name: "local_single", policy: "single", samples: 1, base_seed: 11}
     - {name: "local_samples_4", policy: "samples", samples: 4, base_seed: 23}
     - {name: "local_samples_4_critic", policy: "samples_critic", samples: 4, base_seed: 37}
+    # Distillation-value arm (2026-07-24): same model/policy as local_single
+    # but the request payload carries the market's matched distilled_claims.
+    # Paired against local_single on identical episodes, its brier_delta is
+    # the direct measurement of whether the distiller's output adds skill —
+    # the question phase 1 was built to answer (the bare arms measured an
+    # information-free prompt: 502/502 forecasts echoed the market price).
+    - {name: "local_single_claims", policy: "single", samples: 1, base_seed: 53, claims_evidence: true}
 
 market_maker:
   enabled: true
