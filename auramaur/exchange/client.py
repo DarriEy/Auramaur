@@ -642,6 +642,23 @@ class PolymarketClient:
                     if created_raw not in (None, "")
                     else datetime.now(timezone.utc)
                 )
+                # The CLOB API doesn't echo our `source`. The gateway pre-writes
+                # a trades row (with strategy_source) for every order it places,
+                # so the ledger is the authority; only orders with no row at all
+                # are true unknowns. The old fallback hardcoded "market_maker"
+                # ("only the MM rests limits") — false since the 2026-07-24
+                # promotions armed bias_harvest/term_structure/opus, whose
+                # resting entries were then booked to the MM's live record.
+                source = "adopted_unknown"
+                try:
+                    row = await self._paper.db.fetchone(
+                        "SELECT strategy_source FROM trades WHERE order_id = ?",
+                        (oid,))
+                    if row and row["strategy_source"]:
+                        source = row["strategy_source"]
+                except Exception as e:  # noqa: BLE001 — attribution must not block adoption
+                    log.debug("order.reconcile_source_lookup_failed",
+                              order_id=oid, error=str(e)[:80])
                 self._live_pending[oid] = Order(
                     market_id=str(o.get("market") or o.get("asset_id") or ""),
                     exchange="polymarket",
@@ -652,15 +669,7 @@ class PolymarketClient:
                     order_type=OrderType.LIMIT,
                     dry_run=False,
                     created_at=created,
-                    # The CLOB API doesn't echo our `source`, so a prior-session
-                    # orphan would otherwise reach the monitor's fallback INSERT
-                    # sourceless and get tagged 'order_monitor', masking the real
-                    # book. A live *resting GTC limit* can only come from the
-                    # market maker in the current regime — directional books are
-                    # paper-forced, arb is both-or-nothing immediate, exits cross
-                    # the spread (taker). So attribute reconciled orphans to the
-                    # MM. NOTE: revisit if any other live book ever rests limits.
-                    source="market_maker",
+                    source=source,
                 )
                 count += 1
             except (TypeError, ValueError) as e:

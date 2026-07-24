@@ -153,6 +153,18 @@ async def test_reconcile_open_orders_imports_orphans(client):
     ]
     client._clob_client = mock_clob
 
+    # Attribution authority is the gateway's pre-written trades row: orphan-1
+    # was placed by bias_harvest; orphan-2 has no row (true prior-session
+    # unknown). The old hardcoded "market_maker" default booked every other
+    # promoted live book's resting entries to the MM's record.
+    async def fetchone(sql, params=()):
+        if "strategy_source" in sql and params and params[0] == "orphan-1":
+            return {"strategy_source": "bias_harvest"}
+        if "strategy_source" in sql:
+            return None
+        return {"net": 0}
+    client._paper.db.fetchone = fetchone
+
     with patch.object(type(client), "_is_live_enabled", return_value=True):
         n = await client.reconcile_open_orders()
 
@@ -164,11 +176,8 @@ async def test_reconcile_open_orders_imports_orphans(client):
     assert buy.token_id == "tokA"
     # created_at parsed from the order's unix timestamp (not "now")
     assert buy.created_at.year == 1970
-    # Reconciled orphans are attributed to the market maker (the only live book
-    # that leaves resting GTC limits) so the monitor's fill INSERT doesn't mask
-    # them as the generic 'order_monitor' fallback.
-    assert buy.source == "market_maker"
-    assert client._live_pending["orphan-2"].source == "market_maker"
+    assert buy.source == "bias_harvest"
+    assert client._live_pending["orphan-2"].source == "adopted_unknown"
 
 
 @pytest.mark.asyncio
