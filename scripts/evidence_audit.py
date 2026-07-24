@@ -47,6 +47,9 @@ QUERIES = {
 def audit(path: Path) -> dict[str, list[dict]]:
     conn = sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
+    # Out-of-process readers share the file with the live bot: wait for the
+    # write lock instead of failing instantly (project DB-access convention).
+    conn.execute("PRAGMA busy_timeout=5000")
     try:
         return {name: [dict(row) for row in conn.execute(sql)]
                 for name, sql in QUERIES.items()}
