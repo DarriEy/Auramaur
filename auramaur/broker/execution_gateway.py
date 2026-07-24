@@ -117,6 +117,20 @@ class ExecutionGateway:
             return ExecutionResult(status="skipped", reason="not submitted")
         capped = await self._exceeds_market_cap(order, is_live=is_live)
         if capped is not None:
+            # Surface the drop on the console like the other pre-submission
+            # gates, and bench the market so cycles stop re-analyzing it while
+            # the position sits at cap (the held-market filter is the primary
+            # exclusion; this covers partially-capped markets it lets through).
+            show_order_dropped(order.market_id, capped)
+            try:
+                await self._serialized_write(
+                    """INSERT OR REPLACE INTO order_build_drops
+                       (market_id, blocked_until, reason)
+                       VALUES (?, datetime('now', '+2 hours'), ?)""",
+                    (order.market_id, capped),
+                )
+            except Exception:
+                pass
             return ExecutionResult(status="skipped", reason=capped)
         decision_id = await self._capture_decision(intent, order)
         return await self._place_and_record(

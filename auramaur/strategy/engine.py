@@ -336,7 +336,7 @@ class TradingEngine(CycleOrchestrationMixin):
         return positions, cash
 
     async def _held_market_ids(self) -> set[str]:
-        """market_ids we already hold in the current mode + exchange.
+        """market_ids we already hold on this exchange, in EITHER book.
 
         Used to keep already-held markets out of the BUY-candidate set: the
         allocator won't average into an open position (skip_held), so analyzing
@@ -345,20 +345,25 @@ class TradingEngine(CycleOrchestrationMixin):
         venue-exit path and the portfolio monitor, not this cycle, so dropping
         them here does not affect closing positions. The allocator's skip_held
         remains the correctness backstop; this is a pure efficiency filter.
+
+        Both books are pooled deliberately: in live mode the graduation ladder
+        still paper-forces unproven strategies, so their at-cap holdings are
+        paper rows — filtering by the global mode alone let those markets
+        through to full LLM analysis only to be cap-blocked at the gateway.
+        The cost is conservatism if a strategy later graduates while its paper
+        book still holds a market (the live entry is skipped, not misplaced).
         """
-        is_paper_flag = 0 if self.settings.is_live else 1
         try:
             if self.exchange_name:
                 rows = await self.db.fetchall(
                     """SELECT p.market_id FROM portfolio p
                        JOIN markets m ON p.market_id = m.id
-                       WHERE p.size > 0 AND p.is_paper = ? AND m.exchange = ?""",
-                    (is_paper_flag, self.exchange_name),
+                       WHERE p.size > 0 AND m.exchange = ?""",
+                    (self.exchange_name,),
                 )
             else:
                 rows = await self.db.fetchall(
-                    "SELECT market_id FROM portfolio WHERE size > 0 AND is_paper = ?",
-                    (is_paper_flag,),
+                    "SELECT market_id FROM portfolio WHERE size > 0",
                 )
             return {r["market_id"] for r in rows}
         except Exception:
@@ -416,10 +421,13 @@ class TradingEngine(CycleOrchestrationMixin):
             # Delivery telemetry is high-volume (per-book, per-gather rows);
             # readiness only reads latest-row and 24h windows, so 14 days is
             # ample for debugging while bounding growth.
-            await self.db.execute(
-                "DELETE FROM strategy_data_deliveries "
-                "WHERE observed_at < datetime('now', '-14 days')"
-            )
+            now_mono = time.monotonic()
+            if now_mono - getattr(self, "_last_delivery_prune", 0.0) >= 3600:
+                await self.db.execute(
+                    "DELETE FROM strategy_data_deliveries "
+                    "WHERE observed_at < datetime('now', '-14 days')"
+                )
+                self._last_delivery_prune = now_mono
 
         # Consumer telemetry uses one snapshot id for the market rows and their
         # contemporaneous price-history points, making as-of joins explicit.

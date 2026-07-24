@@ -131,6 +131,11 @@ def test_submit_blocks_buy_that_exceeds_aggregate_market_cap():
         ex.place_order.assert_not_awaited()             # never placed
         fills = await db.fetchall("SELECT * FROM fills WHERE market_id='m1'")
         assert fills == []                              # nothing recorded
+        # The block benches the market so cycles stop re-analyzing it.
+        drop = await db.fetchone(
+            "SELECT reason FROM order_build_drops WHERE market_id='m1' "
+            "AND blocked_until > datetime('now')")
+        assert drop is not None and "market_cap" in drop["reason"]
 
     asyncio.run(run())
 
