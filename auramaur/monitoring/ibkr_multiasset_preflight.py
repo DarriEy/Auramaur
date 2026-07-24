@@ -88,7 +88,9 @@ async def preflight(settings, db, *, client=None, timeout_seconds: float | None 
                                             has_history=True, error="no executable BBO")
                     return f"{spec.key}: no executable BBO", None, None
                 age = time.time() - float(quote.timestamp)
-                if age < 0 or age > cfg.multiasset_max_quote_age_seconds:
+                # Tolerate small forward clock skew (see _quote_fresh): Alpaca
+                # server stamps can lead this host by ~1s.
+                if age < -5 or age > cfg.multiasset_max_quote_age_seconds:
                     await record_validation(db, spec, contract,
                                             quote_source=getattr(quote, "source", "none"),
                                             has_history=True, error="stale BBO")
