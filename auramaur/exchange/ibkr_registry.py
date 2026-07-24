@@ -25,7 +25,7 @@ async def record_validation(db, spec: InstrumentSpec, contract, *, quote_source:
         approved = 0
     elif spec.approval_required and not approved:
         status = "pending_approval"
-    elif quote_source != "ibkr_live" or not has_history:
+    elif quote_source not in ("ibkr_live", "alpaca_iex") or not has_history:
         status = "qualified_no_live_data"
     else:
         status = "eligible"
@@ -71,7 +71,7 @@ async def approve(db, instrument_key: str, reason: str) -> bool:
     """Approve the current manifest identity; drift invalidates this approval."""
     cursor = await db.execute(
         """UPDATE ibkr_contract_registry SET approved=1,
-           status=CASE WHEN quote_source='ibkr_live' AND has_history=1
+           status=CASE WHEN quote_source IN ('ibkr_live','alpaca_iex') AND has_history=1
                        THEN 'eligible' ELSE 'qualified_no_live_data' END,
            approval_reason=?, approved_at=datetime('now'), validated_at=datetime('now')
            WHERE instrument_key=? AND status IN ('pending_approval', 'drifted')""",

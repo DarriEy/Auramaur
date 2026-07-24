@@ -56,7 +56,11 @@ jobs:
           cache-dependency-path: pyproject.toml
 
       - name: Install ruff
-        run: pip install ruff
+        # Pinned: an unpinned install broke every PR when ruff 0.16.0 shipped
+        # new default rules (1,278 violations appeared overnight, none from
+        # the PRs being gated). Upgrade deliberately: bump the pin and clear
+        # the new findings in one dedicated chore PR.
+        run: pip install "ruff==0.15.22"
 
       - name: Run ruff
         run: ruff check .

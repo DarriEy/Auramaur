@@ -10,7 +10,6 @@ from types import SimpleNamespace
 import structlog
 
 from auramaur.exchange.ibkr_instruments import BY_BOOK, IBKRBook
-from auramaur.exchange.ibkr_market_data import IBKRReadOnlyMarketData
 from auramaur.exchange.ibkr_registry import record_validation
 from auramaur.risk.ibkr_evidence import (evaluate_ibkr_daily_evidence,
                                          evaluate_ibkr_evidence)
@@ -45,8 +44,13 @@ async def preflight(settings, db, *, client=None, timeout_seconds: float | None 
         results.append(MultiAssetPreflightResult(book, severity, detail))
 
     own_client = client is None
-    client = client or IBKRReadOnlyMarketData(
-        settings, client_id=cfg.multiasset_preflight_client_id)
+    if client is None:
+        # Same provenance chain as the trading loop: registry qualification
+        # must see the exact quote sources fills will see (alpaca bridge
+        # included when armed).
+        from auramaur.exchange.alpaca_multiasset import build_multiasset_market_data
+        client = build_multiasset_market_data(
+            settings, client_id=cfg.multiasset_preflight_client_id)
     semaphore = asyncio.Semaphore(cfg.multiasset_preflight_concurrency)
 
     def pacing_error(exc: Exception) -> bool:
@@ -90,7 +94,9 @@ async def preflight(settings, db, *, client=None, timeout_seconds: float | None 
                                             has_history=True, error="stale BBO")
                     return f"{spec.key}: stale BBO ({age:.0f}s old)", None, None
                 source = getattr(quote, "source", "ibkr_unknown")
-                if source != "ibkr_live":
+                # alpaca_iex is paper-fill-credible (2026-07-24 bridge) — only
+                # delayed/frozen/unknown sources are flagged non-executable.
+                if source not in ("ibkr_live", "alpaca_iex"):
                     await record_validation(db, spec, contract, quote_source=source,
                                             has_history=True)
                     return f"{spec.key}: non-executable {source} quote", source, None

@@ -124,7 +124,9 @@ class IBKRMultiAssetPaperBook:
 
     def _quote_fresh(self, quote) -> bool:
         age = time.time() - float(quote.timestamp)
-        return (getattr(quote, "source", "") == "ibkr_live"
+        # alpaca_iex is real-time IEX bid/ask — credible for PAPER fills with
+        # its provenance recorded (2026-07-24 bridge); delayed/frozen stay out.
+        return (getattr(quote, "source", "") in ("ibkr_live", "alpaca_iex")
                 and 0 <= age <= self._settings.ibkr.multiasset_max_quote_age_seconds)
 
     @staticmethod

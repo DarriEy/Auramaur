@@ -282,6 +282,12 @@ ibkr:
   multiasset_refreshes_per_cycle: 12
   # Delayed/frozen quotes may be observed, but cannot create credible fills.
   multiasset_max_quote_age_seconds: 120
+  # Free Alpaca IEX quote fallback for USD STOCK instruments (paper fills
+  # carry provenance 'alpaca_iex'; execution stays IBKR-gated). Unblocks the
+  # global_etf book's evidence accrual without market-data subscriptions.
+  # Off by default: flipping it changes which instruments the registry can
+  # qualify — arm deliberately in the operator config.
+  multiasset_alpaca_quotes: false
   # Re-discover futures/options/bonds during long-running sessions.
   multiasset_contract_cache_seconds: 21600
   # Keep contract/history bursts below IBKR pacing thresholds.

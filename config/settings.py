@@ -1283,6 +1283,12 @@ class IBKRConfig(BaseModel):
     multiasset_cycle_seconds: int = 900
     multiasset_refreshes_per_cycle: int = 12
     multiasset_max_quote_age_seconds: int = 120
+    # Free Alpaca IEX quote fallback for USD STOCK instruments — real-time
+    # bid/ask credible for PAPER fills (provenance 'alpaca_iex'); unblocks
+    # the global_etf book's evidence accrual without IBKR subscriptions.
+    # Requires alpaca_api_key/secret. Default off: enabling changes which
+    # instruments the registry can qualify, so it's an operator decision.
+    multiasset_alpaca_quotes: bool = False
     multiasset_contract_cache_seconds: int = 21_600
     multiasset_preflight_concurrency: int = 2
     multiasset_preflight_pacing_retries: int = 2
