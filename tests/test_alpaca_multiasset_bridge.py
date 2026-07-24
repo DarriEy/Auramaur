@@ -153,3 +153,25 @@ def test_quote_fresh_tolerates_small_forward_clock_skew():
     absurd = MarketDataQuote("SPY", 1, 2, now + 60.0, 0, "USD", 1.0,
                              source="alpaca_iex")
     assert book._quote_fresh(absurd) is False
+
+
+def test_hung_ibkr_quote_times_out_and_falls_back_to_alpaca(monkeypatch):
+    """An unentitled instrument's IBKR ticker can await forever — before the
+    bound, the first eligible stock quote hung the entire multiasset task
+    (2026-07-24, heartbeats silent 2h+). The bridge must time out and serve
+    Alpaca instead."""
+    async def run():
+        class HangingIBKR(FakeIBKR):
+            async def get_quote(self, spec):
+                await asyncio.Event().wait()  # never resolves
+
+        monkeypatch.setattr(
+            AlpacaMultiAssetQuotes, "_IBKR_QUOTE_TIMEOUT_SECONDS", 0.05)
+        alpaca = FakeAlpaca(EquityQuote(628.10, 628.15, time.time(), "alpaca_iex"))
+        bridge = AlpacaMultiAssetQuotes(HangingIBKR(None), alpaca)
+        quote = await asyncio.wait_for(bridge.get_quote(SPY), timeout=5)
+        assert quote is not None and quote.source == "alpaca_iex"
+        # Non-stock instruments time out to None rather than hanging.
+        quote = await asyncio.wait_for(bridge.get_quote(GBPJPY), timeout=5)
+        assert quote is None
+    asyncio.run(run())
