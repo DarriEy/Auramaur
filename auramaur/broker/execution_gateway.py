@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import Literal
 
@@ -116,11 +118,12 @@ class ExecutionGateway:
         capped = await self._exceeds_market_cap(order, is_live=is_live)
         if capped is not None:
             return ExecutionResult(status="skipped", reason=capped)
-        await self._capture_decision(intent, order)
+        decision_id = await self._capture_decision(intent, order)
         return await self._place_and_record(
             order, strategy_source=intent.signal.strategy_source,
             signal_id=getattr(intent.signal, "id", None),
-            exchange=self.exchange, exchange_name=self.exchange_name)
+            exchange=self.exchange, exchange_name=self.exchange_name,
+            decision_id=decision_id)
 
     async def _exceeds_market_cap(self, order: Order, *, is_live: bool) -> str | None:
         """Aggregate per-(market, token) stake cap. Returns a skip-reason string
@@ -201,29 +204,57 @@ class ExecutionGateway:
             order, strategy_source=strategy_source, signal_id=None,
             exchange=exchange, exchange_name=exchange_name)
 
-    async def _capture_decision(self, intent: TradeIntent, order: Order) -> None:
-        """Persist the immutable executable decision before submission."""
+    async def _capture_decision(self, intent: TradeIntent, order: Order) -> int | None:
+        """Persist a parameter-frozen executable decision before submission."""
         try:
+            source = intent.signal.strategy_source or "llm"
+            section_name = (
+                "agent_trader" if source.startswith("agent_trader_") else
+                "technical" if source.startswith("technical_") else
+                "nlp" if source in {"llm", "news_speed"} else source
+            )
+            section = getattr(self.settings, section_name, None)
+            section_payload = (section.model_dump(mode="json")
+                               if hasattr(section, "model_dump") else {})
+            contract = {
+                "strategy_source": source,
+                "strategy_config": section_payload,
+                "risk": {
+                    "min_edge_pct": self.settings.risk.min_edge_pct,
+                    "max_spread_pct": self.settings.risk.max_spread_pct,
+                    "confidence_floor": self.settings.risk.confidence_floor,
+                },
+            }
+            config_json = json.dumps(contract, sort_keys=True, separators=(",", ":"))
+            strategy_version = hashlib.sha256(config_json.encode()).hexdigest()
+            book = await self.db.fetchone(
+                """SELECT best_bid,best_ask FROM orderbook_snapshots
+                   WHERE market_id=? AND (?='' OR token_id=?)
+                   ORDER BY recorded_at DESC LIMIT 1""",
+                (order.market_id, order.token_id or "", order.token_id or ""),
+            )
             coefficient = 0.0 if order.post_only else taker_fee_rate(
                 order.exchange or self.exchange_name, intent.market.category)
             fee = order.size * coefficient * order.price * (1.0 - order.price)
-            await DecisionTracker(self.db).capture(
-                market_id=order.market_id,
-                strategy_source=intent.signal.strategy_source or "llm",
-                signal_id=getattr(intent.signal, "id", None),
-                side=order.side.value,
+            family = intent.market.neg_risk_market_id or intent.market.id
+            venue = order.exchange or self.exchange_name
+            return await DecisionTracker(self.db).capture(
+                market_id=order.market_id, strategy_source=source,
+                signal_id=getattr(intent.signal, "id", None), side=order.side.value,
                 fair_probability=intent.signal.claude_prob,
                 reference_price=intent.signal.market_prob,
                 executable_price=order.price,
-                best_bid=None,
-                best_ask=None,
-                requested_size=order.size * order.price,
-                fee_estimate=fee,
+                best_bid=None if book is None else book["best_bid"],
+                best_ask=None if book is None else book["best_ask"],
+                requested_size=order.size * order.price, fee_estimate=fee,
+                venue=venue, event_family=family, strategy_version=strategy_version,
+                cohort_id=f"{venue}:{family}", config_json=config_json,
+                holdout_warmup_days=self.settings.graduation.holdout_warmup_days,
+                is_paper=order.dry_run,
             )
         except Exception as exc:
-            # Research telemetry may never block an approved trade.
-            log.warning("gateway.decision_capture_failed",
-                        market_id=order.market_id, error=str(exc))
+            log.warning("gateway.decision_capture_failed", error=str(exc),
+                        market_id=order.market_id)
 
     async def submit_paired(
         self,
@@ -373,13 +404,32 @@ class ExecutionGateway:
 
     async def _place_and_record(
         self, order: Order, *, strategy_source: str, signal_id,
-        exchange: ExchangeClient, exchange_name: str,
+        exchange: ExchangeClient, exchange_name: str, decision_id: int | None = None,
     ) -> ExecutionResult:
         """Place a built order, then log slippage, record the fill, and mirror
         to ``trades``. Shared by the single-leg, paired, and exit paths.
         """
         result = await exchange.place_order(order)
         show_order(result.status, result.order_id, order.side.value, order.size, order.price, result.is_paper, exchange=exchange_name, error_message=result.error_message, market_id=order.market_id)
+        if (decision_id is not None and result.status in _FILLED_STATUSES
+                and result.filled_size > 0):
+            evidence = "venue_fill"
+            if result.is_paper:
+                snap = await self.db.fetchone(
+                    "SELECT best_bid,best_ask FROM decision_snapshots WHERE id=?",
+                    (decision_id,),
+                )
+                price = result.filled_price or order.price
+                crossed = bool(snap) and (
+                    (order.side == OrderSide.BUY and snap["best_ask"] is not None
+                     and price >= float(snap["best_ask"]))
+                    or (order.side == OrderSide.SELL and snap["best_bid"] is not None
+                        and price <= float(snap["best_bid"]))
+                )
+                evidence = "book_cross" if crossed else "synthetic"
+            await DecisionTracker(self.db).mark_fill(
+                decision_id, filled_price=result.filled_price or order.price,
+                evidence=evidence)
         return await self._record_result(
             order, result, strategy_source=strategy_source,
             signal_id=signal_id, exchange_name=exchange_name)

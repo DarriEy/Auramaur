@@ -1119,6 +1119,22 @@ class GraduationConfig(BaseModel):
     # audit: weather_temp alone at 140; the next-best cells accrue 30-45),
     # so every other book's paper evidence fed a gate it could never clear.
     # Keyed by strategy_source; unlisted strategies use min_markets. The
+    # Strong prospective edge contract. Tracked defaults enable it; class
+    # defaults remain permissive for isolated callers and legacy test fixtures.
+    prospective_only: bool = False
+    require_market_brier_edge: bool = False
+    require_executable_fills: bool = False
+    min_calendar_days: int = 0
+    min_regime_months: int = 1
+    holdout_warmup_days: int = 0
+    familywise_alpha: float = 0.05
+    max_hypotheses: int = 1
+    sequential_looks_per_window: int = 1
+    credible_fill_evidence: list[str] = ["venue_fill", "book_cross", "trade_through"]
+    # Minimum number of paired forecast-vs-market observations; zero inherits
+    # the strategy's min_markets threshold.
+    min_paired_forecasts: int = 0
+
     # tracked default stays empty — fresh clones keep the strict bar.
     min_markets_overrides: dict[str, int] = {}
     # Strategies elected at STRATEGY grain: evidence aggregates across all

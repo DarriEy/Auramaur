@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 42
+SCHEMA_VERSION = 43
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -430,6 +430,14 @@ CREATE TABLE IF NOT EXISTS decision_snapshots (
     best_ask REAL,
     requested_size REAL NOT NULL DEFAULT 0,
     fee_estimate REAL NOT NULL DEFAULT 0,
+    venue TEXT NOT NULL DEFAULT '',
+    event_family TEXT NOT NULL DEFAULT '',
+    strategy_version TEXT NOT NULL DEFAULT '',
+    cohort_id TEXT NOT NULL DEFAULT '',
+    is_holdout INTEGER NOT NULL DEFAULT 0,
+    fill_evidence TEXT NOT NULL DEFAULT 'unverified',
+    is_paper INTEGER NOT NULL DEFAULT 1,
+    filled_price REAL,
     filled INTEGER NOT NULL DEFAULT 0,
     observed_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(signal_id, strategy_source)
@@ -437,6 +445,17 @@ CREATE TABLE IF NOT EXISTS decision_snapshots (
 CREATE INDEX IF NOT EXISTS idx_decision_market_time
     ON decision_snapshots(market_id, observed_at);
 
+
+CREATE TABLE IF NOT EXISTS strategy_experiments (
+    strategy_version TEXT PRIMARY KEY,
+    strategy_source TEXT NOT NULL,
+    config_json TEXT NOT NULL,
+    registered_at TEXT NOT NULL DEFAULT (datetime('now')),
+    holdout_starts_at TEXT NOT NULL,
+    UNIQUE(strategy_source, strategy_version)
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_experiments_source
+    ON strategy_experiments(strategy_source, registered_at);
 CREATE TABLE IF NOT EXISTS decision_marks (
     decision_id INTEGER NOT NULL,
     horizon_seconds INTEGER NOT NULL,
@@ -966,6 +985,8 @@ CREATE TABLE IF NOT EXISTS evaluation_runs (
     tool_calls INTEGER NOT NULL DEFAULT 0,
     duration_ms INTEGER NOT NULL DEFAULT 0,
     compute_seconds REAL NOT NULL DEFAULT 0,
+    treatment_payload_json TEXT NOT NULL DEFAULT '{}',
+    treatment_payload_hash TEXT NOT NULL DEFAULT '',
     error TEXT NOT NULL DEFAULT '',
     started_at TEXT NOT NULL,
     completed_at TEXT

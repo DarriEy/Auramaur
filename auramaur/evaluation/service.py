@@ -257,6 +257,13 @@ class IntelligenceEvalService:
         attempt_count = failed_count = 0
         compute_seconds = 0.0
         for treatment, result in zip(treatments, results, strict=True):
+            treatment_payload = dict(payload)
+            if treatment.extra_payload is not None:
+                treatment_payload.update(_plain(treatment.extra_payload))
+            treatment_payload_json = json.dumps(
+                treatment_payload, sort_keys=True, separators=(",", ":"))
+            treatment_payload_hash = hashlib.sha256(
+                treatment_payload_json.encode()).hexdigest()
             run_id = hashlib.sha256(
                 f"{snapshot.episode_hash}:{treatment.treatment_id}".encode()).hexdigest()
             duration_ms = sum(int(attempt.telemetry.get("duration_ms", 0))
@@ -275,6 +282,8 @@ class IntelligenceEvalService:
                 prompt_version=self._cfg.prompt_version,
                 output_schema_version=self._cfg.output_schema_version,
                 status=status, duration_ms=duration_ms,
+                treatment_payload_json=treatment_payload_json,
+                treatment_payload_hash=treatment_payload_hash,
                 compute_seconds=duration_ms / 1000, error=errors,
                 started_at=now, completed_at=datetime.now(timezone.utc),
             ))
