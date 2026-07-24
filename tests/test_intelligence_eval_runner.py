@@ -131,7 +131,8 @@ async def test_extra_payload_enriches_requests_without_breaking_pairing():
 
 @pytest.mark.asyncio
 async def test_extra_payload_reaches_critic_stage():
-    outputs = lambda request: {"prob_yes": .7, "action": "YES"}
+    def outputs(request):
+        return {"prob_yes": .7, "action": "YES"}
     rich = Adapter(outputs)
     enriched = TreatmentSpec(
         "claims_critic", ArmSpec("arm", "fake", rich),

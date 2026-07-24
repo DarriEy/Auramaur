@@ -5,8 +5,6 @@ tracking tables so a day's inference bill is one query (2026-07-24 audit)."""
 
 import asyncio
 
-import pytest
-
 from auramaur.db.database import Database
 
 
