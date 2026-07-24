@@ -1,0 +1,35 @@
+# Local ops override (untracked, not part of the repo's tracked config).
+#
+# 2026-07-23 SYS_PTRACE: lets py-spy attach and dump stacks when the event
+# loop stalls. Delete + `docker compose up -d auramaur` to revert.
+#
+# 2026-07-23 named-volume state (user-approved): SQLite WAL on the Windows
+# bind mount (gRPC-FUSE) caused repeated transaction wedges/stalls — WAL's
+# -shm shared memory is unsupported there. /app/state now lives on the
+# Linux-native volume `auramaur-state`. Consequences:
+#   - The DB is no longer at runtime\state\ on the host. Access it via
+#     `docker exec auramaur-auramaur-1 python3 ...` or `docker cp`.
+#   - KILL SWITCH moved so it stays host-touchable from Windows:
+#     create the file  runtime\killswitch\KILL_SWITCH  to halt trading.
+#   - The old runtime/state dir is the pre-migration snapshot; a full copy
+#     also sits in runtime/backups/pre-volume-migration-20260723/.
+# Revert: delete this file's volume/env blocks and `docker compose up -d`.
+services:
+  auramaur:
+    cap_add:
+      - SYS_PTRACE
+    environment:
+      AURAMAUR_KILL_SWITCH_PATH: /app/killswitch/KILL_SWITCH
+    volumes:
+      - state:/app/state
+      - ./runtime/killswitch:/app/killswitch
+  auramaur-web:
+    environment:
+      AURAMAUR_KILL_SWITCH_PATH: /app/killswitch/KILL_SWITCH
+    volumes:
+      - state:/app/state
+      - ./runtime/killswitch:/app/killswitch:ro
+
+volumes:
+  state:
+    name: auramaur-state
