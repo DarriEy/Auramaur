@@ -242,10 +242,10 @@ class ClaudeAnalyzer:
         pin_claude: bool = False,
     ) -> AnalysisResult:
         """Call Claude (primary) to estimate the probability."""
+        from auramaur.nlp.prompts import format_market_context
         evidence_text = format_evidence(evidence)
         prompt = PROBABILITY_ESTIMATION_PROMPT.format(
-            question=market.question,
-            description=market.description,
+            market_context=format_market_context(market.question, market.description),
             market_price=market.outcome_yes_price,
             evidence=evidence_text,
         )
@@ -262,10 +262,10 @@ class ClaudeAnalyzer:
         first_estimate: float | None = None,
     ) -> AnalysisResult:
         """Call Claude (adversarial second opinion)."""
+        from auramaur.nlp.prompts import format_market_context
         evidence_text = format_evidence(evidence)
         prompt = ADVERSARIAL_PROMPT.format(
-            question=market.question,
-            description=market.description,
+            market_context=format_market_context(market.question, market.description),
             market_price=market.outcome_yes_price,
             first_estimate=first_estimate if first_estimate is not None else 0.5,
             evidence=evidence_text,
