@@ -10,6 +10,7 @@ execution gateway, the allocator). Method-local imports moved with the methods.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from typing import TYPE_CHECKING
 
 import structlog
@@ -28,6 +29,23 @@ from auramaur.strategy.signals import taker_fee_rate
 
 if TYPE_CHECKING:
     from auramaur.strategy.protocols import TradeCandidate
+
+def select_rotating_ranked(
+    ranked: list[tuple[Market, float]],
+    limit: int,
+    rotation_slot: int,
+) -> list[tuple[Market, float]]:
+    """Select reproducibly from the best 2x candidates while rotating access."""
+    if limit <= 0:
+        return []
+    band = ranked[:limit * 2]
+    return sorted(
+        band,
+        key=lambda item: hashlib.sha256(
+            f"{rotation_slot}|{item[0].id}".encode()
+        ).digest(),
+    )[:limit]
+
 
 log = structlog.get_logger()
 
@@ -263,7 +281,6 @@ class CycleOrchestrationMixin:
 
         # Smart ranking — prioritize markets most likely to be mispriced
         from auramaur.strategy.market_selector import rank_markets
-        import random
 
         price_history = await self._get_price_history(hours=24)
         ranked = rank_markets(fresh_candidates, price_history=price_history)
@@ -289,11 +306,19 @@ class CycleOrchestrationMixin:
                 event_counts[event_key] = count + 1
         ranked = deduped
 
-        # Shuffle within similar scores to avoid always picking the same ones
+        # Deterministically rotate within the top 2x band. This retains the
+        # quality floor and gives candidates comparable access over time.
         if len(ranked) > max_markets:
-            top_batch = ranked[:max_markets * 2]
-            random.shuffle(top_batch)
-            ranked = top_batch
+            rotation_seconds = max(
+                1, int(self.settings.nlp.selection_rotation_seconds))
+            rotation_slot = int(time.time() // rotation_seconds)
+            selected = select_rotating_ranked(ranked, max_markets, rotation_slot)
+            rotation_band = ranked[:max_markets * 2]
+            selected_ids_rotating = {market.id for market, _ in selected}
+            ranked = selected + [
+                item for item in rotation_band
+                if item[0].id not in selected_ids_rotating
+            ]
 
         # Promote news-flagged markets to the front of the batch so fresh
         # headlines get evaluated first. News flagging replaces the old

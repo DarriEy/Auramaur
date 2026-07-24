@@ -362,3 +362,25 @@ def test_strategy_level_election_aggregates_categories():
         await db.close()
     asyncio.run(run())
 
+
+
+def test_graduation_uses_pnl_net_of_fees():
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        for i in range(5):
+            await db.execute(
+                """INSERT INTO pnl_ledger
+                   (market_id, venue, category, strategy_source, kind, token,
+                    qty, pnl, fees, is_paper, source_ref)
+                   VALUES (?, 'kraken', 'crypto', 'fee_test', 'sell', 'YES',
+                           1, 1, 2, 1, ?)""",
+                (f"fee-{i}", f"fee-ref-{i}"),
+            )
+        ladder = GraduationLadder(db, _settings(min_markets=5))
+        decision = await ladder.decide("fee_test", "crypto")
+        assert decision.status == "paper_negative"
+        assert decision.force_paper is True
+        await db.close()
+
+    asyncio.run(run())

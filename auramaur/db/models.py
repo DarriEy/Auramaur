@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 41
+SCHEMA_VERSION = 42
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (

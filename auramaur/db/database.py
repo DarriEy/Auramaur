@@ -276,6 +276,19 @@ class Database:
             await self._migrate_v39_to_v40()
         if from_version < 41:
             await self._migrate_v40_to_v41()
+        if from_version < 42:
+            await self._migrate_v41_to_v42()
+
+    async def _migrate_v41_to_v42(self) -> None:
+        """Make ambiguous historical attribution explicit."""
+        await self._db.execute(
+            "UPDATE pnl_ledger SET strategy_source = 'legacy_unattributed' "
+            "WHERE strategy_source IS NULL OR strategy_source = ''"
+        )
+        await self._db.execute("UPDATE schema_version SET version = 42")
+        await self._db.commit()
+        log.info("database.migrated", from_version=41, to_version=42)
+
 
     async def _migrate_v40_to_v41(self) -> None:
         await self._db.executescript("""

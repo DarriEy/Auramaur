@@ -95,7 +95,7 @@ class GraduationLadder:
         # decision. See GraduationConfig.strategy_level_strategies.
         if strategy in self._settings.graduation.strategy_level_strategies:
             rows = await self._db.fetchall(
-                """SELECT market_id, is_paper, SUM(pnl) AS pnl
+                """SELECT market_id, is_paper, SUM(pnl - fees) AS pnl
                    FROM pnl_ledger
                    WHERE strategy_source = ?
                      AND realized_at >= datetime('now', ?)
@@ -105,7 +105,7 @@ class GraduationLadder:
             )
         else:
             rows = await self._db.fetchall(
-                """SELECT market_id, is_paper, SUM(pnl) AS pnl
+                """SELECT market_id, is_paper, SUM(pnl - fees) AS pnl
                    FROM pnl_ledger
                    WHERE strategy_source = ? AND category = ?
                      AND realized_at >= datetime('now', ?)
@@ -200,9 +200,9 @@ class GraduationLadder:
         rows = await self._db.fetchall(
             """SELECT strategy_source AS strategy, category,
                  SUM(CASE WHEN is_paper = 0 THEN 1 ELSE 0 END) AS live_n,
-                 COALESCE(SUM(CASE WHEN is_paper = 0 THEN pnl ELSE 0 END), 0) AS live_pnl,
+                 COALESCE(SUM(CASE WHEN is_paper = 0 THEN pnl - fees ELSE 0 END), 0) AS live_pnl,
                  SUM(CASE WHEN is_paper = 1 THEN 1 ELSE 0 END) AS paper_n,
-                 COALESCE(SUM(CASE WHEN is_paper = 1 THEN pnl ELSE 0 END), 0) AS paper_pnl
+                 COALESCE(SUM(CASE WHEN is_paper = 1 THEN pnl - fees ELSE 0 END), 0) AS paper_pnl
                FROM pnl_ledger
                WHERE realized_at >= datetime('now', ?)
                GROUP BY 1, 2 ORDER BY 1, 2""",

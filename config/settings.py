@@ -281,6 +281,8 @@ class NLPConfig(BaseModel):
     api_intensity: Literal["low", "medium", "full_blast"] = "medium"
     skip_second_opinion: bool = False
     max_markets_per_cycle: int = 10
+    # Deterministic exploration rotation for the top-ranked candidate band.
+    selection_rotation_seconds: int = 3600
     evidence_per_source: int = 3
     daily_claude_call_budget: int = 100
     # Slice of the daily budget held back for pin_claude callers (the proven
