@@ -486,3 +486,41 @@ async def test_claude_arms_unaffected_by_provider_field_default(tmp_path):
         await pillar.run_once()
     finally:
         await db.close()
+
+
+def test_kalshi_lane_scopes_cells_and_venue():
+    """The Kalshi instance must earn its OWN graduation cells.
+
+    Sharing `agent_trader_<alias>` across venues would let unproven Kalshi
+    trades ride the Polymarket cell's live exemption (and pollute its
+    evidence). It must also reject Polymarket markets, or the two instances
+    would trade the same books through different exchange clients.
+    """
+    from unittest.mock import MagicMock
+
+    from auramaur.strategy.agent_trader import AgentTraderPillar
+
+    common = dict(db=MagicMock(), settings=_settings([]), discovery=MagicMock(),
+                  exchange=MagicMock(), risk_manager=MagicMock(),
+                  pnl_tracker=MagicMock(), calibration=MagicMock())
+    poly = AgentTraderPillar(**common)
+    kalshi = AgentTraderPillar(**common, exchange_name="kalshi",
+                               cell_suffix="_kalshi")
+
+    assert poly.cell("opus") == "agent_trader_opus"
+    assert kalshi.cell("opus") == "agent_trader_opus_kalshi"
+    assert poly.name == "agent_trader"
+    assert kalshi.name == "agent_trader_kalshi"
+    assert kalshi._gateway.exchange_name == "kalshi"
+
+    cfg = _settings([]).agent_trader
+    cfg.kalshi_min_liquidity = 50.0
+    poly_mkt = Market(id="p1", question="Q?", exchange="polymarket",
+                      liquidity=5000.0, outcome_yes_price=0.5, active=True)
+    kalshi_mkt = Market(id="k1", question="Q?", exchange="kalshi",
+                        liquidity=200.0, outcome_yes_price=0.5, active=True)
+
+    assert poly._eligible(poly_mkt, cfg) is True
+    assert poly._eligible(kalshi_mkt, cfg) is False
+    assert kalshi._eligible(kalshi_mkt, cfg) is True   # venue's lower floor
+    assert kalshi._eligible(poly_mkt, cfg) is False

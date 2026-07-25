@@ -417,6 +417,44 @@ class StrategyTaskMixin:
                 log.error("weather_temp.cycle_error", error=str(e))
             await asyncio.sleep(interval)
 
+    async def _task_agent_trader_kalshi(self) -> None:
+        """Kalshi lane for the multi-model LLM day-trader.
+
+        A SECOND instance bound to the Kalshi discovery/exchange, attributed to
+        ``agent_trader_<alias>_kalshi`` so it earns its own graduation cells and
+        can neither dilute nor free-ride on the Polymarket record (the same rule
+        as the resolution_lens Kalshi spike). No-ops cleanly if the Kalshi venue
+        isn't composed.
+        """
+        from auramaur.strategy.agent_trader import AgentTraderPillar
+
+        discovery = self._components.discoveries.get("kalshi")
+        exchange = self._components.exchanges.get("kalshi")
+        if discovery is None or exchange is None:
+            log.info("agent_trader.kalshi_skipped", reason="kalshi venue not composed")
+            return
+
+        pillar = AgentTraderPillar(
+            db=self._components.db,
+            settings=self.settings,
+            discovery=discovery,
+            exchange=exchange,
+            risk_manager=self._components.risk_manager,
+            pnl_tracker=self._components.pnl_tracker,
+            calibration=self._components.calibration,
+            exchange_name="kalshi",
+            cell_suffix="_kalshi",
+        )
+        interval = max(600, self.settings.agent_trader.interval_seconds)
+        while self._running:
+            if await self._check_kill_switch():
+                return
+            try:
+                await run_pillar_once(self._components.db, pillar, interval_seconds=interval)
+            except Exception as e:
+                log.error("agent_trader.kalshi_cycle_error", error=str(e))
+            await asyncio.sleep(interval)
+
     async def _task_resolution_lens(self) -> None:
         """Periodic resolution-language lens scan (paper-forced by config)."""
         from auramaur.strategy.resolution_lens import ResolutionLensPillar

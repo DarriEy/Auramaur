@@ -699,6 +699,13 @@ class AgentTraderConfig(BaseModel):
     max_open_per_model: int = 10
     stake_usd: float = 10.0
     min_liquidity: float = 1000.0
+    # Kalshi instance (agent_trader_<alias>_kalshi cells, on their own ledger
+    # so the venue's record can neither dilute nor free-ride on the proven
+    # Polymarket cells). Kalshi's bulk liquidity field UNDERREPORTS — the lens
+    # and long_horizon both had to drop their Poly-tuned floor to ~50 or the
+    # venue was starved of candidates.
+    kalshi_enabled: bool = False
+    kalshi_min_liquidity: float = 50.0
     # Day-trader horizon: near-dated books turn over fast enough to feed the
     # memory loop; min keeps out markets resolving mid-cycle.
     min_days_to_resolution: float = 0.25

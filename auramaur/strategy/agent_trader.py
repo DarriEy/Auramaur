@@ -153,10 +153,11 @@ def parse_decisions(raw: str, max_entries: int) -> list[dict]:
 class AgentTraderPillar:
     """Multi-model LLM day-trader over near-dated Polymarket markets."""
 
-    name = "agent_trader"
 
     def __init__(self, db, settings, discovery, exchange, risk_manager,
-                 pnl_tracker, calibration) -> None:
+                 pnl_tracker, calibration, *,
+                 exchange_name: str = "polymarket",
+                 cell_suffix: str = "") -> None:
         self._db = db
         self._settings = settings
         self._discovery = discovery
@@ -164,16 +165,25 @@ class AgentTraderPillar:
         self._risk = risk_manager
         self._pnl = pnl_tracker
         self._calibration = calibration
+        self._exchange_name = exchange_name
+        # Venue-scoped attribution: a Kalshi instance earns its OWN graduation
+        # cells (agent_trader_<alias>_kalshi) so its record can neither dilute
+        # nor free-ride on the proven Polymarket cells — same rule as the
+        # resolution_lens Kalshi spike.
+        self._cell_suffix = cell_suffix
         self._gateway = ExecutionGateway(
-            router=None, exchange=exchange, exchange_name="polymarket",
+            router=None, exchange=exchange, exchange_name=exchange_name,
             settings=settings, db=db, pnl_tracker=pnl_tracker,
         )
         self._schema_ready = False
         self._cycle_n = 0
 
-    @staticmethod
-    def cell(alias: str) -> str:
-        return f"agent_trader_{alias}"
+    @property
+    def name(self) -> str:  # type: ignore[override]
+        return f"agent_trader{self._cell_suffix}"
+
+    def cell(self, alias: str) -> str:
+        return f"agent_trader_{alias}{self._cell_suffix}"
 
     async def _ensure_schema(self) -> None:
         if self._schema_ready:
@@ -334,9 +344,15 @@ class AgentTraderPillar:
     def _eligible(self, market: Market, cfg) -> bool:
         if not market.active:
             return False
-        if (market.exchange or "polymarket") != "polymarket":
+        if (market.exchange or self._exchange_name) != self._exchange_name:
             return False
-        if market.liquidity < cfg.min_liquidity:
+        # Kalshi's bulk liquidity field underreports; the Poly-tuned floor
+        # rejects nearly the whole venue (same wall the lens and long_horizon
+        # hit). Use the venue's own, lower floor there.
+        min_liq = cfg.min_liquidity
+        if self._exchange_name == "kalshi":
+            min_liq = min(min_liq, cfg.kalshi_min_liquidity)
+        if market.liquidity < min_liq:
             return False
         p = market.outcome_yes_price
         if not (0.03 <= p <= 0.97):
@@ -635,7 +651,7 @@ class AgentTraderPillar:
                description, category, active, outcome_yes_price, outcome_no_price,
                volume, liquidity, last_updated)
                VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))""",
-            (market.id, market.exchange or "polymarket", market.condition_id,
+            (market.id, market.exchange or self._exchange_name, market.condition_id,
              market.question, (market.description or "")[:500],
              ensure_category(market.question, market.description, market.category),
              market.outcome_yes_price, market.outcome_no_price,
@@ -663,13 +679,14 @@ class AgentTraderPillar:
             """INSERT INTO portfolio (market_id, exchange, side, size, avg_price,
                current_price, unrealized_pnl, category, token, token_id,
                is_paper, updated_at)
-               VALUES (?, 'polymarket', 'BUY', ?, ?, ?, 0, ?, ?, ?, ?, datetime('now'))
+               VALUES (?, ?, 'BUY', ?, ?, ?, 0, ?, ?, ?, ?, datetime('now'))
                ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
                    size = excluded.size,
                    avg_price = excluded.avg_price,
                    current_price = excluded.current_price,
                    updated_at = excluded.updated_at""",
-            (order.market_id, fill_size, fill_price, fill_price,
+            (order.market_id, market.exchange or self._exchange_name,
+             fill_size, fill_price, fill_price,
              market.category or "", order.token.value, order.token_id,
              1 if is_paper else 0),
         )

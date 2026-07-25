@@ -1724,6 +1724,11 @@ class AuramaurBot(
         # Multi-model LLM day-trader (paper-forced; intelligence-cap A/B)
         if self.settings.agent_trader.enabled:
             tasks.append(asyncio.create_task(self._task_agent_trader(), name="agent_trader"))
+            # Kalshi lane — a second instance on its own cells. Default off;
+            # flip agent_trader.kalshi_enabled.
+            if self.settings.agent_trader.kalshi_enabled:
+                tasks.append(asyncio.create_task(
+                    self._task_agent_trader_kalshi(), name="agent_trader_kalshi"))
 
         if (self.settings.intelligence_eval.enabled
                 and self.settings.local_llm.enabled):
