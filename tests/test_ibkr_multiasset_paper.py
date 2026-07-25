@@ -283,13 +283,21 @@ async def test_open_position_is_marked_by_original_contract_id():
     await db.close()
 
 
-def test_books_declare_paper_simulated_mode_and_asset_calendars():
+def test_books_declare_gated_multiasset_mode_and_asset_calendars():
+    """These books are paper by DEFAULT, not paper-only.
+
+    `_fill` places through IBKRMultiAssetExecution once a book graduates,
+    behind its own confirm-live + is_live + environment + kill-switch chain.
+    They were declared PAPER_SIMULATED, which the enum defines as "no order
+    path exists at all" — a declaration that told a reviewer real money was
+    impossible here.
+    """
     settings = Settings()
     assert not settings.ibkr.multiasset_books["options"].enabled
     assert not settings.ibkr.multiasset_books["bonds"].enabled
     for book in IBKRBook:
         pillar = IBKRMultiAssetPaperBook(settings, None, None, book)
-        assert pillar.execution_mode.value == "paper_simulated"
+        assert pillar.execution_mode.value == "direct_multiasset"
 
 
 def test_option_fallback_pricer_respects_intrinsic_value():

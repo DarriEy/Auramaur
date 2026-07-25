@@ -44,6 +44,8 @@ from datetime import datetime, timedelta, timezone
 
 import structlog
 
+from auramaur.strategy.protocols import ExecutionMode
+
 from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
 from auramaur.exchange.models import Confidence, Market, OrderSide, Signal
 from auramaur.strategy.classifier import blocked_category_hit, ensure_category
@@ -229,6 +231,7 @@ class TermStructurePillar:
     """Deadline-ladder curve reader over Polymarket."""
 
     name = "term_structure"
+    execution_mode = ExecutionMode.GATEWAY_SINGLE
 
     def __init__(self, db, settings, discovery, exchange, risk_manager,
                  pnl_tracker, calibration) -> None:

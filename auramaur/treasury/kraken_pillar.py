@@ -25,12 +25,16 @@ from datetime import datetime, timezone
 
 import structlog
 
+from auramaur.strategy.protocols import ExecutionMode
+
 from auramaur.exchange.models import Fill, OrderSide, TokenType
 
 log = structlog.get_logger()
 
 
 class KrakenPillar:
+    name = "kraken"
+    execution_mode = ExecutionMode.DIRECT_SPOT
     def __init__(self, settings, kraken_client, bot=None, console=None,
                  paper_comparator=None, directional_analyzer=None):
         self._s = settings

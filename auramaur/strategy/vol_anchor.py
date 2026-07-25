@@ -42,6 +42,8 @@ from datetime import datetime, timedelta, timezone
 import aiohttp
 import structlog
 
+from auramaur.strategy.protocols import ExecutionMode
+
 from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
 from auramaur.data_sources.deribit_iv import DeribitIVSource
 from auramaur.exchange.models import Confidence, Market, OrderSide, Signal
@@ -161,6 +163,7 @@ class VolAnchorPillar:
     """Deterministic vol-anchored threshold pricing over Polymarket crypto."""
 
     name = "vol_anchor"
+    execution_mode = ExecutionMode.GATEWAY_SINGLE
 
     def __init__(self, db, settings, discovery, exchange, risk_manager,
                  pnl_tracker, calibration) -> None:

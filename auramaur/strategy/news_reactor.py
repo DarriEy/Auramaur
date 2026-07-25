@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from auramaur.strategy.protocols import ExecutionMode
+
 from auramaur.data_sources.base import NewsItem
 from auramaur.data_sources.rss import RSSSource
 from auramaur.db.database import Database
@@ -72,6 +74,9 @@ class NewsReactor:
     triggers the full analysis pipeline on matches.  This gives us first-mover
     advantage — we can trade before the broader market adjusts to the news.
     """
+
+    name = "news_reactor"
+    execution_mode = ExecutionMode.GATEWAY_SINGLE
 
     # Categories news-reaction structurally cannot price: a breaking headline
     # ("Team X beats Team Y") doesn't predict a LIVE MATCH OUTCOME the way it
