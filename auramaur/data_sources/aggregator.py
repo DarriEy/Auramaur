@@ -236,8 +236,14 @@ class Aggregator:
         if consumer and self.observer is not None:
             from auramaur.data_edge import DataDelivery, record_delivery
 
-            status = ("empty" if not unique else
-                      "partial" if statuses & {"error", "timeout"} else "ok")
+            # A delivery with items is usable — with ~13 sources, at least one
+            # timing out is the common case, and marking those gathers
+            # "partial" kept fail-closed evidence contracts permanently red.
+            # "partial" is reserved for gathers that produced nothing WHILE
+            # sources were failing (the failures plausibly cost us the items);
+            # per-source statuses stay in detail either way.
+            status = ("ok" if unique else
+                      "partial" if statuses & {"error", "timeout"} else "empty")
             published = [item.published_at for item in unique if item.published_at]
             source_at = max(published) if published else None
             await record_delivery(self.observer.db, DataDelivery(

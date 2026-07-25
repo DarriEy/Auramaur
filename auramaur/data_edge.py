@@ -112,14 +112,19 @@ REQUIREMENTS: dict[str, tuple[DataRequirement, ...]] = {
     "settlement_arb": (_FRED, _MARKETS),
     "weather_temp": (DataRequirement(component="weather_ensemble", max_age_seconds=3600, fail_closed=False), _MARKETS),
     "vol_anchor": (DataRequirement(component="spot_volatility", max_age_seconds=3600, fail_closed=False), _MARKETS),
-    "oddlot_tender": (DataRequirement(component="edgar_filings", max_age_seconds=21600),),
+    # EDGAR filings are event-driven: an empty result is the normal state
+    # between tender offers, not a delivery failure.
+    "oddlot_tender": (DataRequirement(component="edgar_filings", max_age_seconds=21600, fail_closed=False),),
     "resolution_lens": (_MARKETS, _EVIDENCE.model_copy(update={"fail_closed": False})),
     "resolution_lens_kalshi": (_MARKETS, _EVIDENCE.model_copy(update={"fail_closed": False})),
     "term_structure": (_MARKETS,),
     "agent_trader": (_MARKETS, DataRequirement(component="model_response", max_age_seconds=10800, fail_closed=False)),
     "long_horizon": (_MARKETS,),
     "entailment_arb": (_MARKETS,),
-    "ibkr_etf_paper": (DataRequirement(component="equity_quote", max_age_seconds=120, fail_closed=False), _EVIDENCE),
+    # ETF evidence gathers only on view refreshes during market hours; a
+    # weekend gap alone exceeds the 48h evidence window.
+    "ibkr_etf_paper": (DataRequirement(component="equity_quote", max_age_seconds=120, fail_closed=False),
+                       _EVIDENCE.model_copy(update={"fail_closed": False})),
     "ibkr_fx_paper": (_VENUE_QUOTE,),
     "ibkr_futures_paper": (_VENUE_QUOTE,),
     "ibkr_global_etf_paper": (_VENUE_QUOTE,),
