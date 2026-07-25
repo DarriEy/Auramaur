@@ -37,22 +37,22 @@ class FailingSource:
 
 
 @pytest.fixture
-def event_loop():
+def local_loop():
     loop = asyncio.new_event_loop()
     yield loop
     loop.close()
 
 
 @pytest.fixture
-def db(event_loop):
+def db(local_loop):
     async def _setup():
         database = Database(db_path=":memory:")
         await database.connect()
         return database
 
-    database = event_loop.run_until_complete(_setup())
+    database = local_loop.run_until_complete(_setup())
     yield database
-    event_loop.run_until_complete(database.close())
+    local_loop.run_until_complete(database.close())
 
 
 def run(coro, loop):
@@ -60,55 +60,55 @@ def run(coro, loop):
 
 
 class TestEnsembleEstimator:
-    def test_single_source(self, db, event_loop):
+    def test_single_source(self, db, local_loop):
         sources = [MockSource("claude", 0.7)]
         ensemble = EnsembleEstimator(db=db, sources=sources)
-        result = run(ensemble.estimate("Will X happen?"), event_loop)
+        result = run(ensemble.estimate("Will X happen?"), local_loop)
         assert abs(result["probability"] - 0.7) < 0.001
 
-    def test_equal_weight_average(self, db, event_loop):
+    def test_equal_weight_average(self, db, local_loop):
         sources = [MockSource("claude", 0.6), MockSource("polls", 0.8)]
         ensemble = EnsembleEstimator(db=db, sources=sources)
-        result = run(ensemble.estimate("Will X happen?"), event_loop)
+        result = run(ensemble.estimate("Will X happen?"), local_loop)
         assert abs(result["probability"] - 0.7) < 0.001
 
-    def test_weighted_average(self, db, event_loop):
+    def test_weighted_average(self, db, local_loop):
         sources = [MockSource("claude", 0.6), MockSource("polls", 0.8)]
         ensemble = EnsembleEstimator(db=db, sources=sources)
         ensemble._weights = {"claude": 2.0, "polls": 1.0}
-        result = run(ensemble.estimate("Will X happen?"), event_loop)
+        result = run(ensemble.estimate("Will X happen?"), local_loop)
         # (0.6*2 + 0.8*1) / 3 = 2.0/3 ~ 0.667
         assert abs(result["probability"] - 0.667) < 0.01
 
-    def test_source_returns_none(self, db, event_loop):
+    def test_source_returns_none(self, db, local_loop):
         sources = [MockSource("claude", 0.6), MockSource("polls", None)]
         ensemble = EnsembleEstimator(db=db, sources=sources)
-        result = run(ensemble.estimate("Will X happen?"), event_loop)
+        result = run(ensemble.estimate("Will X happen?"), local_loop)
         # Only claude contributes
         assert abs(result["probability"] - 0.6) < 0.001
         assert "polls" not in result["sources"]
 
-    def test_failing_source_handled(self, db, event_loop):
+    def test_failing_source_handled(self, db, local_loop):
         sources = [MockSource("claude", 0.6), FailingSource()]
         ensemble = EnsembleEstimator(db=db, sources=sources)
-        result = run(ensemble.estimate("Will X happen?"), event_loop)
+        result = run(ensemble.estimate("Will X happen?"), local_loop)
         assert abs(result["probability"] - 0.6) < 0.001
 
-    def test_no_sources(self, db, event_loop):
+    def test_no_sources(self, db, local_loop):
         ensemble = EnsembleEstimator(db=db, sources=[])
-        result = run(ensemble.estimate("Will X happen?"), event_loop)
+        result = run(ensemble.estimate("Will X happen?"), local_loop)
         assert result["probability"] is None
 
-    def test_all_sources_none(self, db, event_loop):
+    def test_all_sources_none(self, db, local_loop):
         sources = [MockSource("a", None), MockSource("b", None)]
         ensemble = EnsembleEstimator(db=db, sources=sources)
-        result = run(ensemble.estimate("Will X happen?"), event_loop)
+        result = run(ensemble.estimate("Will X happen?"), local_loop)
         assert result["probability"] is None
 
-    def test_source_details_returned(self, db, event_loop):
+    def test_source_details_returned(self, db, local_loop):
         sources = [MockSource("claude", 0.6), MockSource("polls", 0.8)]
         ensemble = EnsembleEstimator(db=db, sources=sources)
-        result = run(ensemble.estimate("Will X happen?"), event_loop)
+        result = run(ensemble.estimate("Will X happen?"), local_loop)
         assert "claude" in result["sources"]
         assert "polls" in result["sources"]
         assert result["sources"]["claude"] == 0.6

@@ -7,6 +7,44 @@ on:
     branches: [main]
 
 jobs:
+  dependency-audit:
+    name: Dependency security audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      # Audit the extras the runtime image actually installs (see Dockerfile:
+      # kalshi, ibkr, web). --all-extras would drag torch/triton/cuda and
+      # transformers into the audited set — the most CVE-active packages on
+      # PyPI, none of which ship in the image.
+      - name: Export locked Python dependencies
+        run: >
+          uv export --frozen --extra kalshi --extra ibkr --extra web
+          --no-hashes --output-file requirements-audit.txt
+
+      # ADVISORY, never blocking. This verdict depends on an external advisory
+      # feed, so a HIGH published against any locked package would otherwise
+      # turn every open PR red with no code change — the same failure mode as
+      # the unpinned ruff that broke every PR when 0.16.0 shipped. pip-audit
+      # itself is pinned for that same reason.
+      - name: Audit locked Python dependencies
+        continue-on-error: true
+        run: uvx pip-audit==2.10.1 -r requirements-audit.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Audit web dependencies
+        continue-on-error: true
+        working-directory: web
+        run: npm audit --audit-level=high
+
   safety-tests:
     name: Safety gate tests
     runs-on: ubuntu-latest

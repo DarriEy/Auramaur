@@ -11,6 +11,7 @@ so the retry backs off instead of looping.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -42,6 +43,12 @@ def _setup(book: OrderBook, current_price: float = 0.90, max_slip_cents: int = 1
     bot = AuramaurBot(settings=settings)
     db = AsyncMock()
     db.fetchone = AsyncMock(return_value={"token_id": "tok-1"})
+
+    @asynccontextmanager
+    async def transaction(*_args, **_kwargs):
+        yield
+
+    db.transaction = MagicMock(side_effect=transaction)
     # pnl_tracker present-but-None preserves the prior `.get()` → None behavior
     # now that the exit reads it via the typed accessor.
     bot._components = Components({"db": db, "pnl_tracker": None})

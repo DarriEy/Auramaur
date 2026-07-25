@@ -27,22 +27,22 @@ from config.settings import Settings
 
 
 @pytest.fixture
-def event_loop():
+def local_loop():
     loop = asyncio.new_event_loop()
     yield loop
     loop.close()
 
 
 @pytest.fixture
-def db(event_loop):
+def db(local_loop):
     async def _setup():
         database = Database(db_path=":memory:")
         await database.connect()
         return database
 
-    database = event_loop.run_until_complete(_setup())
+    database = local_loop.run_until_complete(_setup())
     yield database
-    event_loop.run_until_complete(database.close())
+    local_loop.run_until_complete(database.close())
 
 
 def run(coro, loop):
@@ -149,7 +149,7 @@ class TestCoarseDigest:
 
 
 class TestStrategicCache:
-    def test_partition_reuses_fresh_entry(self, db, event_loop):
+    def test_partition_reuses_fresh_entry(self, db, local_loop):
         a = _analyzer(db)
         market = _market("m1", 0.40)
         evidence = {market.id: [_Item("some headline")]}
@@ -160,15 +160,15 @@ class TestStrategicCache:
             key, market.id,
             BatchAnalysisResult(market_id="m1", probability=0.33, confidence="MEDIUM").model_dump(),
             ttl_seconds=900, market_price=0.40,
-        ), event_loop)
+        ), local_loop)
 
-        cached, to_analyze, keys = run(a._partition_cached([market], evidence), event_loop)
+        cached, to_analyze, keys = run(a._partition_cached([market], evidence), local_loop)
         assert len(cached) == 1
         assert cached[0].probability == 0.33
         assert to_analyze == []
         assert keys[market.id] == key
 
-    def test_all_cached_short_circuits_llm(self, db, event_loop):
+    def test_all_cached_short_circuits_llm(self, db, local_loop):
         a = _analyzer(db)
         market = _market("m1", 0.40)
         evidence = {market.id: [_Item("some headline")]}
@@ -177,7 +177,7 @@ class TestStrategicCache:
             key, market.id,
             BatchAnalysisResult(market_id="m1", probability=0.33, confidence="MEDIUM").model_dump(),
             ttl_seconds=900, market_price=0.40,
-        ), event_loop)
+        ), local_loop)
 
         # If the LLM is called despite a full cache hit, fail loudly.
         async def _boom(*args, **kwargs):
@@ -185,11 +185,11 @@ class TestStrategicCache:
 
         a._call_llm = _boom  # type: ignore[assignment]
 
-        out = run(a.analyze_batch([market], evidence), event_loop)
+        out = run(a.analyze_batch([market], evidence), local_loop)
         assert len(out.markets) == 1
         assert out.markets[0].probability == 0.33
 
-    def test_price_move_invalidates(self, db, event_loop):
+    def test_price_move_invalidates(self, db, local_loop):
         a = _analyzer(db)
         market = _market("m1", 0.40)
         evidence = {market.id: [_Item("some headline")]}
@@ -199,14 +199,14 @@ class TestStrategicCache:
             key, market.id,
             BatchAnalysisResult(market_id="m1", probability=0.33, confidence="MEDIUM").model_dump(),
             ttl_seconds=900, market_price=0.40,
-        ), event_loop)
+        ), local_loop)
 
         moved = _market("m1", 0.60)  # +50% move
-        cached, to_analyze, _ = run(a._partition_cached([moved], {moved.id: evidence["m1"]}), event_loop)
+        cached, to_analyze, _ = run(a._partition_cached([moved], {moved.id: evidence["m1"]}), local_loop)
         assert cached == []
         assert len(to_analyze) == 1
 
-    def test_cache_disabled_bypasses(self, db, event_loop):
+    def test_cache_disabled_bypasses(self, db, local_loop):
         a = _analyzer(db)
         a._settings.nlp.strategic_cache_enabled = False
         market = _market("m1", 0.40)
@@ -216,9 +216,9 @@ class TestStrategicCache:
             key, market.id,
             BatchAnalysisResult(market_id="m1", probability=0.33, confidence="MEDIUM").model_dump(),
             ttl_seconds=900, market_price=0.40,
-        ), event_loop)
+        ), local_loop)
 
-        cached, to_analyze, _ = run(a._partition_cached([market], evidence), event_loop)
+        cached, to_analyze, _ = run(a._partition_cached([market], evidence), local_loop)
         assert cached == []  # disabled → no reuse
         assert len(to_analyze) == 1
 
@@ -258,7 +258,7 @@ class TestStrategicParseAndThrottle:
         out = StrategicAnalyzer._parse_strategic_response("no json here at all")
         assert out.markets == []
 
-    def test_batch_throttle_skips_llm_within_interval(self, db, event_loop):
+    def test_batch_throttle_skips_llm_within_interval(self, db, local_loop):
         s = Settings()
         s.nlp.strategic_min_interval_seconds = 3600
         s.nlp.skip_second_opinion = True  # isolate to the batch call
@@ -273,14 +273,14 @@ class TestStrategicParseAndThrottle:
 
         a._call_llm = fake_llm  # type: ignore[assignment]
 
-        run(a.analyze_batch_with_adversarial([market], evidence), event_loop)
+        run(a.analyze_batch_with_adversarial([market], evidence), local_loop)
         assert calls["n"] == 1  # first run hits the LLM
 
         # Immediate second run is within the interval → served from cache, no call.
-        run(a.analyze_batch_with_adversarial([market], evidence), event_loop)
+        run(a.analyze_batch_with_adversarial([market], evidence), local_loop)
         assert calls["n"] == 1
 
-    def test_batch_throttle_defers_novel_before_floor(self, db, event_loop):
+    def test_batch_throttle_defers_novel_before_floor(self, db, local_loop):
         """Inside the novel floor, even uncached markets wait (cost guard)."""
         s = Settings()
         s.nlp.strategic_min_interval_seconds = 3600
@@ -294,15 +294,15 @@ class TestStrategicParseAndThrottle:
             return '[{"market_id": "m1", "probability": 0.3, "confidence": "MEDIUM"}]'
 
         a._call_llm = fake_llm  # type: ignore[assignment]
-        run(a.analyze_batch_with_adversarial([_market("m1", 0.40)], {}), event_loop)
+        run(a.analyze_batch_with_adversarial([_market("m1", 0.40)], {}), local_loop)
         assert calls["n"] == 1
 
         # Novel market immediately after: within floor -> deferred, no call.
-        out = run(a.analyze_batch_with_adversarial([_market("m2", 0.50)], {}), event_loop)
+        out = run(a.analyze_batch_with_adversarial([_market("m2", 0.50)], {}), local_loop)
         assert calls["n"] == 1
         assert out.markets == []
 
-    def test_novel_batch_overrides_after_floor(self, db, event_loop):
+    def test_novel_batch_overrides_after_floor(self, db, local_loop):
         """Past the floor (but inside the interval), NOVEL markets analyze —
         the interval throttles re-analysis, not first analysis. The old
         behavior dropped every uncached candidate for the full interval
@@ -323,7 +323,7 @@ class TestStrategicParseAndThrottle:
         a._call_llm = fake_llm  # type: ignore[assignment]
         a._last_batch_at = datetime.now(timezone.utc) - timedelta(seconds=700)
 
-        out = run(a.analyze_batch_with_adversarial([_market("m2", 0.50)], {}), event_loop)
+        out = run(a.analyze_batch_with_adversarial([_market("m2", 0.50)], {}), local_loop)
         assert calls["n"] == 1  # novel override ran the batch
         assert [m.market_id for m in out.markets] == ["m2"]
 
