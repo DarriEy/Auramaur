@@ -524,3 +524,46 @@ def test_kalshi_lane_scopes_cells_and_venue():
     assert poly._eligible(kalshi_mkt, cfg) is False
     assert kalshi._eligible(kalshi_mkt, cfg) is True   # venue's lower floor
     assert kalshi._eligible(poly_mkt, cfg) is False
+
+
+@pytest.mark.asyncio
+async def test_open_book_is_venue_scoped_and_clears_on_live_close(tmp_path):
+    """Two failures that between them silently stop the pillar trading.
+
+    1. The theses table was keyed by model_alias alone, so the Kalshi instance
+       counted the Polymarket book and skipped every arm as book_full — the
+       lane could never place a trade.
+    2. The closure check required a PAPER realization, so the moment a cell
+       graduated to live its theses could never clear: the book filled to
+       max_open_per_model and the arm went permanently book_full.
+    """
+    from unittest.mock import MagicMock
+
+    from auramaur.strategy.agent_trader import AgentTraderPillar
+
+    db = Database(str(tmp_path / "theses.db"))
+    await db.connect()
+    common = dict(settings=_settings([]), discovery=MagicMock(),
+                  exchange=MagicMock(), risk_manager=MagicMock(),
+                  pnl_tracker=MagicMock(), calibration=MagicMock())
+    poly = AgentTraderPillar(db=db, **common)
+    kalshi = AgentTraderPillar(db=db, **common, exchange_name="kalshi",
+                               cell_suffix="_kalshi")
+    await poly._ensure_schema()
+
+    for mid in ("p1", "p2"):
+        await db.execute(
+            "INSERT INTO agent_trader_theses (model_alias, cell, market_id, entered) "
+            "VALUES ('opus', 'agent_trader_opus', ?, 1)", (mid,))
+
+    # The Polymarket book is visible only to the Polymarket instance.
+    assert len(await poly._open_theses("opus")) == 2
+    assert len(await kalshi._open_theses("opus")) == 0
+
+    # A LIVE realization must clear the thesis (is_paper=0).
+    await db.execute(
+        "INSERT INTO pnl_ledger (market_id, strategy_source, kind, pnl, is_paper,"
+        " source_ref, realized_at) VALUES ('p1','agent_trader_opus','trade',1.5,0,"
+        "'ref-p1',datetime('now'))")
+    assert len(await poly._open_theses("opus")) == 1
+    await db.close()

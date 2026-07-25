@@ -102,6 +102,9 @@ _THESES_TABLE = """
 CREATE TABLE IF NOT EXISTS agent_trader_theses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     model_alias TEXT NOT NULL,
+    -- Venue-scoped strategy cell (agent_trader_<alias>[_<venue>]): each venue
+    -- instance keeps its own book, so one cannot fill the other's slots.
+    cell TEXT NOT NULL DEFAULT '',
     market_id TEXT NOT NULL,
     question TEXT DEFAULT '',
     token TEXT DEFAULT '',
@@ -195,6 +198,19 @@ class AgentTraderPillar:
             # Upgrade a pre-`entered` table in place (rows so far all entered).
             await self._db.execute(
                 "ALTER TABLE agent_trader_theses ADD COLUMN entered INTEGER DEFAULT 1")
+        except Exception:
+            pass  # column already exists
+        try:
+            # Venue scope. The table was keyed by model_alias alone, so a second
+            # venue instance counted the FIRST venue's open book and skipped
+            # every arm as book_full — the Kalshi lane could never trade.
+            # Existing rows predate any second venue, so they are Polymarket.
+            await self._db.execute(
+                "ALTER TABLE agent_trader_theses ADD COLUMN cell TEXT "
+                "NOT NULL DEFAULT ''")
+            await self._db.execute(
+                "UPDATE agent_trader_theses SET cell = 'agent_trader_' || "
+                "model_alias WHERE cell = ''")
         except Exception:
             pass  # column already exists
         await self._db.commit()
@@ -407,16 +423,21 @@ class AgentTraderPillar:
         """This alias's ENTERED theses with no realized event yet — its open
         book. Stake-0 prediction-only rows (entered=0) are analysis data, not
         positions."""
+        # Scoped to THIS venue's cell: the Kalshi and Polymarket instances keep
+        # separate books. The closure check deliberately does NOT filter
+        # is_paper — it used to require a PAPER realization, so the moment a
+        # cell graduated to live its theses could never clear, the book filled
+        # to max_open_per_model, and the arm went permanently book_full.
+        # strategy_source already scopes the ledger to this cell.
         return await self._db.fetchall(
             """SELECT t.market_id, t.question, t.token, t.prob, t.market_prob,
                       t.thesis, t.created_at
                FROM agent_trader_theses t
-               WHERE t.model_alias = ? AND t.entered = 1
+               WHERE t.model_alias = ? AND t.entered = 1 AND t.cell = ?
                  AND NOT EXISTS (SELECT 1 FROM pnl_ledger l
                                  WHERE l.market_id = t.market_id
-                                   AND l.strategy_source = ?
-                                   AND l.is_paper = 1)""",
-            (alias, self.cell(alias)),
+                                   AND l.strategy_source = ?)""",
+            (alias, self.cell(alias), self.cell(alias)),
         )
 
     @staticmethod
@@ -582,10 +603,10 @@ class AgentTraderPillar:
         if await self._market_claimed(market.id):
             await self._db.execute(
                 """INSERT INTO agent_trader_theses
-                   (model_alias, market_id, question, token, prob, market_prob,
-                    thesis, stake, entered)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0)""",
-                (alias, market.id, market.question,
+                   (model_alias, cell, market_id, question, token, prob,
+                    market_prob, thesis, stake, entered)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)""",
+                (alias, self.cell(alias), market.id, market.question,
                  "YES" if side == OrderSide.BUY else "NO",
                  prob_yes, market_yes, decision["thesis"][:500]),
             )
@@ -628,10 +649,11 @@ class AgentTraderPillar:
         await self._record_position(signal, market, res.order, res.result)
         await self._db.execute(
             """INSERT INTO agent_trader_theses
-               (model_alias, market_id, question, token, prob, market_prob,
-                thesis, stake)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (alias, market.id, market.question, res.order.token.value,
+               (model_alias, cell, market_id, question, token, prob,
+                market_prob, thesis, stake)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (alias, self.cell(alias), market.id, market.question,
+             res.order.token.value,
              prob_yes, market_yes, decision["thesis"][:500], size),
         )
         await self._db.commit()
