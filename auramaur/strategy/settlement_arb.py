@@ -49,6 +49,11 @@ from auramaur.strategy.econ_pricing import (
 
 log = structlog.get_logger()
 
+# How long a FAILED settlement extraction is trusted before the market is
+# offered to the analyzer again. Successes are cached permanently — the
+# resolution criteria they encode are static.
+_FAILED_EXTRACTION_TTL_HOURS = 72
+
 # Indicators this pillar understands, by the registry key (see econ_pricing).
 # Lexical hints route a market to a candidate series before the LLM extracts the
 # precise predicate; the series the LLM names must be one of these.
@@ -334,9 +339,21 @@ class SettlementArbPillar:
         """
         if (getattr(m, "exchange", "") or "") == "kalshi":
             return kalshi_macro_predicate(m)
+        # A cached FAILURE expires; a cached success does not. Every failure
+        # path — analyzer absent, JSON parse error, low confidence, failed
+        # verify — wrote a permanent negative row, so one bad extraction
+        # excluded that market forever: 32 poisoned rows on 2026-07-25, 79% of
+        # the Polymarket econ universe this pillar had ever seen, still
+        # accruing. checked_at was already stored and never read.
         row = await self._db.fetchone(
-            "SELECT indicator, operator, threshold, reference_period, verified "
-            "FROM settlement_extractions WHERE market_id = ?", (m.id,))
+            "SELECT indicator, operator, threshold, reference_period, verified, "
+            "       datetime(checked_at) >= datetime('now', ?) AS fresh "
+            "FROM settlement_extractions WHERE market_id = ?",
+            (f"-{_FAILED_EXTRACTION_TTL_HOURS} hours", m.id))
+        if row is not None:
+            usable = bool(row["indicator"]) and bool(row["verified"])
+            if not usable and not row["fresh"]:
+                row = None  # retry a stale failure instead of honouring it
         if row is not None:
             if not row["indicator"] or not row["verified"]:
                 return None

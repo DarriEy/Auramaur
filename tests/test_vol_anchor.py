@@ -250,3 +250,33 @@ async def test_non_crypto_and_unparseable_ignored(tmp_path):
         pillar._asset_state.assert_not_awaited()  # nothing to price at all
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_market_claimed_only_while_the_position_is_open(tmp_path):
+    """"One position per market bot-wide" must mean CURRENTLY held.
+
+    This probed `trades` for any row by any strategy ever, and trades rows are
+    never deleted — so every market the bot had ever touched was permanently
+    off-limits: 1393 blocked on 2026-07-25, 1248 of them long closed, against
+    3 trades this pillar has ever made.
+    """
+    pillar, db, _ = await _pillar(tmp_path, [])
+    try:
+        # A historical trade with no surviving position must NOT claim.
+        await db.execute(
+            """INSERT INTO trades (market_id, side, size, price, is_paper,
+               status, strategy_source, exchange)
+               VALUES ('CLOSED','BUY',10,0.5,1,'filled','llm','polymarket')""")
+        await db.commit()
+        assert await pillar._market_claimed("CLOSED") is False
+
+        # An open position claims, from either table.
+        await db.execute(
+            """INSERT INTO cost_basis (market_id, token, token_id, size,
+               avg_cost, total_cost, realized_pnl, is_paper, updated_at)
+               VALUES ('OPEN','YES','t',10,0.5,5.0,0,1,datetime('now'))""")
+        await db.commit()
+        assert await pillar._market_claimed("OPEN") is True
+    finally:
+        await db.close()

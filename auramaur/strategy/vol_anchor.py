@@ -340,12 +340,23 @@ class VolAnchorPillar:
         return True
 
     async def _market_claimed(self, market_id: str) -> bool:
+        """One position per market bot-wide — but only while it is still HELD.
+
+        This probed `trades` for any row by any strategy ever, and trades rows
+        are never deleted, so every market the bot had ever touched was
+        permanently off-limits: 1393 markets blocked on 2026-07-25, 1248 of
+        them long closed, against 3 trades this pillar has ever made. The
+        cross-strategy scope is deliberate (the docstring's "one position per
+        market bot-wide"); the missing part was "still open".
+        """
         row = await self._db.fetchone(
-            "SELECT 1 FROM trades WHERE market_id = ? LIMIT 1", (market_id,))
+            "SELECT 1 FROM cost_basis WHERE market_id = ? AND size > 0 LIMIT 1",
+            (market_id,))
         if row is not None:
             return True
         row = await self._db.fetchone(
-            "SELECT 1 FROM portfolio WHERE market_id = ? LIMIT 1", (market_id,))
+            "SELECT 1 FROM portfolio WHERE market_id = ? AND size > 0 LIMIT 1",
+            (market_id,))
         return row is not None
 
     async def _try_enter(self, market: Market, fair: float, sigma: float,
