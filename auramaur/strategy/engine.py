@@ -357,18 +357,28 @@ class TradingEngine(CycleOrchestrationMixin):
         through to full LLM analysis only to be cap-blocked at the gateway.
         The cost is conservatism if a strategy later graduates while its paper
         book still holds a market (the live entry is skipped, not misplaced).
+
+        Reads cost_basis, NOT portfolio. The gateway's per-(market, token) cap
+        check reads cost_basis, so a filter reading portfolio can disagree with
+        the gate that will block the order — and did: market 3092787 held
+        $16.27 of NO in cost_basis with NO portfolio row at all, so it passed
+        this filter, consumed a full LLM analysis and a risk evaluation, and
+        was then dropped at placement (2026-07-25 23:20). portfolio is a
+        projection that can lag or lose rows; cost_basis is the authoritative
+        holding record. Filter and gate must read the same source or we
+        systematically spend budget on bets that cannot clear.
         """
         try:
             if self.exchange_name:
                 rows = await self.db.fetchall(
-                    """SELECT p.market_id FROM portfolio p
-                       JOIN markets m ON p.market_id = m.id
-                       WHERE p.size > 0 AND m.exchange = ?""",
+                    """SELECT cb.market_id FROM cost_basis cb
+                       JOIN markets m ON cb.market_id = m.id
+                       WHERE cb.size > 0 AND m.exchange = ?""",
                     (self.exchange_name,),
                 )
             else:
                 rows = await self.db.fetchall(
-                    "SELECT market_id FROM portfolio WHERE size > 0",
+                    "SELECT market_id FROM cost_basis WHERE size > 0",
                 )
             return {r["market_id"] for r in rows}
         except Exception:

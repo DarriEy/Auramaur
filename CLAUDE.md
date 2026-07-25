@@ -40,7 +40,10 @@ When making git commits, use `Assisted-by: Claude (Anthropic)` in the commit mes
 
 ## Risk Defaults
 - Max drawdown: 15%
-- Max stake per market: $25
+- Max stake per market: 2% of equity, under an absolute ceiling
+  (`risk.max_stake_abs_ceiling`, tracked default $25; operator-raised to
+  $35 on 2026-07-25, so ~$30.80 of equity binds today). The lower of the
+  two always applies — check the effective value, not this line.
 - Daily loss limit: $200
 - Max open positions: 500
 - Minimum edge: 5% after fees

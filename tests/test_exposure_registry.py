@@ -6,6 +6,8 @@ import ast
 from collections import Counter
 from pathlib import Path
 
+import pytest
+
 from auramaur.strategy.exposure_registry import (
     EXPOSURE_BY_KEY,
     EXPOSURE_PATHS,
@@ -154,3 +156,43 @@ def test_every_live_adapter_submission_boundary_is_known():
                 owner = parents.get(owner)
             found[(path.relative_to(_ROOT).as_posix(), owner.name, marker)] += 1
     assert found == expected
+
+
+@pytest.mark.asyncio
+async def test_held_filter_and_market_cap_read_the_same_source(tmp_path):
+    """The candidate filter must see what the gateway's cap check sees.
+
+    _held_market_ids read `portfolio` while ExecutionGateway._exceeds_market_cap
+    reads `cost_basis`. Market 3092787 held $16.27 of NO in cost_basis with no
+    portfolio row at all, so it passed the filter, consumed a full LLM analysis
+    and risk evaluation, and was dropped at placement (2026-07-25 23:20). A
+    filter that disagrees with the gate spends budget on bets that cannot
+    clear.
+    """
+    from auramaur.db.database import Database
+    from auramaur.strategy.engine import TradingEngine
+
+    db = Database(str(tmp_path / "held.db"))
+    await db.connect()
+    try:
+        engine = TradingEngine.__new__(TradingEngine)
+        engine.db = db
+        engine.exchange_name = "polymarket"
+
+        await db.execute(
+            "INSERT INTO markets (id, exchange, question, last_updated) "
+            "VALUES ('3092787', 'polymarket', 'q?', datetime('now'))")
+        # Authoritative holding, with NO portfolio row — the real shape.
+        await db.execute(
+            """INSERT INTO cost_basis (market_id, token, token_id, size,
+               avg_cost, total_cost, realized_pnl, is_paper, updated_at)
+               VALUES ('3092787','NO','t',67.79,0.24,16.27,0,1,datetime('now'))""")
+        await db.commit()
+        assert await engine._held_market_ids() == {"3092787"}
+
+        # A fully closed position stops filtering.
+        await db.execute("UPDATE cost_basis SET size = 0 WHERE market_id='3092787'")
+        await db.commit()
+        assert await engine._held_market_ids() == set()
+    finally:
+        await db.close()
