@@ -1,112 +1,116 @@
-"""Conformance guard for the uniform Strategy pillar contract.
-
-Every pillar declares ``name`` + ``execution_mode`` (strategy/protocols.py). The
-point of the contract is to make the EXECUTE stage explicit and *checked*: a
-pillar that should route through the single ExecutionGateway must not quietly
-grow a direct ``exchange.place_order`` bypass, while the legitimate bypasses
-(market maker resting quotes, concurrent arb legs, IBKR equities) are declared
-and whitelisted with a reason. That turns "is this gateway-bypass intentional?"
-from an unanswerable code-reading question into a test.
-"""
+"""Conformance guards generated from the authoritative strategy registry."""
 
 from __future__ import annotations
 
+import ast
 import pathlib
 
 import pytest
 
-from auramaur.strategy.bias_harvest import BiasHarvestPillar
-from auramaur.strategy.informed_flow_pillar import InformedFlowPillar
-from auramaur.strategy.ibkr_etf_paper import IBKRETFPaperPillar
-from auramaur.strategy.long_horizon import LongHorizonPillar
-from auramaur.strategy.cross_venue_arb import CrossVenueArbPillar
-from auramaur.strategy.econ_indicator import EconIndicatorPillar
-from auramaur.strategy.entailment_arb import EntailmentArbPillar
-from auramaur.strategy.market_maker import MarketMaker
-from auramaur.strategy.momentum_coupling import MomentumCouplingPillar
-from auramaur.strategy.oddlot_tender import OddLotTenderPillar
-from auramaur.strategy.protocols import ExecutionMode, NO_DIRECT_PLACE_MODES
-from auramaur.strategy.resolution_lens import ResolutionLensPillar
-from auramaur.strategy.arbitrage_scanner import ArbitrageScanner
-from auramaur.strategy.weather_temp import WeatherTempPillar
-from auramaur.strategy.platform_consensus import PlatformConsensusPillar
+from auramaur.bot import AuramaurBot
+from auramaur.strategy.protocols import (
+    DeploymentMode,
+    ExecutionMode,
+    NO_DIRECT_PLACE_MODES,
+    StrategyCapability,
+)
+from auramaur.strategy.registry import (
+    FULL_TRADE_PIPELINE,
+    NON_STRATEGY_TASKS,
+    STRATEGY_BY_TASK,
+    STRATEGY_SPECS,
+)
 
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-# (pillar class, source module) — every pillar the bot drives.
-PILLARS = [
-    (BiasHarvestPillar, "auramaur/strategy/bias_harvest.py"),
-    (LongHorizonPillar, "auramaur/strategy/long_horizon.py"),
-    (InformedFlowPillar, "auramaur/strategy/informed_flow_pillar.py"),
-    (ResolutionLensPillar, "auramaur/strategy/resolution_lens.py"),
-    (WeatherTempPillar, "auramaur/strategy/weather_temp.py"),
-    (EconIndicatorPillar, "auramaur/strategy/econ_indicator.py"),
-    (EntailmentArbPillar, "auramaur/strategy/entailment_arb.py"),
-    (CrossVenueArbPillar, "auramaur/strategy/cross_venue_arb.py"),
-    (MomentumCouplingPillar, "auramaur/strategy/momentum_coupling.py"),
-    (MarketMaker, "auramaur/strategy/market_maker.py"),
-    (ArbitrageScanner, "auramaur/strategy/arbitrage_scanner.py"),
-    (OddLotTenderPillar, "auramaur/strategy/oddlot_tender.py"),
-    (IBKRETFPaperPillar, "auramaur/strategy/ibkr_etf_paper.py"),
-    (PlatformConsensusPillar, "auramaur/strategy/platform_consensus.py"),
-]
 
-# NO_DIRECT_PLACE_MODES (single source of truth in protocols.py): the pillar must
-# not call exchange.place_order at all. The other modes legitimately place
-# directly (MM quotes; concurrent arb legs that then record_external_fill;
-# equities) and are skipped with their declared reason below.
+def test_registry_identity_and_task_entrypoints_are_unique():
+    assert len({spec.key for spec in STRATEGY_SPECS}) == len(STRATEGY_SPECS)
+    assert len({spec.task for spec in STRATEGY_SPECS}) == len(STRATEGY_SPECS)
+    for spec in STRATEGY_SPECS:
+        assert hasattr(AuramaurBot, spec.task), spec.key
+        assert spec.venues
+        assert FULL_TRADE_PIPELINE <= spec.capabilities
 
 
-def test_every_pillar_declares_a_unique_named_contract():
-    names: set[str] = set()
-    for cls, _ in PILLARS:
-        assert isinstance(cls.execution_mode, ExecutionMode), cls.__name__
-        assert isinstance(cls.name, str) and cls.name, cls.__name__
-        assert cls.name not in names, f"duplicate pillar name: {cls.name}"
-        names.add(cls.name)
+@pytest.mark.parametrize("spec", STRATEGY_SPECS, ids=lambda spec: spec.key)
+def test_registered_pillar_declares_matching_execution_contract(spec):
+    cls = spec.resolve_class()
+    assert cls.execution_mode is spec.execution_mode
+    assert callable(getattr(cls, spec.runner, None)), (spec.key, spec.runner)
+    # Families with venue/model-scoped runtime names may expose name as a
+    # property, but every implementation must explicitly expose one.
+    assert hasattr(cls, "name")
 
 
-@pytest.mark.parametrize("cls,modfile", PILLARS, ids=[c.name for c, _ in PILLARS])
-def test_gateway_pillars_do_not_place_orders_directly(cls, modfile):
-    """A GATEWAY_SINGLE/PAIRED pillar must route through the ExecutionGateway —
-    it must not call exchange.place_order in its own module. The direct-placement
-    modes are skipped with their declared reason (this is the whitelist)."""
-    if cls.execution_mode not in NO_DIRECT_PLACE_MODES:
-        pytest.skip(
-            f"{cls.name} is {cls.execution_mode.value}: direct placement is its "
-            f"declared, intentional path (not a gateway bypass)")
-    src = (_ROOT / modfile).read_text()
+@pytest.mark.parametrize("spec", STRATEGY_SPECS, ids=lambda spec: spec.key)
+def test_gateway_pillars_do_not_place_orders_directly(spec):
+    if spec.execution_mode not in NO_DIRECT_PLACE_MODES:
+        pytest.skip(f"{spec.key} has declared {spec.execution_mode.value} execution")
+    src = (_ROOT / (spec.module.replace(".", "/") + ".py")).read_text()
     assert ".place_order(" not in src, (
-        f"{cls.name} ({cls.execution_mode.value}) must submit through the "
-        f"ExecutionGateway, not call place_order directly")
+        f"{spec.key} ({spec.execution_mode.value}) must use its declared gateway/simulation path"
+    )
+
+
+def test_paper_only_is_explicit_and_cannot_be_mistaken_for_graduatable():
+    paper_only = {s.key for s in STRATEGY_SPECS if s.deployment is DeploymentMode.PAPER_ONLY}
+    assert paper_only == {"ibkr_etf_paper"}
+    for spec in STRATEGY_SPECS:
+        if spec.execution_mode is ExecutionMode.PAPER_SIMULATED:
+            assert spec.deployment in {DeploymentMode.PAPER_ONLY, DeploymentMode.GRADUATABLE}
 
 
 def test_arb_mixin_does_not_place_orders_directly():
-    """The arb execution mixin (bot_arb.py) places legs via the gateway's
-    place_legs adapter, never exchange.place_order directly — extending the
-    'only the gateway places' perimeter beyond the pillar modules."""
     src = (_ROOT / "auramaur/bot_arb.py").read_text()
-    assert ".place_order(" not in src, (
-        "bot_arb.py must place through ExecutionGateway.place_legs, not call "
-        "exchange.place_order directly")
+    assert ".place_order(" not in src
 
 
 def test_exit_path_only_ibkr_places_directly():
-    """Exit-path perimeter: the poly/kalshi exits route through the gateway's
-    submit_exit; the ONLY direct exchange.place_order in bot_exits.py is the IBKR
-    equity/options exit (the DIRECT_EQUITY exception — IBKR is off the
-    prediction-market gateway, with its own accounting). This names that
-    exception so a new direct placement on the gateway-venue exits fails."""
-    import ast
     src = (_ROOT / "auramaur/bot_exits.py").read_text()
     tree = ast.parse(src)
-    ibkr = next(n for n in ast.walk(tree)
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and n.name == "_execute_ibkr_exit")
-    bad = [node.lineno for node in ast.walk(tree)
-           if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-           and node.func.attr == "place_order"
-           and not (ibkr.lineno <= node.lineno <= ibkr.end_lineno)]
-    assert not bad, (
-        f"direct exchange.place_order in bot_exits.py outside the named IBKR "
-        f"equity exit (lines {bad}) — poly/kalshi exits must use gateway.submit_exit")
+    ibkr = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "_execute_ibkr_exit"
+    )
+    bad = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "place_order"
+        and not (ibkr.lineno <= node.lineno <= ibkr.end_lineno)
+    ]
+    assert not bad
+
+
+def test_capability_enum_covers_trade_lifecycle():
+    assert FULL_TRADE_PIPELINE == {
+        StrategyCapability.DISCOVERY,
+        StrategyCapability.MARKET_DATA,
+        StrategyCapability.SIGNAL,
+        StrategyCapability.RISK,
+        StrategyCapability.EXECUTION,
+        StrategyCapability.RECORDING,
+        StrategyCapability.RECONCILIATION,
+        StrategyCapability.SETTLEMENT,
+    }
+
+
+def test_every_bot_task_is_classified_as_strategy_or_non_strategy():
+    discovered: set[str] = set()
+    for relative in (
+        "auramaur/bot.py",
+        "auramaur/bot_strategy_tasks.py",
+        "auramaur/bot_arb_scan.py",
+    ):
+        tree = ast.parse((_ROOT / relative).read_text(encoding="utf-8"))
+        discovered.update(
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name.startswith("_task_")
+        )
+    assert not (set(STRATEGY_BY_TASK) & NON_STRATEGY_TASKS)
+    assert discovered == set(STRATEGY_BY_TASK) | set(NON_STRATEGY_TASKS)

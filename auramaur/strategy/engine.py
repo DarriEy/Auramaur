@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 
 import structlog
 
+from auramaur.strategy.protocols import ExecutionMode
+
 import asyncio
 import os
 import tempfile
@@ -70,6 +72,9 @@ log = structlog.get_logger()
 
 class TradingEngine(CycleOrchestrationMixin):
     """Orchestrates the full pipeline: data → analysis → risk → execution."""
+
+    name = "core_trading"
+    execution_mode = ExecutionMode.GATEWAY_SINGLE
 
     def __init__(
         self,

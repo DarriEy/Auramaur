@@ -54,6 +54,8 @@ async def warn_stranded_positions(db, enabled_books: set[str]) -> list[str]:
 class IBKRMultiAssetPaperBook:
     """One asset-specific ledger; this class has no broker order capability."""
 
+    name = "ibkr_multiasset"
+
     execution_mode = ExecutionMode.PAPER_SIMULATED
 
     def __init__(self, settings, client, db, book: IBKRBook,
