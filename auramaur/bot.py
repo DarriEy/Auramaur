@@ -39,6 +39,7 @@ from auramaur.bot_exits import ExitExecutionMixin
 from auramaur.bot_strategy_tasks import StrategyTaskMixin
 from auramaur.bot_arb import ArbExecutionMixin
 from auramaur.bot_order_monitor import OrderMonitorMixin
+from auramaur.bot_scheduling import BotSchedulingMixin
 from auramaur.monitoring.heartbeat import run_pillar_once
 
 log = structlog.get_logger()
@@ -58,7 +59,8 @@ async def run_ibkr_etf_arms_once(pillars, db=None) -> None:
 
 
 class AuramaurBot(
-    ExitExecutionMixin, StrategyTaskMixin, ArbExecutionMixin, OrderMonitorMixin
+    ExitExecutionMixin, StrategyTaskMixin, ArbExecutionMixin, OrderMonitorMixin,
+    BotSchedulingMixin,
 ):
     """Main bot orchestrator running concurrent async tasks."""
 
@@ -137,54 +139,6 @@ class AuramaurBot(
         if rm is not None and an is not None:
             from auramaur.nlp.gap_audit import GapAuditor
             rm.gap_auditor = GapAuditor(self._components.db, an, self.settings)
-
-    def _get_schedule_mode(self) -> str:
-        """Return current adaptive schedule mode."""
-        from datetime import datetime, timezone
-
-        cfg = self.settings.intervals
-        if not cfg.adaptive_enabled:
-            return ""
-
-        if self._is_cash_starved():
-            return "starved"
-
-        hour_utc = datetime.now(timezone.utc).hour
-        if hour_utc in cfg.quiet_hours_utc:
-            return "quiet"
-        if hour_utc not in cfg.peak_hours_utc:
-            return "off_peak"
-        return "peak"
-
-    def _adaptive_interval(self, base_seconds: int) -> int:
-        """Scale interval based on time of day and capital.
-
-        Peak hours (US market open):  base interval (full speed)
-        Off-peak (evening/morning):   base × off_peak_multiplier (default 4x)
-        Quiet hours (deep night):     base × quiet_multiplier (default 8x)
-        Cash-starved (<$5 total):     2x slowdown (starved cycle is already lean,
-                                      but no need to run it as often)
-        """
-        cfg = self.settings.intervals
-        mode = self._get_schedule_mode()
-
-        if mode == "quiet":
-            multiplier = cfg.quiet_multiplier
-        elif mode == "off_peak":
-            multiplier = cfg.off_peak_multiplier
-        else:
-            multiplier = 1.0
-
-        if self._is_cash_starved():
-            multiplier *= 5.0  # Price refresh only — no rush
-
-        return int(base_seconds * multiplier)
-
-    def _is_cash_starved(self) -> bool:
-        """Check if both exchanges are too low on cash to open new positions."""
-        # Default to starved (0) until portfolio monitor sets the real value
-        cash = getattr(self, '_last_known_cash', 0.0)
-        return cash < 5.0
 
     async def _check_kill_switch(self) -> bool:
         if kill_switch_present():

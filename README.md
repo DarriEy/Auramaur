@@ -41,6 +41,12 @@ and trades when there's edge after fees.
 # Install
 uv sync
 
+# If this checkout moved between Windows and Linux/WSL, recreate the ignored
+# virtual environment on the current platform first:
+# PowerShell: Remove-Item -Recurse -Force .venv
+# POSIX:     rm -rf .venv
+# Then run `uv sync` again.
+
 # Configure (copy and fill in)
 cp .env.example .env
 

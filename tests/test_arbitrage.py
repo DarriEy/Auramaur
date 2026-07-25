@@ -14,21 +14,21 @@ from auramaur.strategy.correlation import CorrelationDetector
 
 
 @pytest.fixture
-def event_loop():
+def local_loop():
     loop = asyncio.new_event_loop()
     yield loop
     loop.close()
 
 
 @pytest.fixture
-def db(event_loop):
+def db(local_loop):
     async def _setup():
         database = Database(db_path=":memory:")
         await database.connect()
         return database
-    database = event_loop.run_until_complete(_setup())
+    database = local_loop.run_until_complete(_setup())
     yield database
-    event_loop.run_until_complete(database.close())
+    local_loop.run_until_complete(database.close())
 
 
 @pytest.fixture
@@ -42,11 +42,11 @@ def run(coro, loop):
 
 
 class TestArbitrageExecutor:
-    def test_no_opportunities_returns_empty(self, executor, event_loop):
-        result = run(executor.generate_arb_signals(), event_loop)
+    def test_no_opportunities_returns_empty(self, executor, local_loop):
+        result = run(executor.generate_arb_signals(), local_loop)
         assert result == []
 
-    def test_conditional_violation_generates_pair(self, executor, event_loop):
+    def test_conditional_violation_generates_pair(self, executor, local_loop):
         """Conditional violation should produce buy-B sell-A signals."""
         db = executor._db
         # Market A (primary): 70% — too high if it implies B
@@ -55,23 +55,23 @@ class TestArbitrageExecutor:
                                      clob_token_yes, clob_token_no, last_updated)
                VALUES ('primary', 'c1', 'Win primary?', 1, 0.70, 0.30,
                        'primary-yes', 'primary-no', datetime('now'))"""
-        ), event_loop)
+        ), local_loop)
         # Market B (general): 60% — if A implies B, P(A) should be <= P(B)
         run(db.execute(
             """INSERT INTO markets (id, condition_id, question, active, outcome_yes_price, outcome_no_price,
                                      clob_token_yes, clob_token_no, last_updated)
                VALUES ('general', 'c2', 'Win general?', 1, 0.60, 0.40,
                        'general-yes', 'general-no', datetime('now'))"""
-        ), event_loop)
+        ), local_loop)
         # Conditional relationship
         run(db.execute(
             """INSERT INTO market_relationships
                (market_id_a, market_id_b, relationship_type, strength, description, detected_at)
                VALUES ('primary', 'general', 'conditional', 0.9, 'Primary implies general', datetime('now'))"""
-        ), event_loop)
-        run(db.commit(), event_loop)
+        ), local_loop)
+        run(db.commit(), local_loop)
 
-        pairs = run(executor.generate_arb_signals(), event_loop)
+        pairs = run(executor.generate_arb_signals(), local_loop)
         assert len(pairs) == 1
         buy_sig, sell_sig, opp = pairs[0]
         # Should buy B (general, underpriced) and sell A (primary, overpriced)
@@ -80,7 +80,7 @@ class TestArbitrageExecutor:
         assert sell_sig.market_id == "primary"
         assert sell_sig.recommended_side == OrderSide.SELL
 
-    def test_price_divergence_generates_pair(self, executor, event_loop):
+    def test_price_divergence_generates_pair(self, executor, local_loop):
         """Same-event divergence should buy cheap and sell expensive."""
         db = executor._db
         run(db.execute(
@@ -88,27 +88,27 @@ class TestArbitrageExecutor:
                                      clob_token_yes, clob_token_no, last_updated)
                VALUES ('cheap', 'c1', 'Event?', 1, 0.45, 0.55,
                        'cheap-yes', 'cheap-no', datetime('now'))"""
-        ), event_loop)
+        ), local_loop)
         run(db.execute(
             """INSERT INTO markets (id, condition_id, question, active, outcome_yes_price, outcome_no_price,
                                      clob_token_yes, clob_token_no, last_updated)
                VALUES ('expensive', 'c2', 'Event?', 1, 0.55, 0.45,
                        'expensive-yes', 'expensive-no', datetime('now'))"""
-        ), event_loop)
+        ), local_loop)
         run(db.execute(
             """INSERT INTO market_relationships
                (market_id_a, market_id_b, relationship_type, strength, description, detected_at)
                VALUES ('cheap', 'expensive', 'same_event', 0.95, 'Same event', datetime('now'))"""
-        ), event_loop)
-        run(db.commit(), event_loop)
+        ), local_loop)
+        run(db.commit(), local_loop)
 
-        pairs = run(executor.generate_arb_signals(), event_loop)
+        pairs = run(executor.generate_arb_signals(), local_loop)
         assert len(pairs) == 1
         buy_sig, sell_sig, _ = pairs[0]
         assert buy_sig.market_id == "cheap"
         assert sell_sig.market_id == "expensive"
 
-    def test_distinct_outcomes_in_same_event_are_not_arbitrage(self, executor, event_loop):
+    def test_distinct_outcomes_in_same_event_are_not_arbitrage(self, executor, local_loop):
         db = executor._db
         for mid, question, price in (
             ("actor-a", "Will Timothee be the #1 searched actor?", 0.08),
@@ -119,17 +119,17 @@ class TestArbitrageExecutor:
                        outcome_yes_price, outcome_no_price, last_updated)
                    VALUES (?, ?, ?, 1, ?, ?, datetime('now'))""",
                 (mid, mid, question, price, 1 - price),
-            ), event_loop)
+            ), local_loop)
         run(db.execute(
             """INSERT INTO market_relationships
                (market_id_a, market_id_b, relationship_type, strength, description, detected_at)
                VALUES ('actor-a', 'actor-b', 'same_event', 0.95, 'Same search event', datetime('now'))"""
-        ), event_loop)
-        run(db.commit(), event_loop)
+        ), local_loop)
+        run(db.commit(), local_loop)
 
-        assert run(executor.generate_arb_signals(), event_loop) == []
+        assert run(executor.generate_arb_signals(), local_loop) == []
 
-    def test_load_market_preserves_execution_metadata(self, executor, event_loop):
+    def test_load_market_preserves_execution_metadata(self, executor, local_loop):
         db = executor._db
         run(db.execute(
             """INSERT INTO markets
@@ -138,35 +138,35 @@ class TestArbitrageExecutor:
                 clob_token_no, last_updated)
                VALUES ('meta', 'polymarket', 'c1', 'ticker-1', 'Event?', 1,
                        0.4, 0.6, 'yes-token', 'no-token', datetime('now'))"""
-        ), event_loop)
-        run(db.commit(), event_loop)
+        ), local_loop)
+        run(db.commit(), local_loop)
 
-        market = run(executor._load_market("meta"), event_loop)
+        market = run(executor._load_market("meta"), local_loop)
         assert market is not None
         assert market.exchange == "polymarket"
         assert market.ticker == "ticker-1"
         assert market.clob_token_yes == "yes-token"
         assert market.clob_token_no == "no-token"
 
-    def test_missing_market_skipped(self, executor, event_loop):
+    def test_missing_market_skipped(self, executor, local_loop):
         """Opportunities with missing markets should be skipped."""
         db = executor._db
         # Only create one market
         run(db.execute(
             """INSERT INTO markets (id, condition_id, question, active, outcome_yes_price, outcome_no_price, last_updated)
                VALUES ('exists', 'c1', 'Q?', 1, 0.50, 0.50, datetime('now'))"""
-        ), event_loop)
+        ), local_loop)
         run(db.execute(
             """INSERT INTO market_relationships
                (market_id_a, market_id_b, relationship_type, strength, description, detected_at)
                VALUES ('exists', 'missing', 'same_event', 0.9, 'Related', datetime('now'))"""
-        ), event_loop)
-        run(db.commit(), event_loop)
+        ), local_loop)
+        run(db.commit(), local_loop)
 
-        pairs = run(executor.generate_arb_signals(), event_loop)
+        pairs = run(executor.generate_arb_signals(), local_loop)
         assert len(pairs) == 0
 
-    def test_missing_execution_metadata_suppressed_before_bot(self, executor, event_loop):
+    def test_missing_execution_metadata_suppressed_before_bot(self, executor, local_loop):
         db = executor._db
         for mid, price in (("primary", 0.70), ("general", 0.60)):
             run(db.execute(
@@ -174,12 +174,12 @@ class TestArbitrageExecutor:
                    (id, exchange, question, active, outcome_yes_price,
                     outcome_no_price, last_updated)
                    VALUES (?, 'polymarket', ?, 1, ?, ?, datetime('now'))""",
-                (mid, mid, price, 1 - price)), event_loop)
+                (mid, mid, price, 1 - price)), local_loop)
         run(db.execute(
             """INSERT INTO market_relationships
                (market_id_a, market_id_b, relationship_type, strength, description)
-               VALUES ('primary','general','conditional',0.9,'A implies B')"""), event_loop)
-        assert run(executor.generate_arb_signals(), event_loop) == []
+               VALUES ('primary','general','conditional',0.9,'A implies B')"""), local_loop)
+        assert run(executor.generate_arb_signals(), local_loop) == []
 
 
 # --- Category gate (2026-06-12): exempt books still respect category bans ---

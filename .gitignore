@@ -15,6 +15,8 @@ config/defaults.local.yaml
 KILL_SWITCH
 .venv/
 venv/
+.uv-tools/
+requirements-audit.txt
 .pytest_cache/
 .ruff_cache/
 .isolated/

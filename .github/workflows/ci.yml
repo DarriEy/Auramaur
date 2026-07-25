@@ -7,6 +7,31 @@ on:
     branches: [main]
 
 jobs:
+  dependency-audit:
+    name: Dependency security audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Export locked Python dependencies
+        run: uv export --frozen --all-extras --no-hashes --output-file requirements-audit.txt
+
+      - name: Audit locked Python dependencies
+        run: uvx pip-audit -r requirements-audit.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Audit web dependencies
+        working-directory: web
+        run: npm audit --audit-level=high
+
   safety-tests:
     name: Safety gate tests
     runs-on: ubuntu-latest

@@ -1,5 +1,6 @@
 """Tests for position exit strategy (stop-loss, profit target, edge erosion, time decay)."""
 
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
@@ -15,6 +16,12 @@ def mock_db():
     db = AsyncMock()
     db.fetchall = AsyncMock(return_value=[])
     db.fetchone = AsyncMock(return_value=None)
+
+    @asynccontextmanager
+    async def transaction(*_args, **_kwargs):
+        yield
+
+    db.transaction = MagicMock(side_effect=transaction)
     return db
 
 
