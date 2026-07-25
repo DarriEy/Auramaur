@@ -30,10 +30,16 @@ class ExecutionMode(str, Enum):
     DIRECT_QUOTING = (
         "direct_quoting"  # market maker — gateway.place_quote_pair() (resting two-sided)
     )
-    PAPER_SIMULATED = "paper_simulated"  # local fills only; no exchange order method exists
+    PAPER_SIMULATED = "paper_simulated"  # local fills ONLY — no order path exists, at any gate
     # Independently gated off-prediction-market adapters:
     DIRECT_EQUITY = "direct_equity"  # oddlot tender — IBKR equities, outside the PM gateway
     DIRECT_SPOT = "direct_spot"  # Kraken adapter with its own triple gates/caps
+    # IBKR multi-asset books (FX/futures/ETF/bonds): paper by default, but a
+    # graduated book places through IBKRMultiAssetExecution behind its own
+    # confirm-live + is_live + environment + kill-switch chain. Declaring
+    # these PAPER_SIMULATED was false — that mode means "no order path
+    # exists at all" and would tell a reviewer real money is impossible.
+    DIRECT_MULTIASSET = "direct_multiasset"
 
 
 class DeploymentMode(str, Enum):
@@ -63,7 +69,9 @@ class StrategyCapability(str, Enum):
 # through a gateway method (submit / submit_paired / place_legs / place_quote_pair).
 # DIRECT_EQUITY and DIRECT_SPOT are independently gated broker adapters.
 NO_DIRECT_PLACE_MODES = frozenset(
-    m for m in ExecutionMode if m not in {ExecutionMode.DIRECT_EQUITY, ExecutionMode.DIRECT_SPOT}
+    m for m in ExecutionMode
+    if m not in {ExecutionMode.DIRECT_EQUITY, ExecutionMode.DIRECT_SPOT,
+                 ExecutionMode.DIRECT_MULTIASSET}
 )
 
 

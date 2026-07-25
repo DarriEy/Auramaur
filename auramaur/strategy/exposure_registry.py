@@ -271,6 +271,18 @@ EXPOSURE_BY_KEY = {path.key: path for path in EXPOSURE_PATHS}
 REGISTERED_CALLSITES = Counter(
     {
         ("auramaur/agentmcp/book.py", "place_trade", "record_fill", "agent_paper"): 1,
+        ("auramaur/bot.py", "_cancel_resting_live_orders", "cancel_order",
+         "prediction_exit"): 1,
+        ("auramaur/bot_arb_execute.py", "_execute_cross_exchange_arb", "cancel_order",
+         "prediction_paired"): 1,
+        ("auramaur/bot_order_monitor.py", "_task_order_monitor", "cancel_order",
+         "gateway_boundary"): 1,
+        ("auramaur/broker/execution_gateway.py", "submit_paired", "cancel_order",
+         "prediction_paired"): 1,
+        ("auramaur/strategy/market_maker.py", "_cancel_quote", "cancel_order",
+         "prediction_quoting"): 2,
+        ("auramaur/strategy/market_maker.py", "_place_two_sided", "cancel_order",
+         "prediction_quoting"): 1,
         (
             "auramaur/bot_order_monitor.py",
             "_task_order_monitor",
@@ -477,5 +489,11 @@ SENSITIVE_METHODS = frozenset(
         "placeOrder",
         "record_fill",
         "redeem",
+        # Cancellation is half of a resting order's lifecycle. Omitting it left
+        # the market maker's three off-gateway cancels — on the LIVE venue
+        # client, not through the gateway — outside a perimeter this registry
+        # claims to close, and left `prediction_quoting`'s declared
+        # "cancel/requote" exit path unbacked by any registered callsite.
+        "cancel_order",
     }
 )

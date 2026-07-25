@@ -52,11 +52,21 @@ async def warn_stranded_positions(db, enabled_books: set[str]) -> list[str]:
 
 
 class IBKRMultiAssetPaperBook:
-    """One asset-specific ledger; this class has no broker order capability."""
+    """One asset-specific ledger.
 
+    Paper by default, but NOT paper-only: once a book graduates, ``_fill``
+    places through :class:`IBKRMultiAssetExecution`, behind its own
+    confirm-live + is_live + environment + kill-switch chain. Declaring this
+    PAPER_SIMULATED ("no order path exists at all") told a reviewer real money
+    was impossible here, which is false.
+    """
+
+    # Registry identity only. Every instance overrides this in __init__ with
+    # its per-book name (ibkr_fx_paper, ibkr_global_etf_paper, ...), which is
+    # what heartbeats and delivery telemetry actually key on.
     name = "ibkr_multiasset"
 
-    execution_mode = ExecutionMode.PAPER_SIMULATED
+    execution_mode = ExecutionMode.DIRECT_MULTIASSET
 
     def __init__(self, settings, client, db, book: IBKRBook,
                  rates_provider=None, executor=None):

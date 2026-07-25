@@ -144,7 +144,12 @@ REQUIREMENTS: dict[str, tuple[DataRequirement, ...]] = {
 
 
 STRATEGY_ALIASES: dict[str, str] = {
+    # Heartbeats key on `pillar.name` if it exists, else the CLASS name — so
+    # adding a `name` attribute silently re-keys a pillar's whole telemetry
+    # identity. Both spellings must map, or requirements_for() returns () and
+    # the fail-closed readiness criterion reports "unknown data contract".
     "KrakenPillar": "kraken_treasury",
+    "kraken": "kraken_treasury",
     "EvidenceDistiller": "evidence_distiller",
 }
 

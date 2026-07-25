@@ -23,6 +23,14 @@ from auramaur.strategy.registry import (
 
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
 
+# Placement primitives an application module must never call directly when its
+# declared mode routes through the gateway. Kept in sync with the exposure
+# registry's perimeter so a new adapter verb is covered in one place.
+_PLACEMENT_METHODS = frozenset({
+    "place_order", "place_spot_order", "place_share_order", "_place_cash_order",
+    "place", "placeOrder",
+})
+
 
 def test_registry_identity_and_task_entrypoints_are_unique():
     assert len({spec.key for spec in STRATEGY_SPECS}) == len(STRATEGY_SPECS)
@@ -47,9 +55,22 @@ def test_registered_pillar_declares_matching_execution_contract(spec):
 def test_gateway_pillars_do_not_place_orders_directly(spec):
     if spec.execution_mode not in NO_DIRECT_PLACE_MODES:
         pytest.skip(f"{spec.key} has declared {spec.execution_mode.value} execution")
+    # Match EVERY placement primitive, not just the literal `.place_order(`.
+    # Kraken places via `place_spot_order`, IBKR equities via
+    # `place_share_order`/`_place_cash_order`, and the multiasset bridge via
+    # `.place(` — none of which the old substring saw, so a pillar could
+    # bypass the gateway and still pass this guard.
     src = (_ROOT / (spec.module.replace(".", "/") + ".py")).read_text()
-    assert ".place_order(" not in src, (
-        f"{spec.key} ({spec.execution_mode.value}) must use its declared gateway/simulation path"
+    tree = ast.parse(src)
+    offenders = sorted({
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr in _PLACEMENT_METHODS
+    })
+    assert not offenders, (
+        f"{spec.key} ({spec.execution_mode.value}) must use its declared "
+        f"gateway/simulation path, but calls {offenders} directly"
     )
 
 
@@ -99,12 +120,12 @@ def test_capability_enum_covers_trade_lifecycle():
 
 
 def test_every_bot_task_is_classified_as_strategy_or_non_strategy():
+    # Discover the modules rather than listing them: hardcoding three files
+    # meant bot_order_monitor.py's tasks — one of which cancels LIVE resting
+    # orders — were never required to be classified at all.
     discovered: set[str] = set()
-    for relative in (
-        "auramaur/bot.py",
-        "auramaur/bot_strategy_tasks.py",
-        "auramaur/bot_arb_scan.py",
-    ):
+    for path in sorted((_ROOT / "auramaur").glob("bot*.py")):
+        relative = path.relative_to(_ROOT).as_posix()
         tree = ast.parse((_ROOT / relative).read_text(encoding="utf-8"))
         discovered.update(
             node.name
