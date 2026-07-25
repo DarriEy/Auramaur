@@ -223,7 +223,15 @@ class AuramaurBot(
             try:
                 cash = getattr(self, '_last_known_cash', 0.0)
                 await engine.run_cycle(cash_available=cash)
+                from auramaur.monitoring.heartbeat import beat
+                await beat(self._components.db, "strategic", status="ok",
+                           interval_seconds=self.settings.intervals.analysis_seconds,
+                           detail={"exchange": name})
             except Exception as e:
+                from auramaur.monitoring.heartbeat import beat
+                await beat(self._components.db, "strategic", status="error",
+                           interval_seconds=self.settings.intervals.analysis_seconds,
+                           detail={"exchange": name, "error": str(e)[:300]})
                 show_error(f"Trading cycle failed ({name}): {e}")
 
             # Kalshi-only: concentrated-position rebalance (daily cap, intra-event trim).
@@ -1152,6 +1160,7 @@ class AuramaurBot(
             # where. This line makes "alive but idle" distinguishable from "hung",
             # and the first missing op after it localizes any future stall.
             log.info("market_maker.cycle_start")
+            cycle_started_at = datetime.now(timezone.utc)
             try:
                 # Watchdog: the per-op timeout inside run_cycle only covers the
                 # quote ops — the OUTER-loop Polymarket calls (market discovery,
@@ -1170,8 +1179,17 @@ class AuramaurBot(
                 except asyncio.TimeoutError:
                     log.warning("market_maker.op_timeout", op="get_markets",
                                 timeout=op_timeout)
+                    from auramaur.monitoring.heartbeat import beat
+                    await beat(self._components.db, "market_maker", status="error",
+                               interval_seconds=interval,
+                               detail={"error": "market discovery timeout"})
                     await asyncio.sleep(interval)
                     continue
+
+                from auramaur.data_edge import record_market_snapshot
+                await record_market_snapshot(
+                    self._components.db, "market_maker", markets,
+                    provider="polymarket")
 
                 # Run the MM cycle
                 results = await mm.run_cycle(markets)
@@ -1203,7 +1221,19 @@ class AuramaurBot(
                             level="warning",
                         )
 
+                from auramaur.data_edge import record_input_manifest
+                from auramaur.monitoring.heartbeat import beat
+                await record_input_manifest(
+                    self._components.db, "market_maker", cycle_started_at)
+                await beat(self._components.db, "market_maker", status="ok",
+                           entries=len(results), interval_seconds=interval,
+                           detail={"markets": len(markets), "quotes": len(results)})
+
             except Exception as e:
+                from auramaur.monitoring.heartbeat import beat
+                await beat(self._components.db, "market_maker", status="error",
+                           interval_seconds=interval,
+                           detail={"error": str(e)[:300]})
                 show_error(f"Market maker cycle failed: {e}")
             await asyncio.sleep(interval)
 

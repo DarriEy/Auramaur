@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from auramaur.strategy.protocols import ExecutionMode
 
-from datetime import timezone
+from datetime import datetime, timezone
 
 import structlog
 
@@ -52,6 +52,8 @@ class WeatherTempPillar:
         if not cfg.enabled or self._weather is None:
             return 0
         markets = await self._discovery.get_markets(limit=cfg.scan_limit)
+        from auramaur.data_edge import record_market_snapshot
+        await record_market_snapshot(self._db, self.name, markets)
         entered = 0
         for m in markets:
             if entered >= cfg.max_entries_per_cycle:
@@ -89,7 +91,8 @@ class WeatherTempPillar:
         await record_delivery(self._db, DataDelivery(
             strategy=self.name, component="weather_ensemble",
             status="ok" if members else "empty", provider="openmeteo",
-            market_id=market.id, item_count=len(members),
+            market_id=market.id, source_at=datetime.now(timezone.utc),
+            item_count=len(members),
             detail={"target": spec.target.isoformat(), "city": spec.city},
         ))
         model_p = bin_probability(members, spec.lo, spec.hi)

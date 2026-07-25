@@ -135,7 +135,7 @@ class IBKRETFPaperPillar:
                     self._evidence_cache[query] = await self._aggregator.gather(
                         query, limit_per_source=3, category="finance",
                         market_id=symbol, market_price=reference_price,
-                        consumer="ibkr_etf")
+                        consumer=self.name)
                 items = self._evidence_cache[query]
             except Exception as exc:  # noqa: BLE001
                 log.warning("ibkr_etf.paper.evidence_error", symbol=symbol,
@@ -364,6 +364,14 @@ class IBKRETFPaperPillar:
                 continue
             if getattr(quote, "source", "ibkr_live") not in {"ibkr_live", "alpaca_iex"}:
                 continue
+            from auramaur.data_edge import DataDelivery, record_delivery
+            quote_at = datetime.fromtimestamp(float(quote.timestamp), timezone.utc)
+            await record_delivery(self._db, DataDelivery(
+                strategy=self.name, component="equity_quote", status="ok",
+                provider=getattr(quote, "source", "ibkr_live"),
+                market_id=symbol, source_at=quote_at, item_count=1,
+                required_fields=("bid", "ask"),
+            ))
             mid = (quote.bid + quote.ask) / 2
             await self._resolve_forecasts(symbol)
             spread_bps = (quote.ask - quote.bid) / mid * 10_000

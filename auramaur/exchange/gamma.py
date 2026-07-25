@@ -19,6 +19,8 @@ GAMMA_API_BASE = "https://gamma-api.polymarket.com"
 # How long (seconds) to remember that a market_id returned 4xx, so we don't
 # re-hit the API every cycle for dead/orphaned IDs.
 _NEGATIVE_CACHE_TTL = 3600.0
+_DISCOVERY_CACHE_TTL = 15.0
+_DISCOVERY_CACHE_MAX = 64
 
 # Gamma sits behind Cloudflare. When CF throttles/challenges the client it can
 # half-close the socket (CLOSE_WAIT) and leave a read hanging indefinitely,
@@ -48,6 +50,7 @@ class GammaClient:
         self._session: aiohttp.ClientSession | None = None
         # market_id -> expiry timestamp for ids that returned 4xx
         self._negative_cache: dict[str, float] = {}
+        self._discovery_cache: dict[tuple, tuple[float, list[Market]]] = {}
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -75,6 +78,16 @@ class GammaClient:
         14-365d favorites) can fetch the right markets directly instead of the
         default top-100-by-volume page, which never contains them.
         """
+        # Bucket the date-window params to the hour: callers derive them from
+        # now() at second precision, so raw values would make every call a
+        # fresh key (a 0%-hit, never-evicted cache). An hour bucket is far
+        # coarser than the 15s TTL, so hits stay contemporaneous.
+        cache_key = (active, limit, offset, order, ascending,
+                     None if end_date_min is None else end_date_min[:13],
+                     None if end_date_max is None else end_date_max[:13])
+        cached = self._discovery_cache.get(cache_key)
+        if cached and time.monotonic() - cached[0] <= _DISCOVERY_CACHE_TTL:
+            return [market.model_copy(deep=True) for market in cached[1]]
         session = await self._ensure_session()
         params = {
             "limit": limit,
@@ -101,6 +114,17 @@ class GammaClient:
                     markets.append(market)
 
             log.info("gamma.markets_fetched", count=len(markets))
+            now_mono = time.monotonic()
+            self._discovery_cache = {
+                k: v for k, v in self._discovery_cache.items()
+                if now_mono - v[0] <= _DISCOVERY_CACHE_TTL
+            }
+            self._discovery_cache[cache_key] = (
+                now_mono, [market.model_copy(deep=True) for market in markets])
+            while len(self._discovery_cache) > _DISCOVERY_CACHE_MAX:
+                oldest = min(self._discovery_cache,
+                             key=lambda k: self._discovery_cache[k][0])
+                del self._discovery_cache[oldest]
             return markets
 
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:

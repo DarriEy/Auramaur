@@ -2,6 +2,8 @@
 graceful per-source failure. (Individual fetchers hit external APIs; the
 aggregator is the pure orchestration logic that actually matters.)"""
 
+from datetime import datetime, timezone
+
 import pytest
 
 from auramaur.data_sources.aggregator import Aggregator
@@ -15,9 +17,11 @@ class _FakeSource:
         self._items = items
         self._raises = raises
         self.fetched = False
+        self.fetch_count = 0
 
     async def fetch(self, query, limit=20):
         self.fetched = True
+        self.fetch_count += 1
         if self._raises:
             raise RuntimeError("source boom")
         return list(self._items)
@@ -78,3 +82,31 @@ async def test_dedup_by_normalised_title():
     agg = Aggregator([a, b])
     out = await agg.gather("q", category=None)
     assert len(out) == 1
+
+
+@pytest.mark.asyncio
+async def test_ttl_cache_coalesces_equivalent_evidence_reads():
+    source = _FakeSource("wire", [_item("wire", "Headline")])
+    agg = Aggregator([source], cache_ttl_seconds=60)
+    first = await agg.gather("Big News!", category="finance")
+    second = await agg.gather("big news", category="finance")
+    assert source.fetch_count == 1
+    assert first[0].ingestion_run_id == second[0].ingestion_run_id
+    assert first[0] is not second[0]
+
+
+@pytest.mark.asyncio
+async def test_transient_source_failure_is_never_cached():
+    source = _FakeSource("wire", [], raises=True)
+    agg = Aggregator([source], cache_ttl_seconds=60)
+    assert await agg.gather("query") == []
+    assert await agg.gather("query") == []
+    assert source.fetch_count == 2
+
+
+def test_news_item_normalizes_naive_provider_time_to_utc():
+    item = NewsItem(
+        id="n1", source="provider", title="Headline",
+        published_at=datetime(2026, 7, 24, 12, 0),
+    )
+    assert item.published_at.tzinfo is timezone.utc

@@ -71,6 +71,8 @@ class PlatformConsensusPillar:
             return 0
 
         markets = await self._discovery.get_markets(limit=cfg.scan_limit)
+        from auramaur.data_edge import record_market_snapshot
+        await record_market_snapshot(self._db, self.name, markets)
 
         eligible_markets = []
         for m in markets:
@@ -227,6 +229,18 @@ class PlatformConsensusPillar:
                 market_id=market.id,
                 error=str(e),
             )
+
+        from auramaur.data_edge import DataDelivery, record_delivery
+        forecasts = manifold_items + metaculus_items
+        observed = datetime.now(timezone.utc)
+        published = [item.published_at for item in forecasts if item.published_at]
+        await record_delivery(self._db, DataDelivery(
+            strategy=self.name, component="platform_forecasts",
+            status="ok" if forecasts else "empty",
+            provider="manifold+metaculus", market_id=market.id,
+            source_at=max(published) if published else observed,
+            item_count=len(forecasts),
+        ))
 
         best_match = None
         best_overlap = 0.0

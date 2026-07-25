@@ -32,6 +32,7 @@ from __future__ import annotations
 from auramaur.strategy.protocols import ExecutionMode
 
 import json
+from datetime import datetime, timezone
 
 import structlog
 
@@ -91,6 +92,13 @@ class OddLotTenderPillar:
         if not cfg.enabled:
             return 0
         filings = await self._edgar.recent_tender_filings(days=cfg.lookback_days)
+        from auramaur.data_edge import DataDelivery, record_delivery
+        observed = datetime.now(timezone.utc)
+        await record_delivery(self._db, DataDelivery(
+            strategy=self.name, component="edgar_filings",
+            status="ok" if filings else "empty", provider="edgar",
+            source_at=observed, item_count=len(filings),
+        ))
         found = 0
         analyzed = 0
         for f in filings:

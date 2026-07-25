@@ -433,6 +433,8 @@ class EntailmentArbPillar:
         if not cfg.enabled:
             return 0
         markets = await self._discovery.get_markets(limit=cfg.scan_limit)
+        from auramaur.data_edge import record_market_snapshot
+        await record_market_snapshot(self._db, self.name, markets)
         good = [m for m in markets if self._real_book(m)]
         by_id = {m.id: m for m in good}
 

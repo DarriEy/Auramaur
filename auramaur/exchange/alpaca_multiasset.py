@@ -66,10 +66,14 @@ class AlpacaMultiAssetQuotes:
             log.debug("alpaca_bridge.ibkr_bars_timeout", key=spec.key)
             return []
 
-    async def is_market_open(self, spec: InstrumentSpec) -> bool:
+    async def is_market_open(self, spec: InstrumentSpec, *, con_id: int = 0,
+                             now=None) -> bool:
         try:
+            check = (self._ibkr.is_market_open(spec, con_id=con_id, now=now)
+                     if con_id or now is not None
+                     else self._ibkr.is_market_open(spec))
             return await asyncio.wait_for(
-                self._ibkr.is_market_open(spec),
+                check,
                 timeout=self._IBKR_MISC_TIMEOUT_SECONDS)
         except (TimeoutError, asyncio.TimeoutError):
             log.debug("alpaca_bridge.ibkr_market_open_timeout", key=spec.key)

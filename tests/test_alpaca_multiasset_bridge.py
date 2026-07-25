@@ -226,3 +226,20 @@ def test_every_pillar_await_is_bounded(monkeypatch):
         assert await asyncio.wait_for(
             bridge.get_quote_by_con_id(GBPJPY, 1), timeout=5) is None
     asyncio.run(run())
+
+
+def test_market_open_forwards_held_contract_identity():
+    async def run():
+        seen = {}
+
+        class IBKR:
+            async def is_market_open(self, spec, *, con_id=0, now=None):
+                seen.update(con_id=con_id, now=now)
+                return False
+
+        bridge = AlpacaMultiAssetQuotes(IBKR(), FakeAlpaca(None))
+        marker = object()
+        assert not await bridge.is_market_open(SPY, con_id=756733, now=marker)
+        assert seen == {"con_id": 756733, "now": marker}
+
+    asyncio.run(run())

@@ -112,12 +112,18 @@ class KalshiTradeTape:
 
     def __init__(self, exchange) -> None:
         self._exchange = exchange  # a KalshiExchange exposing get_trades()
+        self.last_count = 0
+        self.last_ok = False
 
     async def informed_flow(self, ticker: str, *, limit: int = 200,
                             **kwargs) -> InformedFlowSignal:
         try:
             trades = await self._exchange.get_trades(ticker, limit=limit)
+            self.last_count = len(trades or [])
+            self.last_ok = True
         except Exception as e:
+            self.last_count = 0
+            self.last_ok = False
             log.debug("informed_flow.fetch_failed", ticker=ticker, error=str(e))
             return _NO_SIGNAL
         return detect_informed_flow(trades or [], **kwargs)

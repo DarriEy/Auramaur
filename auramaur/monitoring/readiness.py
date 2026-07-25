@@ -272,15 +272,12 @@ async def check_strategy_data_delivery(
 ) -> CriterionResult:
     """Verify the datasets consumed by recently-running strategies.
 
-    Missing telemetry is reported honestly as insufficient data. A hard
-    failure requires the latest record to actively report trouble: a failing
-    status, or fresh telemetry carrying over-age source data or too few
-    items. An old record alone is treated as unobserved, not failed —
-    conditional emitters (FRED cache hits, weather priced on demand) simply
-    stop recording between events, which says nothing about data health.
-    'partial' and 'empty' are honest deliveries, not delivery failures.
+    Active strategies fail closed on unknown contracts, missing required
+    telemetry, empty/partial required datasets, missing required fields, and
+    absent or stale source timestamps. This criterion is an execution-safety
+    assertion, not a provider-uptime dashboard.
     """
-    from auramaur.data_edge import requirements_for
+    from auramaur.data_edge import canonical_strategy, requirements_for
 
     heartbeats = await db.fetchall(
         "SELECT strategy,interval_seconds FROM strategy_heartbeats "
@@ -297,16 +294,22 @@ async def check_strategy_data_delivery(
     checked = 0
     for heartbeat in heartbeats:
         strategy = heartbeat["strategy"]
-        for requirement in requirements_for(strategy):
+        canonical = canonical_strategy(strategy)
+        requirements = requirements_for(strategy)
+        if not requirements:
+            failures.append(f"{strategy}=unknown data contract")
+            continue
+        for requirement in requirements:
             row = await db.fetchone(
                 """SELECT status,observed_at,age_seconds,item_count,missing_fields
                    FROM strategy_data_deliveries
                    WHERE strategy=? AND component=?
                    ORDER BY observed_at DESC LIMIT 1""",
-                (strategy, requirement.component))
+                (canonical, requirement.component))
             label = f"{strategy}:{requirement.component}"
             if row is None:
-                unobserved.append(label)
+                (failures if requirement.fail_closed else unobserved).append(
+                    f"{label}=unobserved")
                 continue
             checked += 1
             try:
@@ -324,14 +327,28 @@ async def check_strategy_data_delivery(
                 if row["status"] in ("stale", "timeout", "error", "unavailable"):
                     failures.append(f"{label}={row['status']} age={delivery_age:.0f}s")
                 else:
-                    unobserved.append(f"{label} (last seen {delivery_age:.0f}s ago)")
+                    target = failures if requirement.fail_closed else unobserved
+                    target.append(f"{label}=expired age={delivery_age:.0f}s")
                 continue
             source_age = row["age_seconds"]
-            if (row["status"] not in ("ok", "partial", "empty")
-                    or (source_age is not None and source_age > requirement.max_age_seconds)
-                    or (row["status"] == "ok"
-                        and int(row["item_count"] or 0) < requirement.min_items)):
-                failures.append(f"{label}={row['status']} age={delivery_age:.0f}s")
+            try:
+                missing_fields = json.loads(row["missing_fields"] or "[]")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                missing_fields = ["invalid missing_fields metadata"]
+            reasons = []
+            if row["status"] != "ok":
+                reasons.append(str(row["status"]))
+            if requirement.source_time_required and source_age is None:
+                reasons.append("missing source time")
+            elif source_age is not None and source_age > requirement.max_age_seconds:
+                reasons.append(f"source age={source_age:.0f}s")
+            if int(row["item_count"] or 0) < requirement.min_items:
+                reasons.append(f"items={int(row['item_count'] or 0)}")
+            if missing_fields:
+                reasons.append("missing=" + ",".join(map(str, missing_fields)))
+            if reasons:
+                target = failures if requirement.fail_closed else unobserved
+                target.append(f"{label}=" + " ".join(reasons))
 
     if failures:
         return CriterionResult(

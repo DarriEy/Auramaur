@@ -81,6 +81,7 @@ async def run_pillar_once(db, pillar, *,
     """
     name = getattr(pillar, "name", type(pillar).__name__)
     started = time.monotonic()
+    cycle_started_at = datetime.now(timezone.utc)
     try:
         entered = await pillar.run_once()
     except Exception as e:
@@ -94,10 +95,6 @@ async def run_pillar_once(db, pillar, *,
             detail={"error": str(e)[:300]},
         ))
         raise
-    await beat(db, name, status="ok",
-               entries=int(entered) if isinstance(entered, (int, float)) else None,
-               interval_seconds=interval_seconds,
-               detail=getattr(pillar, "last_cycle_detail", None))
     from auramaur.data_edge import DataDelivery, record_delivery
     await record_delivery(db, DataDelivery(
         strategy=name, component="strategy_cycle", status="ok",
@@ -106,4 +103,12 @@ async def run_pillar_once(db, pillar, *,
         item_count=int(entered) if isinstance(entered, (int, float)) else 0,
         detail=getattr(pillar, "last_cycle_detail", None) or {},
     ))
+    # Record the cycle delivery before its manifest: operational workers whose
+    # only contract is strategy_cycle can then produce a truthful manifest.
+    from auramaur.data_edge import record_input_manifest
+    await record_input_manifest(db, name, cycle_started_at)
+    await beat(db, name, status="ok",
+               entries=int(entered) if isinstance(entered, (int, float)) else None,
+               interval_seconds=interval_seconds,
+               detail=getattr(pillar, "last_cycle_detail", None))
     return entered if isinstance(entered, int) else 0

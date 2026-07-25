@@ -207,7 +207,8 @@ class VolAnchorPillar:
         await record_delivery(self._db, DataDelivery(
             strategy=self.name, component="spot_volatility",
             status="ok" if len(closes) >= 10 else "partial",
-            provider="coingecko", market_id=cg_id, item_count=len(closes),
+            provider="coingecko", market_id=cg_id,
+            source_at=datetime.now(timezone.utc), item_count=len(closes),
         ))
         if len(closes) < 10:
             return None
@@ -315,6 +316,12 @@ class VolAnchorPillar:
                 continue
             kind, strike, deadline = parsed
             out.append((asset, kind, strike, deadline, m))
+        from auramaur.data_edge import record_market_snapshot
+        # Record the delivered discovery result, not the (asset, kind, strike,
+        # deadline, Market) candidate tuples — the recorder reads price fields
+        # off Market models, and an empty candidate list after filtering is
+        # strategy selectivity, not a data-delivery failure.
+        await record_market_snapshot(self._db, self.name, raw)
         return out
 
     def _eligible(self, market: Market, cfg) -> bool:

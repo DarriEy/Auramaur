@@ -76,6 +76,9 @@ class InformedFlowPillar:
                 min_close_ts, max_close_ts, limit=cfg.scan_limit)
         else:  # fallback (e.g. a discovery without the windowed fetch / tests)
             markets = await self._kalshi.get_markets(limit=cfg.scan_limit)
+        from auramaur.data_edge import record_market_snapshot
+        await record_market_snapshot(self._db, self.name, markets,
+                                     provider="kalshi")
         entered = 0
         for market in markets:
             if entered >= cfg.max_entries_per_cycle:
@@ -137,6 +140,15 @@ class InformedFlowPillar:
             min_sample=cfg.min_abnormal_sample, size_mult=cfg.size_mult,
             min_dominance=cfg.min_dominance,
         )
+        from auramaur.data_edge import DataDelivery, record_delivery
+        await record_delivery(self._db, DataDelivery(
+            strategy=self.name, component="venue_trades",
+            status=("ok" if self._tape.last_ok and self._tape.last_count
+                    else "empty" if self._tape.last_ok else "error"),
+            provider="kalshi", market_id=market.ticker,
+            source_at=datetime.now(timezone.utc) if self._tape.last_ok else None,
+            item_count=self._tape.last_count,
+        ))
         if not flow.has_signal or flow.informed_side is None:
             return False
 

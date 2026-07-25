@@ -579,6 +579,9 @@ class ResolutionLensPillar:
                      close_window=len(markets) - lexical_n)
         else:
             markets = await self._discovery.get_markets(limit=cfg.scan_limit)
+        from auramaur.data_edge import record_market_snapshot
+        await record_market_snapshot(
+            self._db, self.name, markets, provider=self._exchange_name)
         markets = await self._prioritize_known_gaps(markets, cfg)
         calls = 0
         entered = 0

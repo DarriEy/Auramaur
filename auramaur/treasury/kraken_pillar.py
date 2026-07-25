@@ -21,6 +21,7 @@ import asyncio
 import math
 import time
 import uuid
+from datetime import datetime, timezone
 
 import structlog
 
@@ -737,6 +738,15 @@ class KrakenPillar:
                     log.warning("kraken.directional.orphan_no_price", pair=pair,
                                 note="held position Kraken won't price; manual close may be needed")
                 continue
+            db = self._db()
+            if db is not None:
+                from auramaur.data_edge import DataDelivery, record_delivery
+                await record_delivery(db, DataDelivery(
+                    strategy="kraken_treasury", component="crypto_quote",
+                    status="ok", provider="kraken", market_id=pair,
+                    source_at=datetime.now(timezone.utc), item_count=1,
+                    required_fields=("price",), detail={"price": price},
+                ))
             holding = pair in self._dir_long
             mom: float | None = None
 
