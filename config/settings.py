@@ -22,6 +22,43 @@ def _deep_merge(base: dict, over: dict) -> dict:
     return out
 
 
+class _NoDuplicateKeyLoader(yaml.SafeLoader):
+    """SafeLoader that refuses a mapping with repeated keys.
+
+    PyYAML silently keeps the LAST value for a duplicated key, which in an
+    operator config means a decision vanishes without any error, log line or
+    diff to notice. This file has lost three that way: a duplicate ``risk:``
+    dropped the politics_us unblock (2026-07-24), a duplicate
+    ``resolution_lens:`` ran the lens paper-forced for three days against an
+    explicit live handoff (found 2026-07-25), and a duplicate ``agent_trader:``
+    nearly erased the crypto exclusion the same day. Config that silently
+    disagrees with what an operator wrote is worse than config that fails
+    loudly, so fail loudly.
+    """
+
+    def construct_mapping(self, node, deep=False):  # noqa: D102
+        seen: set = set()
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if key in seen:
+                raise yaml.constructor.ConstructorError(
+                    "while loading config", node.start_mark,
+                    f"duplicate key {key!r} — YAML keeps only the last block, "
+                    f"so the earlier one would be silently discarded. Merge "
+                    f"them into a single {key!r} block.",
+                    key_node.start_mark)
+            seen.add(key)
+        return super().construct_mapping(node, deep=deep)
+
+
+def _safe_load_strict(stream, path):
+    """yaml.safe_load, but a duplicate key is a hard error naming the file."""
+    try:
+        return yaml.load(stream, Loader=_NoDuplicateKeyLoader)
+    except yaml.constructor.ConstructorError as exc:
+        raise ValueError(f"{path}: {exc.problem}") from exc
+
+
 def _load_defaults() -> dict:
     """Load tracked ``defaults.yaml`` then deep-merge optional local overrides.
 
@@ -35,14 +72,14 @@ def _load_defaults() -> dict:
     defaults_path = Path(__file__).parent / "defaults.yaml"
     if defaults_path.exists():
         with open(defaults_path) as f:
-            base = yaml.safe_load(f) or {}
+            base = _safe_load_strict(f, defaults_path) or {}
     local_path = Path(os.environ.get(
         "AURAMAUR_LOCAL_CONFIG",
         Path(__file__).parent / "defaults.local.yaml",
     ))
     if local_path.exists():
         with open(local_path) as f:
-            base = _deep_merge(base, yaml.safe_load(f) or {})
+            base = _deep_merge(base, _safe_load_strict(f, local_path) or {})
     return base
 
 

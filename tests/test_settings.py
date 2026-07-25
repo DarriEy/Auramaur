@@ -294,3 +294,40 @@ def test_yaml_alone_still_applies_without_env(monkeypatch):
     s = _with_yaml_ibkr(monkeypatch)
     assert s.ibkr.multiasset_paper_enabled is False
     assert s.ibkr.multiasset_disabled_instruments == ["7203.T"]
+
+
+def test_duplicate_top_level_key_in_operator_config_is_rejected(tmp_path, monkeypatch):
+    """A repeated key must fail loudly, not silently drop the earlier block.
+
+    PyYAML keeps only the last value, so in an operator config a decision
+    vanishes with no error, log line or diff. Three were lost that way: a
+    duplicate `risk:` dropped the politics_us unblock, a duplicate
+    `resolution_lens:` ran the lens paper-forced against an explicit live
+    handoff, and a duplicate `agent_trader:` nearly erased the crypto
+    exclusion.
+    """
+    import config.settings as settings_mod
+
+    cfg = tmp_path / "defaults.local.yaml"
+    cfg.write_text(
+        "resolution_lens:\n  paper: false\n\n"
+        "resolution_lens:\n  kalshi_enabled: true\n",
+        encoding="utf-8")
+    monkeypatch.setenv("AURAMAUR_LOCAL_CONFIG", str(cfg))
+
+    with pytest.raises(ValueError) as exc:
+        settings_mod._load_defaults()
+    assert "duplicate key" in str(exc.value)
+    assert "resolution_lens" in str(exc.value)
+
+
+def test_operator_config_without_duplicates_still_loads(tmp_path, monkeypatch):
+    import config.settings as settings_mod
+
+    cfg = tmp_path / "defaults.local.yaml"
+    cfg.write_text("resolution_lens:\n  paper: false\n  kalshi_enabled: true\n",
+                   encoding="utf-8")
+    monkeypatch.setenv("AURAMAUR_LOCAL_CONFIG", str(cfg))
+    loaded = settings_mod._load_defaults()
+    assert loaded["resolution_lens"]["paper"] is False
+    assert loaded["resolution_lens"]["kalshi_enabled"] is True
