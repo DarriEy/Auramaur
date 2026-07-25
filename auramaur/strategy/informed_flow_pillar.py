@@ -225,9 +225,15 @@ class InformedFlowPillar:
     async def _open_position_count(self) -> int:
         row = await self._db.fetchone(
             """SELECT COUNT(*) AS n FROM portfolio p
-               WHERE EXISTS (SELECT 1 FROM signals s
-                             WHERE s.market_id = p.market_id
-                               AND s.strategy_source = 'informed_flow')""",
+               WHERE p.size > 0
+                 AND EXISTS (SELECT 1 FROM cost_basis cb
+                             WHERE cb.market_id = p.market_id
+                               AND UPPER(cb.token) = UPPER(p.token)
+                               AND cb.is_paper = p.is_paper AND cb.size > 0)
+                 AND EXISTS (SELECT 1 FROM trades t
+                             WHERE t.market_id = p.market_id
+                               AND t.strategy_source = 'informed_flow'
+                               AND t.is_paper = p.is_paper)""",
         )
         return int(row["n"]) if row else 0
 

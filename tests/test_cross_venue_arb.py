@@ -246,8 +246,18 @@ def test_second_leg_rejection_marks_partial_not_traded_and_does_not_retry():
             assert row["partial_at"] is not None
             assert row["last_error"] == "venue rejected"
 
+            # Leg A was left NAKED by the rejection, so it must be unwound:
+            # entry + closing order = 2 calls, the second on the opposite side.
+            assert poly_ex.place_order.await_count == 2
+            entry = poly_ex.place_order.await_args_list[0].args[0]
+            unwind = poly_ex.place_order.await_args_list[1].args[0]
+            assert unwind.market_id == entry.market_id
+            assert unwind.side != entry.side
+            assert unwind.size == entry.size
+
+            # Within the cooldown the pair is skipped — no re-entry.
             assert await pillar.run_once() == 0
-            assert poly_ex.place_order.await_count == 1
+            assert poly_ex.place_order.await_count == 2
             assert kalshi_ex.place_order.await_count == 1
         finally:
             await db.close()

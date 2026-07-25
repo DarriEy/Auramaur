@@ -293,11 +293,26 @@ class BiasHarvestPillar:
         return row is not None  # held by any strategy/mode — stay out
 
     async def _open_position_count(self) -> int:
+        """Count positions THIS strategy actually entered and still holds.
+
+        Counting `portfolio EXISTS signals(strategy_source)` is unsound twice
+        over: a signal is written BEFORE the risk gate, so rejected ideas hold
+        slots forever, and the row need not be ours — any pillar's position in
+        a market we merely signalled consumed a slot. That shape wedged
+        long_horizon at 47/40 on 2026-07-25. cost_basis is the authoritative
+        holding record; trades proves we were the one who entered.
+        """
         row = await self._db.fetchone(
             """SELECT COUNT(*) AS n FROM portfolio p
-               WHERE EXISTS (SELECT 1 FROM signals s
-                             WHERE s.market_id = p.market_id
-                               AND s.strategy_source IN (?, ?))""",
+               WHERE p.size > 0
+                 AND EXISTS (SELECT 1 FROM cost_basis cb
+                             WHERE cb.market_id = p.market_id
+                               AND UPPER(cb.token) = UPPER(p.token)
+                               AND cb.is_paper = p.is_paper AND cb.size > 0)
+                 AND EXISTS (SELECT 1 FROM trades t
+                             WHERE t.market_id = p.market_id
+                               AND t.strategy_source IN (?, ?)
+                               AND t.is_paper = p.is_paper)""",
             (SOURCE_TAG, SOURCE_TAG_WIDE),
         )
         return int(row["n"]) if row else 0

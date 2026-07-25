@@ -632,12 +632,21 @@ class TermStructurePillar:
         return entered
 
     async def _market_claimed(self, market_id: str) -> bool:
+        """Claimed while a position is still HELD — not forever after one trade.
+
+        This probed `trades`, which is append-only, so every market the bot had
+        ever touched was permanently off-limits: 1252 markets bot-wide had a
+        trade row and no live position on 2026-07-25, and 10 of the 16 markets
+        this pillar had written off were blocked purely by history.
+        """
         row = await self._db.fetchone(
-            "SELECT 1 FROM trades WHERE market_id = ? LIMIT 1", (market_id,))
+            "SELECT 1 FROM cost_basis WHERE market_id = ? AND size > 0 LIMIT 1",
+            (market_id,))
         if row is not None:
             return True
         row = await self._db.fetchone(
-            "SELECT 1 FROM portfolio WHERE market_id = ? LIMIT 1", (market_id,))
+            "SELECT 1 FROM portfolio WHERE market_id = ? AND size > 0 LIMIT 1",
+            (market_id,))
         return row is not None
 
     async def _try_enter(self, market: Market, prob_yes: float, thesis: str,

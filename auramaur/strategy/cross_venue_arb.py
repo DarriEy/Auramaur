@@ -33,10 +33,16 @@ from datetime import datetime, timezone
 import structlog
 
 from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
-from auramaur.exchange.models import Confidence, Market, OrderSide, Signal
+from auramaur.exchange.models import (
+    Confidence, Market, Order, OrderSide, OrderType, Signal,
+)
 from auramaur.strategy.arbitrage_scanner import _word_overlap_score
 
 log = structlog.get_logger()
+
+# How long a pair is skipped after a one-legged entry, so a transient
+# venue rejection cools off instead of retiring the pair permanently.
+_PARTIAL_COOLDOWN_HOURS = 6
 
 
 EQUIVALENCE_PROMPT = """You are auditing whether two prediction markets on DIFFERENT venues resolve the SAME underlying claim. Be adversarial: the default answer is "none". A false match turns a "risk-free" arbitrage into a paired loss, so only assert equivalence you are sure of.
@@ -244,11 +250,49 @@ class CrossVenueArbPillar:
         )
 
     async def _already_traded(self, a_id: str, b_id: str) -> bool:
+        """A completed pair is retired for good; a PARTIAL only cools off.
+
+        partial_at was permanent, so one transient leg-B rejection retired the
+        pair forever — with the naked leg left resting and unmanaged.
+        """
         row = await self._db.fetchone(
-            "SELECT traded_at, partial_at FROM cross_venue_verdicts "
-            "WHERE poly_id = ? AND kalshi_id = ?",
-            (a_id, b_id))
-        return bool(row and (row["traded_at"] or row["partial_at"]))
+            """SELECT traded_at,
+                      partial_at IS NOT NULL
+                        AND datetime(partial_at) >= datetime('now', ?) AS cooling
+                 FROM cross_venue_verdicts WHERE poly_id = ? AND kalshi_id = ?""",
+            (f"-{_PARTIAL_COOLDOWN_HOURS} hours", a_id, b_id))
+        return bool(row and (row["traded_at"] or row["cooling"]))
+
+    async def _unwind_leg(self, market: Market, res, exchange) -> None:
+        """Close a leg whose partner never filled. Best effort, always logged."""
+        order = getattr(res, "order", None)
+        fill = getattr(res, "result", None)
+        size = float(getattr(fill, "filled_size", 0) or getattr(order, "size", 0) or 0)
+        if order is None or size <= 0:
+            log.error("cross_venue.unwind_impossible", market_id=market.id,
+                      reason="no filled leg-A order to close")
+            return
+        exit_order = Order(
+            market_id=order.market_id,
+            exchange=order.exchange,
+            token_id=order.token_id,
+            side=(OrderSide.SELL if order.side == OrderSide.BUY else OrderSide.BUY),
+            token=order.token,
+            size=size,
+            price=order.price,
+            order_type=OrderType.LIMIT,
+            dry_run=bool(getattr(fill, "is_paper", True)),
+            source="exit",
+        )
+        try:
+            out = await self._gateway.submit_exit(
+                exit_order, exchange=exchange,
+                exchange_name=market.exchange or "polymarket")
+            log.warning("cross_venue.single_leg_unwound", market_id=market.id,
+                        size=size, status=getattr(out, "status", "?"))
+        except Exception as e:  # noqa: BLE001 — surface, never swallow silently
+            log.error("cross_venue.unwind_failed", market_id=market.id,
+                      size=size, error=str(e)[:200])
 
     def _exchange_for(self, market: Market):
         return self._exchanges.get(market.exchange or "polymarket")
@@ -310,6 +354,12 @@ class CrossVenueArbPillar:
             log.error("cross_venue.leg_b_failed_single_leg", a=a.id, b=b.id,
                       status=res_b.status)
             await self._record_leg(a, res_a.order, res_a.result, why)
+            # Leg A is now NAKED directional exposure — the opposite of what
+            # this pillar exists to hold. Unwind it immediately through the
+            # gateway exit contract rather than leaving it resting with no
+            # owner: nothing else manages a cross-venue leg, and _already_traded
+            # retires the pair, so it would never be revisited.
+            await self._unwind_leg(a, res_a, exchange_a)
             await self._mark_partial(
                 a.id, b.id, res_b.reason or f"leg_b_{res_b.status}")
             return False

@@ -46,6 +46,10 @@ from auramaur.exchange.models import (
 
 log = structlog.get_logger()
 
+# How long a give-up verdict (neutral row written after repeated read
+# failures) is honoured before the market is offered to the LLM again.
+_GIVE_UP_TTL_DAYS = 7
+
 # Lexical triggers — phrasings where fine print historically diverges from
 # the headline. Deliberately broad; the LLM lens is the precision stage.
 TRIGGER_PATTERNS = [
@@ -230,12 +234,22 @@ class ResolutionLensPillar:
         criteria reading is static (cache it); `verified` is -1 until the
         adversarial check runs at trade-decision time."""
         row = await self._db.fetchone(
-            "SELECT fair_prob, gap_score, mechanism, verified FROM lens_verdicts WHERE market_id = ?",
-            (m.id,),
+            """SELECT fair_prob, gap_score, mechanism, verified,
+                      datetime(checked_at) >= datetime('now', ?) AS fresh
+                 FROM lens_verdicts WHERE market_id = ?""",
+            (f"-{_GIVE_UP_TTL_DAYS} days", m.id),
         )
         if row is not None:
-            return (float(row["fair_prob"]), float(row["gap_score"]),
-                    row["mechanism"], int(row["verified"]))
+            # A give-up row (the neutral verdict written after 3 failed reads)
+            # is indistinguishable from a genuine "no gap here" and never
+            # expired, so one confusing market was retired for good — 28
+            # give-ups fired in a 3-day window on 2026-07-25. Let those age
+            # out; real verdicts stay cached, since the criteria they read are
+            # static.
+            gave_up = float(row["gap_score"]) == 0.0 and row["mechanism"] in ("none", "")
+            if not (gave_up and not row["fresh"]):
+                return (float(row["fair_prob"]), float(row["gap_score"]),
+                        row["mechanism"], int(row["verified"]))
         if self._analyzer is None:
             return None
         # pin_claude: the fine-print read IS the edge — never let budget

@@ -247,19 +247,29 @@ class InterimManagerPillar:
                   f"− slip {cfg.slippage_buffer:.3f} − liq {liq:.3f} − corr {corr:.3f}")
         return edge, detail
 
+    # Counted through `signals`, but this pillar NEVER writes a signals row —
+    # every other pillar does, so the join silently returned 0 forever. That
+    # made max_open_positions non-binding and zeroed the correlation penalty
+    # in _robust_edge (penalty x 0 positions). Count from trades, which the
+    # gateway writes for every placement this pillar makes.
+    _COUNT_SQL = """SELECT COUNT(DISTINCT p.market_id) AS n FROM portfolio p
+                    WHERE p.size > 0
+                      AND EXISTS (SELECT 1 FROM cost_basis cb
+                                  WHERE cb.market_id = p.market_id
+                                    AND UPPER(cb.token) = UPPER(p.token)
+                                    AND cb.is_paper = p.is_paper AND cb.size > 0)
+                      AND EXISTS (SELECT 1 FROM trades t
+                                  WHERE t.market_id = p.market_id
+                                    AND t.strategy_source = ?
+                                    AND t.is_paper = p.is_paper)"""
+
     async def _open_positions_in_category(self, category: str) -> int:
         row = await self._db.fetchone(
-            """SELECT COUNT(DISTINCT s.market_id) AS n FROM signals s
-               JOIN portfolio p ON p.market_id = s.market_id AND p.size > 0
-               WHERE s.strategy_source = ? AND p.category = ?""",
-            (self.name, category))
+            self._COUNT_SQL + " AND p.category = ?", (self.name, category))
         return int(row["n"] or 0) if row else 0
 
     async def _open_positions(self) -> int:
-        row = await self._db.fetchone(
-            """SELECT COUNT(DISTINCT s.market_id) AS n FROM signals s
-               JOIN portfolio p ON p.market_id = s.market_id AND p.size > 0
-               WHERE s.strategy_source = ?""", (self.name,))
+        row = await self._db.fetchone(self._COUNT_SQL, (self.name,))
         return int(row["n"] or 0) if row else 0
 
     async def _expire_pending(self, reason: str) -> None:

@@ -221,6 +221,12 @@ async def test_claimed_market_skipped(tmp_path):
                is_paper, order_id, status, exchange, strategy_source)
                VALUES ('b', datetime('now'), 'BUY', 10, 0.3, 1, 'x', 'paper',
                        'polymarket', 'llm')""")
+        # A market is claimed while the position is still HELD. The trade row
+        # alone is append-only and used to block the market forever.
+        await db.execute(
+            """INSERT INTO cost_basis (market_id, token, token_id, size,
+               avg_cost, total_cost, realized_pnl, is_paper, updated_at)
+               VALUES ('b', 'YES', 'x', 10, 0.3, 3.0, 0, 1, datetime('now'))""")
         await db.commit()
         entered = await pillar.run_once()
         # b is claimed -> the two entries come from the remaining strikes.

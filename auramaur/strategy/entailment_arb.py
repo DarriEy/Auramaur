@@ -369,6 +369,13 @@ class EntailmentArbPillar:
                 direction = "none"
         except Exception as e:
             log.warning("entailment.llm_parse_error", a=a.id, b=b.id, error=str(e))
+            # Do NOT cache a failure. The verdict table has no TTL and is read
+            # as authoritative, so persisting the "none" default here retired
+            # the pair permanently on one transient LLM/parse error — 2 pairs
+            # were poisoned under the current source version on 2026-07-25,
+            # recognisable by confidence=0 with empty reasoning. Retry next
+            # cycle instead. (resolution_lens._verdict already works this way.)
+            return self._to_call_frame("none", swapped), 0.0
         await self._db.execute(
             """INSERT OR REPLACE INTO entailment_verdicts
                (market_id_a, market_id_b, direction, confidence, source, reasoning)
@@ -417,9 +424,19 @@ class EntailmentArbPillar:
         return pairs
 
     async def _already_traded(self, a_id: str, b_id: str) -> bool:
+        """Blocked only while a leg is still HELD.
+
+        Keyed on `trades` alone this never cleared, so one closed pair retired
+        both markets from EVERY future pair: 4 Kalshi CPI markets were blocked
+        since June 2026 with zero remaining size.
+        """
         row = await self._db.fetchone(
-            """SELECT 1 FROM trades WHERE strategy_source = 'entailment_arb'
-               AND market_id IN (?, ?) LIMIT 1""", (a_id, b_id),
+            """SELECT 1 FROM cost_basis cb WHERE cb.market_id IN (?, ?)
+                 AND cb.size > 0
+                 AND EXISTS (SELECT 1 FROM trades t
+                             WHERE t.market_id = cb.market_id
+                               AND t.strategy_source = 'entailment_arb')
+               LIMIT 1""", (a_id, b_id),
         )
         return row is not None
 
