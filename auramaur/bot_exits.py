@@ -41,10 +41,17 @@ class ExitExecutionMixin:
         """
         if order is None or getattr(order, "side", None) != OrderSide.SELL:
             return
-        exit_key = f"exit:{exchange_name}:{order.market_id}"
-        self._exit_pending.discard(exit_key)
-        self._exit_failures.discard(exit_key)
-        log.debug("exit.suppression_cleared", exit_key=exit_key, status=status)
+        # The monitor only knows the market, while the portfolio monitor keys by
+        # (market, token, mode) — clear every position-level key under it.
+        prefix = f"exit:{exchange_name}:{order.market_id}:"
+        cleared = [k for k in self._exit_pending if k.startswith(prefix)]
+        cleared += [k for k in self._exit_failures if k.startswith(prefix)]
+        for key in cleared:
+            self._exit_pending.discard(key)
+            self._exit_failures.pop(key, None)
+        if cleared:
+            log.info("exit.suppression_cleared", market_id=order.market_id,
+                     keys=len(set(cleared)), status=status)
 
     @property
     def _exit_gateway(self):
@@ -116,7 +123,7 @@ class ExitExecutionMixin:
                     token_id = market_data.clob_token_yes or market_data.clob_token_no
 
         if not token_id:
-            log.debug("exit.no_token", market_id=pos.market_id)
+            log.warning("exit.no_token", market_id=pos.market_id)
             return False
 
         # Cancel stale sell orders so balance is free
@@ -151,10 +158,10 @@ class ExitExecutionMixin:
         if sell_size < 5:
             if self.settings.is_live and sell_size <= 0.01:
                 await self._prune_zero_onchain_poly_position(pos.market_id)
-            log.debug("exit.too_small", market_id=pos.market_id, size=sell_size)
+            log.warning("exit.too_small", market_id=pos.market_id, size=sell_size)
             return False
         if pos.current_price < 0.01:
-            log.debug("exit.near_zero", market_id=pos.market_id, price=pos.current_price)
+            log.warning("exit.near_zero", market_id=pos.market_id, price=pos.current_price)
             return False
 
         sell_price = max(0.01, min(0.99, round(pos.current_price, 2)))

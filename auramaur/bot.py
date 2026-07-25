@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from datetime import datetime, timezone
 from auramaur.killswitch import kill_switch_present
@@ -44,6 +45,12 @@ from auramaur.monitoring.heartbeat import run_pillar_once
 
 log = structlog.get_logger()
 
+# How long a failed exit is suppressed before it is retried. A failure
+# that happens before an order is placed produces no terminal SELL for
+# the order monitor to clear, so without this bound the suppression
+# lasted until the process restarted.
+_EXIT_RETRY_BACKOFF_SECONDS = 900.0
+
 
 async def run_ibkr_etf_arms_once(pillars, db=None) -> None:
     """Run every intelligence arm independently; one failure cannot stop peers."""
@@ -79,7 +86,13 @@ class AuramaurBot(
         self._exchange_filter = exchange_filter  # If set, only run this exchange
         self._lock_file = None  # File handle kept open for duration
         self._rebalance_cooldowns: dict[str, float] = {}  # kept for reference, allocator handles concentration
-        self._exit_failures: set[str] = set()  # Track failed exit sells to avoid spam
+        # Failed-exit backoff: key -> monotonic expiry. This MUST expire. It was
+        # a plain set cleared only when the order monitor saw a terminal SELL —
+        # but an exit that fails BEFORE placing an order never produces one, so
+        # the market was suppressed for the whole process lifetime. On
+        # 2026-07-25 that latched 7 exits (3 stop-losses) dead while two of the
+        # positions round-tripped from +$29/+$75 peaks to -$26/-$25.
+        self._exit_failures: dict[str, float] = {}
         self._exit_pending: set[str] = set()  # Track exits with resting orders
         self._exit_gateway_obj = None  # Lazily built; see _exit_gateway property
         # Track attempted cross-exchange arbs so the scanner doesn't re-execute
@@ -451,8 +464,18 @@ class AuramaurBot(
                         continue
 
                     for pos, reason in exit_list:
-                        exit_key = f"exit:{name}:{pos.market_id}"
-                        if exit_key in self._exit_failures or exit_key in self._exit_pending:
+                        # Key by POSITION, not market: check_exits yields one row
+                        # per (market, token, mode), and a sub-minimum dust leg
+                        # can never sell — a market-wide key let that dust pin
+                        # its sibling legs (2026-07-25: a 1.49-share leg pinned
+                        # $322 of exposure in the same market).
+                        exit_key = (f"exit:{name}:{pos.market_id}:"
+                                    f"{getattr(pos.token, 'value', pos.token)}:"
+                                    f"{int(bool(pos.is_paper))}")
+                        if exit_key in self._exit_pending:
+                            continue
+                        retry_at = self._exit_failures.get(exit_key)
+                        if retry_at is not None and time.monotonic() < retry_at:
                             continue
                         log.info(
                             "exit.triggered",
@@ -475,8 +498,14 @@ class AuramaurBot(
                             ok = False
                         if ok:
                             self._exit_pending.add(exit_key)
+                            self._exit_failures.pop(exit_key, None)
                         else:
-                            self._exit_failures.add(exit_key)
+                            self._exit_failures[exit_key] = (
+                                time.monotonic() + _EXIT_RETRY_BACKOFF_SECONDS)
+                            log.warning(
+                                "exit.suppressed_until_retry", exchange=name,
+                                market_id=pos.market_id, reason=reason.value,
+                                backoff_seconds=_EXIT_RETRY_BACKOFF_SECONDS)
             except Exception as e:
                 log.debug("portfolio_monitor_error", error=str(e))
             await asyncio.sleep(interval)

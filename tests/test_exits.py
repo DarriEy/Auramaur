@@ -481,3 +481,46 @@ async def test_live_exits_ignore_paper_positions(settings):
         gamma.get_market.assert_awaited_once_with("live_ok")
     finally:
         await db.close()
+
+
+def test_exit_suppression_expires_and_is_keyed_per_position():
+    """A failed exit must not be suppressed forever, and dust must not pin its
+    siblings.
+
+    On 2026-07-25 both defects were live: the suppression was a set cleared
+    only when the order monitor saw a terminal SELL, but an exit failing
+    BEFORE placement never produces one — 7 exits (3 stop-losses) were dead
+    until restart while two positions round-tripped from +$29/+$75 peaks to
+    -$26/-$25. And the key was market-wide, so a sub-5-share leg that can
+    never sell pinned $322 of sellable exposure in the same market.
+    """
+    import time as _time
+    from types import SimpleNamespace
+
+    from auramaur.bot import AuramaurBot, _EXIT_RETRY_BACKOFF_SECONDS
+    from auramaur.bot_exits import ExitExecutionMixin
+    from auramaur.exchange.models import OrderSide
+
+    bot = AuramaurBot.__new__(AuramaurBot)
+    bot._exit_failures = {}
+    bot._exit_pending = set()
+
+    dust = "exit:polymarket:M1:YES:0"
+    sibling = "exit:polymarket:M1:NO:0"
+
+    # The dust leg fails; only ITS key is suppressed.
+    bot._exit_failures[dust] = _time.monotonic() + _EXIT_RETRY_BACKOFF_SECONDS
+    assert _time.monotonic() < bot._exit_failures[dust]
+    assert sibling not in bot._exit_failures      # sibling still exitable
+
+    # The backoff expires rather than lasting until restart.
+    bot._exit_failures[dust] = _time.monotonic() - 1.0
+    assert _time.monotonic() >= bot._exit_failures[dust]
+
+    # A terminal SELL clears every position-level key under that market.
+    bot._exit_failures = {dust: _time.monotonic() + 900, sibling: _time.monotonic() + 900}
+    bot._exit_pending = {dust}
+    order = SimpleNamespace(side=OrderSide.SELL, market_id="M1")
+    ExitExecutionMixin._clear_exit_suppression(bot, "polymarket", order, "cancelled")
+    assert bot._exit_failures == {}
+    assert bot._exit_pending == set()
