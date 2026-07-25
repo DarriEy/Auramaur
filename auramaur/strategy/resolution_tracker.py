@@ -677,8 +677,9 @@ class ResolutionTracker:
 
             # Remove peak tracking
             await self._db.execute(
-                "DELETE FROM position_peaks WHERE market_id = ?",
-                (market_id,),
+                "DELETE FROM position_peaks WHERE market_id = ? "
+                "OR market_id LIKE ? || ':%'",
+                (market_id, market_id),
             )
 
         log.info(

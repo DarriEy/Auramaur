@@ -422,6 +422,7 @@ class PortfolioTracker:
 
         # Load peak prices for trailing stop calculation
         peak_prices = await self._get_peak_prices()
+        await self._prune_orphan_peaks()
         prices_updated = False
 
         unmarkable: list[str] = []
@@ -493,10 +494,11 @@ class PortfolioTracker:
             # "current > current" — position_peaks stayed empty forever, so
             # the trailing tier below was structurally unable to fire for any
             # position, paper or live (2026-07-20 audit).
-            stored_peak = peak_prices.get(pos.market_id)
+            peak_key = self._peak_key(pos, mode_flag)
+            stored_peak = peak_prices.get(peak_key)
             peak_pnl_pct = pnl_pct if stored_peak is None else max(stored_peak, pnl_pct)
             if stored_peak is None or pnl_pct > stored_peak:
-                await self._update_peak_price(pos.market_id, pnl_pct)
+                await self._update_peak_price(peak_key, pnl_pct)
 
             # 1. Stop-loss — hard floor
             if pnl_pct <= -settings.execution.stop_loss_pct:
@@ -653,6 +655,24 @@ class PortfolioTracker:
             return 0.0
         return (datetime.now(timezone.utc) - entry_dt).total_seconds() / 3600.0
 
+    @staticmethod
+    def _peak_key(pos, mode_flag: int | None) -> str:
+        """Peak-tracking key: one high-water mark per POSITION, not per market.
+
+        The table was keyed by market_id alone, so every leg and both modes of
+        a market shared one peak — market 2299992's paper YES (+69%) and its
+        two live legs all read the same 30.1 (2026-07-25). A peak is a property
+        of a position, and the trailing stop fires off it. Composite string
+        keys follow the convention kraken_pillar already uses
+        ("kraken-live:{pair}"), which avoids rebuilding a shared table.
+        """
+        token = getattr(pos.token, "value", pos.token) or "YES"
+        # mode_flag is None only on a legacy unscoped read; fall back to the
+        # market-wide key there rather than inventing a mode.
+        if mode_flag is None:
+            return f"{pos.market_id}:{token}"
+        return f"{pos.market_id}:{token}:{int(mode_flag)}"
+
     async def _get_peak_prices(self) -> dict[str, float]:
         """Load tracked peak PnL percentages for trailing stop."""
         try:
@@ -663,6 +683,29 @@ class PortfolioTracker:
         except Exception:
             # Table might not exist yet — will be created on first write
             return {}
+
+    async def _prune_orphan_peaks(self) -> None:
+        """Drop high-water marks for positions that are no longer held.
+
+        A peak only ever moves up, and rows survived every normal exit — 56
+        were stranded on 2026-07-25 with peaks up to +66.7%. Re-entering such a
+        market inherited the stale peak, and since ``peak >= 12`` and
+        ``drawdown > 0.45 * peak`` are both true at pnl ~ 0, the trailing stop
+        fired a PROFIT_TARGET the instant the position opened. Clearing them
+        here also retires the legacy bare-market rows the per-position keys
+        replaced.
+        """
+        try:
+            async with self.db.transaction(owner="peak_prune"):
+                await self.db.execute(
+                    """DELETE FROM position_peaks
+                        WHERE market_id NOT LIKE 'kraken-%'
+                          AND NOT EXISTS (
+                              SELECT 1 FROM portfolio p WHERE p.size > 0
+                                AND position_peaks.market_id =
+                                    p.market_id || ':' || p.token || ':' || p.is_paper)""")
+        except Exception as e:  # noqa: BLE001 — housekeeping must never block exits
+            log.debug("peak_price.prune_error", error=str(e))
 
     async def _update_peak_price(self, market_id: str, peak_pnl_pct: float) -> None:
         """Track the highest PnL percentage reached for trailing stop."""

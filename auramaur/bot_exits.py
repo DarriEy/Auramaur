@@ -286,7 +286,12 @@ class ExitExecutionMixin:
                 "DELETE FROM cost_basis WHERE market_id = ? AND is_paper = 0",
                 (market_id,),
             )
-            await db.execute("DELETE FROM position_peaks WHERE market_id = ?", (market_id,))
+            await db.execute(
+                # Per-position keys ("{market}:{token}:{mode}") plus any
+                # legacy bare-market row.
+                "DELETE FROM position_peaks WHERE market_id = ? "
+                "OR market_id LIKE ? || ':%'",
+                (market_id, market_id))
             await db.commit()
             log.info(
                 "exit.stale_zero_pruned",

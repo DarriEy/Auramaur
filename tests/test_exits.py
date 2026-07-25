@@ -524,3 +524,56 @@ def test_exit_suppression_expires_and_is_keyed_per_position():
     ExitExecutionMixin._clear_exit_suppression(bot, "polymarket", order, "cancelled")
     assert bot._exit_failures == {}
     assert bot._exit_pending == set()
+
+
+@pytest.mark.asyncio
+async def test_peaks_are_per_position_and_orphans_are_pruned(tmp_path):
+    """A high-water mark belongs to a position, not a market.
+
+    Keyed by market_id alone, every leg and both modes shared one peak
+    (2026-07-25: market 2299992's paper YES at +69% and its two live legs all
+    read 30.1). And because peaks only move up and survived normal exits, 56
+    rows were stranded with peaks up to +66.7% — re-entering such a market
+    inherited the stale peak and fired a PROFIT_TARGET at entry, since
+    peak>=12 and drawdown>0.45*peak are both true at pnl~0.
+    """
+    from types import SimpleNamespace
+
+    from auramaur.db.database import Database
+    from auramaur.exchange.models import TokenType
+    from auramaur.risk.portfolio import PortfolioTracker
+
+    db = Database(str(tmp_path / "peaks.db"))
+    await db.connect()
+    try:
+        mon = PortfolioTracker(db, SimpleNamespace(is_live=False))
+        yes = SimpleNamespace(market_id="M1", token=TokenType.YES)
+        no = SimpleNamespace(market_id="M1", token=TokenType.NO)
+
+        # Legs and modes get distinct keys.
+        assert mon._peak_key(yes, 1) == "M1:YES:1"
+        assert mon._peak_key(no, 1) == "M1:NO:1"
+        assert mon._peak_key(yes, 0) == "M1:YES:0"
+
+        await mon._update_peak_price(mon._peak_key(yes, 1), 40.0)
+        await mon._update_peak_price(mon._peak_key(no, 1), 5.0)
+        peaks = await mon._get_peak_prices()
+        assert peaks["M1:YES:1"] == 40.0 and peaks["M1:NO:1"] == 5.0
+
+        # Only the held leg's peak survives the prune.
+        await db.execute(
+            """INSERT INTO portfolio (market_id, exchange, side, size, avg_price,
+               current_price, unrealized_pnl, category, token, token_id,
+               is_paper, updated_at)
+               VALUES ('M1','polymarket','BUY',10,0.5,0.5,0,'tech','YES','t',
+                       1, datetime('now'))""")
+        await db.execute(
+            "INSERT INTO position_peaks (market_id, peak_pnl_pct) "
+            "VALUES ('LEGACY_BARE', 66.7)")
+        await db.commit()
+
+        await mon._prune_orphan_peaks()
+        remaining = await mon._get_peak_prices()
+        assert set(remaining) == {"M1:YES:1"}, remaining
+    finally:
+        await db.close()
