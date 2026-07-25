@@ -386,6 +386,13 @@ class CalibrationConfig(BaseModel):
 
 class MarketMakerConfig(BaseModel):
     enabled: bool = True
+    # Force every quote leg to dry_run regardless of global live mode.
+    # The graduation ladder CANNOT demote the MM: force_paper is applied in
+    # ExecutionGateway.submit() (the directional entry path), while quotes go
+    # through place_quote_pair, which reads settings.is_live directly. Removing
+    # market_maker from graduation.exempt_strategies therefore has no effect on
+    # its live/paper status — this flag is the only lever that does.
+    paper: bool = False
     min_spread_bps: int = 40  # minimum spread in bps; below the 1-tick improvement, join BBO
     # Upper spread bound. A nominal spread this wide is not a fat opportunity —
     # it's a dead/empty book (e.g. bid 0.02 / ask 0.98 = 9600 bps), where neither

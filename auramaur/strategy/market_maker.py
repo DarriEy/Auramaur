@@ -214,8 +214,9 @@ class MarketMaker:
                         if self._settings.is_live else None)
 
         for market in markets:
-            # Category gate. The MM is graduation-exempt and places orders
-            # outside the risk gateway, so until 2026-06-12 it was the last
+            # Category gate. The MM is outside the ladder's reach (see
+            # `market_maker.paper`) and places orders outside the risk
+            # gateway, so until 2026-06-12 it was the last
             # path with NO category policy at all — it filled $6.30 of a
             # tennis match live (Stuttgart Open) hours after the allowlist
             # shipped. "Structural two-sided" only holds while quotes stay
@@ -281,7 +282,8 @@ class MarketMaker:
 
     async def _quote_market(self, market: Market) -> tuple[dict | None, str | None]:
         """Fetch order book, compute quotes, and place two-sided order for a market."""
-        # Cash reserve floor: MM is graduation-exempt and quotes continuously,
+        # Cash reserve floor: MM is outside the ladder's reach and quotes
+        # continuously,
         # so by default it absorbs EVERY free live dollar as inventory — a
         # $200 float deposited for directional entries was fully claimed by MM
         # fills within a week (2026-07). New quote pairs are skipped while
@@ -358,8 +360,10 @@ class MarketMaker:
                 return None, "quote_unchanged"
             await self._cancel_quote(prior)
 
-        # Place the two-sided quote
-        is_live = self._settings.is_live
+        # Place the two-sided quote. `market_maker.paper` is the ONLY demotion
+        # lever for this path: the graduation ladder's force_paper applies in
+        # ExecutionGateway.submit(), which quotes never touch.
+        is_live = self._settings.is_live and not self._settings.market_maker.paper
         result = await self._place_two_sided(quote, is_live)
 
         if result.get("success"):

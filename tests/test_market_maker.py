@@ -9,7 +9,7 @@ from auramaur.strategy.market_maker import MarketMaker
 
 
 def _maker(*, quote_size=10.0, max_inventory=50.0, is_live=False,
-           op_timeout_seconds=15.0,
+           op_timeout_seconds=15.0, paper=False,
            blocked_categories=("sports", "politics_us"),
            allowed_categories_live=("crypto", "tech", "politics_intl")) -> MarketMaker:
     settings = SimpleNamespace(
@@ -22,6 +22,7 @@ def _maker(*, quote_size=10.0, max_inventory=50.0, is_live=False,
             max_markets=5,
             refresh_seconds=30,
             op_timeout_seconds=op_timeout_seconds,
+            paper=paper,
         ),
         risk=SimpleNamespace(
             blocked_categories=list(blocked_categories),
@@ -429,3 +430,72 @@ def test_run_cycle_times_out_a_hung_quote_and_continues():
 
     results = asyncio.run(run())
     assert results == []  # the hung market produced no quote, loop survived
+
+
+@pytest.mark.asyncio
+async def test_paper_flag_forces_dry_run_quotes_in_live_mode():
+    """`market_maker.paper` is the ONLY way to demote the MM.
+
+    The graduation ladder cannot reach this path: force_paper is applied in
+    ExecutionGateway.submit(), while quotes go through place_quote_pair, which
+    reads settings.is_live. Removing market_maker from
+    graduation.exempt_strategies (done 2026-07-24 on live evidence of
+    -$39.40 over 52 markets) left it quoting live for ~30h until this flag
+    landed. If this test ever fails, real money is being quoted.
+    """
+    from unittest.mock import AsyncMock
+
+    mm = _maker(is_live=True, paper=True)
+    orders = []
+
+    async def place_order(order):
+        orders.append(order)
+        return SimpleNamespace(order_id="o1", status="pending", is_paper=order.dry_run)
+
+    book = OrderBook(
+        bids=[OrderBookLevel(price=0.40, size=100)],
+        asks=[OrderBookLevel(price=0.46, size=100)],
+    )
+    mm._exchange = SimpleNamespace(
+        place_order=place_order, cancel_order=AsyncMock(return_value=True),
+        get_order_book=AsyncMock(return_value=book),
+    )
+    market = Market(id="m1", question="Will this happen?",
+                    clob_token_yes="yes", clob_token_no="no")
+
+    result, _ = await mm._quote_market(market)
+    assert result and result.get("success")
+    # Paper quotes rest synthetically in the gateway, so nothing should reach
+    # the exchange at all; anything that did must be dry_run.
+    assert all(o.dry_run for o in orders), (
+        "MM sent a LIVE order despite market_maker.paper=true")
+    assert result["bid_order_id"].startswith("PAPER-QUOTE-")
+    assert result["ask_order_id"].startswith("PAPER-QUOTE-")
+
+
+@pytest.mark.asyncio
+async def test_live_quotes_remain_live_when_paper_flag_is_off():
+    """The flag must not silently paper-force an intentionally live MM."""
+    from unittest.mock import AsyncMock
+
+    mm = _maker(is_live=True, paper=False)
+    orders = []
+
+    async def place_order(order):
+        orders.append(order)
+        return SimpleNamespace(order_id="o1", status="pending", is_paper=order.dry_run)
+
+    book = OrderBook(
+        bids=[OrderBookLevel(price=0.40, size=100)],
+        asks=[OrderBookLevel(price=0.46, size=100)],
+    )
+    mm._exchange = SimpleNamespace(
+        place_order=place_order, cancel_order=AsyncMock(return_value=True),
+        get_order_book=AsyncMock(return_value=book),
+    )
+    market = Market(id="m1", question="Will this happen?",
+                    clob_token_yes="yes", clob_token_no="no")
+
+    result, _ = await mm._quote_market(market)
+    assert result and result.get("success")
+    assert orders and not any(o.dry_run for o in orders)
