@@ -202,3 +202,51 @@ async def test_v42_labels_ambiguous_legacy_attribution():
     assert version["version"] == 42
     assert row["strategy_source"] == "legacy_unattributed"
     await db.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_commit_does_not_strand_an_open_transaction(tmp_path):
+    """COMMIT can raise under contention (SQLITE_BUSY). If the block unwinds
+    with the connection still in a transaction and ownership cleared, every
+    later writer dies on "cannot start a transaction within a transaction"
+    until the process restarts — the 2026-07-25 45-minute write outage.
+    """
+    db = await _fresh_db(tmp_path)
+    conn = db._db
+    real_execute = conn.execute
+
+    async def flaky_execute(sql, *args, **kwargs):
+        if sql == "COMMIT":
+            raise RuntimeError("database is locked")
+        return await real_execute(sql, *args, **kwargs)
+
+    conn.execute = flaky_execute
+    with pytest.raises(RuntimeError):
+        async with db.transaction(owner="victim"):
+            await db.execute("INSERT INTO t (k, v) VALUES ('a', 1)")
+    conn.execute = real_execute
+
+    # The connection must be usable: no stranded transaction, no owner.
+    assert not db._db._conn.in_transaction
+    assert db._txn_owner is None
+    async with db.transaction(owner="next_writer"):
+        await db.execute("INSERT INTO t (k, v) VALUES ('b', 2)")
+    row = await db.fetchone("SELECT v FROM t WHERE k='b'")
+    assert row["v"] == 2
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_ownerless_open_transaction_is_rolled_back_by_next_writer(tmp_path):
+    """Defense in depth: an orphan opened outside transaction() (no owner)
+    is cleared by the next adopter instead of wedging the connection."""
+    db = await _fresh_db(tmp_path)
+    await db.execute("BEGIN IMMEDIATE")
+    assert db._db._conn.in_transaction and db._txn_owner is None
+
+    async with db.transaction(owner="recovering_writer"):
+        await db.execute("INSERT INTO t (k, v) VALUES ('c', 3)")
+    row = await db.fetchone("SELECT v FROM t WHERE k='c'")
+    assert row["v"] == 3
+    assert not db._db._conn.in_transaction
+    await db.close()

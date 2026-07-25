@@ -120,6 +120,25 @@ class Database:
                           requested_task=asyncio.current_task().get_name(),
                           waited_seconds=round(waited, 3),
                           active_owner=self._txn_owner or "legacy/unknown")
+                # Orphan recovery. We hold _txn_lock, so no transaction() body
+                # is running: an open transaction with no owner is unreachable
+                # by whoever left it (a COMMIT/ROLLBACK that raised, e.g.
+                # "database is locked", unwinds through the finally below and
+                # clears ownership while the connection stays in-transaction).
+                # Left alone it wedges EVERY later writer with "cannot start a
+                # transaction within a transaction" until the process
+                # restarts — a 45-minute outage on 2026-07-25. Rolling back
+                # discards only work its owner already abandoned.
+                if self._txn_owner is None:
+                    try:
+                        await self.db.execute("ROLLBACK")
+                        log.error("database.transaction_orphan_rolled_back",
+                                  requested_owner=requested_owner,
+                                  requested_task=asyncio.current_task().get_name())
+                    except Exception as exc:  # noqa: BLE001 - best effort
+                        log.error("database.transaction_orphan_rollback_failed",
+                                  requested_owner=requested_owner,
+                                  error=str(exc))
             started = time.monotonic()
             try:
                 await self.db.execute("BEGIN IMMEDIATE")
@@ -156,6 +175,19 @@ class Database:
                     )
             finally:
                 finished_owner = self._txn_owner
+                # Never surrender ownership with the transaction still open.
+                # COMMIT/ROLLBACK can raise (SQLITE_BUSY under contention);
+                # unwinding past that point used to leave an ownerless open
+                # transaction that no later writer could clear.
+                if self._db._conn.in_transaction:
+                    try:
+                        await self.db.execute("ROLLBACK")
+                        log.error("database.transaction_forced_rollback",
+                                  owner=finished_owner,
+                                  task=asyncio.current_task().get_name())
+                    except Exception as exc:  # noqa: BLE001 - best effort
+                        log.error("database.transaction_forced_rollback_failed",
+                                  owner=finished_owner, error=str(exc))
                 self._txn_task = None
                 self._txn_owner = None
                 held = time.monotonic() - started
