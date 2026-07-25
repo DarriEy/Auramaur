@@ -279,7 +279,18 @@ class LongHorizonPillar:
     # ideas stuck forever, and any other pillar's position in a market we
     # merely signalled ate a slot. 8 of those phantom slots were LIVE rows
     # owned by other pillars, while this pillar is paper.
+    # cost_basis is the authoritative holding record, not portfolio: the exit
+    # path zeroes cost_basis but can leave the portfolio row standing, so
+    # keying on portfolio.size alone re-selected a position already sold and
+    # the decay sweep re-sold market 1931104 every cycle (2026-07-25 15:23,
+    # 15:31, 15:38 — the repeats realized $0.00 because the basis was gone,
+    # but live that is selling shares we no longer own).
     _OWNED = """p.size > 0
+                 AND EXISTS (SELECT 1 FROM cost_basis cb
+                             WHERE cb.market_id = p.market_id
+                               AND UPPER(cb.token) = UPPER(p.token)
+                               AND cb.is_paper = p.is_paper
+                               AND cb.size > 0)
                  AND EXISTS (SELECT 1 FROM trades t
                              WHERE t.market_id = p.market_id
                                AND t.strategy_source = ?

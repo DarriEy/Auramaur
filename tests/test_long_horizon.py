@@ -564,3 +564,36 @@ def test_ramp_anchor_is_per_venue_tag():
         finally:
             await db.close()
     asyncio.run(run())
+
+
+async def test_harvest_does_not_resell_a_position_whose_basis_is_gone():
+    """A sold position must leave the harvest's selection immediately.
+
+    The exit zeroes cost_basis but can leave the portfolio row standing, so
+    selecting on portfolio.size alone re-sold market 1931104 on every cycle
+    (2026-07-25 15:23, 15:31, 15:38). The repeats realized $0.00 because the
+    basis was gone — but in live mode that is an order to sell shares we no
+    longer own.
+    """
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        settings = _settings()
+        pillar = _kalshi_pillar(db, settings, [
+            _market("KXSOLD", yes=0.02, exchange="kalshi")])
+        await _seed_position(db, market_id="KXSOLD", tag="long_horizon_kalshi",
+                             venue="kalshi", token="NO", size=30, avg=0.66,
+                             yes_price=0.02)
+        # Fully captured -> would exit, and does.
+        assert await pillar._harvest_decay(settings.long_horizon) == 1
+
+        # The sell zeroed the basis; the portfolio row survives.
+        await db.execute(
+            "UPDATE cost_basis SET size = 0 WHERE market_id = 'KXSOLD'")
+        await db.execute(
+            "UPDATE portfolio SET size = 30 WHERE market_id = 'KXSOLD'")
+        await db.commit()
+        assert await pillar._harvest_decay(settings.long_horizon) == 0
+        assert await pillar._open_position_count() == 0
+    finally:
+        await db.close()
