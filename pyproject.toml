@@ -56,7 +56,6 @@ dev = [
     "ruff>=0.4,<0.16",  # keep in lockstep with the CI pin
     # fastapi.testclient transport for the web-dashboard API tests
     "httpx>=0.27",
-    "httpx2>=2.0",
 ]
 
 [project.scripts]

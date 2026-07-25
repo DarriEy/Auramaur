@@ -1,12 +1,26 @@
 version: 2
 updates:
-  - package-ecosystem: pip
+  # This repo's source of truth is uv.lock. The 'pip' ecosystem edits
+  # pyproject.toml WITHOUT regenerating the lock, and CI installs with
+  # `uv sync --frozen` (which fails on exactly that drift) — every such PR
+  # would open un-mergeable.
+  - package-ecosystem: uv
     directory: /
     schedule:
       interval: weekly
     groups:
-      python-dependencies:
-        patterns: ["*"]
+      # Runtime deps move the live trading process: keep them in their own PR
+      # so a venue-transport bump (aiohttp, pydantic, aiosqlite) is reviewed
+      # and soaked on its own rather than buried in a dev-tooling batch.
+      runtime-dependencies:
+        dependency-type: production
+      dev-dependencies:
+        dependency-type: development
+    ignore:
+      # Pinned deliberately: an unpinned ruff auto-upgraded to 0.16.0 and
+      # broke lint on every open PR. pyproject's <0.16 ceiling must not be
+      # the only thing holding that line.
+      - dependency-name: ruff
 
   - package-ecosystem: npm
     directory: /web
