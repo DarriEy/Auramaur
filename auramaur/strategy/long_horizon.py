@@ -30,6 +30,7 @@ enters a market already held by any strategy/mode.
 
 from __future__ import annotations
 
+import asyncio
 import math
 from datetime import datetime, timezone
 
@@ -49,6 +50,10 @@ from auramaur.strategy.classifier import blocked_category_hit, ensure_category
 from auramaur.strategy.protocols import ExecutionMode
 
 log = structlog.get_logger()
+
+# Per-position mark fetch during the decay sweep. Bounded: an unbounded
+# await on a venue call has hung this bot's event loop three times.
+_MARK_FETCH_TIMEOUT_SECONDS = 10.0
 
 
 def calibrated_fair(price: float, slope: float) -> float:
@@ -267,13 +272,24 @@ class LongHorizonPillar:
         )
         return row is not None  # held by any strategy/mode — stay out
 
+    # Capacity and the decay exit BOTH key on this predicate: a position is
+    # ours only if THIS tag actually traded it, in THIS mode, and it is still
+    # held. Counting `signals` instead wedged the Polymarket book at 47/40
+    # (2026-07-25) — a signal is written before the risk gate, so rejected
+    # ideas stuck forever, and any other pillar's position in a market we
+    # merely signalled ate a slot. 8 of those phantom slots were LIVE rows
+    # owned by other pillars, while this pillar is paper.
+    _OWNED = """p.size > 0
+                 AND EXISTS (SELECT 1 FROM trades t
+                             WHERE t.market_id = p.market_id
+                               AND t.strategy_source = ?
+                               AND t.is_paper = p.is_paper)"""
+
     async def _open_position_count(self) -> int:
         row = await self._db.fetchone(
-            """SELECT COUNT(*) AS n FROM portfolio p
-               WHERE EXISTS (SELECT 1 FROM signals s
-                             WHERE s.market_id = p.market_id
-                               AND s.strategy_source = ?)""",
-            (self._tag,),
+            f"""SELECT COUNT(*) AS n FROM portfolio p
+                WHERE p.exchange = ? AND {self._OWNED}""",
+            (self._venue, self._tag),
         )
         return int(row["n"]) if row else 0
 
@@ -370,21 +386,35 @@ class LongHorizonPillar:
         capture_floor = float(getattr(cfg, "take_profit_capture", 0.0))
         if capture_floor <= 0:
             return 0
+        # Marks come from a LIVE fetch per held position, not from the markets
+        # table: nothing refreshes that row for a position we already hold
+        # (_persist_signal is INSERT OR IGNORE), so the old
+        # `last_updated >= -1 day` guard silently disqualified the ENTIRE book
+        # once the pillar stopped scanning — 0 rows eligible for two days, and
+        # the take-profit exit had never fired. Freshness is still enforced,
+        # just sourced from somewhere that can actually be fresh; a position
+        # whose fetch fails or returns nothing is skipped, never exited on a
+        # stale price (the #80 lesson).
         rows = await self._db.fetchall(
             """SELECT p.market_id, p.token, p.token_id, p.size, p.avg_price,
-                      p.is_paper, m.outcome_yes_price, m.clob_token_yes,
-                      m.clob_token_no
+                      p.is_paper, m.clob_token_yes, m.clob_token_no
                FROM portfolio p JOIN markets m ON m.id = p.market_id
-               WHERE p.size > 0 AND p.exchange = ?
-                 AND m.last_updated >= datetime('now', '-1 day')
-                 AND EXISTS (SELECT 1 FROM signals s
-                             WHERE s.market_id = p.market_id
-                               AND s.strategy_source = ?)""",
+               WHERE p.exchange = ? AND {owned}""".format(owned=self._OWNED),
             (self._venue, self._tag))
         exited = 0
         for r in rows:
             token = (r["token"] or "YES").upper()
-            p_yes = float(r["outcome_yes_price"] or 0.0)
+            try:
+                fresh = await asyncio.wait_for(
+                    self._discovery.get_market(r["market_id"]),
+                    timeout=_MARK_FETCH_TIMEOUT_SECONDS)
+            except Exception as e:  # noqa: BLE001 — one bad mark must not stop the sweep
+                log.debug("long_horizon.mark_fetch_failed",
+                          market_id=r["market_id"], error=str(e)[:120])
+                continue
+            if fresh is None or not fresh.active:
+                continue
+            p_yes = float(fresh.outcome_yes_price or 0.0)
             if not (0.0 < p_yes < 1.0):
                 continue
             mark = p_yes if token == "YES" else 1.0 - p_yes

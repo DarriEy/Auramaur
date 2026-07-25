@@ -84,9 +84,21 @@ def _risk(approved=True, size=8.0, force_paper=False):
     return rm
 
 
+def _by_id(markets):
+    """get_market() stub: the decay harvest fetches a FRESH mark per held
+    position instead of trusting the markets table (nothing refreshes that row
+    for a position we already hold)."""
+    index = {m.id: m for m in markets}
+
+    async def _get(market_id):
+        return index.get(market_id)
+    return AsyncMock(side_effect=_get)
+
+
 def _pillar(db, settings, markets, exchange=None, risk=None):
     discovery = MagicMock()
     discovery.get_markets = AsyncMock(return_value=markets)
+    discovery.get_market = _by_id(markets)
     calibration = MagicMock()
     calibration.record_prediction = AsyncMock()
     return LongHorizonPillar(
@@ -278,6 +290,7 @@ def test_scan_long_dated_paginates_and_uses_date_window():
 def _kalshi_pillar(db, settings, markets, exchange=None, risk=None):
     discovery = MagicMock()
     discovery.get_markets = AsyncMock(return_value=markets)
+    discovery.get_market = _by_id(markets)
     calibration = MagicMock()
     calibration.record_prediction = AsyncMock()
     return LongHorizonPillar(
@@ -326,7 +339,10 @@ async def test_poly_instance_still_excludes_politics():
 
 
 async def _seed_position(db, *, market_id, tag, venue, token, size, avg,
-                         yes_price, fresh=True):
+                         yes_price, fresh=True, owner_tag=None, discovery=None):
+    """Seed a held position. ``owner_tag`` defaults to ``tag``; pass a different
+    one to model a position some OTHER pillar entered — capacity and the decay
+    harvest must both ignore it (they used to count and could SELL it)."""
     await db.execute(
         """INSERT INTO markets (id, exchange, question, category, active,
            outcome_yes_price, outcome_no_price, last_updated, created_at)
@@ -354,7 +370,18 @@ async def _seed_position(db, *, market_id, tag, venue, token, size, avg,
            total_cost, realized_pnl, is_paper, updated_at)
            VALUES (?, ?, 'tok', ?, ?, ?, 0, 1, datetime('now'))""",
         (market_id, token, size, avg, size * avg))
+    # Proof of ownership: capacity and the harvest key on an actual trade by
+    # this tag in this mode, not on a signals row (a signal is written before
+    # the risk gate, so rejected ideas used to occupy slots forever).
+    await db.execute(
+        """INSERT INTO trades (market_id, side, size, price, is_paper, status,
+           strategy_source, exchange)
+           VALUES (?, 'BUY', ?, ?, 1, 'filled', ?, ?)""",
+        (market_id, size, avg, owner_tag or tag, venue))
     await db.commit()
+    if discovery is not None:
+        discovery.get_market = _by_id([
+            _market(market_id, yes=yes_price, exchange=venue)])
 
 
 async def test_decay_harvest_exits_captured_position_and_realizes():
@@ -366,7 +393,8 @@ async def test_decay_harvest_exits_captured_position_and_realizes():
     await db.connect()
     try:
         settings = _settings()
-        pillar = _kalshi_pillar(db, settings, [])
+        pillar = _kalshi_pillar(db, settings, [
+            _market("KXH", yes=0.06, exchange="kalshi")])
         await _seed_position(db, market_id="KXH", tag="long_horizon_kalshi",
                              venue="kalshi", token="NO", size=30, avg=0.66,
                              yes_price=0.06)
@@ -380,22 +408,75 @@ async def test_decay_harvest_exits_captured_position_and_realizes():
         await db.close()
 
 
-async def test_decay_harvest_skips_below_floor_and_stale_marks():
+async def test_decay_harvest_skips_below_floor_unfetchable_and_other_pillars():
+    """Three things the harvest must NOT sell: an under-captured position, one
+    whose fresh mark cannot be obtained, and one belonging to another pillar.
+
+    The last is the dangerous one — the harvest used to select on a `signals`
+    row with no ownership or mode filter, so it could emit a REAL sell against
+    another pillar's live book.
+    """
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        settings = _settings()
+        pillar = _kalshi_pillar(db, settings, [
+            _market("KXLOW", yes=0.25, exchange="kalshi"),
+            # KXGONE deliberately absent -> get_market returns None.
+            _market("KXOTHER", yes=0.02, exchange="kalshi"),
+        ])
+        # Captured only 26% (< 60%) -> hold.
+        await _seed_position(db, market_id="KXLOW", tag="long_horizon_kalshi",
+                             venue="kalshi", token="NO", size=30, avg=0.66,
+                             yes_price=0.25)
+        # Fully captured but no fresh mark available -> skip, never exit blind.
+        await _seed_position(db, market_id="KXGONE", tag="long_horizon_kalshi",
+                             venue="kalshi", token="NO", size=30, avg=0.66,
+                             yes_price=0.02)
+        # Fully captured but entered by ANOTHER pillar -> not ours to sell.
+        await _seed_position(db, market_id="KXOTHER", tag="long_horizon_kalshi",
+                             venue="kalshi", token="NO", size=30, avg=0.66,
+                             yes_price=0.02, owner_tag="market_maker")
+        assert await pillar._harvest_decay(settings.long_horizon) == 0
+        assert await db.fetchone("SELECT 1 FROM pnl_ledger") is None
+    finally:
+        await db.close()
+
+
+async def test_open_count_ignores_signals_only_and_other_pillars():
+    """Capacity counts positions THIS tag actually entered, in THIS mode.
+
+    Counting `portfolio EXISTS signals(strategy_source)` wedged the live book
+    at 47/40 on 2026-07-25: signals are written before the risk gate, so
+    rejected ideas held slots forever, and any other pillar's position in a
+    market we merely signalled ate a slot too (8 of the phantoms were LIVE
+    rows while this pillar is paper).
+    """
     db = Database(":memory:")
     await db.connect()
     try:
         settings = _settings()
         pillar = _kalshi_pillar(db, settings, [])
-        # Captured only 26% (< 60%) -> hold.
-        await _seed_position(db, market_id="KXLOW", tag="long_horizon_kalshi",
+        await _seed_position(db, market_id="MINE", tag="long_horizon_kalshi",
                              venue="kalshi", token="NO", size=30, avg=0.66,
-                             yes_price=0.25)
-        # Fully captured but the mark is STALE (frozen row) -> skip, not exit.
-        await _seed_position(db, market_id="KXSTALE", tag="long_horizon_kalshi",
+                             yes_price=0.30)
+        await _seed_position(db, market_id="THEIRS", tag="long_horizon_kalshi",
                              venue="kalshi", token="NO", size=30, avg=0.66,
-                             yes_price=0.02, fresh=False)
-        assert await pillar._harvest_decay(settings.long_horizon) == 0
-        assert await db.fetchone("SELECT 1 FROM pnl_ledger") is None
+                             yes_price=0.30, owner_tag="bias_harvest")
+        # Signal only, no trade — the pre-risk-gate write that used to stick.
+        await db.execute(
+            """INSERT INTO signals (market_id, claude_prob, claude_confidence,
+               market_prob, edge, evidence_summary, action, strategy_source)
+               VALUES ('REJECTED', 0.8, 'MEDIUM', 0.7, 8.0, 'e', 'BUY',
+                       'long_horizon_kalshi')""")
+        await db.execute(
+            """INSERT INTO portfolio (market_id, exchange, side, size, avg_price,
+               current_price, unrealized_pnl, category, token, token_id,
+               is_paper, updated_at)
+               VALUES ('REJECTED', 'kalshi', 'BUY', 5, 0.5, 0.5, 0, 'tech',
+                       'NO', 'tok', 1, datetime('now'))""")
+        await db.commit()
+        assert await pillar._open_position_count() == 1
     finally:
         await db.close()
 
