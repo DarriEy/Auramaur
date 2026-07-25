@@ -211,14 +211,26 @@ class InformedFlowPillar:
     # ------------------------------------------------------------------
 
     async def _already_entered_or_held(self, market_id: str) -> bool:
+        """One shot per market — keyed on an actual FILL, not on a signal.
+
+        _persist_signal runs BEFORE the risk gate, and signals rows are never
+        deleted, so any risk rejection, order-build failure or post-signal skip
+        blacklisted that market permanently. On 2026-07-25 that had burned 54
+        markets for econ_indicator (77% of its universe), 107 for weather_temp
+        and 68 for informed_flow — all with zero trades to show for it. Keying
+        on trades preserves the intent (never re-enter a market this pillar has
+        traded) without letting a rejection cost us the market forever.
+        """
         row = await self._db.fetchone(
-            "SELECT 1 FROM signals WHERE market_id = ? AND strategy_source = 'informed_flow' LIMIT 1",
+            "SELECT 1 FROM trades WHERE market_id = ? "
+            "AND strategy_source = 'informed_flow' LIMIT 1",
             (market_id,),
         )
         if row is not None:
             return True
         row = await self._db.fetchone(
-            "SELECT 1 FROM portfolio WHERE market_id = ? LIMIT 1", (market_id,),
+            "SELECT 1 FROM portfolio WHERE market_id = ? AND size > 0 LIMIT 1",
+            (market_id,),
         )
         return row is not None
 

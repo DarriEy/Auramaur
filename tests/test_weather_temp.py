@@ -6,6 +6,8 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from auramaur.broker.pnl import PnLTracker
 from auramaur.db.database import Database
 from auramaur.exchange.models import Market, Order, OrderResult, OrderSide, TokenType
@@ -106,3 +108,51 @@ def test_skips_implausible_divergence():
         finally:
             await db.close()
     asyncio.run(run())
+
+
+@pytest.mark.asyncio
+async def test_rejected_signal_does_not_burn_the_market_forever(tmp_path):
+    """A signal without a fill must not blacklist the market.
+
+    _persist_signal runs before the risk gate and signals rows are never
+    deleted, so any rejection permanently excluded that market: 107 markets
+    burned for this pillar on 2026-07-25 with zero trades to show for it.
+    """
+    from auramaur.db.database import Database
+    from auramaur.strategy.weather_temp import WeatherTempPillar
+
+    db = Database(str(tmp_path / "w.db"))
+    await db.connect()
+    try:
+        pillar = WeatherTempPillar.__new__(WeatherTempPillar)
+        pillar._db = db
+
+        # Signal emitted, then rejected — no trade, no position.
+        await db.execute(
+            """INSERT INTO signals (market_id, claude_prob, claude_confidence,
+               market_prob, edge, evidence_summary, action, strategy_source)
+               VALUES ('BURNED', 0.8, 'MEDIUM', 0.7, 8.0, 'e', 'BUY',
+                       'weather_temp')""")
+        await db.commit()
+        assert await pillar._already_entered_or_held("BURNED") is False
+
+        # An actual fill still blocks re-entry.
+        await db.execute(
+            """INSERT INTO trades (market_id, side, size, price, is_paper,
+               status, strategy_source, exchange)
+               VALUES ('TRADED','BUY',10,0.5,1,'filled','weather_temp',
+                       'polymarket')""")
+        await db.commit()
+        assert await pillar._already_entered_or_held("TRADED") is True
+
+        # A closed position (size 0) no longer blocks.
+        await db.execute(
+            """INSERT INTO portfolio (market_id, exchange, side, size, avg_price,
+               current_price, unrealized_pnl, category, token, token_id,
+               is_paper, updated_at)
+               VALUES ('CLOSED','polymarket','BUY',0,0.5,0.5,0,'weather','YES',
+                       't', 1, datetime('now'))""")
+        await db.commit()
+        assert await pillar._already_entered_or_held("CLOSED") is False
+    finally:
+        await db.close()
