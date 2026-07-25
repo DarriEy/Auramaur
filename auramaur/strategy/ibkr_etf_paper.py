@@ -375,9 +375,16 @@ class IBKRETFPaperPillar:
             mid = (quote.bid + quote.ask) / 2
             await self._resolve_forecasts(symbol)
             spread_bps = (quote.ask - quote.bid) / mid * 10_000
-            if spread_bps > cfg.etf_max_spread_bps:
-                continue
             held = positions.get(symbol)
+            # The spread gate bounds ENTRY quality only. It used to sit above
+            # the held-position branch, so any widening past 20 bps — an
+            # auction, a thin tape, a stress print — silently disabled
+            # stop_loss, take_profit, trailing_stop and llm_bearish for a
+            # position already at risk, exactly when an exit matters most.
+            # The multiasset book already marks and exits held positions
+            # before its own spread check; match it.
+            if spread_bps > cfg.etf_max_spread_bps and not held:
+                continue
             view = await self._view(
                 symbol, allow_refresh=symbol in refresh_set, reference_price=mid)
             prob = view[0] if view else None

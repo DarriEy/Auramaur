@@ -265,3 +265,40 @@ async def test_one_model_failure_does_not_stop_other_arms():
 
     await run_ibkr_etf_arms_once([Arm("luna", True), Arm("terra"), Arm("sol")])
     assert calls == ["luna", "terra", "sol"]
+
+
+@pytest.mark.asyncio
+async def test_wide_spread_still_exits_a_held_position_but_blocks_entry():
+    """A widening spread must never disable a held position's stop-loss.
+
+    The spread gate sat above the held-position branch, so any widening past
+    etf_max_spread_bps — an auction, a thin tape, a stress print — silently
+    disabled stop_loss / take_profit / trailing_stop / llm_bearish on a
+    position already at risk, precisely when the exit matters most. It bounds
+    ENTRY quality only.
+    """
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        # Enter at a tight spread.
+        pillar = await _pillar(db, client=QuotesOnlyClient(bid=99.9, ask=100.0))
+        await pillar.run_once()
+        assert await db.fetchone("SELECT * FROM ibkr_etf_positions") is not None
+
+        # Price collapses AND the spread blows out well past the 20bps cap.
+        cfg = pillar._s.ibkr
+        crashed = 100.0 * (1 - (cfg.etf_stop_loss_pct + 1) / 100.0)
+        wide = QuotesOnlyClient(bid=crashed, ask=crashed * 1.05)  # ~500 bps
+        spread_bps = (wide.ask - wide.bid) / ((wide.ask + wide.bid) / 2) * 10_000
+        assert spread_bps > cfg.etf_max_spread_bps
+
+        pillar._client = wide
+        pillar._cooldown.clear()
+        await pillar.run_once()
+
+        sells = await db.fetchall(
+            "SELECT * FROM ibkr_etf_fills WHERE side = 'SELL'")
+        assert sells, "held position must still be able to exit at a wide spread"
+        assert await db.fetchone("SELECT * FROM ibkr_etf_positions") is None
+    finally:
+        await db.close()
