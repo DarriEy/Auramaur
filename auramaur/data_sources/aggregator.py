@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 _PUNCTUATION_RE = re.compile(r"[^\w\s]")
+_EVIDENCE_CACHE_MAX = 256
 
 
 def _normalise_title(title: str) -> str:
@@ -180,8 +181,20 @@ class Aggregator:
         # Never prolong a transient outage. Successful empty results may be
         # cached, but any timeout/error forces the next consumer to retry.
         if not statuses.intersection({"timeout", "error"}):
+            now_mono = time.monotonic()
+            # Bound the store, not just the TTL: expired entries (and, past a
+            # cap, the oldest live ones) are evicted on insert so a long-lived
+            # process can't accumulate one deep-copied item list per distinct
+            # query forever.
+            self._cache = {
+                k: v for k, v in self._cache.items()
+                if now_mono - v[0] <= self._cache_ttl_seconds
+            }
             self._cache[cache_key] = (
-                time.monotonic(), [item.model_copy(deep=True) for item in unique])
+                now_mono, [item.model_copy(deep=True) for item in unique])
+            while len(self._cache) > _EVIDENCE_CACHE_MAX:
+                oldest = min(self._cache, key=lambda k: self._cache[k][0])
+                del self._cache[oldest]
         if self.observer is not None:
             ranks = {item.id: rank for rank, item in enumerate(unique, start=1)}
             persisted = list({(item.source, item.id): item for item in all_items}.values())

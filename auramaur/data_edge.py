@@ -68,6 +68,14 @@ class DataDelivery(BaseModel):
 # Explicit defaults. Strategies may override these with a ``data_requirements``
 # attribute; keeping the registry here makes readiness useful before every
 # pillar has bespoke telemetry.
+#
+# ``fail_closed=True`` is reserved for components a strategy records
+# UNCONDITIONALLY every cycle (market snapshots, cycle telemetry): for those,
+# a missing/expired record means the pipeline broke. Components recorded only
+# when a candidate/event materializes (per-market books, FRED cache misses,
+# weather ensembles, model calls, venue quotes outside market hours) are
+# ``fail_closed=False`` — absence means idle, not broken, and routing them to
+# FAIL would leave the criterion permanently red during normal quiet periods.
 _EVIDENCE = DataRequirement(component="evidence", max_age_seconds=48 * 3600)
 _MARKETS = DataRequirement(
     component="market_snapshot", max_age_seconds=300,
@@ -75,48 +83,58 @@ _MARKETS = DataRequirement(
 )
 _BOOK = DataRequirement(
     component="order_book", max_age_seconds=15,
-    required_fields=("best_bid", "best_ask"),
+    required_fields=("best_bid", "best_ask"), fail_closed=False,
 )
 _CYCLE = DataRequirement(
     component="strategy_cycle", max_age_seconds=900, min_items=0,
     source_time_required=False,
+)
+_FRED = DataRequirement(
+    component="fred_observations", max_age_seconds=3600, fail_closed=False,
+)
+# IBKR/venue quotes: recorded every cycle, but outside market hours the
+# honest record is "empty, market closed" — that must not read as failure.
+_VENUE_QUOTE = DataRequirement(
+    component="multiasset_quote", max_age_seconds=120, fail_closed=False,
 )
 
 REQUIREMENTS: dict[str, tuple[DataRequirement, ...]] = {
     "strategic": (_MARKETS, _EVIDENCE),
     "llm": (_MARKETS, _EVIDENCE),
     "technical": (_MARKETS, DataRequirement(component="price_history", max_age_seconds=300)),
-    "market_maker": (_BOOK,),
+    "market_maker": (_MARKETS, _BOOK),
     "arbitrage": (_MARKETS,),
     "bias_harvest": (_MARKETS, _BOOK),
-    "platform_consensus": (_MARKETS, DataRequirement(component="platform_forecasts", max_age_seconds=900)),
+    "platform_consensus": (_MARKETS, DataRequirement(component="platform_forecasts", max_age_seconds=900, fail_closed=False)),
     "cross_venue_arb": (DataRequirement(component="cross_venue_snapshot", max_age_seconds=30),),
     "informed_flow": (DataRequirement(component="venue_trades", max_age_seconds=120),),
-    "econ_indicator": (DataRequirement(component="fred_observations", max_age_seconds=3600), _MARKETS),
-    "settlement_arb": (DataRequirement(component="fred_observations", max_age_seconds=3600), _MARKETS),
-    "weather_temp": (DataRequirement(component="weather_ensemble", max_age_seconds=3600), _MARKETS),
-    "vol_anchor": (DataRequirement(component="spot_volatility", max_age_seconds=3600), _MARKETS),
+    "econ_indicator": (_FRED, _MARKETS),
+    "settlement_arb": (_FRED, _MARKETS),
+    "weather_temp": (DataRequirement(component="weather_ensemble", max_age_seconds=3600, fail_closed=False), _MARKETS),
+    "vol_anchor": (DataRequirement(component="spot_volatility", max_age_seconds=3600, fail_closed=False), _MARKETS),
     "oddlot_tender": (DataRequirement(component="edgar_filings", max_age_seconds=21600),),
     "resolution_lens": (_MARKETS, _EVIDENCE.model_copy(update={"fail_closed": False})),
     "resolution_lens_kalshi": (_MARKETS, _EVIDENCE.model_copy(update={"fail_closed": False})),
     "term_structure": (_MARKETS,),
-    "agent_trader": (_MARKETS, DataRequirement(component="model_response", max_age_seconds=10800)),
+    "agent_trader": (_MARKETS, DataRequirement(component="model_response", max_age_seconds=10800, fail_closed=False)),
     "long_horizon": (_MARKETS,),
     "entailment_arb": (_MARKETS,),
-    "ibkr_etf_paper": (DataRequirement(component="equity_quote", max_age_seconds=120), _EVIDENCE),
-    "ibkr_fx_paper": (DataRequirement(component="multiasset_quote", max_age_seconds=120),),
-    "ibkr_futures_paper": (DataRequirement(component="multiasset_quote", max_age_seconds=120),),
-    "ibkr_global_etf_paper": (DataRequirement(component="multiasset_quote", max_age_seconds=120),),
-    "ibkr_international_equity_paper": (DataRequirement(component="multiasset_quote", max_age_seconds=120),),
-    "ibkr_bond_paper": (DataRequirement(component="multiasset_quote", max_age_seconds=120),),
-    "ibkr_options_paper": (DataRequirement(component="multiasset_quote", max_age_seconds=120),),
-    "kraken_treasury": (DataRequirement(component="crypto_quote", max_age_seconds=120), _EVIDENCE),
+    "ibkr_etf_paper": (DataRequirement(component="equity_quote", max_age_seconds=120, fail_closed=False), _EVIDENCE),
+    "ibkr_fx_paper": (_VENUE_QUOTE,),
+    "ibkr_futures_paper": (_VENUE_QUOTE,),
+    "ibkr_global_etf_paper": (_VENUE_QUOTE,),
+    "ibkr_international_equity_paper": (_VENUE_QUOTE,),
+    "ibkr_bonds_paper": (_VENUE_QUOTE,),
+    "ibkr_options_paper": (_VENUE_QUOTE,),
+    "kraken_treasury": (DataRequirement(component="crypto_quote", max_age_seconds=120, fail_closed=False), _EVIDENCE),
     # Operational/non-trading workers. These have no market-data input
     # contract, but naming them explicitly prevents the dangerous unknown-name
     # fallback that used to make new strategies look healthy automatically.
     "evidence_distiller": (_CYCLE,),
     "interim_manager": (_CYCLE,),
-    "momentum_coupling": (DataRequirement(component="crypto_quote", max_age_seconds=120),),
+    # No delivery recorder yet — hold it to the cycle contract until one lands
+    # (a crypto_quote requirement with no emitter would fail unconditionally).
+    "momentum_coupling": (_CYCLE,),
 }
 
 
@@ -179,7 +197,14 @@ async def record_delivery(db, delivery: DataDelivery) -> None:
 
 async def record_market_snapshot(db, strategy: str, markets, *,
                                  provider: str = "discovery") -> str:
-    """Record the exact discovery result delivered to one consumer."""
+    """Record the exact discovery result delivered to one consumer.
+
+    A snapshot is usable when at least one market carries prices — venues
+    routinely include a few unpriced markets, and strategies skip those, so
+    "partial" (a hard readiness reason on fail-closed contracts) is reserved
+    for the degenerate case where rows arrived but NONE are priced. The
+    unpriced count is always surfaced in ``detail``.
+    """
     observed = datetime.now(timezone.utc)
     rows = list(markets or [])
     missing = sum(
@@ -187,14 +212,15 @@ async def record_market_snapshot(db, strategy: str, markets, *,
         if getattr(market, "outcome_yes_price", None) is None
         or getattr(market, "outcome_no_price", None) is None
     )
+    degraded = bool(rows) and missing == len(rows)
     sid = snapshot_id(strategy, provider, observed.isoformat(), len(rows))
     await record_delivery(db, DataDelivery(
         strategy=strategy, component="market_snapshot",
-        status="empty" if not rows else "partial" if missing else "ok",
+        status="empty" if not rows else "partial" if degraded else "ok",
         provider=provider, snapshot_id=sid, source_at=observed,
         item_count=len(rows),
         required_fields=("outcome_yes_price", "outcome_no_price"),
-        missing_fields=(("outcome_prices",) if missing else ()),
+        missing_fields=(("outcome_prices",) if degraded else ()),
         detail={"missing_market_count": missing},
     ))
     return sid

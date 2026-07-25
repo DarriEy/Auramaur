@@ -438,13 +438,17 @@ class TradingEngine(CycleOrchestrationMixin):
             1 for market in markets
             if market.outcome_yes_price is None or market.outcome_no_price is None
         )
+        # Mirrors record_market_snapshot: a few unpriced markets are routine
+        # and skipped by strategies; "partial" (a hard readiness reason) is
+        # reserved for a snapshot where NOTHING is priced.
+        degraded = bool(markets) and missing_prices == len(markets)
         await record_delivery(self.db, DataDelivery(
             strategy="strategic", component="market_snapshot",
-            status=("empty" if not markets else "partial" if missing_prices else "ok"),
+            status=("empty" if not markets else "partial" if degraded else "ok"),
             provider=self.exchange_name or "discovery", snapshot_id=sid,
             source_at=observed, item_count=len(markets),
             required_fields=("outcome_yes_price", "outcome_no_price"),
-            missing_fields=(("outcome_prices",) if missing_prices else ()),
+            missing_fields=(("outcome_prices",) if degraded else ()),
             detail={"missing_market_count": missing_prices},
         ))
         await record_delivery(self.db, DataDelivery(
