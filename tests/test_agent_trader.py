@@ -527,15 +527,15 @@ def test_kalshi_lane_scopes_cells_and_venue():
 
 
 @pytest.mark.asyncio
-async def test_open_book_is_venue_scoped_and_clears_on_live_close(tmp_path):
-    """Two failures that between them silently stop the pillar trading.
+async def test_open_book_counts_held_positions_not_ledger_absence(tmp_path):
+    """The book must be derived from positions actually held.
 
-    1. The theses table was keyed by model_alias alone, so the Kalshi instance
-       counted the Polymarket book and skipped every arm as book_full — the
-       lane could never place a trade.
-    2. The closure check required a PAPER realization, so the moment a cell
-       graduated to live its theses could never clear: the book filled to
-       max_open_per_model and the arm went permanently book_full.
+    Inferring "open" from the absence of a closing pnl_ledger row wedged this
+    arm at its cap while it held ONE real position (2026-07-25). All three
+    real-world break modes are covered here: a purged position that never got
+    a closure row, a market closed under ANOTHER cell's strategy_source, and
+    an exit booked as strategy_source='exit'. Venue scoping is checked too —
+    the Kalshi instance must not count the Polymarket book.
     """
     from unittest.mock import MagicMock
 
@@ -551,19 +551,41 @@ async def test_open_book_is_venue_scoped_and_clears_on_live_close(tmp_path):
                                cell_suffix="_kalshi")
     await poly._ensure_schema()
 
-    for mid in ("p1", "p2"):
+    async def thesis(mid, token="YES", cell="agent_trader_opus"):
         await db.execute(
-            "INSERT INTO agent_trader_theses (model_alias, cell, market_id, entered) "
-            "VALUES ('opus', 'agent_trader_opus', ?, 1)", (mid,))
+            "INSERT INTO agent_trader_theses (model_alias, cell, market_id,"
+            " token, entered) VALUES ('opus', ?, ?, ?, 1)", (cell, mid, token))
 
-    # The Polymarket book is visible only to the Polymarket instance.
-    assert len(await poly._open_theses("opus")) == 2
-    assert len(await kalshi._open_theses("opus")) == 0
+    async def hold(mid, token="YES", size=10.0):
+        await db.execute(
+            "INSERT INTO cost_basis (market_id, token, size, avg_cost,"
+            " total_cost, is_paper) VALUES (?, ?, ?, 0.5, 5.0, 1)",
+            (mid, token, size))
 
-    # A LIVE realization must clear the thesis (is_paper=0).
+    await thesis("held")        # genuinely open
+    await hold("held")
+    await thesis("purged")      # position swept by maintenance, no closure row
+    await thesis("other_cell")  # closed, but booked under a different cell
     await db.execute(
-        "INSERT INTO pnl_ledger (market_id, strategy_source, kind, pnl, is_paper,"
-        " source_ref, realized_at) VALUES ('p1','agent_trader_opus','trade',1.5,0,"
-        "'ref-p1',datetime('now'))")
-    assert len(await poly._open_theses("opus")) == 1
+        "INSERT INTO pnl_ledger (market_id, strategy_source, kind, pnl,"
+        " is_paper, source_ref, realized_at) VALUES ('other_cell',"
+        " 'agent_trader_sonnet','trade',1.0,1,'r1',datetime('now'))")
+    await thesis("exited")      # closed by the exit path
+    await db.execute(
+        "INSERT INTO pnl_ledger (market_id, strategy_source, kind, pnl,"
+        " is_paper, source_ref, realized_at) VALUES ('exited','exit','trade',"
+        "2.0,0,'r2',datetime('now'))")
+
+    open_rows = await poly._open_theses("opus")
+    assert [r["market_id"] for r in open_rows] == ["held"], (
+        "only a held position counts against the cap")
+
+    # A live close (is_paper=0) removes the holding and frees the slot.
+    await db.execute("UPDATE cost_basis SET size = 0 WHERE market_id = 'held'")
+    assert await poly._open_theses("opus") == []
+
+    # Venue scoping: the Kalshi instance never sees the Polymarket book.
+    await thesis("k1", cell="agent_trader_opus_kalshi")
+    await hold("k1")
+    assert [r["market_id"] for r in await kalshi._open_theses("opus")] == ["k1"]
     await db.close()

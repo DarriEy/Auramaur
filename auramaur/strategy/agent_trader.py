@@ -423,21 +423,31 @@ class AgentTraderPillar:
         """This alias's ENTERED theses with no realized event yet — its open
         book. Stake-0 prediction-only rows (entered=0) are analysis data, not
         positions."""
-        # Scoped to THIS venue's cell: the Kalshi and Polymarket instances keep
-        # separate books. The closure check deliberately does NOT filter
-        # is_paper — it used to require a PAPER realization, so the moment a
-        # cell graduated to live its theses could never clear, the book filled
-        # to max_open_per_model, and the arm went permanently book_full.
-        # strategy_source already scopes the ledger to this cell.
+        # A thesis is open iff the POSITION IS STILL HELD. Do not infer it from
+        # the absence of a closing pnl_ledger row: that inference stuck open in
+        # three separate ways and wedged this arm's book at the cap while it
+        # held a single real position (2026-07-25 — 9 of 10 "open" were
+        # phantoms, entries blocked for days, looking exactly like ordinary
+        # selectivity).
+        #   * maintenance purges of paper rows delete the position without ever
+        #     writing a closure, so the thesis stays open forever;
+        #   * when several arms enter the same market the closure is attributed
+        #     to whichever cell owned the position, so the others never clear;
+        #   * exits book under strategy_source='exit', not the entering cell.
+        # cost_basis is the authoritative holding record, so asking it directly
+        # is immune to all three. It is not strategy-scoped, so two arms in the
+        # same market AND side each see the position — an over-count, but a
+        # self-correcting one, unlike a permanent phantom.
         return await self._db.fetchall(
             """SELECT t.market_id, t.question, t.token, t.prob, t.market_prob,
                       t.thesis, t.created_at
                FROM agent_trader_theses t
                WHERE t.model_alias = ? AND t.entered = 1 AND t.cell = ?
-                 AND NOT EXISTS (SELECT 1 FROM pnl_ledger l
-                                 WHERE l.market_id = t.market_id
-                                   AND l.strategy_source = ?)""",
-            (alias, self.cell(alias), self.cell(alias)),
+                 AND EXISTS (SELECT 1 FROM cost_basis cb
+                             WHERE cb.market_id = t.market_id
+                               AND UPPER(cb.token) = UPPER(t.token)
+                               AND cb.size > 0)""",
+            (alias, self.cell(alias)),
         )
 
     @staticmethod
