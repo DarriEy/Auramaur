@@ -250,3 +250,155 @@ async def test_ownerless_open_transaction_is_rolled_back_by_next_writer(tmp_path
     assert row["v"] == 3
     assert not db._db._conn.in_transaction
     await db.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_write_waits_out_explicit_transaction(tmp_path):
+    """A one-statement writer may never bleed into another task's batch."""
+    db = await _fresh_db(tmp_path)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    legacy_landed = asyncio.Event()
+
+    async def adopter():
+        async with db.transaction(owner="adopter"):
+            await db.execute("INSERT INTO t (k, v) VALUES ('adopter', 1)")
+            entered.set()
+            await release.wait()
+
+    async def legacy_writer():
+        await entered.wait()
+        await db.execute("INSERT INTO t (k, v) VALUES ('legacy', 2)")
+        legacy_landed.set()
+
+    adopter_task = asyncio.create_task(adopter())
+    legacy_task = asyncio.create_task(legacy_writer())
+    await entered.wait()
+    await asyncio.sleep(0.02)
+    assert not legacy_landed.is_set()
+    release.set()
+    await asyncio.gather(adopter_task, legacy_task)
+    assert legacy_landed.is_set()
+    rows = await db.fetchall("SELECT k FROM t ORDER BY k")
+    assert [row["k"] for row in rows] == ["adopter", "legacy"]
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_write_survives_concurrent_adopter_rollback(tmp_path):
+    """A rollback cannot discard a queued legacy writer from another task."""
+    db = await _fresh_db(tmp_path)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def adopter():
+        with pytest.raises(RuntimeError):
+            async with db.transaction(owner="adopter"):
+                await db.execute("INSERT INTO t (k, v) VALUES ('rolled-back', 1)")
+                entered.set()
+                await release.wait()
+                raise RuntimeError("rollback")
+
+    async def legacy_writer():
+        await entered.wait()
+        await db.execute("INSERT INTO t (k, v) VALUES ('legacy', 2)")
+
+    adopter_task = asyncio.create_task(adopter())
+    legacy_task = asyncio.create_task(legacy_writer())
+    await entered.wait()
+    release.set()
+    await asyncio.gather(adopter_task, legacy_task)
+    rows = await db.fetchall("SELECT k FROM t ORDER BY k")
+    assert [row["k"] for row in rows] == ["legacy"]
+    await db.close()
+@pytest.mark.asyncio
+async def test_read_waits_out_other_tasks_uncommitted_transaction(tmp_path):
+    """Other tasks cannot observe an adopter's uncommitted rows."""
+    db = await _fresh_db(tmp_path)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    read_finished = asyncio.Event()
+
+    async def adopter():
+        async with db.transaction(owner="adopter"):
+            await db.execute("INSERT INTO t (k, v) VALUES ('private', 1)")
+            entered.set()
+            await release.wait()
+
+    async def reader():
+        await entered.wait()
+        row = await db.fetchone("SELECT v FROM t WHERE k='private'")
+        read_finished.set()
+        return row
+
+    adopter_task = asyncio.create_task(adopter())
+    reader_task = asyncio.create_task(reader())
+    await entered.wait()
+    await asyncio.sleep(0.02)
+    assert not read_finished.is_set()
+    release.set()
+    await adopter_task
+    row = await reader_task
+    assert row["v"] == 1
+    await db.close()
+@pytest.mark.asyncio
+async def test_legacy_rollback_cannot_discard_an_adopters_batch(tmp_path):
+    db = await _fresh_db(tmp_path)
+    async with db.transaction(owner="adopter"):
+        await db.execute("INSERT INTO t (k, v) VALUES ('safe', 1)")
+        await db.rollback()
+        assert db.db.in_transaction is True
+    row = await db.fetchone("SELECT v FROM t WHERE k='safe'")
+    assert row["v"] == 1
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_waiters_do_not_leak_waiter_count(tmp_path):
+    db = await _fresh_db(tmp_path)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def holder():
+        async with db.transaction(owner="holder"):
+            entered.set()
+            await release.wait()
+
+    holder_task = asyncio.create_task(holder())
+    await entered.wait()
+    waiters = [
+        asyncio.create_task(db.execute("INSERT INTO t (k, v) VALUES ('x', 1)")),
+        asyncio.create_task(db.fetchone("SELECT 1")),
+    ]
+    await asyncio.sleep(0.02)
+    assert db._write_waiters == 2
+    for task in waiters:
+        task.cancel()
+    await asyncio.gather(*waiters, return_exceptions=True)
+    assert db._write_waiters == 0
+    release.set()
+    await holder_task
+    await db.close()
+@pytest.mark.asyncio
+async def test_close_waits_for_active_transaction(tmp_path):
+    db = await _fresh_db(tmp_path)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def writer():
+        async with db.transaction(owner="writer"):
+            await db.execute("INSERT INTO t (k, v) VALUES ('landed', 1)")
+            entered.set()
+            await release.wait()
+
+    writer_task = asyncio.create_task(writer())
+    await entered.wait()
+    close_task = asyncio.create_task(db.close())
+    await asyncio.sleep(0.02)
+    assert not close_task.done()
+    release.set()
+    await writer_task
+    await close_task
+    assert db._db is None
+    assert not db._txn_lock.locked()
+    assert db._txn_owner is None

@@ -65,13 +65,17 @@ class PnLTracker:
                 return
             raise ValueError(f"conflicting fill replay for order {fill.order_id}")
 
-        try:
-            await self._record_fill_once(fill)
-        except Exception:
-            await self._db.rollback()
-            raise
+        async with self._db.transaction(owner="pnl_fill"):
+            ledger_event = await self._record_fill_once(fill)
 
-    async def _record_fill_once(self, fill: Fill) -> None:
+        # Ancillary reporting follows the authoritative fill + cost-basis
+        # commit. It is independently idempotent and must not lengthen the
+        # critical transaction or accidentally commit it halfway through.
+        if ledger_event is not None:
+            from auramaur.broker.ledger import record_ledger_event
+            await record_ledger_event(self._db, **ledger_event)
+
+    async def _record_fill_once(self, fill: Fill) -> dict | None:
         """Write one new fill and its cost basis as a single transaction."""
         # 1. Persist the fill
         cursor = await self._db.execute(
@@ -211,12 +215,6 @@ class PnLTracker:
                 now,
             ),
         )
-        await self._db.commit()
-
-        if ledger_event is not None:
-            from auramaur.broker.ledger import record_ledger_event
-            await record_ledger_event(self._db, **ledger_event)
-
         log.info(
             "pnl.fill_recorded",
             market_id=fill.market_id,
@@ -226,6 +224,7 @@ class PnLTracker:
             new_position_size=new_size,
             avg_cost=round(new_avg_cost, 4),
         )
+        return ledger_event
 
     # ------------------------------------------------------------------
     # Cost basis queries

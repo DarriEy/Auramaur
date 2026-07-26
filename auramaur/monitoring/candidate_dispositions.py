@@ -31,12 +31,17 @@ class CandidateDispositionCycle:
         counts = Counter(row[0] for row in self._rows.values())
         try:
             async with self.db.transaction(owner="candidate_dispositions"):
-                for market_id, (disposition, stage, reason) in self._rows.items():
-                    await self.db.execute("""INSERT INTO candidate_dispositions
+                rows = [
+                    (self.cycle_id, market_id, self.exchange, self.strategy,
+                     disposition, stage, reason)
+                    for market_id, (disposition, stage, reason) in self._rows.items()
+                ]
+                if rows:
+                    await self.db.executemany("""INSERT INTO candidate_dispositions
                         (cycle_id,market_id,exchange,strategy,disposition,stage,reason) VALUES (?,?,?,?,?,?,?)
                         ON CONFLICT(cycle_id,market_id,strategy) DO UPDATE SET
                         disposition=excluded.disposition,stage=excluded.stage,reason=excluded.reason""",
-                        (self.cycle_id,market_id,self.exchange,self.strategy,disposition,stage,reason))
+                        rows)
                 await self.db.execute("""INSERT OR REPLACE INTO candidate_cycle_summaries
                     (cycle_id,exchange,strategy,discovered,executed,risk_blocked,filtered,throttled,malformed,unavailable,failed)
                     VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
