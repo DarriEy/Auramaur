@@ -219,3 +219,35 @@ def test_kraken_pair_gets_venue_fallback():
         await db.close()
 
     asyncio.run(run())
+
+def test_fill_and_cost_basis_roll_back_atomically_on_mid_batch_failure():
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        tracker = PnLTracker(db, Settings())
+        real_execute = db.execute
+
+        async def fail_cost_basis(sql, params=()):
+            if "INSERT INTO cost_basis" in sql:
+                raise RuntimeError("injected cost-basis failure")
+            return await real_execute(sql, params)
+
+        db.execute = fail_cost_basis
+        try:
+            await tracker.record_fill(_fill("atomic", OrderSide.BUY, 5, 0.4))
+        except RuntimeError as exc:
+            assert "injected" in str(exc)
+        else:
+            raise AssertionError("expected injected failure")
+        finally:
+            db.execute = real_execute
+
+        assert await db.fetchone(
+            "SELECT 1 FROM fills WHERE market_id='atomic'"
+        ) is None
+        assert await db.fetchone(
+            "SELECT 1 FROM cost_basis WHERE market_id='atomic'"
+        ) is None
+        await db.close()
+
+    asyncio.run(run())

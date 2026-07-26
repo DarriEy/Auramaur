@@ -22,6 +22,24 @@ class Database:
         self._txn_lock = asyncio.Lock()
         self._txn_task: asyncio.Task | None = None
         self._txn_owner: str | None = None
+        self._write_waiters = 0
+        self._closing = False
+
+    @asynccontextmanager
+    async def _serialized_slot(self):
+        """Acquire the shared connection fairly without leaking waiter state."""
+        self._write_waiters += 1
+        acquired = False
+        try:
+            await self._txn_lock.acquire()
+            acquired = True
+            self._write_waiters -= 1
+            yield
+        finally:
+            if acquired:
+                self._txn_lock.release()
+            else:
+                self._write_waiters -= 1
 
     async def connect(self, ensure_schema: bool = True) -> None:
         """Open the connection.
@@ -105,7 +123,17 @@ class Database:
             yield self
             return
         requested_owner = owner or asyncio.current_task().get_name()
-        async with self._txn_lock:
+        queued_at = time.monotonic()
+        async with self._serialized_slot():
+            queue_wait = time.monotonic() - queued_at
+            if queue_wait > 0.25:
+                log.warning(
+                    "database.transaction_queue_wait",
+                    seconds=round(queue_wait, 3),
+                    requested_owner=requested_owner,
+                    active_owner=self._txn_owner,
+                    waiters=self._write_waiters,
+                )
             # Autocommit legacy writes cannot strand an implicit transaction.
             # Keep this check as a corruption/concurrency tripwire: the only
             # legitimate active transaction is owned by transaction(), which
@@ -139,23 +167,44 @@ class Database:
                         log.error("database.transaction_orphan_rollback_failed",
                                   requested_owner=requested_owner,
                                   error=str(exc))
-            started = time.monotonic()
+            begin_started = time.monotonic()
             try:
                 await self.db.execute("BEGIN IMMEDIATE")
-            except Exception as exc:
-                log.error("database.transaction_begin_failed",
-                          requested_owner=requested_owner,
-                          requested_task=asyncio.current_task().get_name(),
-                          active_owner=self._txn_owner or "legacy/unknown",
-                          in_transaction=self._db._conn.in_transaction,
-                          error=str(exc))
+            except BaseException as exc:
+                # Cancellation cannot retract work already queued on
+                # aiosqlite's worker thread. Queue a rollback behind BEGIN so
+                # a cancelled acquisition can never leave an ownerless txn.
+                cleanup = asyncio.create_task(
+                    self.db.execute("ROLLBACK"),
+                    name=f"db_begin_cleanup_{requested_owner}",
+                )
+                try:
+                    await asyncio.shield(cleanup)
+                except Exception:
+                    pass
+                if not isinstance(exc, asyncio.CancelledError):
+                    log.error(
+                        "database.transaction_begin_failed",
+                        requested_owner=requested_owner,
+                        requested_task=asyncio.current_task().get_name(),
+                        active_owner=self._txn_owner or "legacy/unknown",
+                        in_transaction=self._db._conn.in_transaction,
+                        error=str(exc),
+                    )
                 raise
+            begin_wait = time.monotonic() - begin_started
+            if begin_wait > 0.25:
+                log.warning(
+                    "database.transaction_file_wait",
+                    seconds=round(begin_wait, 3),
+                    owner=requested_owner,
+                )
             self._txn_task = asyncio.current_task()
             self._txn_owner = requested_owner
+            body_started = time.monotonic()
             try:
                 yield self
             except BaseException:
-                await self.db.execute("ROLLBACK")
                 raise
             else:
                 try:
@@ -163,11 +212,6 @@ class Database:
                 except Exception as exc:  # noqa: BLE001 — narrow handling
                     if "no transaction is active" not in str(exc).lower():
                         raise
-                    # A legacy writer's commit() landed mid-transaction and
-                    # ended it early: the batch's rows ARE durable, but its
-                    # atomicity was violated. Log loudly (this is the bleed
-                    # phase 5 exists to retire) without failing the writer —
-                    # failing here reports durable writes as failures.
                     log.warning(
                         "database.transaction_commit_bled",
                         owner=self._txn_owner,
@@ -175,22 +219,36 @@ class Database:
                     )
             finally:
                 finished_owner = self._txn_owner
-                # Never surrender ownership with the transaction still open.
-                # COMMIT/ROLLBACK can raise (SQLITE_BUSY under contention);
-                # unwinding past that point used to leave an ownerless open
-                # transaction that no later writer could clear.
-                if self._db._conn.in_transaction:
-                    try:
-                        await self.db.execute("ROLLBACK")
-                        log.error("database.transaction_forced_rollback",
-                                  owner=finished_owner,
-                                  task=asyncio.current_task().get_name())
-                    except Exception as exc:  # noqa: BLE001 - best effort
-                        log.error("database.transaction_forced_rollback_failed",
-                                  owner=finished_owner, error=str(exc))
+                # Clear ownership synchronously before cancellation-sensitive
+                # cleanup. The serializer lock remains held until this block
+                # exits, so no successor can begin before the queued rollback.
                 self._txn_task = None
                 self._txn_owner = None
-                held = time.monotonic() - started
+                if self._db is not None and self._db._conn.in_transaction:
+                    rollback_task = asyncio.create_task(
+                        self.db.execute("ROLLBACK"),
+                        name=f"db_rollback_{finished_owner or 'unknown'}",
+                    )
+                    try:
+                        await asyncio.shield(rollback_task)
+                        log.warning(
+                            "database.transaction_forced_rollback",
+                            owner=finished_owner,
+                            task=asyncio.current_task().get_name(),
+                        )
+                    except asyncio.CancelledError:
+                        # The aiosqlite worker operation is already queued.
+                        # Shield it from this task's cancellation and keep the
+                        # serializer until cleanup has actually completed.
+                        await asyncio.shield(rollback_task)
+                        raise
+                    except Exception as exc:  # noqa: BLE001 - best effort
+                        log.error(
+                            "database.transaction_forced_rollback_failed",
+                            owner=finished_owner,
+                            error=str(exc),
+                        )
+                held = time.monotonic() - body_started
                 if held > 0.25:
                     log.warning(
                         "database.transaction_held_long",
@@ -198,12 +256,14 @@ class Database:
                         owner=finished_owner,
                         task=asyncio.current_task().get_name(),
                     )
-
     async def close(self) -> None:
-        if self._db:
-            await self._db.close()
-            self._db = None
-
+        if self._db is None:
+            return
+        self._closing = True
+        async with self._serialized_slot():
+            if self._db is not None:
+                await self._db.close()
+                self._db = None
     async def _init_schema(self) -> None:
         await self._db.executescript(TABLES)
         # Check/set schema version
@@ -1299,18 +1359,54 @@ class Database:
         return self._db
 
     async def execute(self, sql: str, params: tuple = ()) -> aiosqlite.Cursor:
-        return await self.db.execute(sql, params)
+        # Autocommit alone is insufficient: without this guard a legacy
+        # statement queued after another task's BEGIN silently joins or reads
+        # that task's uncommitted batch. All statements share the serializer.
+        if self._txn_task is asyncio.current_task():
+            return await self.db.execute(sql, params)
+        queued_at = time.monotonic()
+        async with self._serialized_slot():
+            waited = time.monotonic() - queued_at
+            if waited > 0.25:
+                log.warning(
+                    "database.statement_queue_wait",
+                    seconds=round(waited, 3),
+                    statement=sql.lstrip().split(None, 1)[0].upper(),
+                    waiters=self._write_waiters,
+                )
+            return await self.db.execute(sql, params)
 
     async def executemany(self, sql: str, params_seq: list[tuple]) -> None:
-        await self.db.executemany(sql, params_seq)
+        if self._txn_task is asyncio.current_task():
+            await self.db.executemany(sql, params_seq)
+            return
+        queued_at = time.monotonic()
+        async with self._serialized_slot():
+            waited = time.monotonic() - queued_at
+            if waited > 0.25:
+                log.warning(
+                    "database.statement_queue_wait",
+                    seconds=round(waited, 3),
+                    statement="EXECUTEMANY",
+                    waiters=self._write_waiters,
+                )
+            await self.db.executemany(sql, params_seq)
 
     async def fetchone(self, sql: str, params: tuple = ()) -> aiosqlite.Row | None:
-        cursor = await self.db.execute(sql, params)
-        return await cursor.fetchone()
+        if self._txn_task is asyncio.current_task():
+            cursor = await self.db.execute(sql, params)
+            return await cursor.fetchone()
+        async with self._serialized_slot():
+            cursor = await self.db.execute(sql, params)
+            return await cursor.fetchone()
 
     async def fetchall(self, sql: str, params: tuple = ()) -> list[aiosqlite.Row]:
-        cursor = await self.db.execute(sql, params)
-        return await cursor.fetchall()
+        if self._txn_task is asyncio.current_task():
+            cursor = await self.db.execute(sql, params)
+            return await cursor.fetchall()
+        async with self._serialized_slot():
+            cursor = await self.db.execute(sql, params)
+            return await cursor.fetchall()
 
     async def commit(self) -> None:
         # Deliberate no-op. Under the autocommit connection every legacy
@@ -1327,4 +1423,11 @@ class Database:
                       active_owner=self._txn_owner or "unknown")
 
     async def rollback(self) -> None:
-        await self.db.rollback()
+        # Deliberate no-op, symmetric with commit(). In autocommit mode a
+        # legacy caller owns no transaction; a raw rollback could only discard
+        # another task's explicit transaction. transaction() owns rollback.
+        if self._db is not None and self._db._conn.in_transaction:
+            log.debug(
+                "database.legacy_rollback_skipped_mid_transaction",
+                active_owner=self._txn_owner or "unknown",
+            )

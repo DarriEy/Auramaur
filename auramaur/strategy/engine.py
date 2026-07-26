@@ -397,35 +397,43 @@ class TradingEngine(CycleOrchestrationMixin):
             market.category = ensure_category(
                 market.question, market.description, market.category)
 
+        market_rows = [
+            (
+                market.id, market.exchange or self.exchange_name or "polymarket",
+                market.condition_id, market.question,
+                market.description, market.category,
+                market.end_date.isoformat() if market.end_date else None,
+                int(market.active), market.outcome_yes_price, market.outcome_no_price,
+                market.volume, market.liquidity,
+                market.clob_token_yes, market.clob_token_no,
+                datetime.now(timezone.utc).isoformat(),
+            )
+            for market in markets
+        ]
         async with self.db.transaction():
-            for market in markets:
-                await self.db.execute(
+            if market_rows:
+                await self.db.executemany(
                     """INSERT OR REPLACE INTO markets
                        (id, exchange, condition_id, question, description, category, end_date, active,
                         outcome_yes_price, outcome_no_price, volume, liquidity,
                         clob_token_yes, clob_token_no, last_updated)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        market.id, market.exchange or self.exchange_name or "polymarket",
-                        market.condition_id, market.question,
-                        market.description, market.category,
-                        market.end_date.isoformat() if market.end_date else None,
-                        int(market.active), market.outcome_yes_price, market.outcome_no_price,
-                        market.volume, market.liquidity,
-                        market.clob_token_yes, market.clob_token_no,
-                        datetime.now(timezone.utc).isoformat(),
-                    ),
+                    market_rows,
                 )
 
         # Price snapshots + prune as a second short transaction so the
         # markets upsert above commits (and releases the write lock) first.
+        history_rows = [
+            (market.id, market.outcome_yes_price,
+             market.exchange or self.exchange_name or "polymarket")
+            for market in markets
+        ]
         async with self.db.transaction():
-            for market in markets:
-                await self.db.execute(
+            if history_rows:
+                await self.db.executemany(
                     "INSERT INTO price_history (market_id, price, exchange)"
                     " VALUES (?, ?, ?)",
-                    (market.id, market.outcome_yes_price,
-                     market.exchange or self.exchange_name or "polymarket"),
+                    history_rows,
                 )
             # Prune old price history to bound table growth. Extended 7 -> 30
             # days so reversion/intraday research has a multi-week sample; the
