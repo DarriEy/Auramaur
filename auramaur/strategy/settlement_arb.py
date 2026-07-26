@@ -31,6 +31,10 @@ un-repriced market (the easy fill) is never wrongly excluded.
 from __future__ import annotations
 
 from auramaur.strategy.protocols import ExecutionMode
+from auramaur.experiments.strategies.settlement_arb import (
+    is_satisfied as _is_satisfied,
+    settlement_proposal,
+)
 
 import json
 import re
@@ -46,6 +50,8 @@ from auramaur.strategy.econ_pricing import (
     kalshi_macro_predicate,
     spec_for_series,
 )
+
+is_satisfied = _is_satisfied  # backward-compatible public import
 
 log = structlog.get_logger()
 
@@ -143,35 +149,6 @@ def indicator_at_period(
         return (ordered[idx][1] - ordered[idx - 1][1]) * spec.scale
 
     return None
-
-
-def _bin_half_width(threshold: float) -> float:
-    """Half-width of the point-bin centered on ``threshold``, derived from the
-    threshold's own decimal precision (Kalshi econ point-bins are one grid step
-    wide: 3.8 -> the [3.75, 3.85) bin, half-width 0.05). Needed because the
-    indicator is computed CONTINUOUSLY from FRED (e.g. CPI YoY = 3.7841%), so an
-    exact ``== 3.8`` test never matches and every point-bin would price fair=0.
-    """
-    s = f"{threshold:.10f}".rstrip("0")
-    decimals = len(s.split(".")[1]) if "." in s else 0
-    return 0.5 * (10.0 ** -decimals)
-
-
-def is_satisfied(value: float, operator: str, threshold: float) -> bool:
-    """Does the published value satisfy the YES criterion?"""
-    if operator == ">=":
-        return value >= threshold
-    if operator == ">":
-        return value > threshold
-    if operator == "<=":
-        return value <= threshold
-    if operator == "<":
-        return value < threshold
-    if operator == "==":
-        # Point-bin: YES iff the continuous indicator rounds INTO this bin, i.e.
-        # falls within half a grid step of the threshold — not exact equality.
-        return abs(value - threshold) < _bin_half_width(threshold) + 1e-12
-    return False
 
 
 class SettlementArbPillar:
@@ -455,27 +432,28 @@ class SettlementArbPillar:
         if spec.report_round_to:
             value = round(value / spec.report_round_to) * spec.report_round_to
 
-        yes_locked = is_satisfied(value, pred["operator"], pred["threshold"])
         yes_price = m.outcome_yes_price
         # Fair is a HARD 0/1 — the print already decided it. The lag is the edge:
         # only trade the un-converged distance. Same edge-sign convention as the
         # graduated resolution_lens: edge>0 -> long YES (BUY); edge<0 -> short YES
         # = long NO (SELL). |edge| < min_edge means the market already converged.
-        fair = 1.0 if yes_locked else 0.0
-        edge = fair - yes_price
-        if abs(edge) < cfg.min_edge:
+        proposal = settlement_proposal(
+            market_id=m.id, yes_price=yes_price,
+            no_price=m.outcome_no_price, published_value=value,
+            indicator=pred["indicator"], reference_period=pred["reference_period"],
+            operator=pred["operator"], threshold=pred["threshold"],
+            min_edge=cfg.min_edge, stake_usd=cfg.stake_usd,
+        )
+        if proposal is None:
             self._bump("converged")
             return False  # already converged — no lag to capture
-        side = OrderSide.BUY if edge > 0 else OrderSide.SELL
+        side = OrderSide.BUY if proposal.buy_yes else OrderSide.SELL
 
         signal = Signal(
-            market_id=m.id, claude_prob=fair,
+            market_id=m.id, claude_prob=proposal.fair_probability,
             claude_confidence=Confidence.HIGH, market_prob=yes_price,
-            edge=abs(edge) * 100.0,
-            evidence_summary=(f"settlement_arb: {pred['indicator']} "
-                              f"{pred['reference_period']} = {value:.2f} "
-                              f"{pred['operator']} {pred['threshold']} -> "
-                              f"{'YES' if yes_locked else 'NO'} locked"),
+            edge=proposal.edge_percent,
+            evidence_summary=proposal.evidence_summary,
             recommended_side=side,
             strategy_source="settlement_arb",
             mispricing_reason="structural: official print already determines the criterion",
@@ -498,6 +476,6 @@ class SettlementArbPillar:
             self._bump("submit_failed")
         if ok:
             log.info("settlement_arb.entered", market_id=m.id, side=side.value,
-                     locked="YES" if yes_locked else "NO", value=round(value, 2),
+                     locked="YES" if proposal.buy_yes else "NO", value=round(value, 2),
                      market_price=round(yes_price, 3), paper=getattr(res.result, "is_paper", True))
         return ok

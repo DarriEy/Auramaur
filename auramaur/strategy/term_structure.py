@@ -47,6 +47,11 @@ import structlog
 from auramaur.strategy.protocols import ExecutionMode
 
 from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
+from auramaur.experiments.strategies.term_structure import (
+    TermStructureCandidate,
+    TermStructureRules,
+    select_term_structure_proposals,
+)
 from auramaur.exchange.models import Confidence, Market, OrderSide, Signal
 from auramaur.strategy.classifier import blocked_category_hit, ensure_category
 
@@ -596,7 +601,8 @@ class TermStructurePillar:
     async def _trade_curve(self, fam: str, strikes: list[Market], thesis: str,
                            probs: dict[str, float], cfg) -> int:
         entered = 0
-        gaps = []
+        candidates = []
+        markets_by_id = {market.id: market for market in strikes}
         for m in strikes:
             if m.id not in probs:
                 continue
@@ -624,13 +630,25 @@ class TermStructurePillar:
                  int(claimed), int(liquid), disposition),
             )
             if disposition == "candidate":
-                gaps.append((gap, m))
+                candidates.append(TermStructureCandidate(
+                    market_id=m.id,
+                    market_probability=m.outcome_yes_price,
+                    model_probability=probs[m.id],
+                    liquidity=m.liquidity,
+                    claimed=claimed,
+                ))
         await self._db.commit()
-        gaps.sort(reverse=True, key=lambda g: g[0])
-        for gap, market in gaps:
-            if entered >= cfg.max_entries_per_family:
-                break
-            if await self._try_enter(market, probs[market.id], thesis, cfg):
+        proposals = select_term_structure_proposals(candidates, TermStructureRules(
+            min_edge_percent=cfg.min_edge_pts,
+            min_liquidity=cfg.min_liquidity,
+            max_entries=cfg.max_entries_per_family,
+            stake_usd=cfg.stake_usd,
+        ))
+        for proposal in proposals:
+            market = markets_by_id[proposal.market_id]
+            if await self._try_enter(
+                market, proposal.fair_probability, thesis, cfg
+            ):
                 entered += 1
         return entered
 

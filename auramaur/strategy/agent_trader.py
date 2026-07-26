@@ -34,7 +34,6 @@ settlement-based, like bias_harvest/long_horizon.
 from __future__ import annotations
 
 import asyncio
-import json
 import tempfile
 from datetime import datetime, timedelta, timezone
 
@@ -44,6 +43,12 @@ from auramaur.strategy.protocols import ExecutionMode
 
 from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
 from auramaur.exchange.models import Confidence, Market, OrderSide, Signal
+from auramaur.experiments.strategies.agent_trader import (
+    AgentTraderInputs,
+    AgentTraderRules,
+    assess_agent_trader,
+    parse_decisions,
+)
 from auramaur.strategy.classifier import blocked_category_hit, ensure_category
 
 log = structlog.get_logger()
@@ -118,41 +123,6 @@ CREATE TABLE IF NOT EXISTS agent_trader_theses (
     created_at TEXT DEFAULT (datetime('now'))
 )
 """
-
-
-def parse_decisions(raw: str, max_entries: int) -> list[dict]:
-    """Tolerant parse of the model's JSON: accepts fenced/prefixed output,
-    drops malformed entries, clamps probabilities, caps the count. Returns
-    ``[]`` on anything unparseable — a bad LLM reply must never crash a cycle."""
-    text = raw.strip()
-    start, end = text.find("{"), text.rfind("}")
-    if start < 0 or end <= start:
-        return []
-    try:
-        payload = json.loads(text[start:end + 1])
-    except (json.JSONDecodeError, ValueError):
-        return []
-    decisions = payload.get("decisions")
-    if not isinstance(decisions, list):
-        return []
-    out: list[dict] = []
-    for d in decisions:
-        if not isinstance(d, dict):
-            continue
-        market_id = str(d.get("market_id", "")).strip()
-        thesis = str(d.get("thesis", "")).strip()
-        try:
-            prob = float(d.get("prob_yes"))
-        except (TypeError, ValueError):
-            continue
-        if not market_id or not thesis:
-            continue
-        if not (0.0 < prob < 1.0):
-            continue
-        out.append({"market_id": market_id, "prob_yes": prob, "thesis": thesis})
-        if len(out) >= max_entries:
-            break
-    return out
 
 
 class AgentTraderPillar:
@@ -597,14 +567,26 @@ class AgentTraderPillar:
 
     async def _try_enter(self, alias: str, market: Market, decision: dict,
                          cfg) -> bool:
-        prob_yes = decision["prob_yes"]
-        market_yes = market.outcome_yes_price
-        edge_pts = abs(prob_yes - market_yes) * 100.0
-        if edge_pts < cfg.min_edge_pts:
+        assessment = assess_agent_trader(AgentTraderInputs(
+            market_id=market.id,
+            question=market.question,
+            market_yes=market.outcome_yes_price,
+            prob_yes=decision["prob_yes"],
+            thesis=decision["thesis"],
+        ), AgentTraderRules(
+            min_edge_pts=cfg.min_edge_pts,
+            stake_usd=cfg.stake_usd,
+            source_tag=self.cell(alias),
+        ))
+        if assessment.proposal is None:
             log.debug("agent_trader.edge_below_floor", alias=alias,
-                      market_id=market.id, edge=round(edge_pts, 1))
+                      market_id=market.id, rejection=assessment.rejection)
             return False
-        side = OrderSide.BUY if prob_yes > market_yes else OrderSide.SELL
+        proposal = assessment.proposal
+        prob_yes = proposal.probability_yes
+        market_yes = proposal.market_probability
+        edge_pts = proposal.edge_percent
+        side = OrderSide.BUY if proposal.buy_yes else OrderSide.SELL
 
         # ONE POSITION PER MARKET, across the whole bot. Settlement attribution
         # is market-level earliest-entrant-wins (ledger._ENTRY_STRATEGY_SQL), so
@@ -621,7 +603,7 @@ class AgentTraderPillar:
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)""",
                 (alias, self.cell(alias), market.id, market.question,
                  "YES" if side == OrderSide.BUY else "NO",
-                 prob_yes, market_yes, decision["thesis"][:500]),
+                 prob_yes, market_yes, proposal.thesis),
             )
             await self._db.commit()
             log.info("agent_trader.market_claimed", alias=alias,
@@ -635,10 +617,10 @@ class AgentTraderPillar:
             claude_confidence=Confidence.MEDIUM,
             market_prob=market_yes,
             edge=edge_pts,
-            evidence_summary=decision["thesis"][:500],
+            evidence_summary=proposal.thesis,
             recommended_side=side,
-            strategy_source=self.cell(alias),
-            mispricing_reason=decision["thesis"][:300],
+            strategy_source=proposal.source_tag,
+            mispricing_reason=proposal.thesis[:300],
         )
         await self._persist_signal(signal, market)
 
@@ -667,7 +649,7 @@ class AgentTraderPillar:
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (alias, self.cell(alias), market.id, market.question,
              res.order.token.value,
-             prob_yes, market_yes, decision["thesis"][:500], size),
+             prob_yes, market_yes, proposal.thesis, size),
         )
         await self._db.commit()
         log.info("agent_trader.entered", alias=alias, market_id=market.id,

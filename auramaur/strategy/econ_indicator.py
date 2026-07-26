@@ -25,6 +25,11 @@ import structlog
 
 from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
 from auramaur.exchange.models import Confidence, Market, OrderSide, Signal
+from auramaur.experiments.strategies.econ_indicator import (
+    EconIndicatorInputs,
+    EconIndicatorRejection,
+    assess_econ_indicator,
+)
 from auramaur.strategy.classifier import ensure_category
 from auramaur.strategy.econ_pricing import (
     estimate_distribution,
@@ -172,26 +177,28 @@ class EconIndicatorPillar:
     async def _enter_if_edge(self, market: Market, model_p: float) -> bool:
         cfg = self._settings.econ_indicator
         market_p = market.outcome_yes_price
-        edge = model_p - market_p
-        if abs(edge) < self._required_edge(market):
-            return False
-        # Implausible-disagreement guard: a random-walk nowcast that disagrees
-        # with the market by a huge margin is naive (the crowd prices forward
-        # info the model lacks), not an edge — trust the market and skip.
-        if abs(edge) > cfg.max_divergence:
+        assessment = assess_econ_indicator(EconIndicatorInputs(
+            market_id=market.id,
+            market_probability=market_p,
+            model_probability=model_p,
+            required_edge=self._required_edge(market),
+            max_divergence=cfg.max_divergence,
+            already_entered_or_held=await self._already_entered_or_held(market.id),
+        ))
+        if assessment.rejection == EconIndicatorRejection.IMPLAUSIBLE_DIVERGENCE:
             log.info("econ_indicator.implausible_divergence", market_id=market.id,
                      model_p=round(model_p, 3), market_p=round(market_p, 3))
+        if assessment.proposal is None:
             return False
-        if await self._already_entered_or_held(market.id):
-            return False
-        side = OrderSide.BUY if edge > 0 else OrderSide.SELL  # SELL -> Kalshi buys NO
+        proposal = assessment.proposal
+        side = OrderSide.BUY if proposal.buy_yes else OrderSide.SELL
         signal = Signal(
             market_id=market.id,
             market_question=market.question,
-            claude_prob=max(0.01, min(0.99, model_p)),
+            claude_prob=proposal.signal_probability,
             claude_confidence=Confidence.MEDIUM,
             market_prob=market_p,
-            edge=abs(edge) * 100.0,
+            edge=proposal.edge_percent,
             evidence_summary=(
                 f"Econ-indicator model P(above)={model_p:.2f} vs market "
                 f"{market_p:.2f} from {spec_for_series(market.ticker.split('-')[0]).fred_series} history."

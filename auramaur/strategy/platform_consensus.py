@@ -18,7 +18,14 @@ from auramaur.exchange.models import (
     Signal,
 )
 from auramaur.strategy.classifier import blocked_category_hit, ensure_category
-from auramaur.strategy.arbitrage_scanner import _word_overlap_score
+from auramaur.experiments.strategies.platform_consensus import (
+    ConsensusForecast,
+    ConsensusInputs,
+    ConsensusRules,
+    assess_platform_consensus,
+    clean_title,
+    parse_probability,
+)
 from auramaur.strategy.protocols import ExecutionMode
 from auramaur.strategy.signals import taker_fee_rate
 
@@ -186,13 +193,10 @@ class PlatformConsensusPillar:
         return int(row["n"]) if row else 0
 
     def _get_clean_title(self, title: str) -> str:
-        return re.sub(r"^\[(?:Manifold|Metaculus):\s*\d+%\]\s*", "", title).strip()
+        return clean_title(title)
 
     def _parse_probability_from_title(self, title: str) -> float | None:
-        m = re.match(r"^\[(?:Manifold|Metaculus):\s*(\d+)%\]", title)
-        if m:
-            return float(m.group(1)) / 100.0
-        return None
+        return parse_probability(title)
 
     @staticmethod
     def _quality_ok(item, source_name: str, cfg) -> bool:
@@ -248,44 +252,7 @@ class PlatformConsensusPillar:
             item_count=len(forecasts),
         ))
 
-        best_match = None
-        best_overlap = 0.0
-        source_name = ""
-
-        # Process Manifold matches
-        for item in manifold_items:
-            if not self._quality_ok(item, "Manifold", cfg):
-                continue
-            clean_title = self._get_clean_title(item.title)
-            overlap = _word_overlap_score(market.question, clean_title)
-            if overlap > best_overlap:
-                best_overlap = overlap
-                best_match = item
-                source_name = "Manifold"
-
-        # Process Metaculus matches
-        for item in metaculus_items:
-            if not self._quality_ok(item, "Metaculus", cfg):
-                continue
-            clean_title = self._get_clean_title(item.title)
-            overlap = _word_overlap_score(market.question, clean_title)
-            if overlap > best_overlap:
-                best_overlap = overlap
-                best_match = item
-                source_name = "Metaculus"
-
-        if best_match is None or best_overlap < cfg.match_threshold:
-            return False
-
-        prob = self._parse_probability_from_title(best_match.title)
-        if prob is None:
-            return False
-
         market_p = market.outcome_yes_price
-        edge = prob - market_p
-        abs_edge = abs(edge)
-
-        # Calculate required edge (including fee)
         fee = (
             taker_fee_rate(
                 market.exchange or "polymarket",
@@ -295,38 +262,66 @@ class PlatformConsensusPillar:
             * market_p
             * (1.0 - market_p)
         )
-        required_edge = cfg.min_edge + fee
-
-        if abs_edge < required_edge:
+        blocked = set(self._settings.risk.blocked_categories)
+        proposal = assess_platform_consensus(
+            ConsensusInputs(
+                market_id=market.id,
+                question=market.question,
+                market_probability=market_p,
+                active=market.active,
+                liquidity_or_volume=max(market.liquidity or 0.0, market.volume or 0.0),
+                category_blocked=blocked_category_hit(
+                    blocked, market.question, market.description, market.category
+                ),
+                end_at=market.end_date,
+                as_of=observed,
+                fee=fee,
+                forecasts=tuple(
+                    ConsensusForecast(item.title, item.content or "", source)
+                    for source, items in (
+                        ("Manifold", manifold_items),
+                        ("Metaculus", metaculus_items),
+                    )
+                    for item in items
+                ),
+            ),
+            ConsensusRules(
+                min_liquidity=cfg.min_liquidity,
+                min_hours_to_resolution=cfg.min_hours_to_resolution,
+                max_days_to_resolution=cfg.max_days_to_resolution,
+                match_threshold=cfg.match_threshold,
+                min_edge=cfg.min_edge,
+                min_manifold_bettors=cfg.min_manifold_bettors,
+                min_manifold_liquidity=cfg.min_manifold_liquidity,
+                min_metaculus_forecasters=cfg.min_metaculus_forecasters,
+                stake_usd=cfg.stake_usd,
+            ),
+        )
+        if proposal is None:
             return False
-
-        recommended_side = OrderSide.BUY if edge > 0 else OrderSide.SELL
+        recommended_side = OrderSide.BUY if proposal.buy_yes else OrderSide.SELL
 
         log.info(
             "platform_consensus.signal_detected",
             market_id=market.id,
             market_question=market.question[:50],
-            consensus_source=source_name,
-            consensus_prob=round(prob, 3),
+            consensus_source=proposal.consensus_source,
+            consensus_prob=round(proposal.consensus_probability, 3),
             market_prob=round(market_p, 3),
-            edge=round(abs_edge * 100, 2),
+            edge=round(proposal.edge_percent, 2),
             side=recommended_side.value,
         )
 
         signal = Signal(
             market_id=market.id,
             market_question=market.question,
-            claude_prob=prob,
+            claude_prob=proposal.consensus_probability,
             claude_confidence=Confidence.HIGH
-            if best_overlap >= 0.8
+            if proposal.confidence == "high"
             else Confidence.MEDIUM,
             market_prob=market_p,
-            edge=abs_edge * 100.0,
-            evidence_summary=(
-                f"Platform consensus follower: found matching market on {source_name} "
-                f"('{self._get_clean_title(best_match.title)[:80]}') with consensus probability {prob:.0%}. "
-                f"Market price is {market_p:.0%}. Edge: {abs_edge:.1%}. Word overlap: {best_overlap:.2f}."
-            ),
+            edge=proposal.edge_percent,
+            evidence_summary=proposal.evidence_summary,
             recommended_side=recommended_side,
             strategy_source=self.name,
         )

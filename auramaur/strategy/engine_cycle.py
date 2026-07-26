@@ -19,6 +19,11 @@ import structlog
 from auramaur.broker.allocator import CandidateTrade, CapitalAllocator
 from auramaur.killswitch import kill_switch_present
 from auramaur.exchange.models import Market, OrderSide, Signal
+from auramaur.experiments.strategies.core_trading import (
+    CoreTradingInputs,
+    CoreTradingRules,
+    assess_core_trading,
+)
 from auramaur.monitoring.display import (
     show_cycle_summary,
     show_risk_decision,
@@ -749,21 +754,38 @@ class CycleOrchestrationMixin:
                     )
             market_prob = market.outcome_yes_price
 
-            # Edge calculation (same as detect_edge)
+            # Pure proposal formation; strategic intentionally retains its
+            # historic direct estimate (no second-opinion blend/negation gate).
             raw_edge = claude_prob - market_prob
             log.info("strategic.edge_calc", market_id=market.id,
                      claude=round(claude_prob, 3), market=round(market_prob, 3),
                      raw_edge=round(raw_edge, 3))
-            if abs(raw_edge) < 0.001:
-                continue
-            side = OrderSide.BUY if raw_edge > 0 else OrderSide.SELL
             # Taker fee coefficient applies to per-contract P*(1-P), not a flat
             # percentage. Polymarket is per-category (see taker_fee_rate); this
             # is a crossing execution path so the taker rate is the right one.
             fee_rate = taker_fee_rate(
                 market.exchange or self.exchange_name, market.category, exchange_fees,
                 actual_fee_rate=market.fee_rate, fees_enabled=market.fees_enabled)
-            edge = abs(raw_edge) - fee_rate * market_prob * (1.0 - market_prob)
+            assessment = assess_core_trading(
+                CoreTradingInputs(
+                    market_id=market.id,
+                    question=market.question,
+                    market_probability=market_prob,
+                    model_probability=claude_prob,
+                    confidence=batch_result.confidence,
+                    second_opinion_probability=batch_result.second_opinion_prob,
+                    divergence=batch_result.divergence,
+                    reasoning=batch_result.reasoning,
+                    evidence_count=0,
+                    hours_to_resolution=None,
+                    fee_rate=fee_rate,
+                ),
+                CoreTradingRules(False, False, False, 1.0, False),
+            )
+            if assessment.proposal is None:
+                continue
+            proposal = assessment.proposal
+            side = OrderSide(proposal.side)
 
             signal = Signal(
                 market_id=market.id,
@@ -771,10 +793,10 @@ class CycleOrchestrationMixin:
                 claude_prob=claude_prob,
                 claude_confidence=Confidence(batch_result.confidence),
                 market_prob=market_prob,
-                edge=edge * 100,
+                edge=proposal.edge_percent,
                 second_opinion_prob=batch_result.second_opinion_prob,
                 divergence=batch_result.divergence,
-                evidence_summary=batch_result.reasoning[:500],
+                evidence_summary=proposal.evidence_summary,
                 recommended_side=side,
             )
 
