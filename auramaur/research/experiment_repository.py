@@ -13,6 +13,10 @@ from datetime import datetime, timezone
 
 from auramaur.experiments.registry import RegisteredExperiment
 from auramaur.experiments.runtimes import ReplayReport
+from auramaur.experiments.specialized import (
+    RegisteredSpecializedExperiment,
+    SpecializedReplayReport,
+)
 
 
 @dataclass(frozen=True)
@@ -30,7 +34,7 @@ class ExperimentRepository:
         self.db = db
 
     async def register(
-        self, registered: RegisteredExperiment
+        self, registered: RegisteredExperiment | RegisteredSpecializedExperiment
     ) -> ProspectiveRegistration:
         definition = registered.definition
         async with self.db.transaction(owner="experiment_register"):
@@ -146,6 +150,69 @@ class ExperimentRepository:
                     or int(existing["is_paper"]) != 1
                 ):
                     raise ValueError("replay observation conflicts with an existing row")
+        return inserted
+
+    async def record_specialized_replay(
+        self,
+        registered: RegisteredSpecializedExperiment,
+        report: SpecializedReplayReport,
+    ) -> int:
+        """Persist proposal-only replay without inventing fills, P&L, or targets."""
+        if report.lineage_id != registered.lineage_id:
+            raise ValueError("specialized replay lineage does not match registration")
+        await self.register(registered)  # type: ignore[arg-type]
+        inserted = 0
+        async with self.db.transaction(owner="experiment_specialized_replay"):
+            for result in report.results:
+                proposal = result.proposal
+                mechanism = (
+                    f"experiment_specialized_replay:{registered.lineage_id}:"
+                    f"seq={result.event_sequence}"
+                )
+                payload = json.dumps({
+                    "schema_version": 1,
+                    "lineage_id": registered.lineage_id,
+                    "runtime": "specialized_replay",
+                    "data_version": result.data_version,
+                    "event_sequence": result.event_sequence,
+                    "proposal": proposal.model_dump(mode="json") if proposal else None,
+                }, sort_keys=True, separators=(",", ":"), allow_nan=False)
+                cursor = await self.db.execute(
+                    """INSERT OR IGNORE INTO strategy_evaluations
+                           (strategy_source,market_id,mechanism,score,expected_edge,
+                            payload_json,is_paper,observed_at)
+                       VALUES (?,?,?,0,0,?,1,?)""",
+                    (
+                        registered.definition.strategy_source,
+                        result.market_id,
+                        mechanism,
+                        payload,
+                        _sqlite_timestamp(result.observed_at),
+                    ),
+                )
+                if cursor.rowcount == 1:
+                    inserted += 1
+                    continue
+                existing = await self.db.fetchone(
+                    """SELECT payload_json,score,is_paper FROM strategy_evaluations
+                       WHERE strategy_source=? AND market_id=?
+                         AND mechanism=? AND observed_at=?""",
+                    (
+                        registered.definition.strategy_source,
+                        result.market_id,
+                        mechanism,
+                        _sqlite_timestamp(result.observed_at),
+                    ),
+                )
+                if (
+                    existing is None
+                    or existing["payload_json"] != payload
+                    or float(existing["score"]) != 0.0
+                    or int(existing["is_paper"]) != 1
+                ):
+                    raise ValueError(
+                        "specialized replay conflicts with an existing observation"
+                    )
         return inserted
 
 
