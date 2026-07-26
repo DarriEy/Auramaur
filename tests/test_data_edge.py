@@ -229,3 +229,14 @@ async def test_market_snapshot_partial_only_when_nothing_priced(db):
     assert [(r["provider"], r["status"]) for r in rows] == [
         ("t1", "ok"), ("t2", "partial")]
     assert '"missing_market_count": 1' in rows[0]["detail"]
+
+@pytest.mark.asyncio
+async def test_concurrent_deliveries_share_one_transaction(db):
+    statements = []
+    await db._db.set_trace_callback(statements.append)
+    await asyncio.gather(*(record_delivery(db, DataDelivery(
+        strategy=f"batch-{i}", component="market_snapshot", status="ok",
+        source_at=datetime.now(timezone.utc), item_count=1)) for i in range(12)))
+    assert len([sql for sql in statements if sql.startswith("BEGIN IMMEDIATE")]) == 1
+    row = await db.fetchone("SELECT COUNT(*) n FROM strategy_data_deliveries WHERE strategy LIKE 'batch-%'")
+    assert row["n"] == 12

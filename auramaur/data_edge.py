@@ -7,6 +7,7 @@ with event time, observation time, coverage, fallbacks, and snapshot identity.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -21,6 +22,7 @@ log = structlog.get_logger()
 
 _HEALTHY_THROTTLE_SECONDS = {"order_book": 15.0}
 _last_healthy_recorded: dict[tuple[int, str, str], float] = {}
+_delivery_batchers: dict[int, "_DeliveryBatcher"] = {}
 
 DeliveryStatus = Literal[
     "ok", "empty", "stale", "partial", "timeout", "error", "unavailable"
@@ -168,6 +170,44 @@ def snapshot_id(*parts: object) -> str:
     return hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()[:24]
 
 
+class _DeliveryBatcher:
+    """Coalesce concurrent telemetry calls into bounded transactions."""
+
+    def __init__(self, db) -> None:
+        self.db = db
+        self.pending: list[tuple[tuple, asyncio.Future]] = []
+        self.task: asyncio.Task | None = None
+
+    async def write(self, params: tuple) -> None:
+        done = asyncio.get_running_loop().create_future()
+        self.pending.append((params, done))
+        if self.task is None or self.task.done():
+            self.task = asyncio.create_task(self._flush())
+        await done
+
+    async def _flush(self) -> None:
+        while self.pending:
+            await asyncio.sleep(0)
+            batch, self.pending = self.pending[:64], self.pending[64:]
+            try:
+                async with self.db.transaction(owner="data_edge"):
+                    await self.db.executemany(
+                        """INSERT INTO strategy_data_deliveries
+                           (delivery_id,strategy,component,status,provider,market_id,snapshot_id,
+                            observed_at,source_at,age_seconds,latency_ms,item_count,
+                            required_fields,missing_fields,fallback_used,detail)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        [params for params, _ in batch],
+                    )
+            except Exception as exc:
+                for _, done in batch:
+                    if not done.done():
+                        done.set_exception(exc)
+            else:
+                for _, done in batch:
+                    if not done.done():
+                        done.set_result(None)
+
 async def record_delivery(db, delivery: DataDelivery) -> None:
     """Persist one delivery without allowing monitoring to kill a strategy."""
     try:
@@ -183,21 +223,19 @@ async def record_delivery(db, delivery: DataDelivery) -> None:
         if source is not None:
             source = (source.replace(tzinfo=timezone.utc) if source.tzinfo is None
                       else source.astimezone(timezone.utc))
-        async with db.transaction(owner="data_edge"):
-            await db.execute(
-                """INSERT INTO strategy_data_deliveries
-               (delivery_id,strategy,component,status,provider,market_id,snapshot_id,
-                observed_at,source_at,age_seconds,latency_ms,item_count,
-                required_fields,missing_fields,fallback_used,detail)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (uuid.uuid4().hex, delivery.strategy, delivery.component,
-                 delivery.status, delivery.provider, delivery.market_id,
-                 delivery.snapshot_id, observed.isoformat(),
-                 source.isoformat() if source else None, delivery.age_seconds,
-                 max(0, delivery.latency_ms), max(0, delivery.item_count),
-                 json.dumps(delivery.required_fields), json.dumps(delivery.missing_fields),
-                delivery.fallback_used, json.dumps(delivery.detail, default=str)[:4000]),
-            )
+        batcher = _delivery_batchers.get(id(db))
+        if batcher is None or batcher.db is not db:
+            batcher = _DeliveryBatcher(db)
+            _delivery_batchers[id(db)] = batcher
+        await batcher.write(
+            (uuid.uuid4().hex, delivery.strategy, delivery.component,
+             delivery.status, delivery.provider, delivery.market_id,
+             delivery.snapshot_id, observed.isoformat(),
+             source.isoformat() if source else None, delivery.age_seconds,
+             max(0, delivery.latency_ms), max(0, delivery.item_count),
+             json.dumps(delivery.required_fields), json.dumps(delivery.missing_fields),
+             delivery.fallback_used, json.dumps(delivery.detail, default=str)[:4000]),
+        )
         if delivery.status == "ok" and throttle > 0:
             _last_healthy_recorded[key] = now_mono
     except Exception as exc:  # noqa: BLE001 - telemetry must be best effort

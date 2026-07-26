@@ -83,38 +83,47 @@ class LineageObserver:
     async def _run(self) -> None:
         while True:
             event = await self._queue.get()
+            batch = [event]
             try:
                 if event is None:
                     return
-                # Contention retry: transaction()'s in_transaction pre-check
-                # and its BEGIN execute on different sides of the shared
-                # aiosqlite statement queue, so a write racing another task's
-                # implicit transaction can fail in ms with "cannot start a
-                # transaction within a transaction" (or a transient lock).
-                # Both clear as soon as the interleaved writer commits, and a
-                # single dropped event was how forecast_snapshots lost rows
-                # on 2026-07-21. Bounded retries; anything else raises on the
-                # first attempt.
+                while len(batch) < 64:
+                    try:
+                        queued = self._queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    if queued is None:
+                        self._queue.task_done()
+                        break
+                    batch.append(queued)
                 for attempt in range(3):
                     try:
-                        await getattr(self, f"_write_{event.kind}")(**event.payload)
+                        async with self.db.transaction(owner="lineage"):
+                            for item in batch:
+                                await getattr(self, f"_write_{item.kind}")(**item.payload)
                         break
                     except Exception as exc:
                         detail = str(exc).lower()
                         transient = ("cannot start a transaction" in detail
                                      or "database is locked" in detail)
                         if not transient or attempt == 2:
-                            raise
+                            if len(batch) == 1:
+                                raise
+                            for item in batch:
+                                try:
+                                    async with self.db.transaction(owner="lineage"):
+                                        await getattr(self, f"_write_{item.kind}")(**item.payload)
+                                except Exception as item_exc:
+                                    log.warning("lineage_observer.write_failed", kind=item.kind,
+                                                batch_size=1, error=str(item_exc)[:200])
+                            break
                         await asyncio.sleep(0.1 * (attempt + 1))
             except Exception as exc:
-                # transaction() already rolled back this batch; a bare
-                # rollback() here would run on the SHARED connection and could
-                # discard another task's uncommitted writes.
                 log.warning("lineage_observer.write_failed", kind=event.kind if event else None,
-                            error=str(exc)[:200])
+                            batch_size=len(batch), error=str(exc)[:200])
             finally:
-                self._queue.task_done()
-
+                for _ in batch:
+                    self._queue.task_done()
     async def _write_ingestion(self, *, run_id: str, query: str, category: str,
                                market_id: str | None, started_at: str,
                                observed_at: str, fetch_rows: list[tuple],
@@ -168,6 +177,7 @@ class LineageObserver:
         # per-event KeyError that silently zeroed the forecast stream for a
         # day (strategic-path emission, found 2026-07-21). The snapshot row
         # is the evidence; config/evidence ids are provenance decoration.
+        p = dict(p)
         fingerprint = hashlib.sha256(json.dumps(
             p.pop("config", {}), sort_keys=True, separators=(",", ":"),
         ).encode()).hexdigest()[:16]

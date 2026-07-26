@@ -11,7 +11,7 @@ The budget counter used to live in-memory on each analyzer instance
   private counter, so the "daily budget" was really up to 4x the
   configured number.
 
-One row per day in the bot's own sqlite file fixes both. Helpers are
+One row per day in a dedicated sqlite sidecar fixes both. Helpers are
 synchronous on purpose: sub-millisecond statements, callers sit inside
 multi-second LLM calls, and no analyzer constructor has to grow an async
 ``Database`` dependency.
@@ -43,7 +43,8 @@ import structlog
 
 log = structlog.get_logger()
 
-_db_path = "auramaur.db"  # same working-directory convention as Database
+_source_db_path = "auramaur.db"
+_db_path = "auramaur.llm-budget.db"
 _conn_cache: sqlite3.Connection | None = None
 _lock = threading.Lock()  # the connection is shared cross-thread
 _mem_calls = 0
@@ -53,13 +54,17 @@ _PENDING_ALARM = 25  # sustained persistence failure — worth a warning
 
 
 def set_db_path(path: str) -> None:
-    """Point the counter at the instance's sqlite file (bot startup)."""
-    global _db_path, _mem_calls, _mem_day, _pending
-    if path != _db_path:
+    """Derive a dedicated counter sidecar from the instance database path."""
+    global _source_db_path, _db_path, _mem_calls, _mem_day, _pending
+    from pathlib import Path
+
+    source = Path(path)
+    budget_path = str(source.with_name(f"{source.stem}.llm-budget{source.suffix}"))
+    if budget_path != _db_path or path != _source_db_path:
         _reset_conn()
         _mem_calls, _mem_day, _pending = 0, "", 0
-    _db_path = path
-
+    _source_db_path = path
+    _db_path = budget_path
 
 def _conn() -> sqlite3.Connection:
     """One cached connection per process; schema created once.
@@ -76,6 +81,28 @@ def _conn() -> sqlite3.Connection:
                    claude_calls INTEGER NOT NULL DEFAULT 0
                )"""
         )
+        # Preserve today's spend when upgrading from the historical row.
+        # MAX makes this restart-safe: legacy state can never roll us back.
+        from pathlib import Path
+        if Path(_source_db_path).exists() and _source_db_path != _db_path:
+            try:
+                legacy = sqlite3.connect(_source_db_path, timeout=0.0)
+                try:
+                    row = legacy.execute(
+                        "SELECT claude_calls FROM llm_call_counter WHERE day = ?",
+                        (date.today().isoformat(),),
+                    ).fetchone()
+                finally:
+                    legacy.close()
+                if row:
+                    conn.execute(
+                        """INSERT INTO llm_call_counter(day, claude_calls) VALUES (?, ?)
+                           ON CONFLICT(day) DO UPDATE SET claude_calls =
+                           MAX(claude_calls, excluded.claude_calls)""",
+                        (date.today().isoformat(), int(row[0])),
+                    )
+            except sqlite3.Error:
+                pass
         conn.commit()
         _conn_cache = conn
     return _conn_cache

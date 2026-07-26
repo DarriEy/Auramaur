@@ -120,3 +120,20 @@ async def test_close_is_idempotent_and_leaves_shared_db_open(tmp_path):
     row = await db.fetchone("SELECT COUNT(*) AS n FROM forecast_snapshots")
     assert row["n"] == 1
     await db.close()
+
+@pytest.mark.asyncio
+async def test_ready_lineage_events_share_one_outer_transaction(tmp_path):
+    db = Database(str(tmp_path / "batched.db"))
+    await db.connect()
+    statements = []
+    await db._db.set_trace_callback(statements.append)
+    observer = await LineageObserver.create(db)
+    try:
+        for index in range(12):
+            payload = _forecast_payload(); payload["market_id"] = f"m-{index}"
+            observer.forecast(**payload)
+        await observer.flush()
+        assert len([sql for sql in statements if sql.startswith("BEGIN IMMEDIATE")]) == 1
+        assert (await db.fetchone("SELECT COUNT(*) n FROM forecast_snapshots"))["n"] == 12
+    finally:
+        await observer.close(); await db.close()

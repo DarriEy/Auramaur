@@ -60,39 +60,34 @@ def test_sqlite_failure_degrades_to_memory(tmp_path):
     assert call_budget._mem_day == date.today().isoformat()
 
 
-def test_locked_writer_fails_fast_and_folds_count_back(tmp_path):
-    """The 2026-07-19 event-loop freeze: a held write lock used to busy-wait
-    ~31s ON the loop (a potential self-deadlock — the holder's commit only
-    advances when the loop does). A miss must return in a beat, and the
-    missed increment must land in the row on the next successful write."""
+def test_trading_db_writer_does_not_block_call_budget(tmp_path):
     import sqlite3
     import time
 
     _use_tmp_db(tmp_path)
     assert call_budget.record_call() == 1
-
     blocker = sqlite3.connect(str(tmp_path / "test.db"))
-    blocker.execute("BEGIN IMMEDIATE")  # hold the write lock
+    blocker.execute("BEGIN IMMEDIATE")
     t0 = time.monotonic()
-    n = call_budget.record_call()  # cannot persist
+    assert call_budget.record_call() == 2
     elapsed = time.monotonic() - t0
-    blocker.rollback()
-    blocker.close()
-
-    assert n == 2  # in-memory total is still right
-    assert elapsed < 2.0, f"blocked {elapsed:.1f}s — busy-wait is back"
-    assert call_budget._pending == 1
-
-    # Budget checks between the miss and the flush must still see the call.
-    assert call_budget.calls_today() == 2
-
-    assert call_budget.record_call() == 3  # 1 stored + 1 pending + 1 new
+    blocker.rollback(); blocker.close()
+    assert elapsed < 0.1
     assert call_budget._pending == 0
 
-    # The ROW carries all three: a fresh reader (restart) agrees.
-    call_budget.set_db_path(str(tmp_path / "test.db"))
-    assert call_budget.calls_today() == 3
 
+def test_legacy_today_count_migrates_without_budget_reset(tmp_path):
+    import sqlite3
+
+    source = tmp_path / "legacy.db"
+    conn = sqlite3.connect(source)
+    conn.execute("CREATE TABLE llm_call_counter (day TEXT PRIMARY KEY, claude_calls INTEGER NOT NULL)")
+    conn.execute("INSERT INTO llm_call_counter VALUES (?, 17)", (date.today().isoformat(),))
+    conn.commit(); conn.close()
+    call_budget.set_db_path(str(source))
+    assert call_budget.calls_today() == 17
+    assert call_budget.record_call() == 18
+    assert (tmp_path / "legacy.llm-budget.db").exists()
 
 # ---------------------------------------------------------------------------
 # Pacing envelope — the non-reserved pool is time-shaped toward the peak
