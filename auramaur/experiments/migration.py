@@ -30,7 +30,7 @@ MIGRATION_INVENTORY: dict[str, tuple[MigrationTrack, MigrationStatus]] = {
     "core_trading": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED),
     "news_reactor": (MigrationTrack.ROUTING, MigrationStatus.MIGRATED),
     "kraken": (MigrationTrack.EXTERNAL_ASSET, MigrationStatus.SPECIALIZED_PLANNED),
-    "arbitrage": (MigrationTrack.PAIRED_PACKAGE, MigrationStatus.SPECIALIZED_PLANNED),
+    "arbitrage": (MigrationTrack.PAIRED_PACKAGE, MigrationStatus.MIGRATED),
     "bias_harvest": (
         MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED
     ),
@@ -41,8 +41,8 @@ MIGRATION_INVENTORY: dict[str, tuple[MigrationTrack, MigrationStatus]] = {
     "term_structure": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED),
     "vol_anchor": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED),
     "informed_flow": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED),
-    "entailment_arb": (MigrationTrack.PAIRED_PACKAGE, MigrationStatus.SPECIALIZED_PLANNED),
-    "cross_venue_arb": (MigrationTrack.PAIRED_PACKAGE, MigrationStatus.SPECIALIZED_PLANNED),
+    "entailment_arb": (MigrationTrack.PAIRED_PACKAGE, MigrationStatus.MIGRATED),
+    "cross_venue_arb": (MigrationTrack.PAIRED_PACKAGE, MigrationStatus.MIGRATED),
     "econ_indicator": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED),
     "interim_manager": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED),
     "settlement_arb": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED),
@@ -53,7 +53,7 @@ MIGRATION_INVENTORY: dict[str, tuple[MigrationTrack, MigrationStatus]] = {
     ),
     "oddlot_tender": (MigrationTrack.EXTERNAL_ASSET, MigrationStatus.SPECIALIZED_PLANNED),
     "momentum_coupling": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED),
-    "market_maker": (MigrationTrack.QUOTING, MigrationStatus.SPECIALIZED_PLANNED),
+    "market_maker": (MigrationTrack.QUOTING, MigrationStatus.MIGRATED),
     "ibkr_etf_paper": (MigrationTrack.EXTERNAL_ASSET, MigrationStatus.SPECIALIZED_PLANNED),
     "ibkr_multiasset": (MigrationTrack.EXTERNAL_ASSET, MigrationStatus.SPECIALIZED_PLANNED),
 }

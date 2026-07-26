@@ -206,8 +206,9 @@ Bias harvest and every portable directional strategy now delegate deterministic
 proposal formation. News reactor delegates its pure routing decision and hands
 the eventual trade choice to the separately migrated core-trading decision.
 Every live-sensitive risk, gateway, persistence, order-lifecycle, and accounting
-operation remains in production. Paired, quoting, and external-asset entries
-remain explicitly planned on specialized tracks.
+operation remains in production. Arbitrage retains atomic paired-package
+proposals and market making retains coupled quote/reconciliation proposals.
+External-asset entries remain explicitly planned on specialized tracks.
 
 ## Full-set migration sequence
 
@@ -235,6 +236,5 @@ deterministic seam to a pure contract, focused old/new decision coverage passes,
 and its existing execution-contract suite still passes. The status does not
 claim that the contract is supported by the generic replay runtime.
 
-All portable directional and routing entries satisfy that decision-seam gate.
-The following stack layers migrate paired/quoting and external-asset contracts
-in independently reviewable changes.
+Portable, routing, paired-package, and quoting entries satisfy that
+decision-seam gate. The following stack layer migrates external-asset contracts.
