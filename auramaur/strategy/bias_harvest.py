@@ -39,6 +39,16 @@ Design constraints:
 from __future__ import annotations
 
 from auramaur.strategy.protocols import ExecutionMode
+from auramaur.experiments.strategies.bias_harvest import (
+    BiasHarvestInputs,
+    BiasHarvestProposal,
+    BiasHarvestRules,
+    BiasRejection,
+    SOURCE_TAG,
+    SOURCE_TAG_WIDE,
+    assess_bias_harvest,
+    select_bias_band,
+)
 
 import hashlib
 import time
@@ -56,19 +66,6 @@ from auramaur.exchange.models import (
 )
 
 log = structlog.get_logger()
-
-# Attribution tags. The deep band [LONGSHOT_HI, band_hi) keeps the original
-# tag (its graduation record was earned there); the widened regimes accrue
-# their own cells under the _wide tag and must graduate independently.
-SOURCE_TAG = "bias_harvest"
-SOURCE_TAG_WIDE = "bias_harvest_wide"
-
-# Regime pivots for the bi-directional rules. Deliberately code-level, not
-# config: they encode WHICH DIRECTION the measured bias points at a price,
-# and silently reinterpreting band_lo/band_hi overrides as direction changes
-# would be a trap. band_lo/band_hi still bound the overall harvested range.
-LONGSHOT_LO = 0.70
-LONGSHOT_HI = 0.90
 
 # How long to skip re-fetching the book for a market that showed no capturable
 # maker spread (in-memory, resets on restart). Spreads don't appear within a
@@ -161,23 +158,19 @@ class BiasHarvestPillar:
         (same isolation idiom as resolution_lens_kalshi).
         """
         cfg = self._settings.bias_harvest
-        p_yes = market.outcome_yes_price
-        if not (0.0 < p_yes < 1.0):
+        decision = select_bias_band(
+            market.outcome_yes_price,
+            band_lo=cfg.band_lo,
+            band_hi=cfg.band_hi,
+        )
+        if decision is None:
             return None
-        p_fav = max(p_yes, 1.0 - p_yes)
-        if not (cfg.band_lo <= p_fav < cfg.band_hi):
-            return None
-        fav_is_yes = p_yes >= 0.5
-        if LONGSHOT_LO <= p_fav < LONGSHOT_HI:
-            # Buy the longshot side
-            buy_yes = not fav_is_yes
-            action_desc = "longshot side (favorite overpriced)"
-        else:
-            # Buy the favored side
-            buy_yes = fav_is_yes
-            action_desc = "favored side (favorite underpriced)"
-        tag = SOURCE_TAG if p_fav >= LONGSHOT_HI else SOURCE_TAG_WIDE
-        return p_fav, buy_yes, action_desc, tag
+        return (
+            decision.favored_price,
+            decision.buy_yes,
+            decision.action_description,
+            decision.source_tag,
+        )
 
     def _eligible(self, market: Market) -> bool:
         cfg = self._settings.bias_harvest
@@ -217,9 +210,10 @@ class BiasHarvestPillar:
             return False  # capital lock-up cap
         return True
 
-    async def _maker_price(self, market: Market, buy_yes: bool) -> float | None:
-        """The favored-side BID to post a maker BUY at, or None if there is no
-        capturable spread / no book.
+    async def _maker_book(
+        self, market: Market, buy_yes: bool
+    ) -> tuple[float, float] | None:
+        """Return the selected outcome's best bid/ask for pure assessment.
 
         The favorite-longshot edge accrues to makers (capture the spread), not
         takers (pay it). We only harvest where we can actually be a maker: there
@@ -227,7 +221,6 @@ class BiasHarvestPillar:
         the bid is ~ taking and the edge dies in slippage (the backtest's 4.4c
         cliff). Execution-only — the risk/divergence accounting stays on the
         observed price (see ``_try_enter``)."""
-        cfg = self._settings.bias_harvest
         token_id = market.clob_token_yes if buy_yes else market.clob_token_no
         if not token_id:
             return None
@@ -248,12 +241,7 @@ class BiasHarvestPillar:
         ))
         if best_bid is None or best_ask is None:
             return None
-        if (best_ask - best_bid) < cfg.maker_min_spread:
-            return None  # nothing to capture — posting at the bid ~= crossing
-        maker_price = round(best_bid, 2)
-        if not (0.01 <= maker_price <= 0.99):
-            return None
-        return maker_price
+        return best_bid, best_ask
 
     def _paper_admits(self, market_id: str) -> bool:
         """Deterministic maker-capture gate for the PAPER book: admit only
@@ -343,6 +331,43 @@ class BiasHarvestPillar:
             strategy_source=source_tag,
         )
 
+    def _signal_from_proposal(
+        self, market: Market, proposal: BiasHarvestProposal
+    ) -> Signal:
+        cfg = self._settings.bias_harvest
+        return Signal(
+            market_id=market.id,
+            market_question=market.question,
+            claude_prob=proposal.fair_probability,
+            claude_confidence=Confidence.MEDIUM,
+            market_prob=proposal.market_probability,
+            edge=proposal.edge_percent,
+            evidence_summary=(
+                f"Bias harvest: {proposal.action_description} at "
+                f"{proposal.favored_price:.2f} in band "
+                f"[{cfg.band_lo:.2f}, {cfg.band_hi:.2f}); measured "
+                f"favorite-longshot bias, no forecast claimed."
+            ),
+            recommended_side=OrderSide.BUY if proposal.buy_yes else OrderSide.SELL,
+            strategy_source=proposal.source_tag,
+        )
+
+    def _rules(self) -> BiasHarvestRules:
+        cfg = self._settings.bias_harvest
+        return BiasHarvestRules(
+            band_lo=cfg.band_lo,
+            band_hi=cfg.band_hi,
+            edge_uplift=cfg.edge_uplift,
+            stake_usd=cfg.stake_usd,
+            min_liquidity=cfg.min_liquidity,
+            min_hours_to_resolution=cfg.min_hours_to_resolution,
+            max_days_to_resolution=cfg.max_days_to_resolution,
+            skip_disputed=cfg.skip_disputed,
+            maker_entry=cfg.maker_entry,
+            maker_min_spread=cfg.maker_min_spread,
+            paper=cfg.paper,
+        )
+
     async def _try_enter(self, market: Market) -> bool:
         cfg = self._settings.bias_harvest
         band = self._band_check(market)
@@ -350,7 +375,8 @@ class BiasHarvestPillar:
             return False
         if await self._already_entered_or_held(market.id):
             return False
-        p_fav, buy_yes, action_desc, source_tag = band
+        _, buy_yes, _, _ = band
+        best_bid = best_ask = None
 
         # Maker entry: post the BUY at the favored-side bid (capture the spread)
         # instead of paying the observed price. The signal/divergence accounting
@@ -376,14 +402,51 @@ class BiasHarvestPillar:
             until = self._no_spread_until.get(market.id, 0.0)
             if now < until:
                 return False
-            maker_price = await self._maker_price(market, buy_yes)
-            if maker_price is None:
+            book = await self._maker_book(market, buy_yes)
+            if book is None:
                 self._no_spread_until[market.id] = now + NO_SPREAD_TTL_SECONDS
                 return False  # no capturable spread -> don't harvest as a taker
-            self._no_spread_until.pop(market.id, None)
-            order_market = self._with_favored_price(market, buy_yes, maker_price)
+            best_bid, best_ask = book
 
-        signal = self._build_signal(market, p_fav, buy_yes, action_desc, source_tag)
+        excluded = set(self._settings.risk.blocked_categories) | set(cfg.exclude_categories)
+        category_blocked = bool(blocked_category_hit(
+            excluded, market.question, market.description, market.category
+        ))
+        proposal_assessment = assess_bias_harvest(BiasHarvestInputs(
+            market_id=market.id,
+            yes_price=market.outcome_yes_price,
+            no_price=market.outcome_no_price,
+            active=market.active,
+            venue=market.exchange or "polymarket",
+            dispute_risk=market.dispute_risk,
+            liquidity=market.liquidity,
+            category_blocked=category_blocked,
+            end_at=market.end_date,
+            as_of=datetime.now(timezone.utc),
+            already_entered_or_held=False,
+            paper_admitted=True,
+            selected_token_available=bool(
+                market.clob_token_yes if buy_yes else market.clob_token_no
+            ),
+            best_bid=best_bid,
+            best_ask=best_ask,
+        ), self._rules())
+        proposal = proposal_assessment.proposal
+        if proposal is None:
+            if proposal_assessment.rejection in {
+                BiasRejection.BOOK_UNAVAILABLE,
+                BiasRejection.SPREAD_TOO_THIN,
+                BiasRejection.INVALID_MAKER_PRICE,
+            }:
+                self._no_spread_until[market.id] = time.monotonic() + NO_SPREAD_TTL_SECONDS
+            return False
+        self._no_spread_until.pop(market.id, None)
+        if cfg.maker_entry:
+            order_market = self._with_favored_price(
+                market, proposal.buy_yes, proposal.entry_price
+            )
+
+        signal = self._signal_from_proposal(market, proposal)
         await self._persist_signal(signal, market)
 
         # Full risk gate — all checks apply; never bypassed.
