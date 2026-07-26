@@ -47,6 +47,11 @@ from auramaur.exchange.models import (
     OrderSide,
     Signal,
 )
+from auramaur.experiments.strategies.entailment_arb import (
+    EntailmentMarket,
+    EntailmentPairProposal,
+    form_entailment_pair,
+)
 
 log = structlog.get_logger()
 
@@ -443,6 +448,14 @@ class EntailmentArbPillar:
     def _exchange_for(self, market: Market):
         return self._exchanges.get(market.exchange or "polymarket")
 
+    @staticmethod
+    def _experiment_market(market: Market) -> EntailmentMarket:
+        return EntailmentMarket(
+            market_id=market.id,
+            question=market.question,
+            yes_probability=market.outcome_yes_price,
+        )
+
     # -- main cycle -------------------------------------------------------
 
     async def run_once(self) -> int:
@@ -489,21 +502,25 @@ class EntailmentArbPillar:
             if placed >= cfg.max_pairs_per_cycle:
                 break
             
-            if is_neg:
-                # Negative implication: P(A) + P(B) > 1.0
-                gap = implier.outcome_yes_price + implied.outcome_yes_price - 1.0
-            else:
-                # Positive implication: P(A) > P(B)
-                gap = implier.outcome_yes_price - implied.outcome_yes_price
-
             # Fee-aware floor: Polymarket uses min_gap; Kalshi must clear both
             # legs' taker fees + buffer, or the "free" arb loses to fees.
-            if gap < self._required_gap(implier, implied):
+            proposal = form_entailment_pair(
+                self._experiment_market(implier),
+                self._experiment_market(implied),
+                rationale=why,
+                confidence=conf,
+                minimum_gap=self._required_gap(implier, implied),
+                negative_implication=is_neg,
+            )
+            if proposal is None:
                 continue
             if await self._already_traded(implier.id, implied.id):
                 continue
             try:
-                if await self._enter_pair(implier, implied, gap, why, conf, is_neg):
+                if await self._enter_pair(
+                    implier, implied, proposal.gap, why, conf, is_neg,
+                    proposal=proposal,
+                ):
                     placed += 1
             except Exception as e:
                 log.error("entailment.entry_error", a=implier.id, b=implied.id,
@@ -537,8 +554,20 @@ class EntailmentArbPillar:
         )
 
     async def _enter_pair(self, implier: Market, implied: Market,
-                          gap: float, why: str, conf: float, is_neg: bool = False) -> bool:
+                          gap: float, why: str, conf: float, is_neg: bool = False,
+                          *, proposal: EntailmentPairProposal | None = None) -> bool:
         cfg = self._settings.entailment_arb
+        proposal = proposal or form_entailment_pair(
+            self._experiment_market(implier),
+            self._experiment_market(implied),
+            rationale=why,
+            confidence=conf,
+            minimum_gap=self._required_gap(implier, implied),
+            negative_implication=is_neg,
+        )
+        if proposal is None:
+            return False
+        gap = proposal.gap
         exchange_a = self._exchange_for(implier)
         exchange_b = self._exchange_for(implied)
         if exchange_a is None or exchange_b is None:
@@ -551,20 +580,16 @@ class EntailmentArbPillar:
             )
             return False
 
-        if is_neg:
-            # Leg 1: NO on implier/A (YES is overpriced vs the bound 1 - pb).
-            sig_a = self._leg_signal(implier, OrderSide.SELL,
-                                     fair=1.0 - implied.outcome_yes_price, gap=gap, why=why, is_neg=True)
-            # Leg 2: NO on implied/B (YES is overpriced vs the bound 1 - pa).
-            sig_b = self._leg_signal(implied, OrderSide.SELL,
-                                     fair=1.0 - implier.outcome_yes_price, gap=gap, why=why, is_neg=True)
-        else:
-            # Leg 1: NO on the implier (its YES is overpriced vs the bound).
-            sig_a = self._leg_signal(implier, OrderSide.SELL,
-                                     fair=implied.outcome_yes_price, gap=gap, why=why)
-            # Leg 2: YES on the implied (its YES is underpriced vs the bound).
-            sig_b = self._leg_signal(implied, OrderSide.BUY,
-                                     fair=implier.outcome_yes_price, gap=gap, why=why)
+        sig_a = self._leg_signal(
+            implier, OrderSide(proposal.leg_a.side),
+            fair=proposal.leg_a.fair_probability, gap=gap, why=why,
+            is_neg=proposal.negative_implication,
+        )
+        sig_b = self._leg_signal(
+            implied, OrderSide(proposal.leg_b.side),
+            fair=proposal.leg_b.fair_probability, gap=gap, why=why,
+            is_neg=proposal.negative_implication,
+        )
 
         dec_a = await self._risk.evaluate(sig_a, implier)
         dec_b = await self._risk.evaluate(sig_b, implied)

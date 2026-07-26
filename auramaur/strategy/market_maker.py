@@ -20,10 +20,14 @@ from __future__ import annotations
 from auramaur.strategy.protocols import ExecutionMode
 
 import asyncio
-import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from auramaur.killswitch import kill_switch_present
+from auramaur.experiments.strategies.market_maker import (
+    QuoteReconciliation,
+    form_coupled_quote,
+    reconcile_quote,
+)
 
 import structlog
 
@@ -342,13 +346,17 @@ class MarketMaker:
             # deliberately-kept quote; if the book moves or the market drops
             # out of the candidate set, this guard fails and the normal
             # cancel/stale paths run — the orphaned-GTC leak cannot return.
-            if (
-                abs(prior.bid_price - quote.bid_price) < 1e-9
-                and abs(prior.ask_price - quote.ask_price) < 1e-9
-                and prior.size == quote.size
-                and prior.bid_order_id in self._pending_orders
-                and prior.ask_order_id in self._pending_orders
-            ):
+            reconciliation = reconcile_quote(
+                quote,
+                active_bid_price=prior.bid_price,
+                active_ask_price=prior.ask_price,
+                active_size=prior.size,
+                both_legs_pending=(
+                    prior.bid_order_id in self._pending_orders
+                    and prior.ask_order_id in self._pending_orders
+                ),
+            )
+            if reconciliation is QuoteReconciliation.KEEP:
                 prior.placed_at = datetime.now(timezone.utc)
                 self._active_quotes[market.id] = prior
                 log.debug(
@@ -383,125 +391,29 @@ class MarketMaker:
 
         Polymarket uses 1-cent tick sizes (0.01 increments), prices 0.01-0.99.
         """
-        best_bid = book.best_bid
-        best_ask = book.best_ask
-
-        if best_bid is None or best_ask is None:
-            return None, "no_bbo"
-
-        # Dead-book guard on the LIVE book (selection used market.spread, a summary
-        # field that can be stale or differ from the CLOB BBO). If the actual best
-        # bid/ask are this far apart, there's no genuine two-sided market — quoting
-        # into it just churns and risks one-sided fills at an extreme price.
-        book_spread_bps = int((best_ask - best_bid) * 10000)
-        if book_spread_bps > self._max_spread_bps:
-            log.debug(
-                "market_maker.dead_book",
-                market_id=market.id,
-                best_bid=best_bid,
-                best_ask=best_ask,
-                book_spread_bps=book_spread_bps,
-                max_spread_bps=self._max_spread_bps,
-            )
-            return None, "dead_book"
-
-        # Polymarket has 1-cent ticks. Try to price-improve by one tick on each
-        # side; if the underlying spread is too tight for that (which is the
-        # common case — most liquid markets sit at 2-3 cent spreads), quote at
-        # the BBO instead (join the queue) so we still capture spread as maker.
-        step = 0.01
-        raw_bid = best_bid + step
-        raw_ask = best_ask - step
-        raw_spread_bps = int((raw_ask - raw_bid) * 10000)
-        if raw_spread_bps < self._min_spread_bps:
-            our_bid = round(best_bid, 2)
-            our_ask = round(best_ask, 2)
-        else:
-            our_bid = round(raw_bid, 2)
-            our_ask = round(raw_ask, 2)
-
-        # Inventory skew: adjust quotes based on current inventory
-        inventory = self._inventory.get(market.id, 0)
-        if abs(inventory) > 0.01:
-            # Skew factor: 0.01 per 10 tokens of inventory
-            skew = round(inventory / self._max_inventory * 0.03, 2)
-            # If long YES (inventory > 0): lower bid (less eager to buy YES),
-            # lower ask (more eager to sell YES / buy NO)
-            our_bid = round(our_bid - skew, 2)
-            our_ask = round(our_ask - skew, 2)
-
-        # Clamp to valid Polymarket price range
-        our_bid = max(0.01, min(0.99, our_bid))
-        our_ask = max(0.01, min(0.99, our_ask))
-
-        # Post-only crossing clamp: skew (above) can push a joined/improved
-        # quote onto or through the live BBO on tight books, and the venue
-        # then 400-rejects the leg as 'invalid post-only order: order
-        # crosses book' — one market ground through reject+partial-cancel
-        # every ~34s for hours (2299992, 2026-07-22). A maker order must
-        # rest strictly inside the opposite side of the book.
-        if our_bid >= best_ask:
-            our_bid = round(best_ask - 0.01, 2)
-        if our_ask <= best_bid:
-            our_ask = round(best_bid + 0.01, 2)
-
-        # Sanity: bid must be strictly less than ask
-        if our_bid >= our_ask:
-            log.debug(
-                "market_maker.quote_rejected",
-                market_id=market.id,
-                reason="bid_gte_ask",
-                our_bid=our_bid,
-                our_ask=our_ask,
-                best_bid=best_bid,
-                best_ask=best_ask,
-            )
-            return None, "bid_gte_ask"
-
-        # Check our spread meets minimum
-        our_spread = our_ask - our_bid
-        our_spread_bps = int(our_spread * 10000)
-        if our_spread_bps < self._min_spread_bps:
-            log.debug(
-                "market_maker.quote_rejected",
-                market_id=market.id,
-                reason="spread_too_narrow",
-                our_spread_bps=our_spread_bps,
-                min_spread_bps=self._min_spread_bps,
-            )
-            return None, "spread_too_narrow"
-
-        # Check the NO leg price is valid
-        no_price = round(1.0 - our_ask, 2)
-        if no_price < 0.01 or no_price > 0.99:
-            return None, "invalid_no_price"
-
-        # Determine size — scale down if we're near inventory limit, but bump
-        # above Polymarket's $1 minimum when the configured quote size would
-        # otherwise make both-sided quoting impossible on low-price markets.
-        remaining_capacity = self._max_inventory - abs(inventory)
-        size = min(self._quote_size, remaining_capacity)
-        if size < 1.0:
-            return None, "inventory_capacity"
-
-        min_size = max(1.0 / our_bid, 1.0 / no_price)
-        if size * our_bid < 1.0 or size * no_price < 1.0:
-            bumped = math.ceil(min_size * 100) / 100
-            if bumped > remaining_capacity:
-                return None, "min_notional"
-            size = bumped
-
-        # Round size to Polymarket precision
-        size = round(size, 2)
-
-        return MMQuote(
+        formed = form_coupled_quote(
             market_id=market.id,
             token_yes_id=market.clob_token_yes,
             token_no_id=market.clob_token_no,
-            bid_price=our_bid,
-            ask_price=our_ask,
-            size=size,
-            spread_bps=our_spread_bps,
+            best_bid=book.best_bid,
+            best_ask=book.best_ask,
+            inventory=self._inventory.get(market.id, 0),
+            quote_size=self._quote_size,
+            max_inventory=self._max_inventory,
+            min_spread_bps=self._min_spread_bps,
+            max_spread_bps=self._max_spread_bps,
+        )
+        if formed.proposal is None:
+            return None, formed.rejection_reason
+        proposal = formed.proposal
+        return MMQuote(
+            market_id=proposal.market_id,
+            token_yes_id=proposal.token_yes_id,
+            token_no_id=proposal.token_no_id,
+            bid_price=proposal.bid_price,
+            ask_price=proposal.ask_price,
+            size=proposal.size,
+            spread_bps=proposal.spread_bps,
         ), None
 
     async def _place_two_sided(self, quote: MMQuote, is_live: bool) -> dict:

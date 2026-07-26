@@ -394,4 +394,5 @@ def test_every_production_strategy_is_in_the_migration_inventory():
         "informed_flow", "econ_indicator", "interim_manager", "settlement_arb",
         "weather_temp", "resolution_lens", "resolution_lens_kalshi",
         "momentum_coupling",
+        "arbitrage", "entailment_arb", "cross_venue_arb", "market_maker",
     }

@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 import structlog
 
 from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
+from auramaur.experiments.strategies.cross_venue_arb import paired_arb_proposal
 from auramaur.exchange.models import (
     Confidence, Market, Order, OrderSide, OrderType, Signal,
 )
@@ -221,18 +222,17 @@ class CrossVenueArbPillar:
         'same': buy YES where YES is cheaper, NO where dearer (payout always $1).
         'inverted': A,B complementary — if pA+pB<1 buy both YES; if >1 buy both NO.
         """
-        pa, pb = a.outcome_yes_price, b.outcome_yes_price
-        if orientation == "same":
-            edge = abs(pa - pb)
-            if pa < pb:   # A_YES cheap -> buy A_YES, buy B_NO (sell dear B_YES)
-                return edge, OrderSide.BUY, OrderSide.SELL
-            return edge, OrderSide.SELL, OrderSide.BUY
-        if orientation == "inverted":
-            s = pa + pb
-            if s < 1.0:   # both underpriced -> buy both YES
-                return 1.0 - s, OrderSide.BUY, OrderSide.BUY
-            return s - 1.0, OrderSide.SELL, OrderSide.SELL  # both overpriced -> both NO
-        return None
+        proposal = paired_arb_proposal(
+            market_a_id=a.id, venue_a=a.exchange or "polymarket",
+            yes_price_a=a.outcome_yes_price, market_b_id=b.id,
+            venue_b=b.exchange or "kalshi", yes_price_b=b.outcome_yes_price,
+            orientation=orientation, confidence=1.0, min_confidence=0.0,
+            required_gap=0.0, stake_usd=1.0)
+        if proposal is None:
+            return None
+        side_a = OrderSide.BUY if proposal.legs[0].side == "BUY" else OrderSide.SELL
+        side_b = OrderSide.BUY if proposal.legs[1].side == "BUY" else OrderSide.SELL
+        return proposal.edge, side_a, side_b
 
     # -- execution -------------------------------------------------------
 

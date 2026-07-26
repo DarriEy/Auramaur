@@ -5,6 +5,11 @@ from __future__ import annotations
 import structlog
 
 from auramaur.db.database import Database
+from auramaur.experiments.strategies.arbitrage import (
+    ArbitrageMarket,
+    PairedArbitrageProposal,
+    form_arbitrage_pair,
+)
 from auramaur.exchange.models import Confidence, Market, OrderSide, Signal
 from auramaur.strategy.correlation import CorrelationDetector
 
@@ -55,31 +60,54 @@ class ArbitrageExecutor:
         if not market_a or not market_b:
             return None
 
-        if opp["type"] == "conditional_violation":
-            # A implies B, but P(A) > P(B) — buy B (underpriced), sell A (overpriced)
-            pair = self._make_signal_pair(
-                buy_market=market_b,
-                sell_market=market_a,
-                edge=opp["price_a"] - opp["price_b"],
-                opp=opp,
-            )
-            return pair if self._pair_is_executable(market_b, market_a, opp) else None
+        proposal = form_arbitrage_pair(
+            opp,
+            self._experiment_market(market_a),
+            self._experiment_market(market_b),
+        )
+        if proposal is None:
+            return None
+        return self._proposal_to_signals(proposal, opp)
 
-        elif opp["type"] == "price_divergence":
-            # Same event priced differently — buy cheap, sell expensive
-            if opp["price_a"] < opp["price_b"]:
-                buy_market, sell_market = market_a, market_b
-            else:
-                buy_market, sell_market = market_b, market_a
-            pair = self._make_signal_pair(
-                buy_market=buy_market,
-                sell_market=sell_market,
-                edge=opp.get("divergence", abs(opp["price_a"] - opp["price_b"])),
-                opp=opp,
-            )
-            return pair if self._pair_is_executable(buy_market, sell_market, opp) else None
+    @staticmethod
+    def _experiment_market(market: Market) -> ArbitrageMarket:
+        return ArbitrageMarket(
+            market_id=market.id,
+            question=market.question,
+            yes_price=market.outcome_yes_price,
+            exchange=market.exchange,
+            yes_token=market.clob_token_yes,
+            no_token=market.clob_token_no,
+        )
 
-        return None
+    @staticmethod
+    def _proposal_to_signals(
+        proposal: PairedArbitrageProposal, opp: dict
+    ) -> tuple[Signal, Signal, dict]:
+        evidence = f"Arbitrage: {proposal.opportunity_type}"
+        buy_signal = Signal(
+            market_id=proposal.buy.market_id,
+            market_question=proposal.buy.question,
+            claude_prob=proposal.buy.fair_probability,
+            claude_confidence=Confidence.MEDIUM,
+            market_prob=proposal.buy.market_probability,
+            edge=proposal.buy.edge_percent,
+            evidence_summary=evidence,
+            recommended_side=OrderSide.BUY,
+            strategy_source="arbitrage",
+        )
+        sell_signal = Signal(
+            market_id=proposal.sell.market_id,
+            market_question=proposal.sell.question,
+            claude_prob=proposal.sell.fair_probability,
+            claude_confidence=Confidence.MEDIUM,
+            market_prob=proposal.sell.market_probability,
+            edge=proposal.sell.edge_percent,
+            evidence_summary=evidence,
+            recommended_side=OrderSide.SELL,
+            strategy_source="arbitrage",
+        )
+        return buy_signal, sell_signal, opp
 
     @staticmethod
     def _pair_is_executable(buy: Market, sell: Market, opp: dict) -> bool:
