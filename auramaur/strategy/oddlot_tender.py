@@ -36,6 +36,13 @@ from datetime import datetime, timezone
 
 import structlog
 
+from auramaur.experiments.strategies.oddlot_tender import (
+    OddLotTenderDisposition,
+    OddLotTenderInputs,
+    OddLotTenderProposal,
+    OddLotTenderRules,
+    assess_oddlot_tender,
+)
 from auramaur.exchange.models import Fill, OrderSide
 
 log = structlog.get_logger()
@@ -112,11 +119,11 @@ class OddLotTenderPillar:
             verdict = await self._audit_filing(f)
             if verdict is None:
                 continue
-            if (verdict["odd_lot_priority"]
-                    and not verdict["requires_record_date_holding"]
-                    and verdict["confidence"] >= cfg.llm_min_confidence):
+            assessment = assess_oddlot_tender(
+                self._proposal_inputs(f, verdict), self._proposal_rules())
+            if assessment.proposal is not None:
                 found += 1
-                await self._on_opportunity(f, verdict)
+                await self._on_opportunity(f, verdict, assessment.proposal)
         log.info("oddlot.cycle", analyzed=analyzed, opportunities=found)
         return found
 
@@ -171,21 +178,41 @@ class OddLotTenderPillar:
 
     # ------------------------------------------------------------------
 
-    async def _on_opportunity(self, f, verdict: dict) -> None:
+    def _proposal_rules(self) -> OddLotTenderRules:
         cfg = self._settings.oddlot_tender
-        ticker = f.ticker or "?"
-        msg = (f"ODD-LOT TENDER: {f.company} [{ticker}] {f.form} filed {f.filed_at} — "
-               f"price ${verdict['tender_price']:.2f}"
-               + (f"-${verdict['tender_price_high']:.2f}"
-                  if verdict["tender_price_high"] > verdict["tender_price"] else "")
-               + f", expires {verdict['expiration'] or '?'}. "
-               f"Conditions: {verdict['conditions'] or 'none noted'}. "
-               f"TENDERING IS MANUAL — submit in TWS before expiration.")
+        return OddLotTenderRules(
+            min_confidence=cfg.llm_min_confidence,
+            min_premium_pct=cfg.min_premium_pct,
+            max_position_usd=cfg.max_position_usd,
+        )
+
+    @staticmethod
+    def _proposal_inputs(
+        f, verdict: dict, *, entry_enabled: bool = False,
+        market_price: float | None = None,
+    ) -> OddLotTenderInputs:
+        return OddLotTenderInputs(
+            accession=f.accession, company=f.company, ticker=f.ticker or "?",
+            form=f.form, filed_at=f.filed_at,
+            odd_lot_priority=verdict["odd_lot_priority"],
+            requires_record_date_holding=verdict["requires_record_date_holding"],
+            tender_price=verdict["tender_price"],
+            tender_price_high=verdict["tender_price_high"],
+            expiration=verdict["expiration"], conditions=verdict["conditions"],
+            confidence=verdict["confidence"], entry_enabled=entry_enabled,
+            market_price=market_price,
+        )
+
+    async def _on_opportunity(
+        self, f, verdict: dict, proposal: OddLotTenderProposal,
+    ) -> None:
+        cfg = self._settings.oddlot_tender
+        ticker = proposal.ticker
         log.info("oddlot.opportunity", accession=f.accession, ticker=ticker,
                  price=verdict["tender_price"], expiration=verdict["expiration"])
         if self._alerts is not None:
             try:
-                await self._alerts.send(msg, level="warning")
+                await self._alerts.send(proposal.alert_message, level="warning")
             except Exception as e:
                 log.debug("oddlot.alert_error", error=str(e))
 
@@ -197,20 +224,33 @@ class OddLotTenderPillar:
         # that preserves the minimum premium vs the LOW tender price (Dutch
         # offers fill at >= low, so low is the conservative payout).
         price = await self._equity.get_price(ticker)
-        if not price or price <= 0:
+        assessment = assess_oddlot_tender(
+            self._proposal_inputs(
+                f, verdict, entry_enabled=True, market_price=price,
+            ),
+            self._proposal_rules(),
+        )
+        proposal = assessment.proposal
+        if proposal is None:
             await self._set_status(f.accession, "alerted_no_price")
             return
-        payout = verdict["tender_price"]
-        premium_pct = (payout - price) / price * 100.0 if price else 0.0
-        if premium_pct < cfg.min_premium_pct:
+        if proposal.disposition is OddLotTenderDisposition.NO_MARKET_PRICE:
+            await self._set_status(f.accession, "alerted_no_price")
+            return
+        if proposal.disposition is OddLotTenderDisposition.PREMIUM_TOO_THIN:
+            premium_pct = (verdict["tender_price"] - price) / price * 100.0
             log.info("oddlot.premium_too_thin", ticker=ticker,
-                     price=price, payout=payout, premium_pct=round(premium_pct, 2))
+                     price=price, payout=verdict["tender_price"],
+                     premium_pct=round(premium_pct, 2))
             await self._set_status(f.accession, "premium_too_thin")
             return
-        qty = min(99, int(cfg.max_position_usd // price))
-        if qty < 1:
+        if proposal.disposition is OddLotTenderDisposition.TOO_EXPENSIVE:
             await self._set_status(f.accession, "too_expensive")
             return
+        if proposal.entry is None:
+            await self._set_status(f.accession, "alerted")
+            return
+        qty = proposal.entry.quantity
         dry_run = cfg.paper or not self._settings.is_live
         result = await self._equity.place_share_order(
             ticker, OrderSide.BUY, qty, limit_price=price, dry_run=dry_run)

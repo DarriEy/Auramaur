@@ -395,4 +395,5 @@ def test_every_production_strategy_is_in_the_migration_inventory():
         "weather_temp", "resolution_lens", "resolution_lens_kalshi",
         "momentum_coupling",
         "arbitrage", "entailment_arb", "cross_venue_arb", "market_maker",
+        "kraken", "oddlot_tender", "ibkr_etf_paper", "ibkr_multiasset",
     }

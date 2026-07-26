@@ -11,10 +11,12 @@ from zoneinfo import ZoneInfo
 import structlog
 
 from auramaur.exchange.models import Market, OrderSide
+from auramaur.experiments.strategies.ibkr_etf_paper import (
+    entry_proposal, exit_proposal,
+)
 from auramaur.strategy.protocols import ExecutionMode
 from auramaur.risk.ibkr_math import (
-    adverse_fill, annualized_volatility, normalized_momentum,
-    risk_quantity, stop_distance,
+    annualized_volatility, normalized_momentum,
 )
 
 log = structlog.get_logger()
@@ -395,22 +397,22 @@ class IBKRETFPaperPillar:
                 qty, entry = held
                 gain = (quote.bid - entry) / entry * 100
                 peak = await self._peak(symbol, gain)
-                reason = None
                 risk_row = await self._db.fetchone(
                     """SELECT stop_price FROM ibkr_etf_positions
                          WHERE model_alias=? AND symbol=?""", (self._alias, symbol))
                 stored_stop = float(risk_row["stop_price"] or 0) if risk_row else 0
-                if (stored_stop > 0 and quote.bid <= stored_stop) or gain <= -cfg.etf_stop_loss_pct:
-                    reason = "stop_loss"
-                elif gain >= cfg.etf_take_profit_pct:
-                    reason = "take_profit"
-                elif peak > 0 and peak - gain >= cfg.etf_trailing_stop_pct:
-                    reason = "trailing_stop"
-                elif prob is not None and prob < cfg.etf_exit_prob:
-                    reason = "llm_bearish"
-                if reason:
-                    exit_price = adverse_fill(quote.bid, quote.ask, "SELL", cfg.etf_slippage_bps)
-                    await self._fill(symbol, OrderSide.SELL, qty, exit_price)
+                proposal = exit_proposal(
+                    symbol=symbol, quantity=qty, entry_price=entry,
+                    bid=quote.bid, ask=quote.ask, stored_stop=stored_stop,
+                    peak_gain_pct=peak, probability=prob,
+                    stop_loss_pct=cfg.etf_stop_loss_pct,
+                    take_profit_pct=cfg.etf_take_profit_pct,
+                    trailing_stop_pct=cfg.etf_trailing_stop_pct,
+                    exit_probability=cfg.etf_exit_prob,
+                    slippage_bps=cfg.etf_slippage_bps)
+                if proposal:
+                    await self._fill(symbol, OrderSide.SELL, proposal.quantity,
+                                     proposal.price)
                     self._cooldown[symbol] = time.time() + (
                         cfg.etf_reentry_cooldown_hours * 3600)
                     await self._db.execute(
@@ -426,7 +428,8 @@ class IBKRETFPaperPillar:
                         0.0, class_allocated.get(asset_class, 0.0) - cost)
                     position_count -= 1
                     unmarked_positions.discard(symbol)
-                    log.info("ibkr_etf.paper.exit", symbol=symbol, reason=reason,
+                    log.info("ibkr_etf.paper.exit", symbol=symbol,
+                             reason=proposal.reason,
                              model_alias=self._alias,
                              gain_pct=round(gain, 2),
                              probability=(round(prob, 3) if prob is not None else None))
@@ -442,41 +445,42 @@ class IBKRETFPaperPillar:
                 deployment_cap = cfg.etf_paper_budget_usd * cfg.etf_max_deployment_pct / 100.0
                 asset_class = self._asset_class(symbol)
                 class_cap = cfg.etf_paper_budget_usd * cfg.etf_max_asset_class_pct / 100.0
-                remaining = min(
-                    deployment_cap - allocated,
-                    class_cap - class_allocated.get(asset_class, 0.0),
-                )
                 closes_raw = await self._client.get_adjusted_daily_closes(symbol)
                 closes = [float(close) for _, close in closes_raw if close and close > 0]
                 annual_vol = annualized_volatility(closes)
                 momentum = normalized_momentum(closes)
                 if annual_vol is None or momentum is None or momentum <= 0:
                     continue
-                notional = min(cfg.etf_max_entry_usd, remaining)
-                if notional <= cfg.etf_fee_per_order_usd:
-                    continue
-                entry = adverse_fill(quote.bid, quote.ask, "BUY", cfg.etf_slippage_bps)
-                distance = stop_distance(entry, annual_vol, cfg.etf_stop_vol_multiple,
-                                         cfg.etf_min_stop_pct)
                 risk_budget = cfg.etf_paper_budget_usd * cfg.etf_risk_per_position_pct / 100
-                qty = min(
-                    (notional - cfg.etf_fee_per_order_usd) / entry,
-                    risk_quantity(risk_budget, distance, 1, 1, fractional=True),
-                )
-                if qty <= 0:
-                    continue
-                initial_risk = qty * distance
                 open_risk = await self._db.fetchone(
                     """SELECT COALESCE(SUM(initial_risk_usd), 0) AS risk
                          FROM ibkr_etf_positions WHERE model_alias=?""", (self._alias,))
                 max_risk = cfg.etf_paper_budget_usd * cfg.etf_max_portfolio_risk_pct / 100
-                if float(open_risk["risk"] or 0) + initial_risk > max_risk:
+                proposal = entry_proposal(
+                    symbol=symbol, bid=quote.bid, ask=quote.ask,
+                    probability=prob, confidence=confidence,
+                    confidence_rank=self._CONF.get(confidence.upper(), 0),
+                    min_confidence_rank=self._CONF.get(cfg.etf_min_confidence.upper(), 2),
+                    min_probability=cfg.etf_min_prob,
+                    annual_volatility=annual_vol, momentum=momentum,
+                    remaining_deployment_usd=deployment_cap - allocated,
+                    remaining_class_usd=class_cap - class_allocated.get(asset_class, 0.0),
+                    max_entry_usd=cfg.etf_max_entry_usd,
+                    fee_usd=cfg.etf_fee_per_order_usd,
+                    slippage_bps=cfg.etf_slippage_bps,
+                    stop_vol_multiple=cfg.etf_stop_vol_multiple,
+                    min_stop_pct=cfg.etf_min_stop_pct,
+                    risk_budget_usd=risk_budget,
+                    open_risk_usd=float(open_risk["risk"] or 0),
+                    max_portfolio_risk_usd=max_risk,
+                    controls_allow_entry=True)
+                if proposal is None:
                     continue
-                await self._fill(symbol, OrderSide.BUY, qty, entry,
-                                 stop_price=entry - distance,
-                                 initial_risk_usd=initial_risk)
-                await self._mirror(symbol, qty, entry, quote.bid)
-                actual_cost = qty * entry + cfg.etf_fee_per_order_usd
+                await self._fill(symbol, OrderSide.BUY, proposal.quantity,
+                                 proposal.price, stop_price=proposal.stop_price,
+                                 initial_risk_usd=proposal.initial_risk_usd)
+                await self._mirror(symbol, proposal.quantity, proposal.price, quote.bid)
+                actual_cost = proposal.quantity * proposal.price + cfg.etf_fee_per_order_usd
                 allocated += actual_cost
                 class_allocated[asset_class] = (
                     class_allocated.get(asset_class, 0.0) + actual_cost)
