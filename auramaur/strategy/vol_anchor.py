@@ -47,6 +47,12 @@ from auramaur.strategy.protocols import ExecutionMode
 from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
 from auramaur.data_sources.deribit_iv import DeribitIVSource
 from auramaur.exchange.models import Confidence, Market, OrderSide, Signal
+from auramaur.experiments.strategies.vol_anchor import (
+    VolAnchorInputs,
+    VolAnchorProposal,
+    VolAnchorRules,
+    assess_vol_anchor,
+)
 from auramaur.strategy.classifier import blocked_category_hit, ensure_category
 
 log = structlog.get_logger()
@@ -246,6 +252,13 @@ class VolAnchorPillar:
         now = datetime.now(timezone.utc)
         entered = 0
         priced = 0
+        rules = VolAnchorRules(
+            min_liquidity=cfg.min_liquidity,
+            min_edge_pts=cfg.min_edge_pts,
+            stake_usd=cfg.stake_usd,
+            tau_years=cfg.tau_years,
+            long_run_vol=dict(cfg.long_run_vol),
+        )
         for cg_id, kind, strike, deadline, market in candidates:
             if entered >= cfg.max_entries_per_cycle:
                 break
@@ -255,37 +268,38 @@ class VolAnchorPillar:
             t_years = (deadline - now).total_seconds() / (365.0 * 86400.0)
             if t_years <= 0:
                 continue
-            anchor = cfg.long_run_vol.get(cg_id, 0.0)
-            if anchor <= 0:
-                continue
-            sigma = None
-            sigma_src = "blend"
+            term_sigma = None
             if self._iv_source is not None:
-                sigma = await self._iv_source.term_sigma(cg_id, t_years)
-                if sigma is not None:
-                    sigma_src = "deribit_iv"
-            if sigma is None:
-                # Fallback = the calibrated estimate (pre-Deribit behavior).
-                sigma = blended_sigma(realized, anchor, t_years, cfg.tau_years)
-            if kind in ("touch_up", "touch_down"):
-                fair = touch_prob(spot, strike, sigma, t_years)
-            elif kind == "above":
-                fair = terminal_above_prob(spot, strike, sigma, t_years)
-            else:  # below
-                fair = 1.0 - terminal_above_prob(spot, strike, sigma, t_years)
+                term_sigma = await self._iv_source.term_sigma(cg_id, t_years)
+            claimed = await self._market_claimed(market.id)
+            assessment = assess_vol_anchor(VolAnchorInputs(
+                market_id=market.id,
+                question=market.question,
+                yes_price=market.outcome_yes_price,
+                no_price=market.outcome_no_price,
+                active=market.active,
+                venue=market.exchange or "polymarket",
+                liquidity=market.liquidity,
+                category_blocked=False,
+                as_of=now,
+                spot=spot,
+                realized_vol=realized,
+                already_held=claimed,
+                term_sigma=term_sigma,
+            ), rules)
+            if assessment.proposal is None:
+                continue
+            proposal = assessment.proposal
             priced += 1
-            edge_pts = abs(fair - market.outcome_yes_price) * 100.0
             log.info("vol_anchor.priced", market_id=market.id, asset=cg_id,
                      kind=kind, strike=strike, spot=round(spot, 2),
-                     sigma=round(sigma, 3), sigma_src=sigma_src,
+                     sigma=round(proposal.sigma, 3),
+                     sigma_src=proposal.sigma_source,
                      realized=round(realized, 3),
-                     fair=round(fair, 3), market=market.outcome_yes_price,
-                     edge=round(edge_pts, 1))
-            if edge_pts < cfg.min_edge_pts:
-                continue
-            if await self._market_claimed(market.id):
-                continue
-            if await self._try_enter(market, fair, sigma, realized, kind, cfg):
+                     fair=round(proposal.fair_probability, 3),
+                     market=market.outcome_yes_price,
+                     edge=round(proposal.edge_percent, 1))
+            if await self._try_enter(market, proposal, cfg):
                 entered += 1
         log.info("vol_anchor.cycle", candidates=len(candidates), priced=priced,
                  entered=entered)
@@ -362,8 +376,13 @@ class VolAnchorPillar:
             (market_id,))
         return row is not None
 
-    async def _try_enter(self, market: Market, fair: float, sigma: float,
-                         realized: float, kind: str, cfg) -> bool:
+    async def _try_enter(
+        self, market: Market, proposal: VolAnchorProposal, cfg
+    ) -> bool:
+        fair = proposal.fair_probability
+        sigma = proposal.sigma
+        realized = proposal.realized_vol
+        kind = proposal.kind
         market_yes = market.outcome_yes_price
         side = OrderSide.BUY if fair > market_yes else OrderSide.SELL
         signal = Signal(

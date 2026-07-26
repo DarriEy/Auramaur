@@ -19,11 +19,17 @@ Two rules make it self-retiring:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import structlog
 
 from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
+from auramaur.experiments.strategies.interim_manager import (
+    InterimManagerInputs,
+    InterimManagerRejection,
+    InterimManagerRules,
+    assess_interim_manager,
+)
 from auramaur.exchange.models import Confidence, OrderSide, Signal
 from auramaur.risk.graduation import GraduationLadder
 from auramaur.strategy.classifier import ensure_category
@@ -32,7 +38,6 @@ from auramaur.strategy.protocols import ExecutionMode
 log = structlog.get_logger()
 
 _GRADUATED = {"live", "probation"}
-_MIN_THESIS_CHARS = 40
 
 
 class InterimManagerPillar:
@@ -112,20 +117,10 @@ class InterimManagerPillar:
     # ------------------------------------------------------------------
 
     async def _decide_one(self, p: dict, owned: dict[str, str]) -> bool:
+        from auramaur.strategy.signals import taker_fee_rate
+
         cfg = self._settings.interim_manager
         pid = p["id"]
-
-        created = self._parse_ts(p.get("created_at"))
-        if created is not None and datetime.now(timezone.utc) - created > timedelta(
-                hours=cfg.proposal_ttl_hours):
-            await self._resolve(pid, "expired", "proposal ttl elapsed")
-            return False
-
-        thesis = (p.get("thesis") or "").strip()
-        if len(thesis) < _MIN_THESIS_CHARS:
-            await self._resolve(pid, "skipped",
-                                "charter: no nameable mispricing mechanism")
-            return False
 
         venue = p["venue"]
         discovery = self._discoveries.get(venue)
@@ -141,55 +136,68 @@ class InterimManagerPillar:
 
         category = ensure_category(market.question, market.description,
                                    market.category)
-        if category in owned:
-            await self._resolve(pid, "skipped", f"delegated to {owned[category]}")
-            return False
-
-        # Machine-checkable sunset: an information/time bound the proposer set.
-        sunset = self._parse_ts(p.get("sunset_at"))
-        if sunset is not None and datetime.now(timezone.utc) >= sunset:
-            await self._resolve(pid, "expired", "thesis sunset reached")
-            return False
-
         open_now = await self._open_positions()
-        if open_now >= cfg.max_open_positions:
-            log.info("interim_manager.position_cap", open=open_now)
-            return False  # stays pending; retried next cycle
-
-        side = OrderSide.BUY if str(p["side"]).upper() == "BUY" else OrderSide.SELL
-
-        # Entry-price limit: the mechanical guard that protects the edge.
-        # Expressed as the max price PAID for the side taken (BUY pays the
-        # YES price; SELL pays the NO price).
-        entry_price = (market.outcome_yes_price if side == OrderSide.BUY
-                       else 1.0 - market.outcome_yes_price)
-        max_entry = p.get("max_entry_price")
-        if max_entry is not None and entry_price > float(max_entry) + 1e-9:
-            await self._resolve(
-                pid, "skipped",
-                f"entry {entry_price:.3f} above limit {float(max_entry):.3f}")
+        assessment = assess_interim_manager(
+            InterimManagerInputs(
+                proposal_id=pid, market_id=market.id,
+                thesis=p.get("thesis") or "", side=str(p["side"]),
+                fair_probability=float(p["fair_prob"]),
+                requested_stake_usd=float(p["stake_usd"]),
+                market_yes_price=float(market.outcome_yes_price),
+                market_liquidity=float(market.liquidity or 0), category=category,
+                created_at=self._parse_ts(p.get("created_at")),
+                sunset_at=self._parse_ts(p.get("sunset_at")),
+                as_of=datetime.now(timezone.utc), delegated_to=owned.get(category),
+                open_positions=open_now,
+                open_positions_in_category=await self._open_positions_in_category(category),
+                fee_rate=taker_fee_rate(market.exchange or "kalshi", category),
+                confidence_lo=float(p["confidence_lo"]) if p.get("confidence_lo") is not None else None,
+                confidence_hi=float(p["confidence_hi"]) if p.get("confidence_hi") is not None else None,
+                max_entry_price=float(p["max_entry_price"]) if p.get("max_entry_price") is not None else None,
+            ),
+            InterimManagerRules(
+                proposal_ttl_hours=cfg.proposal_ttl_hours,
+                max_open_positions=cfg.max_open_positions,
+                min_robust_edge=cfg.min_robust_edge,
+                default_uncertainty_buffer=cfg.default_uncertainty_buffer,
+                slippage_buffer=cfg.slippage_buffer,
+                liquidity_penalty=cfg.liquidity_penalty,
+                thin_liquidity_usd=cfg.thin_liquidity_usd,
+                correlation_penalty_per_position=cfg.correlation_penalty_per_position,
+                stake_usd=cfg.stake_usd, paper=cfg.paper,
+            ),
+        )
+        if assessment.proposal is None:
+            if assessment.robust_edge is not None:
+                await self._db.execute(
+                    "UPDATE manager_proposals SET robust_edge = ?, decision_price = ? "
+                    "WHERE id = ?",
+                    (round(assessment.robust_edge, 4), assessment.decision_price, pid),
+                )
+                await self._db.commit()
+            if assessment.rejection == InterimManagerRejection.POSITION_CAP:
+                log.info("interim_manager.position_cap", open=open_now)
+                return False
+            expired = assessment.rejection in {
+                InterimManagerRejection.EXPIRED,
+                InterimManagerRejection.SUNSET_REACHED,
+            }
+            await self._resolve(pid, "expired" if expired else "skipped", assessment.reason)
             return False
-
-        # Robust-edge gate: the edge must survive every haircut. Conservative
-        # about apparent edges built on weak estimates (charter decision rule).
-        robust, detail = await self._robust_edge(p, market, category, side)
+        proposal = assessment.proposal
         await self._db.execute(
             "UPDATE manager_proposals SET robust_edge = ?, decision_price = ? "
-            "WHERE id = ?", (round(robust, 4), entry_price, pid))
+            "WHERE id = ?", (round(proposal.robust_edge, 4), proposal.entry_price, pid))
         await self._db.commit()
-        if robust < cfg.min_robust_edge:
-            await self._resolve(
-                pid, "skipped",
-                f"robust edge {robust:+.3f} < {cfg.min_robust_edge:.3f} ({detail})")
-            return False
+        side = OrderSide.BUY if proposal.buy_yes else OrderSide.SELL
         signal = Signal(
             market_id=market.id,
             market_question=market.question,
-            claude_prob=max(0.01, min(0.99, float(p["fair_prob"]))),
+            claude_prob=proposal.fair_probability,
             claude_confidence=Confidence.MEDIUM,
             market_prob=market.outcome_yes_price,
             edge=abs(float(p["fair_prob"]) - market.outcome_yes_price) * 100.0,
-            evidence_summary=f"[interim_manager proposal {pid}] {thesis}"[:500],
+            evidence_summary=f"[interim_manager proposal {pid}] {proposal.thesis}"[:500],
             recommended_side=side,
             strategy_source=self.name,
         )
@@ -198,8 +206,8 @@ class InterimManagerPillar:
             await self._resolve(pid, "skipped", f"risk: {decision.reason}"[:200])
             return False
 
-        size = min(decision.position_size, cfg.stake_usd, float(p["stake_usd"]))
-        force_paper = cfg.paper or getattr(decision, "force_paper", False)
+        size = min(decision.position_size, proposal.requested_stake_usd)
+        force_paper = proposal.force_paper or getattr(decision, "force_paper", False)
         res = await gateway.submit(TradeIntent(
             signal=signal, market=market, size_dollars=size,
             force_paper=force_paper))
@@ -221,31 +229,6 @@ class InterimManagerPillar:
         return True
 
     # ------------------------------------------------------------------
-
-    async def _robust_edge(self, p: dict, market, category: str,
-                           side: OrderSide) -> tuple[float, str]:
-        """fair − executable − uncertainty − fees − slippage − liquidity −
-        correlation. Returns (edge, haircut breakdown for the audit trail)."""
-        from auramaur.strategy.signals import taker_fee_rate
-        cfg = self._settings.interim_manager
-        fair = float(p["fair_prob"])
-        mid = market.outcome_yes_price
-        gross = (fair - mid) if side == OrderSide.BUY else (mid - fair)
-
-        lo, hi = p.get("confidence_lo"), p.get("confidence_hi")
-        if lo is not None and hi is not None and float(hi) >= float(lo):
-            uncertainty = (float(hi) - float(lo)) / 2.0
-        else:
-            uncertainty = cfg.default_uncertainty_buffer
-        fee = taker_fee_rate(market.exchange or "kalshi", category) * mid * (1.0 - mid)
-        liq = (cfg.liquidity_penalty
-               if float(market.liquidity or 0) < cfg.thin_liquidity_usd else 0.0)
-        corr = (cfg.correlation_penalty_per_position
-                * await self._open_positions_in_category(category))
-        edge = gross - uncertainty - fee - cfg.slippage_buffer - liq - corr
-        detail = (f"gross {gross:+.3f} − unc {uncertainty:.3f} − fee {fee:.3f} "
-                  f"− slip {cfg.slippage_buffer:.3f} − liq {liq:.3f} − corr {corr:.3f}")
-        return edge, detail
 
     # Counted through `signals`, but this pillar NEVER writes a signals row —
     # every other pillar does, so the join silently returned 0 forever. That

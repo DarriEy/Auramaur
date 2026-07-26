@@ -16,6 +16,12 @@ from datetime import datetime, timezone
 import structlog
 
 from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
+from auramaur.experiments.strategies.weather_temp import (
+    WeatherTempInputs,
+    WeatherTempRejection,
+    WeatherTempRules,
+    assess_weather_temp,
+)
 from auramaur.exchange.models import Confidence, Market, OrderSide, Signal
 from auramaur.strategy.classifier import ensure_category
 from auramaur.strategy.weather_pricing import (
@@ -99,27 +105,33 @@ class WeatherTempPillar:
         if model_p is None:
             return False
         market_p = market.outcome_yes_price
-        edge = model_p - market_p
         # Always log model vs market — this is the measurement record.
         log.info("weather_temp.priced", market_id=market.id, city=spec.city,
                  kind=spec.kind, model_p=round(model_p, 3), market_p=round(market_p, 3),
                  members=len(members))
-        if abs(edge) < self._required_edge(market):
-            return False
-        if abs(edge) > cfg.max_divergence:
+        assessment = assess_weather_temp(
+            WeatherTempInputs(
+                market_id=market.id, market_probability=market_p,
+                model_probability=model_p, member_count=len(members),
+                city=spec.city, temperature_kind=spec.kind,
+                already_entered_or_held=await self._already_entered_or_held(market.id),
+            ),
+            WeatherTempRules(required_edge=self._required_edge(market),
+                             max_divergence=cfg.max_divergence, stake_usd=cfg.stake_usd),
+        )
+        if assessment.rejection == WeatherTempRejection.IMPLAUSIBLE_DIVERGENCE:
             log.info("weather_temp.implausible_divergence", market_id=market.id,
                      model_p=round(model_p, 3), market_p=round(market_p, 3))
+        if assessment.proposal is None:
             return False
-        if await self._already_entered_or_held(market.id):
-            return False
-        side = OrderSide.BUY if edge > 0 else OrderSide.SELL
+        proposal = assessment.proposal
+        side = OrderSide.BUY if proposal.buy_yes else OrderSide.SELL
         signal = Signal(
             market_id=market.id, market_question=market.question,
-            claude_prob=max(0.01, min(0.99, model_p)),
+            claude_prob=max(0.01, min(0.99, proposal.model_probability)),
             claude_confidence=Confidence.MEDIUM, market_prob=market_p,
-            edge=abs(edge) * 100.0,
-            evidence_summary=(f"GEFS ensemble P(bin)={model_p:.2f} ({len(members)} members) "
-                              f"vs market {market_p:.2f} for {spec.city} {spec.kind} temp."),
+            edge=proposal.edge_percent,
+            evidence_summary=proposal.evidence_summary,
             recommended_side=side, strategy_source="weather_temp",
         )
         await self._persist_signal(signal, market)

@@ -27,32 +27,32 @@ class MigrationStatus(str, Enum):
 # TargetPosition: routing, paired legs, quoting inventory, and off-PM assets use
 # contracts that retain their production semantics.
 MIGRATION_INVENTORY: dict[str, tuple[MigrationTrack, MigrationStatus]] = {
-    "core_trading": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.PLANNED),
-    "news_reactor": (MigrationTrack.ROUTING, MigrationStatus.PLANNED),
+    "core_trading": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED),
+    "news_reactor": (MigrationTrack.ROUTING, MigrationStatus.MIGRATED),
     "kraken": (MigrationTrack.EXTERNAL_ASSET, MigrationStatus.SPECIALIZED_PLANNED),
     "arbitrage": (MigrationTrack.PAIRED_PACKAGE, MigrationStatus.SPECIALIZED_PLANNED),
     "bias_harvest": (
         MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED
     ),
-    "platform_consensus": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.PLANNED),
-    "long_horizon": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.PLANNED),
-    "agent_trader": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.PLANNED),
-    "agent_trader_kalshi": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.PLANNED),
-    "term_structure": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.PLANNED),
-    "vol_anchor": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.PLANNED),
-    "informed_flow": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.PLANNED),
+    "platform_consensus": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED),
+    "long_horizon": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED),
+    "agent_trader": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED),
+    "agent_trader_kalshi": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED),
+    "term_structure": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED),
+    "vol_anchor": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED),
+    "informed_flow": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED),
     "entailment_arb": (MigrationTrack.PAIRED_PACKAGE, MigrationStatus.SPECIALIZED_PLANNED),
     "cross_venue_arb": (MigrationTrack.PAIRED_PACKAGE, MigrationStatus.SPECIALIZED_PLANNED),
-    "econ_indicator": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.PLANNED),
-    "interim_manager": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.PLANNED),
-    "settlement_arb": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.PLANNED),
-    "weather_temp": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.PLANNED),
-    "resolution_lens": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.PLANNED),
+    "econ_indicator": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED),
+    "interim_manager": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED),
+    "settlement_arb": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED),
+    "weather_temp": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED),
+    "resolution_lens": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED),
     "resolution_lens_kalshi": (
-        MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.PLANNED
+        MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED
     ),
     "oddlot_tender": (MigrationTrack.EXTERNAL_ASSET, MigrationStatus.SPECIALIZED_PLANNED),
-    "momentum_coupling": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.PLANNED),
+    "momentum_coupling": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED),
     "market_maker": (MigrationTrack.QUOTING, MigrationStatus.SPECIALIZED_PLANNED),
     "ibkr_etf_paper": (MigrationTrack.EXTERNAL_ASSET, MigrationStatus.SPECIALIZED_PLANNED),
     "ibkr_multiasset": (MigrationTrack.EXTERNAL_ASSET, MigrationStatus.SPECIALIZED_PLANNED),

@@ -43,6 +43,11 @@ from auramaur.exchange.models import (
     OrderSide,
     Signal,
 )
+from auramaur.experiments.strategies.resolution_lens import (
+    ResolutionLensCandidate,
+    ResolutionLensRules,
+    form_resolution_lens_proposal,
+)
 
 log = structlog.get_logger()
 
@@ -674,28 +679,42 @@ class ResolutionLensPillar:
         # cut the cell to 100% win in-sample. SELL longshot plays (overpriced
         # 'permanent'/'announce' YES) sit below this floor by construction and
         # are deliberately exempt. edge > 0 ⇒ BUY YES at ~outcome_yes_price.
-        if (edge > 0 and cfg.min_entry_price > 0.0
-                and m.outcome_yes_price < cfg.min_entry_price):
-            log.info("lens.below_entry_floor", market_id=m.id,
-                     yes_price=round(m.outcome_yes_price, 3),
-                     floor=cfg.min_entry_price)
+        proposal = form_resolution_lens_proposal(
+            ResolutionLensCandidate(
+                market_id=m.id,
+                market_probability=m.outcome_yes_price,
+                fair_probability=fair,
+                gap_score=score,
+                mechanism=mech,
+            ),
+            ResolutionLensRules(
+                min_entry_price=cfg.min_entry_price,
+                high_conf_gap_score=cfg.high_conf_gap_score,
+                stake_usd=cfg.stake_usd,
+            ),
+        )
+        if proposal is None:
+            if edge > 0 and m.outcome_yes_price < cfg.min_entry_price:
+                log.info("lens.below_entry_floor", market_id=m.id,
+                         yes_price=round(m.outcome_yes_price, 3),
+                         floor=cfg.min_entry_price)
             return False
         signal = Signal(
             market_id=m.id,
             market_question=m.question,
-            claude_prob=fair,
+            claude_prob=proposal.fair_probability,
             # A concrete, named fine-print mechanism with a high gap_score is
             # the one class of LLM divergence with a documented win record —
             # HIGH here both reflects that and clears the divergence filter
             # (which exists to block UNexplained mid-band disagreement).
-            claude_confidence=Confidence.HIGH if score >= cfg.high_conf_gap_score
+            claude_confidence=Confidence.HIGH if proposal.high_confidence
             else Confidence.MEDIUM,
-            market_prob=m.outcome_yes_price,
-            edge=abs(edge) * 100.0,
-            evidence_summary=f"Resolution lens (gap {score:.2f}): {mech}",
-            recommended_side=OrderSide.BUY if edge > 0 else OrderSide.SELL,
+            market_prob=proposal.market_probability,
+            edge=proposal.edge_percent,
+            evidence_summary=proposal.evidence_summary,
+            recommended_side=OrderSide.BUY if proposal.buy_yes else OrderSide.SELL,
             strategy_source=self._source_tag,
-            mispricing_reason=f"behavioral: {mech}",
+            mispricing_reason=proposal.mispricing_reason,
         )
         decision = await self._risk.evaluate(signal, m)
         if not decision.approved or decision.position_size <= 0:

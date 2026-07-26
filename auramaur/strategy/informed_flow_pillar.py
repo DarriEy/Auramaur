@@ -24,6 +24,12 @@ from datetime import datetime, timezone
 import structlog
 
 from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
+from auramaur.experiments.strategies.informed_flow import (
+    InformedFlowInputs,
+    InformedFlowRules,
+    assess_informed_flow,
+    informed_flow_eligibility,
+)
 from auramaur.exchange.models import Confidence, Market, OrderSide, Signal
 from auramaur.strategy.classifier import blocked_category_hit, ensure_category
 from auramaur.strategy.informed_flow import KalshiTradeTape
@@ -98,40 +104,55 @@ class InformedFlowPillar:
     # ------------------------------------------------------------------
 
     def _eligible(self, market: Market) -> bool:
-        cfg = self._settings.informed_flow
-        if not market.active:
-            return False
-        if (market.exchange or "kalshi") != "kalshi":
-            return False
-        if not market.ticker:
-            return False  # need the ticker to pull the tape
-        p_yes = market.outcome_yes_price
-        if not (cfg.band_lo <= p_yes <= cfg.band_hi):
-            return False  # extremes: ATS is noise / already near-resolved
-        if market.liquidity < cfg.min_liquidity:
-            return False
         hit = blocked_category_hit(set(self._settings.risk.blocked_categories),
                                    market.question, market.description, market.category)
         if hit:
             log.debug("informed_flow.skip_category", market_id=market.id, category=hit)
-            return False
-        if market.end_date is None:
-            return False
+        return informed_flow_eligibility(
+            self._proposal_inputs(market, blocked=bool(hit)),
+            self._proposal_rules(),
+        ) is None
+
+    def _proposal_rules(self) -> InformedFlowRules:
+        cfg = self._settings.informed_flow
+        return InformedFlowRules(
+            band_lo=cfg.band_lo, band_hi=cfg.band_hi,
+            min_liquidity=cfg.min_liquidity,
+            min_hours_to_resolution=cfg.min_hours_to_resolution,
+            max_days_to_resolution=cfg.max_days_to_resolution,
+            uplift=cfg.uplift, stake_usd=cfg.stake_usd,
+        )
+
+    def _proposal_inputs(self, market: Market, *, blocked: bool = False,
+                         already: bool = False, flow=None) -> InformedFlowInputs:
         end = market.end_date
-        if end.tzinfo is None:
+        if end is not None and end.tzinfo is None:
             end = end.replace(tzinfo=timezone.utc)
-        hours_left = (end - datetime.now(timezone.utc)).total_seconds() / 3600.0
-        if hours_left < cfg.min_hours_to_resolution:
-            return False
-        if hours_left > cfg.max_days_to_resolution * 24.0:
-            return False
-        return True
+        hours_left = (
+            (end - datetime.now(timezone.utc)).total_seconds() / 3600.0
+            if end is not None else None
+        )
+        return InformedFlowInputs(
+            market_id=market.id, venue=market.exchange or "kalshi",
+            ticker=market.ticker, active=market.active,
+            market_probability=market.outcome_yes_price,
+            liquidity=market.liquidity, blocked_category=blocked,
+            hours_to_resolution=hours_left,
+            already_entered_or_held=already,
+            has_signal=bool(flow and flow.has_signal),
+            informed_side=flow.informed_side if flow else None,
+            abnormal_count=flow.abnormal_count if flow else 0,
+            baseline_size=flow.baseline_size if flow else 0.0,
+            signal_volume=flow.signal_volume if flow else 0.0,
+            sample=flow.sample if flow else 0,
+        )
 
     async def _try_enter(self, market: Market) -> bool:
         cfg = self._settings.informed_flow
         if not self._eligible(market):
             return False
-        if await self._already_entered_or_held(market.id):
+        already = await self._already_entered_or_held(market.id)
+        if already:
             return False
 
         # Only NOW pull the tape (bounded API cost) and detect informed flow.
@@ -149,28 +170,26 @@ class InformedFlowPillar:
             source_at=datetime.now(timezone.utc) if self._tape.last_ok else None,
             item_count=self._tape.last_count,
         ))
-        if not flow.has_signal or flow.informed_side is None:
+        proposal = assess_informed_flow(
+            self._proposal_inputs(market, already=already, flow=flow),
+            self._proposal_rules(),
+        ).proposal
+        if proposal is None:
             return False
 
-        fav_is_yes = flow.informed_side == "yes"
+        fav_is_yes = proposal.buy_yes
         p_yes = market.outcome_yes_price
         # Forecast-free: follow the informed side with a small uplift (stays under
         # the 0.05 divergence-filter floor so a MEDIUM-confidence follow isn't
         # blocked, as in bias_harvest).
-        claude_prob = (min(0.99, p_yes + cfg.uplift) if fav_is_yes
-                       else max(0.01, p_yes - cfg.uplift))
         signal = Signal(
             market_id=market.id,
             market_question=market.question,
-            claude_prob=claude_prob,
+            claude_prob=proposal.model_probability,
             claude_confidence=Confidence.MEDIUM,
             market_prob=p_yes,
-            edge=cfg.uplift * 100.0,
-            evidence_summary=(
-                f"Informed-flow follow: {flow.abnormal_count} abnormal trades "
-                f"({flow.signal_volume:.0f} contracts) on the {flow.informed_side.upper()} "
-                f"side vs a {flow.baseline_size:.0f}-size baseline (n={flow.sample})."
-            ),
+            edge=proposal.edge_percent,
+            evidence_summary=proposal.evidence_summary,
             recommended_side=OrderSide.BUY if fav_is_yes else OrderSide.SELL,
             strategy_source="informed_flow",
             mispricing_reason=(

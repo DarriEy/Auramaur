@@ -31,7 +31,6 @@ enters a market already held by any strategy/mode.
 from __future__ import annotations
 
 import asyncio
-import math
 from datetime import datetime, timezone
 
 import structlog
@@ -48,22 +47,21 @@ from auramaur.exchange.models import (
 )
 from auramaur.strategy.classifier import blocked_category_hit, ensure_category
 from auramaur.strategy.protocols import ExecutionMode
+from auramaur.experiments.strategies.long_horizon import (
+    LongHorizonInputs,
+    LongHorizonRules,
+    assess_long_horizon,
+    calibrated_fair as _calibrated_fair,
+)
 
 log = structlog.get_logger()
+
+# Compatibility export for callers and tests; the implementation is portable.
+calibrated_fair = _calibrated_fair
 
 # Per-position mark fetch during the decay sweep. Bounded: an unbounded
 # await on a venue call has hung this bot's event loop three times.
 _MARK_FETCH_TIMEOUT_SECONDS = 10.0
-
-
-def calibrated_fair(price: float, slope: float) -> float:
-    """Slope-corrected fair probability for a price, in logit space:
-    ``true_logit = slope * logit(price)`` (arXiv 2602.19520). For a favorite
-    (price > 0.5) and slope > 1 this returns a value ABOVE the price — the
-    documented long-horizon underpricing. Pure function (the tested core)."""
-    p = min(max(price, 1e-6), 1.0 - 1e-6)
-    logit = math.log(p / (1.0 - p))
-    return 1.0 / (1.0 + math.exp(-slope * logit))
 
 
 class LongHorizonPillar:
@@ -335,18 +333,48 @@ class LongHorizonPillar:
 
     async def _try_enter(self, market: Market) -> bool:
         cfg = self._settings.long_horizon
-        fav = self._favored(market)
-        if fav is None or not self._eligible(market):
+        venue_excludes = (cfg.kalshi_exclude_categories if self._venue == "kalshi"
+                          else cfg.exclude_categories)
+        excluded = set(self._settings.risk.blocked_categories) | set(venue_excludes)
+        category_blocked = blocked_category_hit(
+            excluded, market.question, market.description, market.category
+        ) is not None
+        min_liquidity = (cfg.kalshi_min_liquidity if self._venue == "kalshi"
+                         else cfg.min_liquidity)
+        max_days = (cfg.kalshi_max_days_to_resolution if self._venue == "kalshi"
+                    else cfg.max_days_to_resolution)
+        assessment = assess_long_horizon(
+            LongHorizonInputs(
+                market_id=market.id,
+                yes_price=market.outcome_yes_price,
+                active=market.active,
+                venue=market.exchange or "polymarket",
+                liquidity=market.liquidity,
+                category_blocked=category_blocked,
+                end_at=market.end_date,
+                as_of=datetime.now(timezone.utc),
+                already_entered_or_held=await self._already_entered_or_held(market.id),
+            ),
+            LongHorizonRules(
+                venue=self._venue,
+                band_lo=cfg.band_lo,
+                band_hi=cfg.band_hi,
+                slope=cfg.slope,
+                min_edge=cfg.min_edge,
+                stake_usd=cfg.stake_usd,
+                min_liquidity=min_liquidity,
+                min_days_to_resolution=cfg.min_days_to_resolution,
+                max_days_to_resolution=max_days,
+                source_tag=self._tag,
+            ),
+        )
+        proposal = assessment.proposal
+        if proposal is None:
             return False
-        if await self._already_entered_or_held(market.id):
-            return False
-        p_fav, fav_is_yes = fav
-
-        edge_fav = calibrated_fair(p_fav, cfg.slope) - p_fav
-        if edge_fav < cfg.min_edge:
-            return False  # correction too small at this price to clear cost
-
-        signal = self._build_signal(market, p_fav, fav_is_yes, edge_fav)
+        edge_fav = proposal.edge_percent / 100.0
+        signal = self._build_signal(
+            market, proposal.favored_price, proposal.buy_yes, edge_fav
+        )
         await self._persist_signal(signal, market)
 
         # Full risk gate — all checks apply; never bypassed.

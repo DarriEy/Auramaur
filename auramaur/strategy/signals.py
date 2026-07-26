@@ -8,6 +8,11 @@ from datetime import datetime, timezone
 import structlog
 
 from auramaur.exchange.models import Confidence, Market, OrderSide, Signal
+from auramaur.experiments.strategies.core_trading import (
+    CoreTradingInputs,
+    CoreTradingRules,
+    assess_core_trading,
+)
 from auramaur.nlp.analyzer import AnalysisResult
 
 log = structlog.get_logger()
@@ -190,42 +195,6 @@ def detect_edge(
     raw_prob = analysis.calibrated_probability if analysis.calibrated_probability is not None else analysis.probability
     market_prob = market.outcome_yes_price
 
-    # Blend with second opinion using confidence-weighted averaging
-    claude_prob = _blend_estimates(
-        raw_prob, analysis.second_opinion_prob, market_prob,
-        primary_confidence=analysis.confidence,
-    )
-
-    # Detect inverted semantics — if the question is negated, Claude may
-    # have estimated the affirmative while the market trades the negation.
-    # When edge is suspiciously large (>25%) and semantics look inverted,
-    # skip the signal entirely rather than risk a miscalibrated trade.
-    inverted = _has_inverted_semantics(market.question)
-
-    # Raw edge
-    edge = claude_prob - market_prob
-
-    # Determine side
-    if edge > 0:
-        recommended_side = OrderSide.BUY
-    elif edge < 0:
-        recommended_side = OrderSide.SELL
-        edge = abs(edge)
-    else:
-        return None
-
-    if inverted and edge > 0.25:
-        log.warning(
-            "signal.inverted_semantics",
-            market_id=market.id,
-            question=market.question[:100],
-            claude_prob=f"{claude_prob:.3f}",
-            market_prob=f"{market_prob:.3f}",
-            edge_pct=f"{edge * 100:.1f}%",
-            hint="Question appears negated and edge is suspiciously large — skipping",
-        )
-        return None
-
     # Adjust for exchange-specific fees. The configured rate is a *coefficient*
     # on the per-contract fee P*(1-P) (Kalshi's actual formula), not a flat
     # percentage haircut: 0.07 -> at most ~1.75pt (at P=0.5), ~1.1pt at the
@@ -237,50 +206,55 @@ def detect_edge(
     fee_rate = taker_fee_rate(
         market.exchange, market.category, exchange_fees,
         actual_fee_rate=market.fee_rate, fees_enabled=market.fees_enabled)
-    net_edge = edge - fee_rate * market_prob * (1.0 - market_prob)
-
-    if net_edge <= 0:
-        return None
-
-    # Compute hours to resolution for signal quality
     hours_to_res = None
     if market.end_date is not None:
         end = market.end_date if market.end_date.tzinfo else market.end_date.replace(tzinfo=timezone.utc)
         hours_to_res = max(0, (end - datetime.now(timezone.utc)).total_seconds() / 3600)
 
-    # Evidence count from the reasoning length as proxy
     evidence_count = len(analysis.key_factors) if analysis.key_factors else 0
-
-    quality = _compute_signal_quality(
-        net_edge * 100,
-        analysis.confidence,
-        analysis.divergence,
-        evidence_count,
-        hours_to_res,
+    assessment = assess_core_trading(
+        CoreTradingInputs(
+            market_id=market.id,
+            question=market.question,
+            market_probability=market_prob,
+            model_probability=raw_prob,
+            confidence=analysis.confidence,
+            second_opinion_probability=analysis.second_opinion_prob,
+            divergence=analysis.divergence,
+            reasoning=analysis.reasoning,
+            evidence_count=evidence_count,
+            hours_to_resolution=hours_to_res,
+            fee_rate=fee_rate,
+        ),
+        CoreTradingRules(True, True, True, 1.0),
     )
+    if assessment.proposal is None:
+        return None
+    proposal = assessment.proposal
+    recommended_side = OrderSide(proposal.side)
 
     signal = Signal(
         market_id=market.id,
         market_question=market.question,
-        claude_prob=claude_prob,
+        claude_prob=proposal.model_probability,
         claude_confidence=Confidence(analysis.confidence),
         market_prob=market_prob,
-        edge=net_edge * 100,  # Store as percentage
+        edge=proposal.edge_percent,
         second_opinion_prob=analysis.second_opinion_prob,
         divergence=analysis.divergence,
-        evidence_summary=analysis.reasoning[:500],
+        evidence_summary=proposal.evidence_summary,
         recommended_side=recommended_side,
-        recommended_size=quality,  # Repurpose as signal quality score
+        recommended_size=proposal.quality,
     )
 
     log.debug(
         "signal.detected",
         market_id=market.id,
-        claude_prob=f"{claude_prob:.3f}",
+        claude_prob=f"{proposal.model_probability:.3f}",
         market_prob=f"{market_prob:.3f}",
         edge_pct=f"{signal.edge:.1f}%",
         side=recommended_side.value,
-        quality=quality,
+        quality=proposal.quality,
     )
 
     # Flag suspiciously large edges — likely a calibration problem, not alpha
@@ -289,7 +263,7 @@ def detect_edge(
             "signal.suspicious_edge",
             market_id=market.id,
             edge_pct=f"{signal.edge:.1f}%",
-            claude_prob=f"{claude_prob:.3f}",
+            claude_prob=f"{proposal.model_probability:.3f}",
             market_prob=f"{market_prob:.3f}",
             hint="Edge >30% is rare — check if market question semantics are inverted or if Claude is miscalibrated",
         )

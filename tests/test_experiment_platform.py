@@ -389,4 +389,9 @@ def test_every_production_strategy_is_in_the_migration_inventory():
     }
     assert migrated == {
         "bias_harvest",
+        "core_trading", "news_reactor", "platform_consensus", "long_horizon",
+        "agent_trader", "agent_trader_kalshi", "term_structure", "vol_anchor",
+        "informed_flow", "econ_indicator", "interim_manager", "settlement_arb",
+        "weather_temp", "resolution_lens", "resolution_lens_kalshi",
+        "momentum_coupling",
     }

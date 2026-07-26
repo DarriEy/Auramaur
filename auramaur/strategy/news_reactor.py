@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from typing import TYPE_CHECKING
 
 import structlog
+
+from auramaur.experiments.strategies.news_reactor import (
+    NewsMarketCandidate,
+    NewsReactorRules,
+    extract_proper_nouns,
+    extract_search_terms,
+    form_news_market_proposal,
+)
 
 from auramaur.strategy.protocols import ExecutionMode
 
@@ -21,49 +28,6 @@ if TYPE_CHECKING:
     from auramaur.nlp.news_triage import MaterialityTriage
 
 log = structlog.get_logger()
-
-# Common English stop words to strip from headlines before building search terms.
-_STOP_WORDS: set[str] = {
-    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
-    "of", "with", "by", "from", "is", "it", "its", "are", "was", "were",
-    "be", "been", "being", "have", "has", "had", "do", "does", "did",
-    "will", "would", "could", "should", "may", "might", "shall",
-    "not", "no", "nor", "so", "if", "then", "than", "that", "this",
-    "these", "those", "what", "which", "who", "whom", "how", "when",
-    "where", "why", "all", "each", "every", "both", "few", "more",
-    "most", "other", "some", "such", "only", "own", "same", "very",
-    "just", "about", "above", "after", "again", "against", "before",
-    "below", "between", "during", "into", "through", "under", "until",
-    "over", "out", "up", "down", "off", "here", "there", "new", "says",
-    "said", "also", "as", "can", "get", "got", "one", "two", "now",
-    "still", "s", "t", "re", "ve", "d", "ll", "m",
-}
-
-# Words that are generic news fluff — not useful for Polymarket search.
-_NEWS_FLUFF: set[str] = {
-    "breaking", "update", "live", "latest", "report", "reports",
-    "exclusive", "developing", "just", "watch", "opinion", "analysis",
-    "sources", "source", "officials", "official", "according",
-}
-
-# Common words that start sentences and get spuriously classified as proper
-# nouns because the RSS headline title-cases them. Matching against these
-# lets clickbait like "Cheap stuff that doesn't suck" promote "Cheap" to a
-# proper noun and turn into a false market match. Keep lowercase.
-_GENERIC_TITLE_WORDS: set[str] = {
-    "cheap", "best", "good", "great", "new", "old", "big", "small",
-    "hot", "top", "bad", "nice", "fun", "cool", "easy", "hard", "fast",
-    "slow", "free", "rich", "poor", "young", "full", "short", "long",
-    "yes", "no", "now", "soon", "next", "last", "first", "final",
-    "early", "late", "happy", "sad", "real", "fake", "true", "false",
-    "every", "any", "much", "many", "some", "few", "less", "more",
-    "here", "there", "why", "how", "who", "what", "when", "where",
-    "thanks", "sorry", "hello", "goodbye", "welcome", "please",
-    "cheap", "stuff", "things", "ways", "reasons", "signs", "tips",
-}
-
-# Regex to detect capitalised proper-noun-like tokens.
-_PROPER_NOUN_RE = re.compile(r"[A-Z][a-z]{2,}")
 
 
 class NewsReactor:
@@ -290,67 +254,11 @@ class NewsReactor:
         "Fed raises interest rates by 50 basis points" -> ["Fed interest rates", "Fed basis points"]
         "Russia launches new offensive in Ukraine" -> ["Russia Ukraine", "Russia offensive Ukraine"]
         """
-        # Tokenise, stripping punctuation.
-        raw_tokens = re.findall(r"[A-Za-z']+", title)
-
-        proper_nouns: list[str] = []
-        keywords: list[str] = []
-
-        # The first token of a headline is almost always title-cased even if
-        # it's a generic word ("Cheap", "Best", "New"), so ignore its casing
-        # when deciding whether it's a real proper noun — fall through to the
-        # generic-title-words filter below.
-        for idx, token in enumerate(raw_tokens):
-            lower = token.lower()
-            if lower in _STOP_WORDS or lower in _NEWS_FLUFF:
-                continue
-            # Don't treat sentence-starting title-case as a proper noun.
-            treat_as_capital = (_PROPER_NOUN_RE.fullmatch(token) or (token.isupper() and len(token) >= 2))
-            if treat_as_capital and lower in _GENERIC_TITLE_WORDS:
-                treat_as_capital = False
-            if treat_as_capital:
-                proper_nouns.append(token)
-            elif lower not in _GENERIC_TITLE_WORDS:
-                keywords.append(token)
-
-        # Build search queries.
-        queries: list[str] = []
-
-        # Query 1: proper nouns together (most targeted).
-        if proper_nouns:
-            queries.append(" ".join(proper_nouns[:4]))
-
-        # Query 2: first proper noun + first couple of keywords.
-        if proper_nouns and keywords:
-            queries.append(f"{proper_nouns[0]} {' '.join(keywords[:2])}")
-
-        # Query 3: just keywords if no proper nouns.
-        if not proper_nouns and keywords:
-            queries.append(" ".join(keywords[:3]))
-
-        # Deduplicate while preserving order.
-        seen: set[str] = set()
-        unique: list[str] = []
-        for q in queries:
-            q_lower = q.lower()
-            if q_lower not in seen:
-                seen.add(q_lower)
-                unique.append(q)
-
-        return unique or [" ".join(raw_tokens[:3])]
+        return extract_search_terms(title)
 
     def _extract_proper_nouns(self, title: str) -> list[str]:
         """Return just the real proper nouns in a headline, for match validation."""
-        proper_nouns: list[str] = []
-        for token in re.findall(r"[A-Za-z']+", title):
-            lower = token.lower()
-            if lower in _STOP_WORDS or lower in _NEWS_FLUFF:
-                continue
-            if lower in _GENERIC_TITLE_WORDS:
-                continue
-            if _PROPER_NOUN_RE.fullmatch(token) or (token.isupper() and len(token) >= 2):
-                proper_nouns.append(token)
-        return proper_nouns
+        return extract_proper_nouns(title)
 
     @staticmethod
     def _market_text(m: Market) -> str:
@@ -365,11 +273,23 @@ class NewsReactor:
         unrelated markets just because the Gamma API search returned
         fuzzy results.
         """
-        proper_nouns = self._extract_proper_nouns(item.title)
-        if not proper_nouns:
-            return False
-        mtext = self._market_text(market)
-        return any(p.lower() in mtext for p in proper_nouns)
+        return form_news_market_proposal(
+            item.title,
+            NewsMarketCandidate(
+                market_id=market.id,
+                question=market.question or "",
+                description=market.description or "",
+                category="",
+                active=True,
+                liquidity=max(float(market.liquidity or 0), self._min_liquidity),
+                volume=float(market.volume or 0),
+            ),
+            NewsReactorRules(
+                min_liquidity=self._min_liquidity,
+                min_proper_nouns=self._min_proper_nouns,
+                blocked_categories=frozenset(),
+            ),
+        ) is not None
 
     async def _find_related_markets(
         self, item: NewsItem,
@@ -400,14 +320,24 @@ class NewsReactor:
                     log.debug("news_reactor.search_exchange_error", exchange=name, error=str(e))
                     continue
                 for m in markets:
-                    # Kalshi reports thin top-of-book liquidity and high volume;
-                    # fall back to volume when liquidity is zero so we don't
-                    # filter out active Kalshi markets.
-                    activity = max(m.liquidity or 0, m.volume or 0)
-                    if (m.active
-                            and activity >= self._min_liquidity
-                            and m.id not in all_markets
-                            and self._match_is_credible(item, m)):
+                    proposal = form_news_market_proposal(
+                        item.title,
+                        NewsMarketCandidate(
+                            market_id=m.id,
+                            question=m.question or "",
+                            description=m.description or "",
+                            category=getattr(m, "category", "") or "",
+                            active=bool(m.active),
+                            liquidity=float(m.liquidity or 0),
+                            volume=float(m.volume or 0),
+                        ),
+                        NewsReactorRules(
+                            min_liquidity=self._min_liquidity,
+                            min_proper_nouns=self._min_proper_nouns,
+                            blocked_categories=self.BLOCKED_CATEGORIES,
+                        ),
+                    )
+                    if proposal is not None and m.id not in all_markets:
                         all_markets[m.id] = m
             ranked = sorted(all_markets.values(), key=lambda m: m.liquidity, reverse=True)
             return (name, ranked[: self._max_markets_per_story])
