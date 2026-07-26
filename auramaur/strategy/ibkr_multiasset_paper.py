@@ -11,13 +11,17 @@ from zoneinfo import ZoneInfo
 
 import structlog
 
+from auramaur.experiments.strategies.ibkr_multiasset import (
+    MultiAssetEntryInputs, MultiAssetEntryRules, propose_multiasset_entry,
+)
+
 from auramaur.exchange.ibkr_instruments import (
     BY_BOOK, BY_KEY, ContractKind, IBKRBook, InstrumentSpec,
 )
 from auramaur.strategy.protocols import ExecutionMode
 from auramaur.risk.ibkr_math import (
     adverse_fill, annualized_volatility, closes_from_bars,
-    normalized_momentum, risk_quantity, stop_distance,
+    normalized_momentum,
 )
 
 log = structlog.get_logger()
@@ -413,33 +417,35 @@ class IBKRMultiAssetPaperBook:
                         held_specs.get(key) or BY_KEY[key],
                         float(row["avg_cost"]), float(row["fx_to_usd"]))
                     for key, row in positions.items())
-                deployment_cap = cfg.budget_usd * cfg.max_deployment_pct / 100
-                target = min(cfg.budget_usd * cfg.max_position_pct / 100,
-                             deployment_cap - deployed)
                 unit_capital = self._capital_per_unit(spec, quote.ask, fx)
-                entry_price = adverse_fill(
-                    quote.bid, quote.ask, "BUY", cfg.slippage_bps)
-                distance = stop_distance(entry_price, annual_vol,
-                                         cfg.stop_vol_multiple, cfg.min_stop_pct)
-                risk_budget = cfg.budget_usd * cfg.risk_per_position_pct / 100
                 class_risk = sum(
                     float(row["initial_risk_usd"] or 0)
                     for key, row in positions.items()
                     if (held_specs.get(key) or BY_KEY[key]).asset_class == spec.asset_class
                 )
-                class_risk_cap = cfg.budget_usd * cfg.max_asset_class_risk_pct / 100
-                risk_budget = min(risk_budget, class_risk_cap - class_risk)
-                quantity = min(
-                    self._quantity(spec, target, unit_capital),
-                    risk_quantity(risk_budget, distance, quote.multiplier, fx,
-                                  fractional=spec.kind is ContractKind.STOCK),
-                )
-                if quantity <= 0:
+                proposal = propose_multiasset_entry(
+                    MultiAssetEntryInputs(
+                        instrument_key=spec.key, asset_class=spec.asset_class,
+                        ask=quote.ask, bid=quote.bid, fx_to_usd=fx,
+                        multiplier=quote.multiplier, annual_volatility=annual_vol,
+                        deployed_usd=deployed, asset_class_risk_usd=class_risk,
+                        capital_per_unit_usd=unit_capital,
+                        fractional=spec.kind is ContractKind.STOCK),
+                    MultiAssetEntryRules(
+                        budget_usd=cfg.budget_usd,
+                        max_position_pct=cfg.max_position_pct,
+                        max_deployment_pct=cfg.max_deployment_pct,
+                        risk_per_position_pct=cfg.risk_per_position_pct,
+                        max_asset_class_risk_pct=cfg.max_asset_class_risk_pct,
+                        stop_vol_multiple=cfg.stop_vol_multiple,
+                        min_stop_pct=cfg.min_stop_pct,
+                        slippage_bps=cfg.slippage_bps))
+                if proposal is None:
                     continue
-                initial_risk = quantity * distance * quote.multiplier * fx
-                await self._fill(spec, quote, "BUY", quantity, fx,
-                                 stop_price=entry_price - distance,
-                                 initial_risk_usd=initial_risk)
+                await self._fill(
+                    spec, quote, proposal.side, proposal.quantity, fx,
+                    stop_price=proposal.stop_price,
+                    initial_risk_usd=proposal.initial_risk_usd)
                 positions = await self._positions()
                 entries += 1
             except Exception as exc:  # noqa: BLE001

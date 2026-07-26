@@ -28,6 +28,13 @@ import structlog
 from auramaur.strategy.protocols import ExecutionMode
 
 from auramaur.exchange.models import Fill, OrderSide, TokenType
+from auramaur.experiments.strategies.kraken import (
+    KrakenAction,
+    KrakenRejection,
+    KrakenSpotInputs,
+    KrakenSpotRules,
+    assess_kraken_spot,
+)
 
 log = structlog.get_logger()
 
@@ -793,13 +800,28 @@ class KrakenPillar:
                 # balance by a rounding sliver. If the held amount is below the
                 # pair's ordermin, a single market sell can't close it — log once
                 # and skip rather than spamming rejected orders forever.
-                vol = self._floor_lot(pair, qty)
                 ordermin = self._pair_min.get(pair, 0.0)
-                if vol <= 0 or (ordermin and vol < ordermin):
+                assessment = assess_kraken_spot(
+                    KrakenSpotInputs(
+                        pair=pair, price=price, holding=True, orphaned=orphaned,
+                        exit_reason=reason, held_quantity=qty,
+                    ),
+                    KrakenSpotRules(
+                        max_order_usd=kcfg.max_order_usd,
+                        lot_decimals=self._pair_lot_dec.get(pair, 8),
+                        order_minimum=ordermin,
+                    ),
+                )
+                if assessment.proposal is None:
                     log.warning("kraken.directional.exit_below_ordermin", pair=pair,
                                 reason=reason, held=round(qty, 8), ordermin=ordermin,
+                                rejection=(assessment.rejection.value
+                                           if assessment.rejection else None),
                                 note="position too small to close with one market sell")
                     continue
+                proposal = assessment.proposal
+                assert proposal.action is KrakenAction.SELL
+                vol = proposal.volume
                 notional = await self._k.usd_notional(pair, vol, price) or (vol * price)
                 res = await self._k.place_spot_order(
                     pair, OrderSide.SELL, volume=vol, ordertype="market",
@@ -888,17 +910,11 @@ class KrakenPillar:
                 # over-precise volume), then respect the minimum lot — bump up to
                 # ordermin only if it still fits ~1.5x the per-order cap in USD;
                 # else the pair is too expensive per lot to trade within budget.
-                vol = self._floor_lot(pair, vol)
                 ordermin = self._pair_min.get(pair, 0.0)
-                if ordermin and vol < ordermin:
-                    min_usd = await self._k.usd_notional(pair, ordermin, price)
-                    if min_usd and min_usd > kcfg.max_order_usd * 1.5:
-                        log.info("kraken.directional.min_lot_too_large", pair=pair,
-                                 ordermin=ordermin, min_usd=round(min_usd, 2))
-                        continue
-                    vol = ordermin  # ordermin is already a valid lot size
-                if vol <= 0:
-                    continue
+                minimum_notional_usd = (
+                    await self._k.usd_notional(pair, ordermin, price)
+                    if ordermin and vol < ordermin else None
+                )
                 # Funding gate: only fire if we actually hold enough FREE quote
                 # currency to pay for it. The notional budget ceiling above is far
                 # larger than available cash, so without this the loop spams orders
@@ -906,14 +922,35 @@ class KrakenPillar:
                 # Paper validation simulates entries, so it needs no real quote
                 # balance — skip the funding gate (else a fully-deployed wallet
                 # would block the paper book from ever opening a position).
-                if not effective_paper:
-                    quote = await self._k.get_pair_quote(pair) or "ZUSD"
-                    free_quote = bal.get(quote, 0.0)
-                    need_quote = vol * price * 1.005   # +0.5% for taker fee headroom
-                    if free_quote < need_quote:
+                quote = await self._k.get_pair_quote(pair) or "ZUSD"
+                free_quote = bal.get(quote, 0.0)
+                assessment = assess_kraken_spot(
+                    KrakenSpotInputs(
+                        pair=pair, price=price, holding=False, orphaned=False,
+                        signal_accepted=True, sized_entry_volume=vol,
+                        allocated_usd=allocated, budget_usd=budget,
+                        free_quote=free_quote, paper=effective_paper,
+                        minimum_notional_usd=minimum_notional_usd,
+                    ),
+                    KrakenSpotRules(
+                        max_order_usd=kcfg.max_order_usd,
+                        lot_decimals=self._pair_lot_dec.get(pair, 8),
+                        order_minimum=ordermin,
+                    ),
+                )
+                if assessment.proposal is None:
+                    if assessment.rejection is KrakenRejection.MINIMUM_TOO_EXPENSIVE:
+                        log.info("kraken.directional.min_lot_too_large", pair=pair,
+                                 ordermin=ordermin,
+                                 min_usd=round(minimum_notional_usd or 0.0, 2))
+                    elif assessment.rejection is KrakenRejection.UNFUNDED:
+                        need_quote = vol * price * 1.005
                         log.info("kraken.directional.skip_unfunded", pair=pair, quote=quote,
                                  free=round(free_quote, 2), need=round(need_quote, 2))
-                        continue
+                    continue
+                proposal = assessment.proposal
+                assert proposal.action is KrakenAction.BUY
+                vol = proposal.volume
                 res = await self._k.place_spot_order(
                     pair, OrderSide.BUY, volume=vol, ordertype="market", purpose="directional",
                     dry_run=True if effective_paper else None,

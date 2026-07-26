@@ -29,7 +29,7 @@ class MigrationStatus(str, Enum):
 MIGRATION_INVENTORY: dict[str, tuple[MigrationTrack, MigrationStatus]] = {
     "core_trading": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED),
     "news_reactor": (MigrationTrack.ROUTING, MigrationStatus.MIGRATED),
-    "kraken": (MigrationTrack.EXTERNAL_ASSET, MigrationStatus.SPECIALIZED_PLANNED),
+    "kraken": (MigrationTrack.EXTERNAL_ASSET, MigrationStatus.MIGRATED),
     "arbitrage": (MigrationTrack.PAIRED_PACKAGE, MigrationStatus.MIGRATED),
     "bias_harvest": (
         MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED
@@ -51,9 +51,9 @@ MIGRATION_INVENTORY: dict[str, tuple[MigrationTrack, MigrationStatus]] = {
     "resolution_lens_kalshi": (
         MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED
     ),
-    "oddlot_tender": (MigrationTrack.EXTERNAL_ASSET, MigrationStatus.SPECIALIZED_PLANNED),
+    "oddlot_tender": (MigrationTrack.EXTERNAL_ASSET, MigrationStatus.MIGRATED),
     "momentum_coupling": (MigrationTrack.PORTABLE_DIRECTIONAL, MigrationStatus.MIGRATED),
     "market_maker": (MigrationTrack.QUOTING, MigrationStatus.MIGRATED),
-    "ibkr_etf_paper": (MigrationTrack.EXTERNAL_ASSET, MigrationStatus.SPECIALIZED_PLANNED),
-    "ibkr_multiasset": (MigrationTrack.EXTERNAL_ASSET, MigrationStatus.SPECIALIZED_PLANNED),
+    "ibkr_etf_paper": (MigrationTrack.EXTERNAL_ASSET, MigrationStatus.MIGRATED),
+    "ibkr_multiasset": (MigrationTrack.EXTERNAL_ASSET, MigrationStatus.MIGRATED),
 }

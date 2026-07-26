@@ -207,8 +207,8 @@ proposal formation. News reactor delegates its pure routing decision and hands
 the eventual trade choice to the separately migrated core-trading decision.
 Every live-sensitive risk, gateway, persistence, order-lifecycle, and accounting
 operation remains in production. Arbitrage retains atomic paired-package
-proposals and market making retains coupled quote/reconciliation proposals.
-External-asset entries remain explicitly planned on specialized tracks.
+proposals, market making retains coupled quote/reconciliation proposals, and
+Kraken, IBKR, and tender strategies retain asset-specific contracts.
 
 ## Full-set migration sequence
 
@@ -236,5 +236,10 @@ deterministic seam to a pure contract, focused old/new decision coverage passes,
 and its existing execution-contract suite still passes. The status does not
 claim that the contract is supported by the generic replay runtime.
 
-Portable, routing, paired-package, and quoting entries satisfy that
-decision-seam gate. The following stack layer migrates external-asset contracts.
+All entries in the authoritative inventory satisfy that decision-seam gate.
+Specialized contracts deliberately remain outside the generic
+`list[TargetPosition]` runtime where using it would discard atomic pair,
+coupled-quote, routing, manual-action, or external-asset semantics. Generic
+replay/shadow adapters, provenance fixtures, and compatibility-path retirement
+remain explicit follow-on work for those contracts. This completes the
+production delegation refactor without overstating runtime portability.
