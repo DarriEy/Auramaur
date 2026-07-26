@@ -218,3 +218,50 @@ async def test_claims_arm_skipped_without_claims_and_enriched_with(tmp_path):
         assert by_name["local_single"].extra_payload is None
     finally:
         await db.close()
+
+
+async def test_claims_arm_reaches_claims_by_evidence_provenance(tmp_path):
+    """A claim distilled from an article gathered FOR this market counts.
+
+    Requiring the distiller to restate the market id in markets_affected
+    starved this arm to zero scored rows in its first two days: it offers the
+    model only 5 candidate markets per article and the model names a subset,
+    so 32 markets had linkage against 353 the evaluator scored — overlap of
+    one. Provenance reaches 103 markets and 94% of claims.
+    """
+    db = Database(str(tmp_path / "eval-prov.db"))
+    await db.connect()
+    try:
+        settings = Settings()
+        settings.intelligence_eval.enabled = True
+        settings.local_llm.enabled = True
+        service = IntelligenceEvalService(db, settings, Discovery(), LocalClient())
+
+        # A claim whose markets_affected is EMPTY (the common case), distilled
+        # from an article that was gathered as evidence for market m9.
+        await db.execute(
+            """INSERT INTO distilled_claims
+               (content_hash, item_id, source, claim, entities, event_date,
+                markets_affected, model)
+               VALUES ('hprov','i9','rss','Provenance claim.','[]','2026-07-25',
+                       '[]', 'qwen3:8b')""")
+        await db.execute(
+            """INSERT INTO evidence_observations
+               (run_id, item_id, source, title, url, content_hash, excerpt,
+                published_at, observed_at, market_id)
+               VALUES ('r9','i9','rss','t','','hprov','x',
+                       datetime('now'), datetime('now'), 'm9')""")
+        await db.commit()
+
+        kept = {s.treatment_id: s for s in await service._attach_claims(
+            service._treatments, "m9")}
+        assert "local_single_claims" in kept, "provenance must reach the arm"
+        assert kept["local_single_claims"].extra_payload[
+            "distilled_evidence"][0]["claim"] == "Provenance claim."
+
+        # An unrelated market still gets no claims, so the arm still drops.
+        assert "local_single_claims" not in {
+            s.treatment_id for s in await service._attach_claims(
+                service._treatments, "m_other")}
+    finally:
+        await db.close()

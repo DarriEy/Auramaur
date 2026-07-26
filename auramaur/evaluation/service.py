@@ -164,11 +164,29 @@ class IntelligenceEvalService:
         if not self._claims_treatments or not any(
                 t.treatment_id in self._claims_treatments for t in treatments):
             return treatments
+        # Two ways a claim belongs to this market, in preference order:
+        #   1. the distiller explicitly named it in markets_affected;
+        #   2. PROVENANCE — the claim was distilled from an article that was
+        #      gathered as evidence FOR this market.
+        # Requiring (1) alone starved this arm completely: it produced ZERO
+        # scored rows in its first two days. The distiller only offers the
+        # model 5 candidate markets per article and the model names a subset,
+        # so only 32 markets had any linkage against 353 the evaluator scored
+        # — an overlap of ONE. The provenance join reaches 103 markets and 585
+        # of 622 claims, because an article gathered as evidence for a market
+        # is about that market whether or not the model restates the id.
+        # No-lookahead is unchanged: only already-distilled rows are visible.
+        like = f'%"{market_id}"%'
         rows = await self._db.fetchall(
-            """SELECT claim, source, event_date FROM distilled_claims
-               WHERE markets_affected LIKE ?
-               ORDER BY created_at DESC LIMIT 8""",
-            (f'%"{market_id}"%',))
+            """SELECT dc.claim, dc.source, dc.event_date,
+                      (dc.markets_affected LIKE ?) AS explicit
+                 FROM distilled_claims dc
+                WHERE dc.markets_affected LIKE ?
+                   OR EXISTS (SELECT 1 FROM evidence_observations eo
+                               WHERE eo.content_hash = dc.content_hash
+                                 AND eo.market_id = ?)
+                ORDER BY explicit DESC, dc.created_at DESC LIMIT 8""",
+            (like, like, market_id))
         claims = [{"claim": r["claim"], "source": r["source"],
                    "event_date": r["event_date"]} for r in rows or []]
         kept = []
