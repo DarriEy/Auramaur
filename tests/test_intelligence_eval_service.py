@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from auramaur.db.database import Database
 from auramaur.evaluation.service import IntelligenceEvalService
@@ -263,5 +264,50 @@ async def test_claims_arm_reaches_claims_by_evidence_provenance(tmp_path):
         assert "local_single_claims" not in {
             s.treatment_id for s in await service._attach_claims(
                 service._treatments, "m_other")}
+    finally:
+        await db.close()
+
+
+async def test_selection_prefers_markets_where_the_claims_arm_can_run(tmp_path):
+    """Within a horizon bucket, claim-bearing markets sort first.
+
+    The evaluator and the evidence pipeline pick markets independently and
+    barely intersect (2026-07-26: 171 markets with evidence, 635 with eval
+    episodes, 24 overlapping, and 0 of 24 in a 2h window), so the claims arm
+    never ran. This is a soft preference — a tiebreaker inside the existing
+    priority, not a filter — so claim-less markets are still sampled.
+    """
+    db = Database(str(tmp_path / "eval-pref.db"))
+    await db.connect()
+    try:
+        settings = Settings()
+        settings.intelligence_eval.enabled = True
+        settings.local_llm.enabled = True
+        service = IntelligenceEvalService(db, settings, Discovery(), LocalClient())
+
+        end = datetime.now(timezone.utc) + timedelta(days=1)
+        bare = SimpleNamespace(id="no_claims", end_date=end,
+                               outcome_yes_price=0.5, volume=100.0)
+        rich = SimpleNamespace(id="has_claims", end_date=end,
+                               outcome_yes_price=0.5, volume=100.0)
+
+        # No claims known -> ordering is untouched (both tie, stable order).
+        service._claims_markets = frozenset()
+        assert (service._information_priority(bare)
+                == service._information_priority(rich))
+
+        # With claims, the claim-bearing market sorts strictly first.
+        service._claims_markets = frozenset({"has_claims"})
+        assert (service._information_priority(rich)
+                < service._information_priority(bare))
+
+        # Horizon still dominates: a near-resolution claim-less market beats a
+        # far-dated one that has claims.
+        far = SimpleNamespace(id="has_claims_far",
+                              end_date=datetime.now(timezone.utc) + timedelta(days=365),
+                              outcome_yes_price=0.5, volume=100.0)
+        service._claims_markets = frozenset({"has_claims_far"})
+        assert (service._information_priority(bare)
+                < service._information_priority(far))
     finally:
         await db.close()

@@ -107,6 +107,10 @@ class IntelligenceEvalService:
         self._claims_treatments = frozenset(
             item.name for item in self._cfg.treatments if item.claims_evidence)
         self._runner = IntelligenceEvalRunner(self._cfg.max_concurrency)
+        # Market ids with distilled claims available, refreshed per cycle.
+        # Empty = no preference, so the ordering is unchanged when the
+        # distiller has produced nothing.
+        self._claims_markets: frozenset[str] = frozenset()
 
     async def run_once(self) -> int:
         cycle_started = datetime.now(timezone.utc)
@@ -206,12 +210,38 @@ class IntelligenceEvalService:
         end = market.end_date or datetime.max.replace(tzinfo=timezone.utc)
         days = (end - datetime.now(timezone.utc)).total_seconds() / 86400
         horizon_bucket = 0 if 0 <= days <= self._cfg.near_resolution_days else 1
+        # Within a horizon bucket, prefer markets where distilled claims exist,
+        # so the claims arm has something to compare against. Without this the
+        # arm never runs at all: the evaluator and the evidence pipeline pick
+        # markets independently and barely intersect (2026-07-26: 171 markets
+        # had evidence, 635 had eval episodes, 24 overlapped — and 0 of the 24
+        # evaluated in a 2h window). This biases WHICH markets are sampled; it
+        # does not touch the within-pair contrast, which is the same market,
+        # same episode, with and without claims. Report the bias alongside any
+        # claims-vs-bare result.
+        claims_bucket = 0 if market.id in self._claims_markets else 1
         ambiguity = abs(float(market.outcome_yes_price) - 0.5)
-        return (horizon_bucket, end, ambiguity, -float(market.volume or 0))
+        return (horizon_bucket, claims_bucket, end, ambiguity,
+                -float(market.volume or 0))
+
+    async def _markets_with_claims(self) -> frozenset[str]:
+        """Markets reachable by the claims lookup — explicit link or provenance."""
+        if not self._claims_treatments:
+            return frozenset()
+        try:
+            rows = await self._db.fetchall(
+                """SELECT DISTINCT eo.market_id FROM distilled_claims dc
+                     JOIN evidence_observations eo
+                       ON eo.content_hash = dc.content_hash
+                    WHERE eo.market_id IS NOT NULL AND eo.market_id != ''""")
+            return frozenset(r["market_id"] for r in rows or [])
+        except Exception:  # noqa: BLE001 — preference only, never block a cycle
+            return frozenset()
 
     async def _select_markets(self, eligible, now):
         """Select changed/novel markets, one per family, with category rotation."""
         latest = await self._store.latest_market_observations()
+        self._claims_markets = await self._markets_with_claims()
         candidates = []
         for market in eligible:
             venue = (market.exchange or "polymarket").lower()
