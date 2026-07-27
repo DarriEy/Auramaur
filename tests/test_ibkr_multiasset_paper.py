@@ -62,9 +62,22 @@ async def test_all_six_books_write_only_isolated_paper_tables():
     assert (await db.fetchone("SELECT COUNT(*) AS n FROM ibkr_paper_fills"))["n"] == 6
     assert (await db.fetchone(
         "SELECT COUNT(*) AS n FROM ibkr_paper_fills WHERE price_source='ibkr_live'"))["n"] == 6
-    # The shared prediction-market wallet is not touched.
-    assert (await db.fetchone("SELECT COUNT(*) AS n FROM cost_basis"))["n"] == 0
-    assert (await db.fetchone("SELECT COUNT(*) AS n FROM pnl_ledger"))["n"] == 0
+    # The shared prediction-market wallet is not touched. The books now DO
+    # write cost_basis/pnl_ledger — that is how they reach the graduation
+    # ladder — so the guard is no longer "these tables are empty" but "every
+    # row is inside the ibkr: namespace, which PaperTrader excludes". The
+    # balance assertion below is the one that actually matters.
+    from auramaur.exchange.paper import PaperTrader
+
+    wallet = PaperTrader(db, initial_balance=1_000.0)
+    assert await wallet._compute_balance() == 1_000.0
+    for table in ("cost_basis", "pnl_ledger"):
+        rows = await db.fetchall(f"SELECT market_id FROM {table}")
+        assert rows, f"{table} should now carry ladder evidence"
+        assert all(r["market_id"].startswith("ibkr:") for r in rows)
+    # Nothing may reach the account-wide LIVE daily-loss gate.
+    assert (await db.fetchone(
+        "SELECT COUNT(*) AS n FROM pnl_ledger WHERE is_paper = 0"))["n"] == 0
     await db.close()
 
 
@@ -488,3 +501,97 @@ def test_stranded_positions_in_disabled_book_warn():
         finally:
             await db.close()
     asyncio.run(run())
+
+
+@pytest.mark.asyncio
+async def test_leveraged_instrument_is_capped_on_capital_not_notional():
+    """The cap is a capital budget; cost_basis stores notional.
+
+    _exceeds_market_cap compared `size * price` against ibkr.paper_budget_usd.
+    For a local-currency or leveraged instrument those are different units:
+    35.8 shares of 7203.T at Y2,501 reads as Y89,615 against a $5,000 cap and
+    would have blocked an entry the book sizes at ~$578. Order.capital_ratio
+    converts, and is 1.0 for everything priced in USD at multiplier 1 — so no
+    prediction-market order changes.
+    """
+    from auramaur.exchange.ibkr_intent import prepare_instrument_order
+    from auramaur.exchange.ibkr_instruments import BY_KEY
+    from auramaur.exchange.models import OrderSide
+
+    spec = next(iter(BY_KEY.values()))
+
+    # Yen-priced equity: 35.8 shares at Y2,501, FX 1/155, no multiplier.
+    jpy = prepare_instrument_order(
+        spec, side=OrderSide.BUY, quantity=35.82, price=2501.0, is_live=False,
+        strategy_source="ibkr_international_equity_paper",
+        usd_per_point=1 / 155.0, usd_capital_per_unit=2501.0 / 155.0)
+    assert jpy.notional == pytest.approx(578.0, abs=2.0)      # USD, not Y89,615
+    assert jpy.capital_ratio == pytest.approx(1.0, abs=1e-6)  # unleveraged
+
+    # FX: notional per unit ~$1,081, committed capital ~$100.
+    fx = prepare_instrument_order(
+        spec, side=OrderSide.BUY, quantity=7.0, price=1.081, is_live=False,
+        strategy_source="ibkr_fx_paper",
+        usd_per_point=1000.0, usd_capital_per_unit=100.0)
+    assert fx.notional == pytest.approx(7567.0, abs=2.0)
+    # Capital-basis exposure is what the budget bounds: 7 x $100.
+    assert fx.notional * fx.capital_ratio == pytest.approx(700.0, abs=1.0)
+
+    # A USD prediction-style order is untouched: ratio exactly 1.0.
+    plain = prepare_instrument_order(
+        spec, side=OrderSide.BUY, quantity=10.0, price=0.42, is_live=False,
+        strategy_source="llm")
+    assert plain.capital_ratio == 1.0
+    assert plain.notional == pytest.approx(4.2)
+
+
+@pytest.mark.asyncio
+async def test_usd_pnl_is_booked_not_local_currency_pnl():
+    """record_fill realizes (price - avg) * size with no multiplier or FX.
+
+    Booking a raw local price recorded $0.02 where the FX book records $21.61 —
+    a 1000x understatement fed straight to the ladder's net-P&L bar.
+    """
+    from auramaur.exchange.ibkr_intent import prepare_instrument_order
+    from auramaur.exchange.ibkr_instruments import BY_KEY
+    from auramaur.exchange.models import OrderSide
+
+    spec = next(iter(BY_KEY.values()))
+    entry = prepare_instrument_order(
+        spec, side=OrderSide.BUY, quantity=2.0, price=1.0810, is_live=False,
+        strategy_source="ibkr_fx_paper", usd_per_point=1000.0)
+    exit_ = prepare_instrument_order(
+        spec, side=OrderSide.SELL, quantity=2.0, price=1.0918, is_live=False,
+        strategy_source="ibkr_fx_paper", usd_per_point=1000.0)
+    # What PnLTracker will realize: (exit - entry) * size, on USD prices.
+    realized = (exit_.price - entry.price) * 2.0
+    assert realized == pytest.approx(21.6, abs=0.2)
+    # The local-price arithmetic the old path would have booked.
+    assert (1.0918 - 1.0810) * 2.0 == pytest.approx(0.0216, abs=0.001)
+
+
+@pytest.mark.asyncio
+async def test_a_live_multiasset_fill_is_not_booked_to_the_ledger():
+    """is_paper=0 rows feed the account-wide live daily-loss gate.
+
+    Booking a live IBKR fill would add its P&L to a LIVE RISK GATE's inputs;
+    booking it as paper would be a lie in the ladder's evidence. Neither is a
+    decision this increment makes, so a live fill is skipped and logged.
+    """
+    db = Database(":memory:")
+    await db.connect()
+    settings = Settings()
+    pillar = IBKRMultiAssetPaperBook(settings, FakeMarketData(), db, IBKRBook.FX)
+    spec = BY_BOOK[IBKRBook.FX][0]
+
+    await pillar._book_fill(spec, side="BUY", quantity=2.0, price=1.081,
+                            fx=1.0, multiplier=1000.0, fee=0.2,
+                            fill_ref="live-ref", was_live=True)
+    assert (await db.fetchone("SELECT COUNT(*) AS n FROM pnl_ledger"))["n"] == 0
+    assert (await db.fetchone("SELECT COUNT(*) AS n FROM cost_basis"))["n"] == 0
+
+    await pillar._book_fill(spec, side="BUY", quantity=2.0, price=1.081,
+                            fx=1.0, multiplier=1000.0, fee=0.2,
+                            fill_ref="paper-ref", was_live=False)
+    assert (await db.fetchone("SELECT COUNT(*) AS n FROM cost_basis"))["n"] == 1
+    await db.close()

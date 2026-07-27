@@ -178,10 +178,34 @@ class Order(BaseModel):
     # to TTL-cancel live limit orders that are still resting, since live GTC
     # orders never auto-expire on-chain and would otherwise lock collateral.
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # USD capital committed per unit, for instruments where NOTIONAL IS NOT
+    # EXPOSURE. A prediction contract, a share and an ETF all commit their
+    # price, so this stays None and `size * price` remains the exposure — every
+    # existing caller is unchanged. A leveraged instrument does not: one FX unit
+    # of EURUSD carries ~$1,081 of notional against ~$100 of committed capital,
+    # so capping it on notional would block a position the book sizes correctly.
+    # The IBKR books already compute this (`_capital_per_unit`, including the
+    # `paper_capital_per_unit_usd` override); this field carries it to the
+    # gateway rather than having the gateway re-derive it.
+    usd_capital_per_unit: float | None = None
 
     @property
     def notional(self) -> float:
         return self.size * self.price
+
+    @property
+    def capital_ratio(self) -> float:
+        """Committed capital per unit of notional. 1.0 unless overridden.
+
+        `cost_basis` stores `size * price`, i.e. notional, and has no column for
+        anything else. Converting with this ratio lets the aggregate cap be
+        enforced on CAPITAL — the quantity a book's budget is actually
+        denominated in — without adding a column to a table five other
+        subsystems read.
+        """
+        if self.usd_capital_per_unit is None or self.price <= 0:
+            return 1.0
+        return self.usd_capital_per_unit / self.price
 
 
 class OrderResult(BaseModel):

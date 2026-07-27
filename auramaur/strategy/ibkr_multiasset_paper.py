@@ -15,9 +15,17 @@ from auramaur.experiments.strategies.ibkr_multiasset import (
     MultiAssetEntryInputs, MultiAssetEntryRules, propose_multiasset_entry,
 )
 
+from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
+from auramaur.broker.ledger import record_ledger_event
+from auramaur.broker.pnl import PnLTracker
 from auramaur.exchange.ibkr_instruments import (
     BY_BOOK, BY_KEY, ContractKind, IBKRBook, InstrumentSpec,
 )
+from auramaur.exchange.ibkr_intent import (
+    SimulatedInstrumentExchange, instrument_market, instrument_market_id,
+    instrument_signal, prepare_instrument_order,
+)
+from auramaur.exchange.models import OrderSide
 from auramaur.strategy.protocols import ExecutionMode
 from auramaur.risk.ibkr_math import (
     adverse_fill, annualized_volatility, closes_from_bars,
@@ -81,6 +89,15 @@ class IBKRMultiAssetPaperBook:
         self.name = f"ibkr_{book.value}_paper"
         self._rates_provider = rates_provider
         self._executor = executor
+        # Standard rails, exactly as the ETF book. ibkr_paper_* stays the
+        # venue-native accounting; the gateway adds the decision snapshot and
+        # books USD P&L into pnl_ledger where GraduationLadder reads it.
+        self._sim = SimulatedInstrumentExchange()
+        self._gateway = ExecutionGateway(
+            router=None, exchange=self._sim, exchange_name="ibkr",
+            settings=settings, db=db,
+            pnl_tracker=PnLTracker(db, settings) if db is not None else None,
+        )
 
     @property
     def config(self):
@@ -293,8 +310,88 @@ class IBKRMultiAssetPaperBook:
                     "DELETE FROM ibkr_paper_positions WHERE book=? AND instrument_key=?",
                     (self.book.value, spec.key))
         await self._db.commit()
+        await self._book_fill(
+            spec, side=side, quantity=quantity, price=price, fx=fx,
+            multiplier=float(quote.multiplier or 1.0), fee=fee,
+            fill_ref=fill_ref, was_live=bool(execution_ref))
         if execution_ref:
             await self._executor.acknowledge(execution_ref)
+
+    async def _book_fill(self, spec, *, side: str, quantity: float, price: float,
+                         fx: float, multiplier: float, fee: float,
+                         fill_ref: str, was_live: bool) -> None:
+        """Register an already-executed fill on the standard rails.
+
+        Runs AFTER the book's own ibkr_paper_* rows and cannot veto them: this
+        increment is booking and capture only, so a booking failure must lose
+        evidence, not change what the book traded.
+
+        LIVE FILLS ARE DELIBERATELY NOT BOOKED. When the executor fills for
+        real, an honest row is is_paper=0 — and `pnl_ledger WHERE is_paper = 0`
+        is what the account-wide live daily-loss gate reads, so booking it here
+        would silently add IBKR P&L to a LIVE RISK GATE's inputs. Recording it
+        as paper instead would be a lie in the ladder's evidence. Neither is
+        mine to choose, so a live fill is skipped and logged loudly. Dormant
+        today (ibkr.multiasset_execution_enabled is false, books []).
+        """
+        if self._db is None or self._gateway.pnl_tracker is None:
+            return
+        if was_live:
+            log.warning(
+                "ibkr_multiasset.live_fill_not_booked", book=self.book.value,
+                instrument=spec.key, fill_ref=fill_ref,
+                detail="live P&L would enter the account-wide daily-loss gate; "
+                       "booking live fills needs an explicit operator decision")
+            return
+        order_side = OrderSide.BUY if str(side).upper() == "BUY" else OrderSide.SELL
+        cell = self.book.value
+        market_id = instrument_market_id(spec, cell)
+        # The USD quantities the book already computes. usd_per_point scales a
+        # local price move into USD (record_fill has no notion of either, and
+        # booked $0.02 where this book books $21.61 on EURUSD). Capital is a
+        # SEPARATE number: one FX unit carries ~$1,081 of notional against
+        # ~$100 committed, and the aggregate cap is a capital budget.
+        usd_per_point = multiplier * fx
+        usd_capital_per_unit = self._capital_per_unit(spec, price, fx)
+        try:
+            await self._db.execute(
+                """INSERT OR IGNORE INTO markets
+                   (id, exchange, question, category, active,
+                    outcome_yes_price, outcome_no_price, last_updated)
+                   VALUES (?, 'ibkr', ?, ?, 0, 0, 0, datetime('now'))""",
+                (market_id, f"{cell}: {spec.description or spec.symbol}",
+                 spec.asset_class or ""))
+            order = prepare_instrument_order(
+                spec, side=order_side, quantity=quantity, price=price,
+                is_live=False, strategy_source=self.name, cell=cell,
+                usd_per_point=usd_per_point,
+                usd_capital_per_unit=usd_capital_per_unit)
+            if order is None:
+                return
+            self._sim.stage(order, order_id=fill_ref)
+            usd_mark = price * usd_per_point
+            result = await self._gateway.submit(TradeIntent(
+                signal=instrument_signal(
+                    spec, strategy_source=self.name, mark=usd_mark, fair=None,
+                    side=order_side, cell=cell,
+                    rationale=f"ibkr_{cell} {side} {spec.key}"),
+                market=instrument_market(spec, mark=usd_mark, cell=cell),
+                size_dollars=quantity * usd_capital_per_unit,
+                force_paper=True,
+            ))
+            if result.status not in ("paper", "filled", "partial"):
+                log.error("ibkr_multiasset.fill_not_booked", book=cell,
+                          instrument=spec.key, status=result.status,
+                          reason=result.reason,
+                          detail="venue-native fill stands; ladder evidence lost")
+                return
+            await record_ledger_event(
+                self._db, market_id=market_id, kind="commission", token="YES",
+                qty=quantity, pnl=-float(fee), fees=0.0, is_paper=True,
+                source_ref=f"{fill_ref}:commission")
+        except Exception as exc:  # noqa: BLE001 - evidence, never the money path
+            log.error("ibkr_multiasset.fill_booking_failed", book=cell,
+                      instrument=spec.key, error=str(exc)[:200])
 
     async def run_once(self) -> int:
         cfg = self.config

@@ -626,3 +626,48 @@ def test_place_quote_pair_paper_quotes_rest_and_never_reach_the_client():
             assert res.order_id.startswith("PAPER")
         assert bid_res.order_id != ask_res.order_id
     asyncio.run(run())
+
+
+async def test_market_cap_bounds_capital_not_local_currency_notional():
+    """The cap is a USD capital budget; `size * price` is notional.
+
+    They are the same for a prediction contract, a share or an ETF. They are
+    not for a yen-priced equity or a leveraged instrument, and comparing the
+    wrong one blocked entries the IBKR books size correctly: 35.8 shares of
+    7203.T at Y2,501 is Y89,615 of notional against ~$578 of capital, which
+    read as a breach of the $5,000 book budget.
+    """
+    db = Database(":memory:")
+    await db.connect()
+    settings = Settings()
+    gw = ExecutionGateway(router=None, exchange=MagicMock(), exchange_name="ibkr",
+                          settings=settings, db=db,
+                          pnl_tracker=PnLTracker(db, settings))
+
+    # USD-normalised price, unleveraged: capital == notional, well under cap.
+    tokyo = Order(market_id="ibkr:international_equity:7203.T", exchange="ibkr",
+                  side=OrderSide.BUY, size=35.82, price=2501.0 / 155.0,
+                  usd_capital_per_unit=2501.0 / 155.0)
+    assert await gw._exceeds_market_cap(tokyo, is_live=False) is None
+
+    # The same position priced in raw yen is what used to be compared, and it
+    # trips the cap — the regression this guards.
+    raw_yen = Order(market_id="ibkr:international_equity:7203.T", exchange="ibkr",
+                    side=OrderSide.BUY, size=35.82, price=2501.0)
+    assert await gw._exceeds_market_cap(raw_yen, is_live=False) is not None
+
+    # Leveraged: $7,567 of notional, $700 of committed capital. Passes on
+    # capital, would fail on notional against the $5,000 book budget.
+    fx = Order(market_id="ibkr:fx:EURUSD", exchange="ibkr", side=OrderSide.BUY,
+               size=7.0, price=1081.0, usd_capital_per_unit=100.0)
+    assert fx.notional > 7000
+    assert await gw._exceeds_market_cap(fx, is_live=False) is None
+
+    # A prediction-market order is untouched: ratio 1.0, $25 ceiling still bites.
+    over = Order(market_id="m1", exchange="polymarket", side=OrderSide.BUY,
+                 size=100.0, price=0.90)
+    assert await gw._exceeds_market_cap(over, is_live=False) is not None
+    under = Order(market_id="m1", exchange="polymarket", side=OrderSide.BUY,
+                  size=10.0, price=0.90)
+    assert await gw._exceeds_market_cap(under, is_live=False) is None
+    await db.close()

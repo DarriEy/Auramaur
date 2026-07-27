@@ -165,6 +165,27 @@ EXPOSURE_PATHS = (
         "ibkr_etf_<alias> ledger",
     ),
     _path(
+        # Distinct from the ibkr_multiasset ENTRY path below: that one is
+        # IBKRMultiAssetExecution.place, which can move real money. This is the
+        # evidence rail that runs AFTER a fill and cannot veto it — booking and
+        # decision capture only. It refuses to book a LIVE fill outright,
+        # because an is_paper=0 row would feed the account-wide live
+        # daily-loss gate, so paper is the only mode it can ever reach.
+        "ibkr_multiasset_booking",
+        ExposureKind.PAPER_BOOKING,
+        "already-executed multiasset paper fill",
+        ("book's own venue-native fill", "IBKR quotes", "FX rate"),
+        "none — cannot veto a fill the book already made",
+        "ExecutionGateway.submit -> SimulatedInstrumentExchange",
+        {"paper"},
+        "ibkr_paper_ledger + ExecutionGateway/PnLTracker",
+        "book cycle marks (ibkr_paper_positions)",
+        "book exit rules (stop/target/trailing)",
+        "book-owned positions table",
+        "no settlement — instruments do not resolve",
+        "ibkr_<book> ledger",
+    ),
+    _path(
         "ibkr_multiasset",
         ExposureKind.ENTRY,
         "graduated IBKR paper book",
@@ -401,6 +422,12 @@ REGISTERED_CALLSITES = Counter(
         ): 1,
         ("auramaur/strategy/ibkr_etf_paper.py", "_book_fill", "submit", "ibkr_etf_paper"): 1,
         ("auramaur/strategy/ibkr_multiasset_paper.py", "_fill", "place", "ibkr_multiasset"): 1,
+        (
+            "auramaur/strategy/ibkr_multiasset_paper.py",
+            "_book_fill",
+            "submit",
+            "ibkr_multiasset_booking",
+        ): 1,
         (
             "auramaur/exchange/ibkr_multiasset_execution.py",
             "place",

@@ -199,6 +199,17 @@ class ExecutionGateway:
             return "market_cap: aggregate exposure unavailable"
         held = float(row["held"]) if row else 0.0
         proposed = order.size * order.price
+        # Both sides are notional; the cap is a capital budget. They are the
+        # same number for a prediction contract, a share or an ETF (ratio 1.0,
+        # so nothing below changes for them). They are NOT the same for a
+        # leveraged instrument: 35.8 shares of 7203.T at Y2,501 is Y89,615 of
+        # notional against ~$578 of capital, which read as a $5,000 breach and
+        # would have stopped an entry the multiasset book takes correctly today.
+        # Converting here rather than storing capital in cost_basis keeps the
+        # change out of a table the paper wallet, resolution sweep and reporting
+        # all read.
+        ratio = order.capital_ratio
+        held, proposed = held * ratio, proposed * ratio
         if held + proposed > cap + 1e-9:
             reason = (
                 f"market_cap: ${held:.2f} held + ${proposed:.2f} new on "

@@ -109,14 +109,28 @@ def instrument_signal(spec, *, strategy_source: str, mark: float,
 
 def prepare_instrument_order(spec, *, side: OrderSide, quantity: float,
                              price: float, is_live: bool,
-                             strategy_source: str, cell: str = "") -> Order | None:
+                             strategy_source: str, cell: str = "",
+                             usd_per_point: float = 1.0,
+                             usd_capital_per_unit: float | None = None
+                             ) -> Order | None:
     """Build the Order the gateway will place. None when it is not placeable.
 
     Quantity is in contracts/shares, not dollars: an IBKR instrument's size is
     not a token count and must not be re-derived from a dollar stake the way a
     CLOB order is.
+
+    ``price`` is in the instrument's own currency; ``usd_per_point`` is its
+    contract multiplier times its FX rate, and the Order carries the PRODUCT.
+    That matters because ``PnLTracker.record_fill`` realizes
+    ``(price - avg_cost) * size`` with no notion of either: booking a raw local
+    price would have recorded $0.02 where the FX book records $21.61, and fed
+    that fiction to the graduation ladder's net-P&L bar. Both default to the
+    identity, so an ETF or a prediction contract is byte-identical to before.
+
+    ``usd_capital_per_unit`` is committed capital, which for a leveraged
+    instrument is not notional — see ``Order.capital_ratio``.
     """
-    if quantity <= 0 or price <= 0:
+    if quantity <= 0 or price <= 0 or usd_per_point <= 0:
         return None
     return Order(
         market_id=instrument_market_id(spec, cell),
@@ -124,10 +138,14 @@ def prepare_instrument_order(spec, *, side: OrderSide, quantity: float,
         token_id=spec.key,
         side=side,
         size=float(quantity),
-        price=float(price),
+        # USD per unit, so every downstream rail (cost_basis, pnl_ledger, the
+        # aggregate cap) speaks one currency.
+        price=float(price) * float(usd_per_point),
         order_type=OrderType.LIMIT,
         dry_run=not is_live,
         source=strategy_source,
+        usd_capital_per_unit=(None if usd_capital_per_unit is None
+                              else float(usd_capital_per_unit)),
     )
 
 
