@@ -1393,6 +1393,19 @@ class IBKRConfig(BaseModel):
     etf_min_prob: float = 0.62
     etf_exit_prob: float = 0.47
     etf_min_confidence: str = "MEDIUM"
+    # Per-arm overrides of the two entry thresholds above, keyed by model_alias.
+    # The defaults were set for MomentumETFAnalyzer, which returns 0.70/"HIGH"
+    # BY CONSTRUCTION whenever momentum is positive. The OpenAI arms are asked
+    # for a calibrated probability and told outright that weak evidence "should
+    # remain near 0.50 with LOW confidence" — so over 282 forecasts they
+    # produced a 0.43-0.56 range topping out at MEDIUM_LOW, and the 0.62/MEDIUM
+    # gate rejected 100% of them (2026-07-27: 382 evaluations, 0 entries). One
+    # threshold cannot serve a signal that is 0.70-by-fiat and one that is
+    # honestly ~0.51. Empty by default: no arm's behaviour changes until an
+    # operator sets a value, and the value should come from resolved-forecast
+    # calibration, not from the observed distribution.
+    etf_arm_min_prob: dict[str, float] = Field(default_factory=dict)
+    etf_arm_min_confidence: dict[str, str] = Field(default_factory=dict)
     etf_signal_horizon_days: int = 5
     etf_signal_refresh_hours: float = 6.0
     etf_cycle_seconds: int = 900

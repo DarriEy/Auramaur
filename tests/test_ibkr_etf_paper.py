@@ -302,3 +302,69 @@ async def test_wide_spread_still_exits_a_held_position_but_blocks_entry():
         assert await db.fetchone("SELECT * FROM ibkr_etf_positions") is None
     finally:
         await db.close()
+
+
+class DeterministicAnalyzer:
+    """Shape of MomentumETFAnalyzer: exposes analyze_symbol, not analyze."""
+
+    model = "deterministic_momentum_v1"
+
+    async def analyze_symbol(self, client, symbol, as_of=None):
+        return SimpleNamespace(probability=0.70, confidence="HIGH",
+                               thesis="momentum", key_risks=())
+
+
+@pytest.mark.asyncio
+async def test_control_arm_records_a_scoreable_forecast():
+    """The deterministic control must be scored on the same terms as the LLM arms.
+
+    It used to return from _view before the forecast INSERT, so the
+    intelligence-cap A/B ran with a control that wrote zero rows: 282
+    forecasts on 2026-07-27, none of them the control. A control that is
+    never scored cannot be compared against.
+    """
+    db = Database(":memory:")
+    await db.connect()
+    pillar = await _pillar(db, analyzer=DeterministicAnalyzer())
+    pillar._alias = "momentum_control"
+    await pillar.run_once()
+
+    rows = await db.fetchall(
+        "SELECT model_alias, probability, confidence, horizon_sessions "
+        "FROM ibkr_etf_forecasts WHERE model_alias='momentum_control'")
+    assert rows, "control arm recorded no forecast"
+    assert rows[0]["probability"] == pytest.approx(0.70)
+    assert rows[0]["confidence"] == "HIGH"
+    assert rows[0]["horizon_sessions"] > 0
+
+
+@pytest.mark.asyncio
+async def test_per_arm_threshold_overrides_the_global_gate():
+    """A calibrated arm must be able to carry its own entry thresholds.
+
+    The global defaults (0.62 / MEDIUM) were set for a control that returns
+    0.70/HIGH by construction. The OpenAI arms are instructed to sit near
+    0.50/LOW on weak evidence, so they produced 0.43-0.56 / MEDIUM_LOW and the
+    shared gate rejected 100% of 282 forecasts.
+    """
+    db = Database(":memory:")
+    await db.connect()
+    pillar = await _pillar(db, analyzer=Analyzer(probability=0.55,
+                                                 confidence="MEDIUM_LOW"))
+    # Global gate: no entry, and the arm must say which gate bound.
+    assert await pillar.run_once() == 0
+
+    db2 = Database(":memory:")
+    await db2.connect()
+    relaxed = await _pillar(db2, analyzer=Analyzer(probability=0.55,
+                                                   confidence="MEDIUM_LOW"))
+    relaxed._s.ibkr.etf_arm_min_prob = {"luna": 0.53}
+    relaxed._s.ibkr.etf_arm_min_confidence = {"luna": "MEDIUM_LOW"}
+    assert relaxed._min_prob == 0.53
+    assert await relaxed.run_once() == 1, (
+        "per-arm override did not reach entry_proposal, which re-checks both "
+        "thresholds and would veto with the global values")
+
+    # A non-overridden arm keeps the global gate.
+    relaxed._alias = "terra"
+    assert relaxed._min_prob == relaxed._s.ibkr.etf_min_prob

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime, time as wall_time, timezone
 import json
 import time
@@ -89,6 +90,16 @@ class IBKRETFPaperPillar:
     def model_alias(self) -> str:
         return self._alias
 
+    @property
+    def _min_prob(self) -> float:
+        return float(self._s.ibkr.etf_arm_min_prob.get(
+            self._alias, self._s.ibkr.etf_min_prob))
+
+    @property
+    def _min_conf_rank(self) -> int:
+        return self._CONF.get(str(self._s.ibkr.etf_arm_min_confidence.get(
+            self._alias, self._s.ibkr.etf_min_confidence)).upper(), 2)
+
     async def _view(self, symbol: str, allow_refresh: bool = True,
                     reference_price: float | None = None) -> tuple[float, str] | None:
         cfg = self._s.ibkr
@@ -105,6 +116,13 @@ class IBKRETFPaperPillar:
                 return None
             view = (float(analysis.probability), str(analysis.confidence))
             self._views[symbol] = (time.time(), *view)
+            # The control arm records its forecast on the SAME terms as the LLM
+            # arms. It used to return here, so momentum_control wrote zero rows
+            # to ibkr_etf_forecasts (282 rows, none of them the control, as of
+            # 2026-07-27) — which left the intelligence-cap A/B with no control
+            # to compare against. A control that is never scored is not a
+            # control.
+            await self._record_forecast(symbol, view, analysis, reference_price)
             return view
         call_count = await self._db.fetchone(
             """SELECT COUNT(*) AS n FROM ibkr_etf_openai_attempts
@@ -157,21 +175,27 @@ class IBKRETFPaperPillar:
             return None
         view = (float(analysis.probability), str(analysis.confidence))
         self._views[symbol] = (time.time(), *view)
-        if reference_price and reference_price > 0:
-            days = max(1, round(self._s.ibkr.etf_signal_horizon_days * 7 / 5))
-            await self._db.execute(
-                """INSERT INTO ibkr_etf_forecasts
-                   (model_alias, model, symbol, probability, confidence, thesis,
-                    risks_json, reference_price, intelligence_cost_usd,
-                    opened_session_date, horizon_sessions, due_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', ?))""",
-                (self._alias, getattr(self._analyzer, "model", "unknown"), symbol,
-                 view[0], view[1], str(getattr(analysis, "thesis", "")),
-                 json.dumps(list(getattr(analysis, "key_risks", []) or [])),
-                 reference_price, float(getattr(analysis, "intelligence_cost_usd", 0)),
-                 datetime.now(timezone.utc).astimezone(_ET).date().isoformat(),
-                 self._s.ibkr.etf_signal_horizon_days, f"+{days} days"))
+        await self._record_forecast(symbol, view, analysis, reference_price)
         return view
+
+    async def _record_forecast(self, symbol: str, view: tuple[float, str],
+                               analysis, reference_price: float | None) -> None:
+        """Persist one scoreable forecast. Shared by the LLM and control arms."""
+        if not reference_price or reference_price <= 0:
+            return
+        days = max(1, round(self._s.ibkr.etf_signal_horizon_days * 7 / 5))
+        await self._db.execute(
+            """INSERT INTO ibkr_etf_forecasts
+               (model_alias, model, symbol, probability, confidence, thesis,
+                risks_json, reference_price, intelligence_cost_usd,
+                opened_session_date, horizon_sessions, due_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', ?))""",
+            (self._alias, getattr(self._analyzer, "model", "unknown"), symbol,
+             view[0], view[1], str(getattr(analysis, "thesis", "")),
+             json.dumps(list(getattr(analysis, "key_risks", []) or [])),
+             reference_price, float(getattr(analysis, "intelligence_cost_usd", 0)),
+             datetime.now(timezone.utc).astimezone(_ET).date().isoformat(),
+             self._s.ibkr.etf_signal_horizon_days, f"+{days} days"))
 
     async def _resolve_forecasts(self, symbol: str) -> None:
         rows = await self._db.fetchall(
@@ -329,6 +353,12 @@ class IBKRETFPaperPillar:
         cfg = self._s.ibkr
         await self._ensure_state()
         entries = 0
+        # Why a cycle produced no entry. Without this the arm reported only
+        # "0 entries" and the cause was invisible: ibkr_etf_openai ran 382
+        # evaluations to zero fills over four days (2026-07-27) and nothing in
+        # the logs or the DB said the probability gate was rejecting 100% of
+        # forecasts. A quiet arm must say which gate is binding.
+        blocked: Counter[str] = Counter()
         positions = await self._positions()
         allocated = sum(qty * entry for qty, entry in positions.values())
         class_allocated: dict[str, float] = {}
@@ -391,8 +421,8 @@ class IBKRETFPaperPillar:
                 symbol, allow_refresh=symbol in refresh_set, reference_price=mid)
             prob = view[0] if view else None
             confidence = view[1] if view else ""
-            conf_ok = bool(view) and self._CONF.get(confidence.upper(), 0) >= self._CONF.get(
-                cfg.etf_min_confidence.upper(), 2)
+            conf_ok = bool(view) and self._CONF.get(
+                confidence.upper(), 0) >= self._min_conf_rank
             if held:
                 qty, entry = held
                 gain = (quote.bid - entry) / entry * 100
@@ -437,11 +467,21 @@ class IBKRETFPaperPillar:
                     await self._mirror(symbol, qty, entry, quote.bid)
                     unmarked_positions.discard(symbol)
                 daily_loss_hit = await self._daily_equity_change() <= -cfg.etf_daily_loss_limit_usd
-            elif (view is not None and conf_ok and prob >= cfg.etf_min_prob
-                  and not daily_loss_hit
-                  and not unmarked_positions
-                  and position_count < cfg.etf_max_positions
-                  and time.time() >= self._cooldown.get(symbol, 0)):
+            elif view is None:
+                blocked["no_view"] += 1
+            elif not conf_ok:
+                blocked["confidence"] += 1
+            elif prob < self._min_prob:
+                blocked["probability"] += 1
+            elif daily_loss_hit:
+                blocked["daily_loss"] += 1
+            elif unmarked_positions:
+                blocked["unmarked_position"] += 1
+            elif position_count >= cfg.etf_max_positions:
+                blocked["max_positions"] += 1
+            elif time.time() < self._cooldown.get(symbol, 0):
+                blocked["cooldown"] += 1
+            else:
                 deployment_cap = cfg.etf_paper_budget_usd * cfg.etf_max_deployment_pct / 100.0
                 asset_class = self._asset_class(symbol)
                 class_cap = cfg.etf_paper_budget_usd * cfg.etf_max_asset_class_pct / 100.0
@@ -450,6 +490,7 @@ class IBKRETFPaperPillar:
                 annual_vol = annualized_volatility(closes)
                 momentum = normalized_momentum(closes)
                 if annual_vol is None or momentum is None or momentum <= 0:
+                    blocked["momentum"] += 1
                     continue
                 risk_budget = cfg.etf_paper_budget_usd * cfg.etf_risk_per_position_pct / 100
                 open_risk = await self._db.fetchone(
@@ -460,8 +501,11 @@ class IBKRETFPaperPillar:
                     symbol=symbol, bid=quote.bid, ask=quote.ask,
                     probability=prob, confidence=confidence,
                     confidence_rank=self._CONF.get(confidence.upper(), 0),
-                    min_confidence_rank=self._CONF.get(cfg.etf_min_confidence.upper(), 2),
-                    min_probability=cfg.etf_min_prob,
+                    # Per-arm, not global: entry_proposal re-checks both
+                    # thresholds, so passing cfg.* here would silently veto any
+                    # per-arm override the outer gate just allowed through.
+                    min_confidence_rank=self._min_conf_rank,
+                    min_probability=self._min_prob,
                     annual_volatility=annual_vol, momentum=momentum,
                     remaining_deployment_usd=deployment_cap - allocated,
                     remaining_class_usd=class_cap - class_allocated.get(asset_class, 0.0),
@@ -475,6 +519,7 @@ class IBKRETFPaperPillar:
                     max_portfolio_risk_usd=max_risk,
                     controls_allow_entry=True)
                 if proposal is None:
+                    blocked["sizing"] += 1
                     continue
                 await self._fill(symbol, OrderSide.BUY, proposal.quantity,
                                  proposal.price, stop_price=proposal.stop_price,
@@ -494,5 +539,8 @@ class IBKRETFPaperPillar:
         # Unconditional cycle log (repo convention, #285): a quiet log must be
         # distinguishable from a dead task.
         log.info("ibkr_etf.cycle", model_alias=self._alias,
-                 positions=position_count, entries=entries)
+                 positions=position_count, entries=entries,
+                 min_prob=self._min_prob, min_conf_rank=self._min_conf_rank,
+                 blocked=dict(blocked),
+                 blocked_by=(blocked.most_common(1)[0][0] if blocked else None))
         return entries
