@@ -532,3 +532,122 @@ async def test_per_arm_threshold_overrides_the_global_gate():
     # A non-overridden arm keeps the global gate.
     relaxed._alias = "terra"
     assert relaxed._min_prob == relaxed._s.ibkr.etf_min_prob
+
+
+@pytest.mark.asyncio
+async def test_benchmark_is_the_drift_not_a_coin_flip():
+    """A 0.5 reference would pay an arm for knowing equities rise.
+
+    brier_edge = (reference - outcome)^2 - (fair - outcome)^2. Against 0.5, an
+    arm that always answers 0.55 collects a positive edge on any up-drifting
+    series without forecasting anything. Against the instrument's own trailing
+    up-rate it collects nothing, which is correct.
+    """
+    from auramaur.risk.ibkr_math import horizon_up_rate
+
+    rising = [100 * 1.002 ** i for i in range(200)]
+    drift = horizon_up_rate(rising, 5)
+    assert drift == 1.0                      # every 5-session window was up
+    assert horizon_up_rate([100.0] * 50, 5) == 0.0
+    assert horizon_up_rate([100.0, 101.0], 5) is None   # too little history
+
+    # A constant 0.55 forecast on an always-up series.
+    fair, outcome = 0.55, 1
+    edge_vs_coin = (0.5 - outcome) ** 2 - (fair - outcome) ** 2
+    edge_vs_drift = (drift - outcome) ** 2 - (fair - outcome) ** 2
+    assert edge_vs_coin > 0        # rewarded for nothing
+    assert edge_vs_drift < 0       # correctly penalised
+
+
+@pytest.mark.asyncio
+async def test_event_family_advances_weekly_so_the_book_can_reach_thirty():
+    """market_id as the family caps the book at 28 families forever, two short
+    of min_paired_forecasts. Overlapping same-week forecasts must still share
+    one family — they share four of five sessions."""
+    from auramaur.exchange.ibkr_instruments import BY_KEY
+    from auramaur.exchange.ibkr_intent import instrument_event_family
+
+    spec = BY_KEY["SPY"]
+    monday = instrument_event_family(spec, "luna", "2026-07-27")
+    friday = instrument_event_family(spec, "luna", "2026-07-31")
+    next_week = instrument_event_family(spec, "luna", "2026-08-03")
+    assert monday == friday          # overlapping windows are one family
+    assert monday != next_week       # a fresh window is new evidence
+    # 28 symbols x weekly buckets clears 30 within two weeks.
+    weekly = {instrument_event_family(BY_KEY[s], "luna", d)
+              for s in list(BY_KEY)[:28] for d in ("2026-07-27", "2026-08-03")}
+    assert len(weekly) >= 30
+    # Arms never share a family.
+    assert instrument_event_family(spec, "sol", "2026-07-27") != monday
+
+
+@pytest.mark.asyncio
+async def test_entry_captures_a_real_forecast_against_a_real_benchmark():
+    from datetime import date, timedelta
+
+    db = Database(":memory:")
+    await db.connect()
+    client = QuotesOnlyClient()
+    # Real ISO session dates: completed_closes compares them as strings against
+    # the as_of date, so the synthetic "session-NNN" ids the other fixtures use
+    # sort ABOVE any 20xx date and silently filter the whole history away.
+    start = date(2026, 7, 27) - timedelta(days=260)
+    bars, day, i = [], start, 0
+    while len(bars) < 200:
+        if day.weekday() < 5:
+            bars.append((day.isoformat(), 75 + i * 0.2))
+            i += 1
+        day += timedelta(days=1)
+    client.get_adjusted_daily_closes = AsyncMock(return_value=bars)
+    pillar = await _pillar(db, client=client)
+    await pillar.run_once()
+
+    snap = await db.fetchone("SELECT * FROM decision_snapshots")
+    assert snap is not None
+    # The arm's own probability, not a copy of the reference: a zero edge is
+    # what the ladder reads as "no evidence".
+    assert snap["fair_probability"] == pytest.approx(0.70)
+    assert snap["reference_price"] != pytest.approx(snap["fair_probability"])
+    # The family is week-bucketed, not the bare market_id.
+    assert snap["event_family"].startswith("ibkr:luna:SPY:")
+    assert snap["event_family"] != snap["market_id"]
+    # A real BBO was recorded, so the fill can be judged executable rather than
+    # stamped 'synthetic' and dropped by require_executable_fills.
+    book = await db.fetchone("SELECT * FROM orderbook_snapshots")
+    assert book["best_bid"] > 0 and book["best_ask"] > 0
+    assert snap["fill_evidence"] in ("book_cross", "venue_fill")
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_resolved_forecast_publishes_the_outcome_the_ladder_joins_on():
+    """_prospective_stats INNER JOINs market_outcomes; without a row the
+    decision is invisible to the ladder forever."""
+    db = Database(":memory:")
+    await db.connect()
+    client = QuotesOnlyClient()
+    client.get_adjusted_daily_closes = AsyncMock(return_value=[
+        ("2026-07-10", 99.0), ("2026-07-13", 100.0), ("2026-07-14", 101.0),
+        ("2026-07-15", 102.0), ("2026-07-16", 103.0),
+        ("2026-07-17", 104.0), ("2026-07-20", 105.0),
+    ])
+    pillar = await _pillar(db, client=client)
+    await db.execute(
+        """INSERT INTO ibkr_etf_forecasts
+           (model_alias, model, symbol, probability, confidence,
+            reference_price, opened_session_date, horizon_sessions, due_at)
+           VALUES ('luna','m','SPY',0.7,'HIGH',100.0,'2026-07-13',5,
+                   datetime('now'))""")
+    await db.commit()
+    await pillar._resolve_forecasts("SPY")
+
+    row = await db.fetchone("SELECT * FROM ibkr_etf_forecasts")
+    assert row["actual_outcome"] == 1
+    outcome = await db.fetchone("SELECT * FROM market_outcomes")
+    assert outcome is not None, "resolved forecast never reached the ladder"
+    assert outcome["venue"] == "ibkr"
+    assert outcome["outcome"] == 1
+    # The join key the ladder builds: lower(venue)||':'||market_id
+    assert outcome["event_key"] == "ibkr:ibkr:luna:SPY"
+    assert outcome["event_family"].startswith("ibkr:luna:SPY:2026W")
+    await db.close()

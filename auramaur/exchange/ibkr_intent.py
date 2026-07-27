@@ -29,6 +29,7 @@ graduation ladder.
 
 from __future__ import annotations
 
+from datetime import date
 import uuid
 
 from auramaur.exchange.models import (
@@ -68,8 +69,43 @@ def instrument_market_id(spec, cell: str = "") -> str:
             else f"{INSTRUMENT_ID_PREFIX}{spec.key}")
 
 
-def instrument_market(spec, *, mark: float, cell: str = "") -> Market:
-    """The instrument as a Market, carrying only what the gateway reads."""
+def instrument_event_family(spec, cell: str, session_date: str) -> str:
+    """The independent-evidence family for one forecast.
+
+    Left at the market_id, an (arm, symbol) pair is ONE family for all time:
+    28 ETF symbols give 28 families ever, against min_paired_forecasts of 30.
+    The book could never graduate, two families short, no matter how good its
+    forecasts were.
+
+    Each forecast is nonetheless a genuinely separate event, so the family has
+    to advance with time — but not per forecast. Consecutive daily forecasts on
+    one symbol share four of their five sessions, and counting them as
+    independent is exactly the overcounting the family mechanism exists to
+    prevent. Bucketing by ISO week collapses a symbol's overlapping forecasts
+    into one family per week and lets genuinely fresh windows count.
+
+    Approximate at the boundary, and deliberately so: a Friday forecast runs
+    into the next week. It never treats two forecasts from the same week as
+    independent, which is the direction that matters — it under-counts
+    evidence rather than inventing it.
+    """
+    try:
+        year, week, _ = date.fromisoformat(str(session_date)[:10]).isocalendar()
+        bucket = f"{year}W{week:02d}"
+    except ValueError:
+        bucket = str(session_date)[:10]
+    return f"{instrument_market_id(spec, cell)}:{bucket}"
+
+
+def instrument_market(spec, *, mark: float, cell: str = "",
+                      event_family: str = "") -> Market:
+    """The instrument as a Market, carrying only what the gateway reads.
+
+    ``event_family`` rides on ``neg_risk_market_id`` because that is the field
+    ``_capture_decision`` already reads for the family, falling back to the id.
+    Routing it this way needs no change to the shared gateway and cannot affect
+    a prediction-market intent, which never sets it for an instrument.
+    """
     return Market(
         id=instrument_market_id(spec, cell),
         exchange=_VENUE,
@@ -78,6 +114,7 @@ def instrument_market(spec, *, mark: float, cell: str = "") -> Market:
         active=True,
         outcome_yes_price=mark,
         outcome_no_price=max(0.0, 1.0 - mark) if 0.0 < mark < 1.0 else 0.0,
+        neg_risk_market_id=event_family or "",
     )
 
 

@@ -177,6 +177,70 @@ side and drifting from the originals.
 **Neither IBKR client has any of the three.** That is the single missing piece,
 and it is the first increment (below).
 
+## Resolved: the Brier bar, and two blockers bigger than it (corrected 2026-07-27)
+
+This spec called `fair_probability` "the real modelling problem" and advised
+**(c)** with **(a)** interim, ruling out **(b)** because "a forecast the
+strategy never made cannot be evidence about the strategy". Measuring it found
+that reasoning sound but **applied to the wrong object**, and found two
+structural blockers that no choice of bar could have fixed.
+
+### The IBKR books are not one thing
+
+| | ETF book | multiasset books |
+|---|---|---|
+| produces a probability? | **yes** — `ibkr_etf_forecasts`, 314 rows | no |
+| resolvable binary? | **yes** — adjusted close, 5 sessions, with a resolver | no |
+| right bar | **(b)**, on its own real forecast | **(c)** risk-adjusted return |
+
+Option (b) does not invent anything for the ETF arms: they are *asked* for a
+calibrated probability, the entry gate is a function of it, and it resolves
+against adjusted closes. The prohibition stands for the multiasset books, which
+produce no probability anywhere — and which have **1 round trip, ever**, so
+their bar cannot be chosen from evidence yet and should wait.
+
+### The benchmark is the drift, not a coin
+
+`reference_price` is what the forecast must beat. 0.5 is wrong: equities rise
+more often than not over five sessions, so a constant 0.55 collects a positive
+Brier edge for knowing the direction of the last century. The reference is the
+instrument's own trailing `horizon_up_rate` over completed closes only
+(`risk/ibkr_math.py`), leakage-guarded by `completed_closes(bars, as_of)`.
+Scoring against `momentum_control` was rejected: it returns 0.70/0.30 by fiat,
+so it is badly calibrated and too easy to beat.
+
+### Two blockers that outrank the bar
+
+Both would have made the ETF book ungraduatable no matter how good its
+forecasts were:
+
+1. **`event_family` = `market_id`.** An (arm, symbol) pair was ONE family for
+   all time: 28 symbols = 28 families ever, against `min_paired_forecasts: 30`.
+   Two short, permanently. The family is now bucketed by ISO week, so
+   overlapping same-week forecasts (which share four of five sessions) stay one
+   family while genuinely fresh windows count. Carried on
+   `neg_risk_market_id`, which `_capture_decision` already reads.
+2. **Category cells.** `category = spec.asset_class` fragments one arm across
+   16 cells — eleven hold a single symbol, the largest holds five. Every cell
+   capped far below 30. The arms are now `strategy_level_strategies`: one
+   strategy over a universe, not a separate claim per asset class.
+
+### The bar is 4.24 sigma, not 1.645
+
+`_prospective_stats` Bonferroni-corrects: `0.05 / (50 hypotheses x 90 looks)`
+gives z ≈ **4.241**, and `confidence_z: 1.645` is a floor that never binds.
+At a 0.02 mean Brier edge (sd 0.10) that needs ~450 paired forecasts; at 0.05
+(sd 0.15), ~162. Worth knowing before reading a two-week result as failure.
+
+### Also landed
+
+- `orderbook_snapshots` written from the real IBKR BBO at capture, so fills
+  stamp `book_cross` instead of `synthetic` and survive
+  `require_executable_fills`. This supplies the data the check reads rather
+  than widening `credible_fill_evidence`.
+- `market_outcomes` written when a forecast resolves, clearing the INNER JOIN
+  in `_prospective_stats` that made every IBKR decision invisible.
+
 ## Increments
 
 1. **Intent adapter + `prepare_order` on the IBKR client.** Present an

@@ -16,8 +16,8 @@ from auramaur.broker.ledger import record_ledger_event
 from auramaur.broker.pnl import PnLTracker
 from auramaur.exchange.ibkr_instruments import BY_KEY
 from auramaur.exchange.ibkr_intent import (
-    SimulatedInstrumentExchange, instrument_market, instrument_market_id,
-    instrument_signal, prepare_instrument_order,
+    SimulatedInstrumentExchange, instrument_event_family, instrument_market,
+    instrument_market_id, instrument_signal, prepare_instrument_order,
 )
 from auramaur.exchange.models import Market, OrderSide
 from auramaur.experiments.strategies.ibkr_etf_paper import (
@@ -25,8 +25,9 @@ from auramaur.experiments.strategies.ibkr_etf_paper import (
 )
 from auramaur.strategy.protocols import ExecutionMode
 from auramaur.risk.ibkr_math import (
-    annualized_volatility, normalized_momentum,
+    annualized_volatility, horizon_up_rate, normalized_momentum,
 )
+from auramaur.strategy.ibkr_etf_controls import completed_closes
 
 log = structlog.get_logger()
 _ET = ZoneInfo("America/New_York")
@@ -80,6 +81,7 @@ class IBKRETFPaperPillar:
         self._views: dict[str, tuple[float, float, str]] = {}
         self._cooldown: dict[str, float] = {}
         self._refresh_cursor = 0
+        self._closes_cache: dict[str, list] = {}
         self._state_loaded = False
         # Standard rails. The book's own ibkr_etf_* tables stay the venue-native
         # accounting; the gateway additionally captures a decision snapshot
@@ -216,6 +218,41 @@ class IBKRETFPaperPillar:
              datetime.now(timezone.utc).astimezone(_ET).date().isoformat(),
              self._s.ibkr.etf_signal_horizon_days, f"+{days} days"))
 
+    async def _closes(self, symbol: str):
+        """Adjusted daily closes, once per symbol per cycle.
+
+        Resolution, entry sizing and the forecast benchmark all want the same
+        bars. Fetching them three times was three identical historical requests
+        against IBKR's pacing limits for one symbol.
+        """
+        if symbol not in self._closes_cache:
+            self._closes_cache[symbol] = await self._client.get_adjusted_daily_closes(symbol)
+        return self._closes_cache[symbol]
+
+    async def _record_outcome(self, symbol: str, session_date: str,
+                              outcome: int) -> None:
+        """Publish a resolved forecast as a scoreable outcome.
+
+        GraduationLadder._prospective_stats INNER JOINs market_outcomes on
+        lower(venue)||':'||market_id, so a decision with no outcome row is
+        invisible to the ladder forever — one of three reasons the IBKR books
+        could not accumulate prospective evidence. A continuously-priced
+        instrument has no oracle, but an ETF arm's forecast is a genuine binary
+        that genuinely resolves, so this row is honest rather than a stand-in.
+        """
+        spec = BY_KEY.get(symbol)
+        if spec is None:
+            return
+        market_id = instrument_market_id(spec, self._alias)
+        await self._db.execute(
+            """INSERT OR IGNORE INTO market_outcomes
+               (event_key, venue, market_id, event_family, outcome,
+                resolved_at, source, resolution_version, recorded_at)
+               VALUES (?, 'ibkr', ?, ?, ?, datetime('now'),
+                       'ibkr_etf_adjusted_close', 1, datetime('now'))""",
+            (f"ibkr:{market_id}", market_id,
+             instrument_event_family(spec, self._alias, session_date), outcome))
+
     async def _resolve_forecasts(self, symbol: str) -> None:
         rows = await self._db.fetchall(
             """SELECT id, reference_price, opened_session_date, horizon_sessions
@@ -226,7 +263,7 @@ class IBKRETFPaperPillar:
              datetime.now(timezone.utc).astimezone(_ET).date().isoformat()))
         if not rows:
             return
-        closes = await self._client.get_adjusted_daily_closes(symbol)
+        closes = await self._closes(symbol)
         for row in rows:
             base = next((close for day, close in closes
                          if day == row["opened_session_date"]), None)
@@ -245,6 +282,9 @@ class IBKRETFPaperPillar:
                      resolved_at=datetime('now') WHERE id=?""",
                 (horizon, target_day, base, final_price,
                  final_price, base, row["id"]))
+            await self._record_outcome(
+                symbol, str(row["opened_session_date"]),
+                1 if final_price > base else 0)
 
     def _asset_class(self, symbol: str) -> str:
         return self._INSTRUMENTS.get(symbol, (symbol, "other"))[1]
@@ -324,7 +364,8 @@ class IBKRETFPaperPillar:
         return float(row["peak_pnl_pct"])
 
     async def _fill(self, symbol: str, side: OrderSide, qty: float, price: float,
-                    *, stop_price: float = 0, initial_risk_usd: float = 0) -> None:
+                    *, stop_price: float = 0, initial_risk_usd: float = 0,
+                    bid: float = 0.0, ask: float = 0.0) -> None:
         fee = self._s.ibkr.etf_fee_per_order_usd
         fill_ref = f"ibkr-etf-paper-{self._alias}-{symbol}-{uuid4().hex}"
         await self._db.execute(
@@ -357,10 +398,46 @@ class IBKRETFPaperPillar:
             await self._db.execute(
                 "DELETE FROM ibkr_etf_positions WHERE model_alias = ? AND symbol = ?",
                 (self._alias, symbol))
-        await self._book_fill(symbol, side, qty, price, fee, fill_ref)
+        await self._book_fill(symbol, side, qty, price, fee, fill_ref,
+                              bid=bid, ask=ask)
+
+    async def _forecast_pair(self, symbol: str, side: OrderSide,
+                             session_date: str) -> tuple[float | None, float]:
+        """(fair, reference) for the Brier bar: the arm's forecast, and what it
+        must beat.
+
+        The reference is the instrument's own trailing drift — P(higher after
+        `horizon` sessions) over completed history — NOT 0.5. Equities rise more
+        often than not, so a coin-flip reference would score an arm positively
+        for constantly answering 0.55, rewarding it for the direction of the
+        last century rather than for forecasting.
+
+        An exit claims no forecast: the arm's probability is about the entry
+        window, so a SELL returns fair=None and asserts no edge. The ladder
+        keeps the earliest decision per family, which is the entry, so this only
+        affects a family an exit opens on its own.
+        """
+        view = self._views.get(symbol)
+        fair = float(view[1]) if view and side == OrderSide.BUY else None
+        reference = None
+        try:
+            closes = completed_closes(await self._closes(symbol), session_date)
+            reference = horizon_up_rate(
+                closes, int(self._s.ibkr.etf_signal_horizon_days))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ibkr_etf.benchmark_unavailable", symbol=symbol,
+                        model_alias=self._alias, error=str(exc)[:100])
+        if reference is None:
+            # No benchmark means no defensible edge claim. Falling back to the
+            # arm's own number asserts a zero Brier edge, which the ladder reads
+            # as "no evidence" — the honest outcome. Falling back to 0.5 would
+            # manufacture an edge out of a missing history.
+            return (fair, fair if fair is not None else 0.5)
+        return (fair, float(reference))
 
     async def _book_fill(self, symbol: str, side: OrderSide, qty: float,
-                         price: float, fee: float, fill_ref: str) -> None:
+                         price: float, fee: float, fill_ref: str,
+                         bid: float = 0.0, ask: float = 0.0) -> None:
         """Register an already-simulated fill on the standard rails.
 
         This is what puts the arm on the graduation ladder. ``gateway.submit``
@@ -403,17 +480,32 @@ class IBKRETFPaperPillar:
                 strategy_source=self.strategy_source, cell=self._alias)
             if order is None:
                 return
+            session_date = datetime.now(timezone.utc).astimezone(_ET).date().isoformat()
+            fair, reference = await self._forecast_pair(symbol, side, session_date)
+            # The real BBO behind this fill. Without it _capture_decision finds
+            # no book, so _place_and_record cannot tell whether the fill crossed
+            # and stamps fill_evidence='synthetic' — which is not in
+            # graduation.credible_fill_evidence, making every decision
+            # uncountable under require_executable_fills. The ETF arms have a
+            # genuine IBKR bid/ask; recording it supplies the data the check was
+            # designed to read rather than working around the check.
+            if bid > 0 and ask > 0:
+                await self._db.execute(
+                    """INSERT INTO orderbook_snapshots
+                       (market_id, token_id, exchange, best_bid, best_ask, mid,
+                        recorded_at)
+                       VALUES (?, ?, 'ibkr', ?, ?, ?, datetime('now'))""",
+                    (market_id, spec.key, bid, ask, (bid + ask) / 2))
             self._sim.stage(order, order_id=fill_ref)
             result = await self._gateway.submit(TradeIntent(
                 signal=instrument_signal(
-                    spec, strategy_source=self.strategy_source, mark=price,
-                    # A directional price book produces no probability about
-                    # the instrument's price, so the signal asserts no edge —
-                    # the ladder's Brier bar must not score a forecast the
-                    # strategy never made (docs/ibkr_graduation_spec.md).
-                    fair=None, side=side, cell=self._alias,
+                    spec, strategy_source=self.strategy_source,
+                    mark=reference, fair=fair, side=side, cell=self._alias,
                     rationale=f"ibkr_etf {self._alias} {side.value} {symbol}"),
-                market=instrument_market(spec, mark=price, cell=self._alias),
+                market=instrument_market(
+                    spec, mark=reference, cell=self._alias,
+                    event_family=instrument_event_family(
+                        spec, self._alias, session_date)),
                 size_dollars=qty * price,
                 # Structurally paper-only. force_paper keeps the global live
                 # flag out of this book entirely; the simulator refuses a
@@ -451,6 +543,9 @@ class IBKRETFPaperPillar:
             return 0
         cfg = self._s.ibkr
         await self._ensure_state()
+        # Bars are stable within a cycle; refetching them per consumer was three
+        # identical historical requests per symbol against IBKR pacing.
+        self._closes_cache.clear()
         entries = 0
         # Why a cycle produced no entry. Without this the arm reported only
         # "0 entries" and the cause was invisible: ibkr_etf_openai ran 382
@@ -541,7 +636,7 @@ class IBKRETFPaperPillar:
                     slippage_bps=cfg.etf_slippage_bps)
                 if proposal:
                     await self._fill(symbol, OrderSide.SELL, proposal.quantity,
-                                     proposal.price)
+                                     proposal.price, bid=quote.bid, ask=quote.ask)
                     self._cooldown[symbol] = time.time() + (
                         cfg.etf_reentry_cooldown_hours * 3600)
                     await self._db.execute(
@@ -584,7 +679,7 @@ class IBKRETFPaperPillar:
                 deployment_cap = cfg.etf_paper_budget_usd * cfg.etf_max_deployment_pct / 100.0
                 asset_class = self._asset_class(symbol)
                 class_cap = cfg.etf_paper_budget_usd * cfg.etf_max_asset_class_pct / 100.0
-                closes_raw = await self._client.get_adjusted_daily_closes(symbol)
+                closes_raw = await self._closes(symbol)
                 closes = [float(close) for _, close in closes_raw if close and close > 0]
                 annual_vol = annualized_volatility(closes)
                 momentum = normalized_momentum(closes)
@@ -622,7 +717,8 @@ class IBKRETFPaperPillar:
                     continue
                 await self._fill(symbol, OrderSide.BUY, proposal.quantity,
                                  proposal.price, stop_price=proposal.stop_price,
-                                 initial_risk_usd=proposal.initial_risk_usd)
+                                 initial_risk_usd=proposal.initial_risk_usd,
+                                 bid=quote.bid, ask=quote.ask)
                 await self._mirror(symbol, proposal.quantity, proposal.price, quote.bid)
                 actual_cost = proposal.quantity * proposal.price + cfg.etf_fee_per_order_usd
                 allocated += actual_cost

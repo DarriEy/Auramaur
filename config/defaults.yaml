@@ -159,7 +159,14 @@ graduation:
      "agent_trader_gflash", "agent_trader_g35flash", "agent_trader_gpro",
      "long_horizon", "long_horizon_kalshi", "term_structure", "vol_anchor",
      "informed_flow", "entailment_arb", "cross_venue_arb", "settlement_arb",
-     "resolution_lens", "resolution_lens_kalshi", "platform_consensus"]
+     "resolution_lens", "resolution_lens_kalshi", "platform_consensus",
+     # The ETF arms are ONE strategy applied across a universe, not a separate
+     # claim per asset class. Celled by category they fragment across 16 cells
+     # (eleven of which hold a single symbol), so every cell caps far below
+     # min_paired_forecasts and none could ever graduate. See
+     # docs/ibkr_graduation_spec.md.
+     "ibkr_etf_luna", "ibkr_etf_sol", "ibkr_etf_terra",
+     "ibkr_etf_momentum_control"]
   confidence_z: 1.645
   # Prospective proof contract: old/backfilled rows remain reportable but cannot
   # graduate a strategy whose parameters and execution provenance were not frozen.
