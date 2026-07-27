@@ -246,6 +246,12 @@ class ExecutionGateway:
             section_name = (
                 "agent_trader" if source.startswith("agent_trader_") else
                 "technical" if source.startswith("technical_") else
+                # An IBKR book cell (ibkr_etf_luna, ibkr_fx_paper, ...) has no
+                # settings section of its own; its parameters live under
+                # settings.ibkr. Without this the frozen strategy_version
+                # hashed an EMPTY config, so a book could be re-tuned mid-clock
+                # and keep claiming the same holdout experiment.
+                "ibkr" if source.startswith("ibkr_") else
                 "nlp" if source in {"llm", "news_speed"} else source
             )
             section = getattr(self.settings, section_name, None)

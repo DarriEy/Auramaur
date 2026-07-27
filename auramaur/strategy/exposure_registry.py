@@ -143,6 +143,28 @@ EXPOSURE_PATHS = (
         "oddlot or originating strategy",
     ),
     _path(
+        # The ETF arms wrote fills by raw SQL with no record_fill call, so they
+        # had no registered exposure callsite at all (audit finding #7,
+        # 2026-07-26). They now route the already-simulated fill through
+        # ExecutionGateway.submit for decision capture and pnl_ledger booking.
+        # The execution boundary is a LOCAL simulator with no broker
+        # connection and an explicit refusal of any non-dry_run order — the
+        # book stays PAPER_SIMULATED, which is why paper is the only mode.
+        "ibkr_etf_paper",
+        ExposureKind.PAPER_BOOKING,
+        "ETF arm forecast (LLM arms + momentum control)",
+        ("IBKR/Alpaca equity quotes", "news evidence", "adjusted daily closes"),
+        "ETF arm envelope (budget, per-class caps, portfolio risk)",
+        "ExecutionGateway.submit -> SimulatedInstrumentExchange",
+        {"paper"},
+        "ibkr_etf_ledger + ExecutionGateway/PnLTracker",
+        "arm cycle marks (ibkr_etf_positions)",
+        "arm exit proposal (stop/target/trailing/bearish)",
+        "arm-owned positions table",
+        "no settlement — instruments do not resolve",
+        "ibkr_etf_<alias> ledger",
+    ),
+    _path(
         "ibkr_multiasset",
         ExposureKind.ENTRY,
         "graduated IBKR paper book",
@@ -377,6 +399,7 @@ REGISTERED_CALLSITES = Counter(
             "submit_paired",
             "prediction_paired",
         ): 1,
+        ("auramaur/strategy/ibkr_etf_paper.py", "_book_fill", "submit", "ibkr_etf_paper"): 1,
         ("auramaur/strategy/ibkr_multiasset_paper.py", "_fill", "place", "ibkr_multiasset"): 1,
         (
             "auramaur/exchange/ibkr_multiasset_execution.py",

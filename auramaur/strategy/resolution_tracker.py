@@ -59,6 +59,12 @@ class ResolutionTracker:
         # and from the portfolio row directly for the position arm; MAX() picks
         # a non-NULL value when a market appears in both, falling back to
         # "polymarket" below when neither knows the venue.
+        # IBKR instrument rows (the `ibkr:` market_id namespace minted by
+        # auramaur.exchange.ibkr_intent) are excluded from the cost_basis arm:
+        # a continuously-priced broker instrument has no oracle outcome to
+        # detect, so every open IBKR paper position would otherwise be probed
+        # against every prediction-market discovery client, every cycle, with
+        # an id none of them can resolve.
         # The cost_basis arm catches held legs the portfolio view is missing:
         # a row dropped mid-sync, or a settled leg whose cost_basis size never
         # zeroed (so it resurrects every cycle). Driving settlement off actual
@@ -78,7 +84,7 @@ class ResolutionTracker:
                    SELECT cb.market_id AS market_id, m.exchange AS exchange
                    FROM cost_basis cb
                    LEFT JOIN markets m ON cb.market_id = m.id
-                   WHERE cb.size > 0
+                   WHERE cb.size > 0 AND cb.market_id NOT LIKE 'ibkr:%'
                    UNION ALL
                    SELECT e.market_id AS market_id, e.venue AS exchange
                    FROM evaluation_episodes e

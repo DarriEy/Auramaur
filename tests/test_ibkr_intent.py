@@ -17,11 +17,16 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
 from auramaur.db.database import Database
 from auramaur.exchange.ibkr_instruments import BY_KEY
 from auramaur.exchange.ibkr_intent import (
+    INSTRUMENT_ID_PREFIX,
+    SimulatedInstrumentExchange,
     instrument_market,
+    instrument_market_id,
     instrument_signal,
     prepare_instrument_order,
 )
@@ -134,3 +139,52 @@ def test_prediction_market_cap_is_not_weakened_for_ibkr():
         strategy_source="ibkr_global_etf_paper")
     assert gw._per_market_cap(ib) == settings.ibkr.paper_budget_usd
     assert gw._per_market_cap(ib) > gw._per_market_cap(poly)
+
+
+def test_cell_scoping_keeps_concurrent_arms_off_one_cost_basis_row():
+    """cost_basis is keyed by (market_id, is_paper, token).
+
+    Four ETF arms trade the SAME symbols concurrently. Sharing one market_id
+    per symbol would merge their basis rows: realized P&L computed against a
+    blended average, the aggregate exposure guard counting four arms as one
+    position, and the ledger's earliest-entrant attribution booking one arm's
+    exit into another arm's graduation cell.
+    """
+    assert instrument_market_id(_SPEC) == "ibkr:UUP"
+    assert instrument_market_id(_SPEC, "luna") == "ibkr:luna:UUP"
+    assert instrument_market_id(_SPEC, "luna") != instrument_market_id(_SPEC, "sol")
+    # Every minted id stays inside the one namespace the shared paper wallet
+    # and the resolution tracker scope themselves off.
+    for cell in ("", "luna", "fx"):
+        assert instrument_market_id(_SPEC, cell).startswith(INSTRUMENT_ID_PREFIX)
+    assert instrument_market(_SPEC, mark=28.57, cell="luna").id == "ibkr:luna:UUP"
+    assert instrument_signal(
+        _SPEC, strategy_source="s", mark=28.57, fair=None,
+        side=OrderSide.BUY, cell="luna").market_id == "ibkr:luna:UUP"
+    assert prepare_instrument_order(
+        _SPEC, side=OrderSide.BUY, quantity=1, price=1.0, is_live=False,
+        strategy_source="s", cell="luna").market_id == "ibkr:luna:UUP"
+
+
+def test_the_simulator_is_not_an_order_path():
+    """PAPER_SIMULATED means "no order path exists, AT ANY GATE".
+
+    Routing a structurally paper-only book through the gateway must not
+    quietly give it one. The simulator has no connection and refuses to carry
+    an order whose dry_run has been cleared, so the gateway's place_order call
+    terminates here — it never becomes a live broker order.
+    """
+    sim = SimulatedInstrumentExchange()
+    assert not hasattr(sim, "connect")
+    order = prepare_instrument_order(
+        _SPEC, side=OrderSide.BUY, quantity=21.0, price=28.57,
+        is_live=False, strategy_source="ibkr_etf_luna", cell="luna")
+    sim.stage(order, order_id="fill-ref-1")
+    result = asyncio.run(sim.place_order(order))
+    assert result.status == "paper" and result.is_paper is True
+    assert result.order_id == "fill-ref-1"   # joins back to the venue-native row
+    assert result.filled_size == 21.0 and result.filled_price == 28.57
+
+    live = order.model_copy(update={"dry_run": False})
+    with pytest.raises(RuntimeError):
+        asyncio.run(sim.place_order(live))

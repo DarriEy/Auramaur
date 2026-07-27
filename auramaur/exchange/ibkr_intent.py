@@ -29,10 +29,13 @@ graduation ladder.
 
 from __future__ import annotations
 
+import uuid
+
 from auramaur.exchange.models import (
     Confidence,
     Market,
     Order,
+    OrderResult,
     OrderSide,
     OrderType,
     Signal,
@@ -43,11 +46,32 @@ from auramaur.exchange.models import (
 # `llm x politics_us` does.
 _VENUE = "ibkr"
 
+# Every market_id this adapter mints starts here. It is the ONE handle the rest
+# of the system has for "this row is broker exposure, not a prediction-market
+# contract" — cost_basis has no venue column, so the shared paper wallet
+# (auramaur/exchange/paper.py) scopes itself off this prefix. Changing it
+# without changing that query silently drains the prediction-market paper book.
+INSTRUMENT_ID_PREFIX = f"{_VENUE}:"
 
-def instrument_market(spec, *, mark: float) -> Market:
+
+def instrument_market_id(spec, cell: str = "") -> str:
+    """The gateway/ledger market_id for one instrument in one book cell.
+
+    ``cell`` separates concurrently-running arms of the same book. It is not
+    cosmetic: ``cost_basis`` is keyed by (market_id, is_paper, token), so two
+    arms holding SPY under one market_id MERGE into a single basis row — their
+    realized P&L, the aggregate exposure guard, and the ledger's
+    earliest-entrant strategy attribution all then belong to whichever arm
+    bought first.
+    """
+    return (f"{INSTRUMENT_ID_PREFIX}{cell}:{spec.key}" if cell
+            else f"{INSTRUMENT_ID_PREFIX}{spec.key}")
+
+
+def instrument_market(spec, *, mark: float, cell: str = "") -> Market:
     """The instrument as a Market, carrying only what the gateway reads."""
     return Market(
-        id=f"{_VENUE}:{spec.key}",
+        id=instrument_market_id(spec, cell),
         exchange=_VENUE,
         question=spec.description or spec.symbol,
         category=spec.asset_class or spec.book.value,
@@ -59,7 +83,7 @@ def instrument_market(spec, *, mark: float) -> Market:
 
 def instrument_signal(spec, *, strategy_source: str, mark: float,
                       fair: float | None, side: OrderSide,
-                      rationale: str = "") -> Signal:
+                      rationale: str = "", cell: str = "") -> Signal:
     """The entry as a Signal.
 
     ``fair`` is the strategy's own view of value. Directional price books do not
@@ -71,7 +95,7 @@ def instrument_signal(spec, *, strategy_source: str, mark: float,
     """
     reference = float(mark)
     return Signal(
-        market_id=f"{_VENUE}:{spec.key}",
+        market_id=instrument_market_id(spec, cell),
         market_question=spec.description or spec.symbol,
         claude_prob=float(fair) if fair is not None else reference,
         claude_confidence=Confidence.MEDIUM,
@@ -85,7 +109,7 @@ def instrument_signal(spec, *, strategy_source: str, mark: float,
 
 def prepare_instrument_order(spec, *, side: OrderSide, quantity: float,
                              price: float, is_live: bool,
-                             strategy_source: str) -> Order | None:
+                             strategy_source: str, cell: str = "") -> Order | None:
     """Build the Order the gateway will place. None when it is not placeable.
 
     Quantity is in contracts/shares, not dollars: an IBKR instrument's size is
@@ -95,7 +119,7 @@ def prepare_instrument_order(spec, *, side: OrderSide, quantity: float,
     if quantity <= 0 or price <= 0:
         return None
     return Order(
-        market_id=f"{_VENUE}:{spec.key}",
+        market_id=instrument_market_id(spec, cell),
         exchange=_VENUE,
         token_id=spec.key,
         side=side,
@@ -105,3 +129,61 @@ def prepare_instrument_order(spec, *, side: OrderSide, quantity: float,
         dry_run=not is_live,
         source=strategy_source,
     )
+
+
+class SimulatedInstrumentExchange:
+    """A local fill simulator that satisfies the gateway's exchange protocol.
+
+    This is NOT a broker adapter. It holds no connection, no credentials and no
+    live branch, and it refuses outright to carry an order that is not
+    ``dry_run``. That is what lets a structurally paper-only book
+    (``ExecutionMode.PAPER_SIMULATED`` — "local fills ONLY, no order path
+    exists, at any gate") route through ``ExecutionGateway`` for decision
+    capture and pnl_ledger booking without acquiring an order path: the
+    gateway's ``exchange.place_order`` call lands here and goes no further.
+
+    The book has already decided its own fill (price, quantity, reference) by
+    the time it reaches the gateway, so ``stage`` hands that exact order over
+    rather than letting the gateway re-derive one. ``order_id`` is the book's
+    own fill reference, which makes ``fills.order_id`` join straight back to
+    the venue-native fill row and gives ``PnLTracker.record_fill`` a real
+    idempotency key.
+    """
+
+    def __init__(self, exchange_name: str = _VENUE) -> None:
+        self.exchange_name = exchange_name
+        self._staged: tuple[Order, str] | None = None
+
+    def stage(self, order: Order, *, order_id: str = "") -> None:
+        """Hand the already-decided order to the next ``gateway.submit``."""
+        self._staged = (order, order_id or f"IBKR-SIM-{uuid.uuid4().hex[:12]}")
+
+    def prepare_order(self, signal, market, size_dollars: float,
+                      is_live: bool) -> Order | None:
+        """The gateway's build hook. Returns the staged order, or None."""
+        if self._staged is None:
+            return None
+        return self._staged[0]
+
+    async def place_order(self, order: Order) -> OrderResult:
+        """Simulate the fill locally. Never reaches a broker, by construction."""
+        if not order.dry_run:
+            # A simulated venue must never be the thing that "executes" a live
+            # order. Reaching here means a caller cleared the live gates and
+            # then routed to the simulator — refuse rather than record a
+            # fictional live fill.
+            raise RuntimeError(
+                "SimulatedInstrumentExchange cannot carry a live order: "
+                f"{order.market_id}")
+        staged = self._staged
+        self._staged = None
+        order_id = (staged[1] if staged is not None and staged[0] is order
+                    else f"IBKR-SIM-{uuid.uuid4().hex[:12]}")
+        return OrderResult(
+            order_id=order_id,
+            market_id=order.market_id,
+            status="paper",
+            filled_size=order.size,
+            filled_price=order.price,
+            is_paper=True,
+        )

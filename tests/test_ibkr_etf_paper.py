@@ -65,10 +65,79 @@ async def test_bullish_view_opens_paper_position_at_ask():
     assert fill["price"] == pytest.approx(100.02)
     pos = await db.fetchone("SELECT * FROM ibkr_etf_positions")
     assert pos["model_alias"] == "luna"
-    assert await db.fetchone("SELECT * FROM fills") is None
-    assert await db.fetchone("SELECT * FROM trades") is None
-    assert await db.fetchone("SELECT * FROM cost_basis") is None
+    # The arm now routes its simulated fill through ExecutionGateway, so the
+    # standard rails ARE written (that is the whole point — without them the
+    # book has no pnl_ledger record and no decision snapshot, and can never
+    # graduate). These assertions used to require the rails to be EMPTY; that
+    # encoded audit finding #7 (2026-07-26: fills by raw SQL, no record_fill)
+    # as if it were the contract. What must stay true is the SCOPING.
+    recorded = await db.fetchone("SELECT * FROM fills")
+    assert recorded["market_id"] == "ibkr:luna:SPY"
+    assert recorded["is_paper"] == 1
+    mirrored = await db.fetchone("SELECT * FROM trades")
+    assert mirrored["exchange"] == "ibkr"
+    assert mirrored["strategy_source"] == "ibkr_etf_luna"
+    assert mirrored["is_paper"] == 1
+    basis = await db.fetchone("SELECT * FROM cost_basis")
+    assert basis["market_id"] == "ibkr:luna:SPY" and basis["is_paper"] == 1
+    # Still no portfolio row: that table feeds the paper-breadth cap, the
+    # drawdown fallback and the exit monitor, none of which manage this book.
     assert await db.fetchone("SELECT * FROM portfolio") is None
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_entry_captures_a_decision_and_registers_a_graduation_clock():
+    """Prospective evidence is one of the ladder's two inputs, and it was
+    permanently empty for this book: 17 registered clocks on 2026-07-27, not
+    one of them an IBKR arm."""
+    db = Database(":memory:")
+    await db.connect()
+    pillar = await _pillar(db)
+    await pillar.run_once()
+
+    snap = await db.fetchone("SELECT * FROM decision_snapshots")
+    assert snap is not None, "no decision captured — no graduation clock"
+    assert snap["strategy_source"] == "ibkr_etf_luna"
+    assert snap["venue"] == "ibkr"
+    assert snap["market_id"] == "ibkr:luna:SPY"
+    assert snap["is_paper"] == 1
+    # A price book asserts no probability edge: reference and fair must agree,
+    # or the ladder's Brier bar scores a forecast the strategy never made.
+    assert snap["fair_probability"] == snap["reference_price"]
+
+    experiment = await db.fetchone(
+        "SELECT * FROM strategy_experiments WHERE strategy_source = 'ibkr_etf_luna'")
+    assert experiment is not None, "clock never started"
+    # The frozen version must actually freeze settings.ibkr, not an empty dict.
+    assert '"etf_max_entry_usd"' in experiment["config_json"]
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_round_trip_books_net_pnl_where_the_ladder_reads_it():
+    db = Database(":memory:")
+    await db.connect()
+    analyzer = Analyzer(0.70)
+    pillar = await _pillar(db, analyzer=analyzer)
+    await pillar.run_once()
+    analyzer.probability = 0.30
+    pillar._views.clear()
+    await pillar.run_once()
+
+    rows = await db.fetchall(
+        "SELECT kind, pnl, is_paper, venue, strategy_source FROM pnl_ledger "
+        "ORDER BY id")
+    assert [r["kind"] for r in rows] == ["commission", "sell", "commission"]
+    assert all(r["is_paper"] == 1 for r in rows)
+    assert all(r["venue"] == "ibkr" for r in rows)
+    assert all(r["strategy_source"] == "ibkr_etf_luna" for r in rows)
+    # Net of BOTH commissions, matching the venue-native ibkr_etf_ledger. A
+    # gross-only ledger would flatter the arm: the entire realized IBKR record
+    # to date is commission.
+    native = await db.fetchall("SELECT pnl FROM ibkr_etf_ledger")
+    assert sum(r["pnl"] for r in rows) == pytest.approx(
+        sum(r["pnl"] for r in native))
     await db.close()
 
 
@@ -187,6 +256,16 @@ async def test_daily_loss_limit_blocks_entries_but_not_loop():
 
 @pytest.mark.asyncio
 async def test_etf_fill_cannot_move_shared_paper_wallet():
+    """The load-bearing isolation guard, now that the arm DOES write the
+    shared rails.
+
+    PaperTrader spendable cash is ``initial + SUM(pnl_ledger) -
+    SUM(open cost_basis)`` over every is_paper=1 row. Left unscoped, an ETF
+    arm's open position would subtract broker exposure from the
+    prediction-market book's cash and stop it entering — a change to what
+    trades produced purely by a bookkeeping move. The IBKR books are funded by
+    their own paper budgets.
+    """
     db = Database(":memory:")
     await db.connect()
     wallet = PaperTrader(db, initial_balance=1_000.0)
@@ -194,8 +273,93 @@ async def test_etf_fill_cannot_move_shared_paper_wallet():
     pillar = await _pillar(db)
     await pillar.run_once()
     assert await wallet._compute_balance() == before
+
+    # The rows exist — they simply must not be in the wallet's scope.
+    open_cost = await db.fetchone(
+        "SELECT COALESCE(SUM(size * avg_cost), 0) AS c FROM cost_basis "
+        "WHERE is_paper = 1 AND size > 0")
+    assert open_cost["c"] > 200.0
+    ledger = await db.fetchone(
+        "SELECT COUNT(*) AS n FROM pnl_ledger WHERE is_paper = 1")
+    assert ledger["n"] > 0
+    assert all(r["market_id"].startswith("ibkr:") for r in await db.fetchall(
+        "SELECT market_id FROM cost_basis UNION ALL "
+        "SELECT market_id FROM pnl_ledger"))
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_etf_paper_pnl_stays_out_of_the_live_gates():
+    """No IBKR paper row may reach the live daily-loss gate or the drawdown
+    latch (the 2026-07-22 phantom-peak failure mode)."""
+    from auramaur.risk.portfolio import PortfolioTracker
+
+    db = Database(":memory:")
+    await db.connect()
+    analyzer = Analyzer(0.70)
+    pillar = await _pillar(db, analyzer=analyzer)
+    await pillar.run_once()
+    analyzer.probability = 0.30
+    pillar._views.clear()
+    await pillar.run_once()
+
+    live_rows = await db.fetchone(
+        "SELECT COUNT(*) AS n FROM pnl_ledger WHERE is_paper = 0")
+    assert live_rows["n"] == 0
+
+    tracker = PortfolioTracker(db, Settings())
+    assert await tracker.get_daily_pnl() == 0.0
+    # The drawdown latch is fed by venue cash + synced positions; the arm must
+    # contribute no portfolio row for it to observe.
+    assert await db.fetchone("SELECT * FROM portfolio") is None
+    assert await tracker.get_drawdown() == 0.0
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_arm_stays_paper_even_when_the_global_live_gates_are_open():
+    """The arm is structurally paper-only (DeploymentMode.PAPER_ONLY).
+
+    Routing through the gateway must not hand it the global live flag: the
+    intent carries force_paper, so is_live never reaches the order, and the
+    simulator refuses a cleared dry_run as the second lock.
+    """
+    db = Database(":memory:")
+    await db.connect()
+    pillar = await _pillar(db)
+    pillar._s.auramaur_live = True
+    pillar._s.execution.live = True
+    assert pillar._s.is_live is True
+    await pillar.run_once()
+
+    fill = await db.fetchone("SELECT is_paper FROM fills")
+    assert fill["is_paper"] == 1
+    assert (await db.fetchone("SELECT is_paper FROM trades"))["is_paper"] == 1
+    assert (await db.fetchone(
+        "SELECT COUNT(*) AS n FROM pnl_ledger WHERE is_paper = 0"))["n"] == 0
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_symbol_outside_the_manifest_still_fills_the_arms_own_books():
+    """Booking is evidence, not the money path.
+
+    etf_symbols is operator-editable; a symbol with no InstrumentSpec cannot
+    be minted into a gateway market_id. That must cost ladder evidence, not
+    break the cycle or silently drop the arm's own accounting.
+    """
+    db = Database(":memory:")
+    await db.connect()
+    pillar = await _pillar(db)
+    pillar._s.ibkr.etf_symbols = ["NOTAMANIFESTSYMBOL"]
+    pillar._INSTRUMENTS = dict(pillar._INSTRUMENTS)
+    pillar._INSTRUMENTS["NOTAMANIFESTSYMBOL"] = ("unknown", "us_broad")
+    assert await pillar.run_once() == 1
+
+    native = await db.fetchone("SELECT symbol, side FROM ibkr_etf_fills")
+    assert native["symbol"] == "NOTAMANIFESTSYMBOL" and native["side"] == "BUY"
+    assert await db.fetchone("SELECT * FROM fills") is None
     assert await db.fetchone("SELECT * FROM pnl_ledger") is None
-    assert await db.fetchone("SELECT * FROM cost_basis") is None
     await db.close()
 
 

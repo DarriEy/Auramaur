@@ -11,6 +11,14 @@ from zoneinfo import ZoneInfo
 
 import structlog
 
+from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
+from auramaur.broker.ledger import record_ledger_event
+from auramaur.broker.pnl import PnLTracker
+from auramaur.exchange.ibkr_instruments import BY_KEY
+from auramaur.exchange.ibkr_intent import (
+    SimulatedInstrumentExchange, instrument_market, instrument_market_id,
+    instrument_signal, prepare_instrument_order,
+)
 from auramaur.exchange.models import Market, OrderSide
 from auramaur.experiments.strategies.ibkr_etf_paper import (
     entry_proposal, exit_proposal,
@@ -73,6 +81,17 @@ class IBKRETFPaperPillar:
         self._cooldown: dict[str, float] = {}
         self._refresh_cursor = 0
         self._state_loaded = False
+        # Standard rails. The book's own ibkr_etf_* tables stay the venue-native
+        # accounting; the gateway additionally captures a decision snapshot
+        # (the graduation clock) and books realized P&L where the ladder reads
+        # it. The exchange handed to it is a local simulator, so PAPER_SIMULATED
+        # remains literally true — see SimulatedInstrumentExchange.
+        self._sim = SimulatedInstrumentExchange()
+        self._gateway = ExecutionGateway(
+            router=None, exchange=self._sim, exchange_name="ibkr",
+            settings=settings, db=db,
+            pnl_tracker=PnLTracker(db, settings) if db is not None else None,
+        )
 
     @staticmethod
     def market_open(now: datetime | None = None) -> bool:
@@ -338,6 +357,86 @@ class IBKRETFPaperPillar:
             await self._db.execute(
                 "DELETE FROM ibkr_etf_positions WHERE model_alias = ? AND symbol = ?",
                 (self._alias, symbol))
+        await self._book_fill(symbol, side, qty, price, fee, fill_ref)
+
+    async def _book_fill(self, symbol: str, side: OrderSide, qty: float,
+                         price: float, fee: float, fill_ref: str) -> None:
+        """Register an already-simulated fill on the standard rails.
+
+        This is what puts the arm on the graduation ladder. ``gateway.submit``
+        captures a decision snapshot (which registers the strategy_experiments
+        clock) and records the fill through ``PnLTracker``, so realized P&L
+        lands in ``pnl_ledger`` where ``GraduationLadder`` reads it — the two
+        inputs that were permanently empty for this book (audit finding #7,
+        2026-07-26: the arm wrote fills by raw SQL with no record_fill call).
+
+        Deliberately runs AFTER the book's own ibkr_etf_* rows and cannot veto
+        them. This increment is booking and capture only; consulting the ladder
+        is a separate, later step, so a booking failure must lose evidence, not
+        change what the book traded. The ibkr_etf_fills / ibkr_etf_ledger /
+        ibkr_etf_positions rows remain the venue-native accounting.
+        """
+        if self._db is None or self._gateway.pnl_tracker is None:
+            return
+        spec = BY_KEY.get(symbol)
+        if spec is None:
+            log.warning("ibkr_etf.unregistered_instrument", symbol=symbol,
+                        model_alias=self._alias,
+                        detail="no manifest entry; fill not booked to pnl_ledger")
+            return
+        market_id = instrument_market_id(spec, self._alias)
+        try:
+            # The ledger resolves venue/category from `markets`; without a row
+            # the pnl_ledger entry lands venue-blank and cannot be scoped.
+            # active=0 on purpose: this is a continuously-priced broker
+            # instrument, not a resolvable prediction market, and nothing in
+            # the prediction-market pipeline should treat it as tradeable.
+            await self._db.execute(
+                """INSERT OR IGNORE INTO markets
+                   (id, exchange, question, category, active,
+                    outcome_yes_price, outcome_no_price, last_updated)
+                   VALUES (?, 'ibkr', ?, ?, 0, 0, 0, datetime('now'))""",
+                (market_id, f"{self._alias}: {spec.description or spec.symbol}",
+                 spec.asset_class or ""))
+            order = prepare_instrument_order(
+                spec, side=side, quantity=qty, price=price, is_live=False,
+                strategy_source=self.strategy_source, cell=self._alias)
+            if order is None:
+                return
+            self._sim.stage(order, order_id=fill_ref)
+            result = await self._gateway.submit(TradeIntent(
+                signal=instrument_signal(
+                    spec, strategy_source=self.strategy_source, mark=price,
+                    # A directional price book produces no probability about
+                    # the instrument's price, so the signal asserts no edge —
+                    # the ladder's Brier bar must not score a forecast the
+                    # strategy never made (docs/ibkr_graduation_spec.md).
+                    fair=None, side=side, cell=self._alias,
+                    rationale=f"ibkr_etf {self._alias} {side.value} {symbol}"),
+                market=instrument_market(spec, mark=price, cell=self._alias),
+                size_dollars=qty * price,
+                # Structurally paper-only. force_paper keeps the global live
+                # flag out of this book entirely; the simulator refuses a
+                # non-dry_run order as the second lock.
+                force_paper=True,
+            ))
+            if result.status not in ("paper", "filled", "partial"):
+                log.error("ibkr_etf.fill_not_booked", symbol=symbol,
+                          model_alias=self._alias, status=result.status,
+                          reason=result.reason,
+                          detail="venue-native fill stands; ladder evidence lost")
+                return
+            # The commission the book already charged its own ledger. The
+            # gateway's Fill carries no fee, so without this row the ladder
+            # would read a gross P&L — and the entire realized IBKR record to
+            # date is commission.
+            await record_ledger_event(
+                self._db, market_id=market_id, kind="commission", token="YES",
+                qty=qty, pnl=-float(fee), fees=0.0, is_paper=True,
+                source_ref=f"{fill_ref}:commission")
+        except Exception as exc:  # noqa: BLE001 - evidence, never the money path
+            log.error("ibkr_etf.fill_booking_failed", symbol=symbol,
+                      model_alias=self._alias, error=str(exc)[:200])
 
     async def _mirror(self, symbol: str, qty: float, entry: float,
                       current: float) -> None:

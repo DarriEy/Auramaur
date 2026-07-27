@@ -7,6 +7,7 @@ import uuid
 import structlog
 
 from auramaur.db.database import Database
+from auramaur.exchange.ibkr_intent import INSTRUMENT_ID_PREFIX
 from auramaur.exchange.models import Order, OrderResult, OrderSide, Position, TokenType
 
 log = structlog.get_logger()
@@ -57,12 +58,25 @@ class PaperTrader:
         tied up in OPEN paper positions (cost_basis). This SELF-HEALS: when a
         position resolves, its cost leaves `open cost` and its payout lands in
         realized P&L, so the cash returns automatically — no resolution-path
-        coupling, no `trades` pollution."""
+        coupling, no `trades` pollution.
+
+        The IBKR instrument namespace is EXCLUDED from both sums. Those books
+        are funded by their own paper budgets (``ibkr.etf_paper_budget_usd``,
+        per-book ``budget_usd``), not by this wallet, and they started writing
+        cost_basis/pnl_ledger rows when they were routed through
+        ExecutionGateway for graduation evidence. Counting them here would
+        subtract up to several thousand dollars of broker exposure from the
+        prediction-market book's spendable cash and silently stop it entering
+        — a change to what trades, caused purely by a bookkeeping move.
+        ``cost_basis`` has no venue column, so the market_id namespace minted
+        by ``auramaur.exchange.ibkr_intent`` is the scope."""
+        like = f"{INSTRUMENT_ID_PREFIX}%"
         pnl_row = await self.db.fetchone(
-            "SELECT COALESCE(SUM(pnl), 0) AS p FROM pnl_ledger WHERE is_paper = 1")
+            "SELECT COALESCE(SUM(pnl), 0) AS p FROM pnl_ledger "
+            "WHERE is_paper = 1 AND market_id NOT LIKE ?", (like,))
         cost_row = await self.db.fetchone(
             "SELECT COALESCE(SUM(size * avg_cost), 0) AS c FROM cost_basis "
-            "WHERE is_paper = 1 AND size > 0")
+            "WHERE is_paper = 1 AND size > 0 AND market_id NOT LIKE ?", (like,))
         realized = float(pnl_row["p"]) if pnl_row else 0.0
         open_cost = float(cost_row["c"]) if cost_row else 0.0
         return self.initial_balance + realized - open_cost
