@@ -16,6 +16,7 @@ import pytest
 
 from auramaur.exchange.ibkr_equity import IBKREquityClient
 from auramaur.exchange.models import OrderSide
+from auramaur.risk.ibkr_math import min_closes_for_momentum
 
 
 def _settings(*, is_live=False, readonly=False, cap=50.0):
@@ -448,3 +449,51 @@ async def test_fx_topup_readonly_blocked_when_live():
 
     assert res.order_id == "BLOCKED"
     assert "readonly" in res.error_message
+
+
+# IBKR RTH sessions per duration unit, deliberately conservative (a real month
+# returned 20 bars, not 21, on 2026-07-27).
+_SESSIONS_PER_UNIT = {"D": 1, "W": 5, "M": 20, "Y": 250}
+
+
+def _requested_sessions(duration: str) -> int:
+    count, unit = duration.split()
+    return int(count) * _SESSIONS_PER_UNIT[unit]
+
+
+async def test_daily_close_request_covers_the_full_momentum_horizon(monkeypatch):
+    """The fetch window must be sized by the math that consumes these bars.
+
+    This read durationStr="1 M" until 2026-07-27 — 20 RTH sessions, 19 after
+    the in-progress one is dropped, one below the 21 annualized_volatility
+    needs. So normalized_momentum returned None, every ETF arm's momentum gate
+    blocked, and momentum_control recorded zero forecasts for four days while
+    looking healthy. Every strategy test mocks get_adjusted_daily_closes with
+    120+ synthetic bars, so none of them could see it; this asserts on the
+    request actually sent to IBKR.
+    """
+    captured = {}
+
+    fake = types.ModuleType("ib_async")
+    fake.Stock = lambda *a, **k: SimpleNamespace(symbol=a[0] if a else "X")
+    monkeypatch.setitem(sys.modules, "ib_async", fake)
+
+    async def _req_historical(contract, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    client = IBKREquityClient(_settings(), force_paper_readonly=True)
+    client._ensure_connected = AsyncMock()
+    client._ib = SimpleNamespace(
+        qualifyContractsAsync=AsyncMock(),
+        reqHistoricalDataAsync=_req_historical,
+    )
+
+    await client.get_adjusted_daily_closes("SPY")
+
+    assert captured["barSizeSetting"] == "1 day"
+    assert captured["whatToShow"] == "ADJUSTED_LAST"
+    # +1 because completed_closes drops the in-progress session before the
+    # signal is computed.
+    assert _requested_sessions(captured["durationStr"]) >= (
+        min_closes_for_momentum() + 1)

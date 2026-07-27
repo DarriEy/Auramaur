@@ -5,8 +5,14 @@ from dataclasses import dataclass
 from datetime import date
 import hashlib
 from statistics import fmean
+import structlog
+
 from auramaur.nlp.openai_etf import ETFAnalysis
-from auramaur.risk.ibkr_math import annualized_volatility, normalized_momentum
+from auramaur.risk.ibkr_math import (
+    annualized_volatility, min_closes_for_momentum, normalized_momentum,
+)
+
+log = structlog.get_logger()
 
 
 def completed_closes(bars, as_of: str) -> list[float]:
@@ -44,6 +50,12 @@ class MomentumETFAnalyzer:
         )
         score = normalized_momentum(closes)
         if score is None:
+            # A control that goes quiet must say why. Returning a bare None here
+            # made "the bars are too short" indistinguishable from "momentum is
+            # flat" and cost four days of an uncomparable A/B.
+            log.warning("ibkr_etf.control.no_momentum", symbol=symbol,
+                        completed_closes=len(closes),
+                        closes_required=min_closes_for_momentum())
             return None
         return ETFAnalysis(
             0.70 if score > 0 else 0.30,

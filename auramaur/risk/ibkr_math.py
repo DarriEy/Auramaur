@@ -22,7 +22,30 @@ def annualized_volatility(closes: list[float], periods: int = 252) -> float | No
     return vol if math.isfinite(vol) and vol > 0 else None
 
 
-def normalized_momentum(closes: list[float], horizons=(20, 60, 120),
+# Lookbacks the momentum signal is designed to blend. Exported so the data
+# layer can size its fetch from the math instead of guessing: a request that
+# returns fewer bars than min_closes_for_momentum() does not fail, it silently
+# returns a *different* (or absent) signal.
+MOMENTUM_HORIZONS = (20, 60, 120)
+
+# annualized_volatility needs 20 log returns before it returns a number at all,
+# and every momentum score is divided by it -- so 21 closes is the hard floor
+# below which normalized_momentum is None regardless of horizon.
+MIN_VOL_CLOSES = 21
+
+
+def min_closes_for_momentum(horizons=MOMENTUM_HORIZONS) -> int:
+    """Completed closes needed for the *full* signal, not the warm-up.
+
+    The IBKR ETF arms fetched one month (20 bars) against these 120-session
+    horizons for four days: 19 completed closes, one short of MIN_VOL_CLOSES,
+    so every arm's momentum read was None and momentum_control -- whose whole
+    view is this signal -- recorded zero forecasts (2026-07-27).
+    """
+    return max(MIN_VOL_CLOSES, max(horizons) + 1)
+
+
+def normalized_momentum(closes: list[float], horizons=MOMENTUM_HORIZONS,
                         periods: int = 252) -> float | None:
     """Mean horizon return divided by its forecast standard deviation.
 

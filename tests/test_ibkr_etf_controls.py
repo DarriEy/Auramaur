@@ -30,6 +30,29 @@ async def test_momentum_analyzer_excludes_as_of_return():
     assert result is not None and result.probability == 0.70
 
 
+@pytest.mark.asyncio
+async def test_control_is_silent_on_a_one_month_window():
+    """momentum_control's entire view is this signal, so a starved history
+    means it records nothing at all — which is what happened for four days
+    from a durationStr="1 M" fetch (20 sessions, 19 completed)."""
+
+    class Client:
+        def __init__(self, sessions):
+            self.sessions = sessions
+
+        async def get_adjusted_daily_closes(self, symbol):
+            return [
+                (f"2025-{i // 28 + 1:02d}-{i % 28 + 1:02d}", x)
+                for i, x in enumerate(_trend(self.sessions))
+            ] + [("2026-07-27", 1.0)]
+
+    assert await MomentumETFAnalyzer().analyze_symbol(
+        Client(19), "SPY", "2026-07-27") is None
+    full = await MomentumETFAnalyzer().analyze_symbol(
+        Client(250), "SPY", "2026-07-27")
+    assert full is not None and full.probability == 0.70
+
+
 def test_walk_forward_and_placebo_are_stable():
     base = _trend(180)
     assert (

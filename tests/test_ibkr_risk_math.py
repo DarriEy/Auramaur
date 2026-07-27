@@ -3,9 +3,32 @@ import math
 import pytest
 
 from auramaur.risk.ibkr_math import (
-    adverse_fill, annualized_volatility, normalized_momentum, risk_quantity,
-    stop_distance,
+    MIN_VOL_CLOSES, MOMENTUM_HORIZONS, adverse_fill, annualized_volatility,
+    min_closes_for_momentum, normalized_momentum, risk_quantity, stop_distance,
 )
+
+
+def test_short_history_degrades_the_momentum_signal_silently():
+    """The failure mode that cost the ETF arms four days.
+
+    normalized_momentum never raises on a short series: it drops the horizons
+    that do not fit and returns None below the volatility floor. Nothing
+    downstream can tell a flat market from a starved one, so the fetch window
+    has to be sized from min_closes_for_momentum().
+    """
+    trend = [100 * 1.001 ** i for i in range(400)]
+    assert min_closes_for_momentum() == max(MOMENTUM_HORIZONS) + 1 == 121
+
+    # A "1 M" IBKR window is 20 sessions, 19 once the in-progress one is
+    # dropped -- one short of the volatility floor, so the signal vanishes.
+    assert annualized_volatility(trend[:MIN_VOL_CLOSES - 1]) is None
+    assert normalized_momentum(trend[:19]) is None
+    assert normalized_momentum(trend[:MIN_VOL_CLOSES]) is not None
+
+    # Between the floor and the full horizon it returns a *different* signal
+    # rather than an error -- the silent part.
+    assert normalized_momentum(trend[:60]) != normalized_momentum(
+        trend[:min_closes_for_momentum()])
 
 
 def test_normalized_momentum_is_scale_invariant():

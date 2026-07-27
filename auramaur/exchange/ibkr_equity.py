@@ -28,6 +28,16 @@ log = structlog.get_logger()
 # since funds settle T+1 and there's never a reason to re-convert quickly.
 _FX_COOLDOWN_S = 1800
 
+# Daily-bar lookback for get_adjusted_daily_closes. One year (~251 RTH
+# sessions) because the CONSUMERS of these bars are sized by
+# normalized_momentum's 120-session horizon, not by the fetch. This read "1 M"
+# until 2026-07-27, which returns 20 bars -- 19 once the in-progress session is
+# dropped, one below the 21 annualized_volatility requires. Every ETF arm's
+# momentum gate therefore read None, and the deterministic control arm, whose
+# entire view is that signal, wrote zero forecasts for four days while looking
+# healthy. Keep this at or above min_closes_for_momentum() + 1.
+_HISTORY_DURATION = "1 Y"
+
 
 @dataclass(frozen=True)
 class EquityQuote:
@@ -151,7 +161,8 @@ class IBKREquityClient:
             stock = Stock(symbol, "SMART", "USD")
             await self._ib.qualifyContractsAsync(stock)
             bars = await self._ib.reqHistoricalDataAsync(
-                stock, endDateTime="", durationStr="1 M", barSizeSetting="1 day",
+                stock, endDateTime="", durationStr=_HISTORY_DURATION,
+                barSizeSetting="1 day",
                 whatToShow="ADJUSTED_LAST", useRTH=True)
             out = []
             for bar in bars or []:
