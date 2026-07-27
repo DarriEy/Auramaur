@@ -355,7 +355,7 @@ requires-dist = [
     { name = "ib-async", marker = "extra == 'ibkr'", specifier = ">=1.0.0" },
     { name = "kalshi-python", marker = "extra == 'kalshi'", specifier = ">=2.1.0" },
     { name = "newsapi-python", specifier = ">=0.2.7" },
-    { name = "py-clob-client-v2", specifier = ">=1.0.0" },
+    { name = "py-clob-client-v2", specifier = ">=1.1.0" },
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "pydantic-settings", specifier = ">=2.14.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.3" },
@@ -3095,7 +3095,7 @@ wheels = [
 
 [[package]]
 name = "py-clob-client-v2"
-version = "1.0.1"
+version = "1.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "eth-abi" },
@@ -3105,9 +3105,9 @@ dependencies = [
     { name = "poly-eip712-structs" },
     { name = "py-order-utils" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d9/cf/3b0761a5e1715b52f927b0fbc7c8e545736e8c53811065ee2da7a8b51779/py_clob_client_v2-1.0.1.tar.gz", hash = "sha256:4d2e4bf6873719d3f9c8bcdc1f1590ec5e9597d6859d93f53d24dd3521c6fb2d", size = 45436, upload-time = "2026-05-09T13:00:52.752Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5e/c9/a4d6f78aeb1b961f728815f54a22c4cb355e9608635b692f3215afea1776/py_clob_client_v2-1.1.0.tar.gz", hash = "sha256:7821e2f3ced3651da0956a1225e89ec94434736a8e16086c1c6a14351774088d", size = 49113, upload-time = "2026-07-17T13:00:51.072Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/85/7b/04c1d94e71a0c2ef0b228f2b3e98e2815d1e9f92fb291ec6b2321fab27b5/py_clob_client_v2-1.0.1-py3-none-any.whl", hash = "sha256:6f288f8078878779d7a30cdcf0ecd196b57c94627fa0bfabf24ed8ab787b8b1d", size = 49042, upload-time = "2026-05-09T13:00:51.076Z" },
+    { url = "https://files.pythonhosted.org/packages/73/7a/2d7d1c3e224fec8787de23c21311540e21fbadd4138e5ce0bea5d427e390/py_clob_client_v2-1.1.0-py3-none-any.whl", hash = "sha256:421dc851ffad5028850dc332a7388863fe854f125b30bf3aa9d3333fb8cd1eeb", size = 50416, upload-time = "2026-07-17T13:00:49.696Z" },
 ]
 
 [[package]]
