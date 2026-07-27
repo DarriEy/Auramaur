@@ -238,8 +238,42 @@ At a 0.02 mean Brier edge (sd 0.10) that needs ~450 paired forecasts; at 0.05
   stamp `book_cross` instead of `synthetic` and survive
   `require_executable_fills`. This supplies the data the check reads rather
   than widening `credible_fill_evidence`.
-- `market_outcomes` written when a forecast resolves, clearing the INNER JOIN
-  in `_prospective_stats` that made every IBKR decision invisible.
+- `market_outcomes` written when a forecast resolves — but see the open
+  question immediately below, which this does **not** close.
+
+## OPEN: the ladder models one outcome per market; this book forecasts weekly
+
+Found by audit on 2026-07-27, in the increment-3 work itself, before any
+forecast had resolved.
+
+`market_outcomes` is `UNIQUE(venue, market_id)` and `_prospective_stats` joins
+`o.event_key = lower(d.venue)||':'||d.market_id`. That is the right model for a
+prediction market, which resolves once. An ETF arm forecasts the same symbol
+every week, so keying outcomes by the symbol-scoped `market_id` would let the
+**first** resolved forecast for (arm, symbol) own the only row that pair can
+ever have — and every later week's forecast would be scored against that one
+stale outcome. Wrong evidence into a gate is worse than none.
+
+Interim, in effect now: outcomes are keyed by **family** (the weekly bucket),
+so each week banks its own row and **nothing joins**. The data accumulates
+correctly and no false Brier edge can reach the ladder. The cost is honest —
+the ETF book still produces no countable prospective evidence.
+
+Closing it needs one of:
+
+- **(i)** join prospective evidence on `event_family` rather than `market_id`,
+  and relax `UNIQUE(venue, market_id)`. Correct, and touches the shared ladder
+  and schema that 17 prediction-market cells depend on.
+- **(ii)** give these books the risk-adjusted-return bar (option **c** above)
+  and exempt them from `require_market_brier_edge`. Smaller blast radius;
+  discards a real, measurable forecast signal.
+- **(iii)** decouple forecast scoring from the ladder entirely and keep
+  `auramaur ibkr-calibration` as the forecast-quality instrument, letting the
+  ladder score execution only.
+
+Note that (iii) is close to what already exists: the calibration report
+measures forecast quality directly and does not need the ladder's plumbing.
+The unresolved part is which of these the *graduation decision* should rest on.
 
 ## Increments
 

@@ -233,25 +233,36 @@ class IBKRETFPaperPillar:
                               outcome: int) -> None:
         """Publish a resolved forecast as a scoreable outcome.
 
-        GraduationLadder._prospective_stats INNER JOINs market_outcomes on
-        lower(venue)||':'||market_id, so a decision with no outcome row is
-        invisible to the ladder forever — one of three reasons the IBKR books
-        could not accumulate prospective evidence. A continuously-priced
-        instrument has no oracle, but an ETF arm's forecast is a genuine binary
-        that genuinely resolves, so this row is honest rather than a stand-in.
+        An ETF arm's forecast is a genuine binary that genuinely resolves, so
+        recording the outcome is honest. But it is keyed by FAMILY (the weekly
+        bucket), not by the symbol-scoped market_id, and that is deliberate.
+
+        ``market_outcomes`` is ``UNIQUE(venue, market_id)`` — the ladder models
+        one outcome per market, because a prediction market resolves once. An
+        ETF arm forecasts the same symbol every week. Keying by market_id would
+        let the FIRST resolved forecast for (arm, symbol) write the only row
+        that pair can ever have, and since _prospective_stats joins
+        ``o.event_key = lower(venue)||':'||d.market_id``, every later week's
+        forecast would then be scored against that one stale outcome. Wrong
+        evidence into a gate is worse than none.
+
+        Keyed by family, each week gets its own row and nothing joins today —
+        the outcomes bank correctly while the join stays honest. Making them
+        countable needs a decision recorded in docs/ibkr_graduation_spec.md:
+        either the ladder joins on event_family, or these books take the
+        risk-adjusted-return bar instead. Not a choice to make silently.
         """
         spec = BY_KEY.get(symbol)
         if spec is None:
             return
-        market_id = instrument_market_id(spec, self._alias)
+        family = instrument_event_family(spec, self._alias, session_date)
         await self._db.execute(
             """INSERT OR IGNORE INTO market_outcomes
                (event_key, venue, market_id, event_family, outcome,
                 resolved_at, source, resolution_version, recorded_at)
                VALUES (?, 'ibkr', ?, ?, ?, datetime('now'),
                        'ibkr_etf_adjusted_close', 1, datetime('now'))""",
-            (f"ibkr:{market_id}", market_id,
-             instrument_event_family(spec, self._alias, session_date), outcome))
+            (f"ibkr:{family}", family, family, outcome))
 
     async def _resolve_forecasts(self, symbol: str) -> None:
         rows = await self._db.fetchall(
@@ -263,7 +274,16 @@ class IBKRETFPaperPillar:
              datetime.now(timezone.utc).astimezone(_ET).date().isoformat()))
         if not rows:
             return
-        closes = await self._closes(symbol)
+        # Drop the session in progress. reqHistoricalData with endDateTime=""
+        # RETURNS TODAY'S PARTIAL BAR (measured 2026-07-27: a "1 M" request at
+        # 14:29 ET included 2026-07-27), so without this the 5th session counts
+        # while it is still trading and the forecast resolves against whatever
+        # the price happened to be when the cycle ran — six hours before the
+        # close it actually asks about. The query filters actual_outcome IS
+        # NULL, so that wrong value would never be revisited.
+        session_today = datetime.now(timezone.utc).astimezone(_ET).date().isoformat()
+        closes = [(day, close) for day, close in await self._closes(symbol)
+                  if day < session_today]
         for row in rows:
             base = next((close for day, close in closes
                          if day == row["opened_session_date"]), None)

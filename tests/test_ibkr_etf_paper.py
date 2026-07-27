@@ -1,8 +1,10 @@
 """Paper-only IBKR ETF book behavior and safety tests."""
 
 import time
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -647,7 +649,50 @@ async def test_resolved_forecast_publishes_the_outcome_the_ladder_joins_on():
     assert outcome is not None, "resolved forecast never reached the ladder"
     assert outcome["venue"] == "ibkr"
     assert outcome["outcome"] == 1
-    # The join key the ladder builds: lower(venue)||':'||market_id
-    assert outcome["event_key"] == "ibkr:ibkr:luna:SPY"
+    # Keyed by FAMILY, not the symbol-scoped market_id. market_outcomes is
+    # UNIQUE(venue, market_id): keying by symbol would let the first resolved
+    # forecast own the only row (luna, SPY) can ever have, and every later
+    # week would be scored against that one stale outcome.
     assert outcome["event_family"].startswith("ibkr:luna:SPY:2026W")
+    assert outcome["market_id"] == outcome["event_family"]
+    assert outcome["event_key"] == f"ibkr:{outcome['event_family']}"
+    # Consequence, recorded honestly: nothing joins today, because the ladder
+    # joins on d.market_id. The outcomes bank; counting them needs a decision.
+    assert outcome["market_id"] != "ibkr:luna:SPY"
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_forecast_never_resolves_against_a_session_still_trading():
+    """reqHistoricalData returns TODAY'S PARTIAL BAR.
+
+    Measured 2026-07-27: a "1 M" request at 14:29 ET included 2026-07-27. So
+    the horizon's final session counts while it is still trading, and the
+    forecast resolves against whatever the price was when the cycle ran rather
+    than the close it asks about. actual_outcome IS NULL filters the row out
+    afterwards, so the wrong value is permanent.
+    """
+    db = Database(":memory:")
+    await db.connect()
+    today = datetime.now(timezone.utc).astimezone(
+        ZoneInfo("America/New_York")).date()
+    days = [(today - timedelta(days=d)).isoformat() for d in range(9, -1, -1)]
+    client = QuotesOnlyClient()
+    # Final bar is TODAY, in progress and gapped down.
+    client.get_adjusted_daily_closes = AsyncMock(return_value=(
+        [(d, 100.0 + i) for i, d in enumerate(days[:-1])] + [(days[-1], 1.0)]))
+    pillar = await _pillar(db, client=client)
+    await db.execute(
+        """INSERT INTO ibkr_etf_forecasts
+           (model_alias, model, symbol, probability, confidence,
+            reference_price, opened_session_date, horizon_sessions, due_at)
+           VALUES ('luna','m','SPY',0.7,'HIGH',100.0,?,5,datetime('now'))""",
+        (days[4],))
+    await db.commit()
+    await pillar._resolve_forecasts("SPY")
+
+    row = await db.fetchone("SELECT * FROM ibkr_etf_forecasts")
+    # Only 4 COMPLETED sessions follow days[4]; the 5th is today, still open.
+    assert row["actual_outcome"] is None, "resolved against a live session"
+    assert row["last_session_date"] != days[-1]
     await db.close()
