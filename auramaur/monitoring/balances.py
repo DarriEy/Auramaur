@@ -23,6 +23,9 @@ log = structlog.get_logger()
 
 # Venue REST calls carry this timeout so a wedged venue can't stall a caller.
 FETCH_TIMEOUT_S = 8
+# A balance row older than this, while fetches are failing, is reported as
+# an error rather than a warning: the displayed number is no longer real.
+STALE_BALANCE_ALERT_HOURS = 6.0
 
 
 async def kalshi_balance(settings) -> str:
@@ -82,6 +85,25 @@ async def ibkr_balance(settings) -> str:
         ib.disconnect()
 
 
+async def _row_age_hours(db, venue: str) -> float | None:
+    """Age of the persisted balance row, so a repeated failure can escalate.
+
+    A fetch error alone is routine (a venue blips); a fetch error standing on
+    top of a day-old row means the number an operator is reading is fiction.
+    """
+    try:
+        row = await db.fetchone(
+            "SELECT fetched_at FROM venue_balances WHERE venue = ?", (venue,))
+        if not row or not row["fetched_at"]:
+            return None
+        fetched = datetime.fromisoformat(str(row["fetched_at"]))
+        if fetched.tzinfo is None:
+            fetched = fetched.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - fetched).total_seconds() / 3600.0
+    except Exception:  # noqa: BLE001 — never let observability break the loop
+        return None
+
+
 async def record_venue_balances(db, settings, *, include_ibkr: bool = True) -> None:
     """Upsert one ``venue_balances`` row per enabled venue.
 
@@ -107,8 +129,21 @@ async def record_venue_balances(db, settings, *, include_ibkr: bool = True) -> N
             # warning, not debug: the stale row silently stood in for a live
             # balance for 8h during the 2026-07-21 gateway 2FA outage — the
             # age column "told the story" but nothing surfaced it.
+            #
+            # Always carry the exception TYPE. asyncio.TimeoutError — the most
+            # common failure here, since every call is wrapped in wait_for —
+            # stringifies to "", so the upgrade to warning above still emitted
+            # `error: ""` 153 times on 2026-07-27 while the IBKR row sat two
+            # days stale. A warning that cannot say what went wrong is the same
+            # invisibility in a louder font.
             log.warning("balance_recorder.fetch_error", venue=venue,
-                        error=str(exc)[:120])
+                        error_type=type(exc).__name__,
+                        error=str(exc)[:120] or type(exc).__name__)
+            stale_age = await _row_age_hours(db, venue)
+            if stale_age is not None and stale_age >= STALE_BALANCE_ALERT_HOURS:
+                log.error("balance_recorder.stale_balance", venue=venue,
+                          age_hours=round(stale_age, 1),
+                          error_type=type(exc).__name__)
             continue
         fetched.append((venue, detail))
     if fetched:
