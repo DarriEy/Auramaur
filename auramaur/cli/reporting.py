@@ -144,6 +144,196 @@ def pnl(paper: bool, backfill: bool):
     asyncio.run(_run())
 
 
+@main.command("ibkr-calibration")
+@click.option("--arm", default="", help="Restrict to one model_alias.")
+@click.option("--width", default=0.02, show_default=True,
+              help="Probability bucket width for the calibration curve.")
+def ibkr_calibration(arm: str, width: float):
+    """Where to set the ETF arms' entry thresholds, read from resolved outcomes.
+
+    The gate is AND(confidence >= floor, probability >= min_prob) and its
+    defaults were tuned for a deterministic analyzer that returns 0.70/HIGH by
+    construction. The OpenAI arms produce 0.43-0.56 at MEDIUM_LOW, so the gate
+    rejects everything. This report is how the per-arm overrides get chosen
+    from evidence rather than from four days of unscored output.
+
+    Read the LOWER bound, never the hit rate. A 5-session directional call is a
+    coin flip until proven otherwise.
+    """
+    async def _run():
+        from auramaur.evaluation.etf_calibration import (
+            COIN, CONFIDENCE_RANKS, Forecast, brier_score, confidence_bands,
+            probability_bands, samples_for_reliable_edge, suggested_thresholds,
+            threshold_sweep,
+        )
+        from auramaur.web.db import ReadOnlyDatabase
+
+        settings = Settings()
+        db = ReadOnlyDatabase()
+        await db.connect()
+        try:
+            clause, params = "", []
+            if arm:
+                clause, params = " WHERE model_alias = ?", [arm]
+            rows = await db.fetchall(
+                f"""SELECT model_alias, probability, confidence, actual_outcome,
+                           due_at
+                    FROM ibkr_etf_forecasts{clause}
+                    ORDER BY model_alias, id""", tuple(params))
+            if not rows:
+                console.print("[yellow]No ETF forecasts recorded.[/]")
+                return
+            by_arm: dict[str, list] = {}
+            pending: dict[str, list[str]] = {}
+            for row in rows:
+                by_arm.setdefault(row["model_alias"], []).append(Forecast(
+                    float(row["probability"]), str(row["confidence"]),
+                    None if row["actual_outcome"] is None
+                    else int(row["actual_outcome"])))
+                if row["actual_outcome"] is None:
+                    pending.setdefault(row["model_alias"], []).append(
+                        str(row["due_at"]))
+
+            for alias in sorted(by_arm):
+                forecasts = by_arm[alias]
+                resolved = [f for f in forecasts if f.resolved]
+                min_prob = float(settings.ibkr.etf_arm_min_prob.get(
+                    alias, settings.ibkr.etf_min_prob))
+                min_conf = str(settings.ibkr.etf_arm_min_confidence.get(
+                    alias, settings.ibkr.etf_min_confidence)).upper()
+                ceiling = max(f.probability for f in forecasts)
+                brier = brier_score(forecasts)
+                head = (f"[bold]{alias}[/] — {len(resolved)}/{len(forecasts)} "
+                        f"resolved | gate: prob>={min_prob} conf>={min_conf} | "
+                        f"observed ceiling {ceiling:.2f}")
+                if brier is not None:
+                    head += f" | Brier {brier:.3f}"
+                console.print(Panel(head, expand=False))
+                if min_prob > ceiling:
+                    # Scoped to the sample, not asserted structurally: a
+                    # deterministic arm returns 0.70/0.30 by construction, so a
+                    # run of negative-momentum forecasts caps at 0.30 without
+                    # the gate being unreachable in principle.
+                    if len(forecasts) >= 30:
+                        console.print(
+                            f"  [red]Gate unreachable on the record[/]: "
+                            f"min_prob {min_prob} exceeds all "
+                            f"{len(forecasts)} forecasts this arm has recorded "
+                            f"(max {ceiling:.2f}).")
+                    else:
+                        console.print(
+                            f"  [yellow]No forecast has reached min_prob "
+                            f"{min_prob}[/] (max {ceiling:.2f}), but only "
+                            f"{len(forecasts)} recorded — too few to call the "
+                            f"gate unreachable.")
+                if not resolved:
+                    nxt = min(pending.get(alias, [])) if pending.get(alias) else "—"
+                    console.print(
+                        f"  [dim]Nothing resolved yet; first matures {nxt[:10]}. "
+                        f"No threshold is choosable from this.[/]\n")
+                    continue
+
+                conf_table = Table(title="by stated confidence", expand=False)
+                for col in ("band", "n", "hit rate", "95% low", "95% high",
+                            "vs forecast", "beats coin"):
+                    conf_table.add_column(col, justify="right")
+                for band in confidence_bands(resolved):
+                    conf_table.add_row(
+                        band.label, str(band.n), f"{band.realized:.1%}",
+                        f"{band.lo:.1%}", f"{band.hi:.1%}",
+                        f"{band.calibration_gap:+.1%}",
+                        "[green]yes[/]" if band.beats_coin else "[dim]no[/]")
+                console.print(conf_table)
+
+                curve = Table(title="calibration curve", expand=False)
+                for col in ("bucket", "n", "mean forecast", "realized",
+                            "95% low", "gap"):
+                    curve.add_column(col, justify="right")
+                for band in probability_bands(resolved, width=width):
+                    curve.add_row(
+                        band.label, str(band.n), f"{band.mean_forecast:.3f}",
+                        f"{band.realized:.1%}", f"{band.lo:.1%}",
+                        f"{band.calibration_gap:+.1%}")
+                console.print(curve)
+
+                candidates = suggested_thresholds(forecasts, width=width)
+                # Always sweep the floor the arm can actually reach, not only
+                # the configured one. A floor that selects nothing tells you
+                # the gate is shut but not where to move it. Use the most
+                # PERMISSIVE observed band: it maximises the sample and lets
+                # min_prob do the filtering, which is the knob with a
+                # continuum. Whether tightening confidence would help instead
+                # is what the band table above answers.
+                reachable = min(
+                    (b.label for b in confidence_bands(resolved)),
+                    key=lambda c: CONFIDENCE_RANKS.get(c, 99), default="LOW")
+                floors = list(dict.fromkeys([min_conf, reachable]))
+                sweeps = {floor: threshold_sweep(resolved, candidates,
+                                                 min_confidence=floor)
+                          for floor in floors}
+                for floor, sweep in sweeps.items():
+                    tag = " (configured)" if floor == min_conf else " (reachable)"
+                    sweep_table = Table(
+                        title=f"threshold sweep — confidence floor {floor}{tag}",
+                        expand=False)
+                    for col in ("min_prob", "selected", "hit rate", "95% low",
+                                "n needed"):
+                        sweep_table.add_column(col, justify="right")
+                    for entry in sweep:
+                        sweep_table.add_row(
+                            f"{entry.threshold:.2f}", str(entry.n),
+                            f"{entry.realized:.1%}" if entry.n else "—",
+                            f"{entry.lo:.1%}" if entry.n else "—",
+                            "—" if entry.samples_needed is None
+                            else str(entry.samples_needed))
+                    console.print(sweep_table)
+                    if not any(e.n for e in sweep):
+                        console.print(
+                            f"  [red]Confidence floor {floor} selects zero "
+                            f"resolved forecasts at every threshold[/] — it is "
+                            f"the binding gate, and it is checked BEFORE "
+                            f"probability. Moving min_prob alone changes "
+                            f"nothing.")
+
+                verdict = sweeps[reachable]
+                best = [e for e in verdict if e.n and e.lo > COIN]
+                if best:
+                    pick = max(best, key=lambda e: e.lo)
+                    console.print(
+                        f"  [green]Supported[/]: at confidence floor "
+                        f"{reachable}, min_prob {pick.threshold:.2f} selects "
+                        f"{pick.n} forecasts at {pick.realized:.1%} "
+                        f"(95% low {pick.lo:.1%} > 50%).\n")
+                else:
+                    strongest = max((e for e in verdict if e.n),
+                                    key=lambda e: e.realized, default=None)
+                    note = ""
+                    if strongest is not None:
+                        need = samples_for_reliable_edge(strongest.realized)
+                        note = (f" Best is {strongest.realized:.1%} on "
+                                f"n={strongest.n} at "
+                                f"min_prob {strongest.threshold:.2f}; "
+                                + (f"~{need} resolutions at that rate would be "
+                                   f"needed to distinguish it from chance."
+                                   if need else
+                                   "no sample size rescues a sub-coin rate."))
+                    console.print(
+                        f"  [yellow]Not yet supported[/]: at floor {reachable}, "
+                        f"no threshold's lower bound clears a coin flip.{note}\n")
+
+            console.print(
+                "[dim]These intervals assume independent forecasts and the "
+                "ETF arms' are not: ~28 correlated instruments (SPY/VTI/QQQ/XLK "
+                "co-move) are forecast on overlapping 5-session windows, so the "
+                "effective sample is well below the row count and the true "
+                "interval is WIDER than shown. Treat every bound here as "
+                "optimistic — if it does not clear a coin flip on these "
+                "numbers, it certainly does not in reality.[/]")
+        finally:
+            await db.close()
+    asyncio.run(_run())
+
+
 @main.command("ibkr-intelligence")
 def ibkr_intelligence():
     """Compare Luna/Terra/Sol ETF forecast quality and paper P&L."""
