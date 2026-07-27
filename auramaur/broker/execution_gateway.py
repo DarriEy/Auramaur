@@ -139,6 +139,27 @@ class ExecutionGateway:
             exchange=self.exchange, exchange_name=self.exchange_name,
             decision_id=decision_id)
 
+    def _per_market_cap(self, order: Order) -> float:
+        """Per-(market, token) exposure ceiling, scoped by VENUE.
+
+        risk.max_stake_abs_ceiling sizes a stake on a binary prediction
+        contract. It is meaningless for a broker instrument: 21 shares of a
+        $28.57 ETF is $600 of perfectly ordinary exposure, and applying the
+        prediction-market ceiling to it blocks every IBKR position outright
+        (found 2026-07-27 the first time an instrument was routed through this
+        gateway). Broker books carry their own envelope — per-book position
+        counts and a paper budget — so the ceiling here is the book budget,
+        with the prediction-market ceiling still governing everything else.
+
+        Deliberately not a global raise: the prediction-market guard exists
+        because stacked sub-cap entries reached ~$90 on a documented $25 limit,
+        and widening it for IBKR's sake would reopen exactly that.
+        """
+        venue = (order.exchange or self.exchange_name or "").lower()
+        if venue == "ibkr":
+            return float(getattr(self.settings.ibkr, "paper_budget_usd", 5000.0))
+        return float(getattr(self.settings.risk, "max_stake_abs_ceiling", 25.0))
+
     async def _exceeds_market_cap(self, order: Order, *, is_live: bool) -> str | None:
         """Aggregate per-(market, token) stake cap. Returns a skip-reason string
         when this BUY would push TOTAL exposure to a market SIDE past the
@@ -159,7 +180,7 @@ class ExecutionGateway:
         """
         if order.side != OrderSide.BUY:
             return None
-        cap = getattr(self.settings.risk, "max_stake_abs_ceiling", 25.0)
+        cap = self._per_market_cap(order)
         is_paper_flag = 0 if is_live else 1
         try:
             row = await self.db.fetchone(

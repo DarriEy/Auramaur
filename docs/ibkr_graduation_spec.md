@@ -49,8 +49,8 @@ exist.
 
 Call `DecisionTracker.capture(...)` on every IBKR entry, mirroring
 `_capture_decision`. The IBKR books do not route through `ExecutionGateway`, so
-this cannot be inherited — it must be called explicitly, or the books must be
-migrated onto a gateway path (see "Open question" below).
+this is inherited for free once the books route through `gateway.submit(...)`
+— see "Resolved: route through the gateway" below, which is the chosen path.
 
 Fields that need an IBKR-specific answer:
 
@@ -136,18 +136,58 @@ has a real live order path behind its gate chain.
   edge; that is a transfer decision, and transfers are hard-off by config.
 - Not changing the prediction-market ladder. Its bars stay as they are.
 
-## Open question for the operator
+## Resolved: route through the gateway (corrected 2026-07-27)
 
-Should the IBKR books be **migrated onto `ExecutionGateway`** rather than
-calling `DecisionTracker` directly?
+An earlier revision of this spec recommended calling `DecisionTracker`
+directly, on the grounds that the gateway is "built around prediction-market
+orders … fitting FX and equities into it is a significant refactor of a
+money-moving component."
 
-- Migrating buys capture, booking, the risk gate, and the exposure registry in
-  one move, and removes a whole class of "this path is outside the perimeter"
-  findings.
-- But the gateway is built around prediction-market orders (tokens, YES/NO,
-  neg-risk families). Fitting FX and equities into it is a significant
-  refactor of a money-moving component.
+**That was wrong, and measuring it disproved it.** The gateway is already
+close to venue-agnostic:
 
-Recommend calling `DecisionTracker` directly for now and revisiting migration
-once the books have demonstrated any edge at all. Building the full integration
-for strategies with a -$6.00 lifetime record is premature.
+- Only **nine lines** in `execution_gateway.py` touch prediction-market
+  concepts at all.
+- It reads exactly **six fields** off the intent: `market.id`,
+  `market.category`, `market.neg_risk_market_id`, `signal.claude_prob`,
+  `signal.market_prob`, `signal.strategy_source`.
+- Everything else flows through `Order` — already generic (`market_id`,
+  `side`, `size`, `price`, `dry_run`, `post_only`, `source`) — and
+  `exchange.place_order(order)`, a protocol method **the IBKR clients already
+  implement** (`ibkr.py:337`, `ibkr_equity.py:169`).
+
+The three prediction-market couplings degrade benignly rather than breaking:
+
+| Coupling | Behaviour for an IBKR instrument |
+|---|---|
+| `order.token.value` in the market-cap key | defaults to `YES`, so the cap becomes one per instrument — the correct semantics |
+| `orderbook_snapshots` lookup in decision capture | returns nothing; already null-guarded (`book is None`) |
+| `neg_risk_market_id` for the event family | optional; falls back to `market.id` |
+
+So routing through the gateway is **both smaller and strictly better** than the
+direct-`DecisionTracker` path: it buys decision capture, `pnl_ledger` booking,
+the aggregate market-cap guard, the exposure-registry perimeter and the
+`force_paper` contract in one move, instead of reimplementing each on the IBKR
+side and drifting from the originals.
+
+### The one real gap
+
+`_build_order` obtains an `Order` from, in priority order: a `SmartOrderRouter`,
+`exchange.prepare_executable_order(...)`, or `exchange.prepare_order(...)`.
+**Neither IBKR client has any of the three.** That is the single missing piece,
+and it is the first increment (below).
+
+## Increments
+
+1. **Intent adapter + `prepare_order` on the IBKR client.** Present an
+   `InstrumentSpec` as the six fields the gateway reads, and give the client a
+   `prepare_order` that builds an `Order` from (spec, quote, side, size).
+   Wired behind the existing `paper` flag so **nothing changes about what
+   trades**. This is the increment to land first.
+2. **Route `_fill` through `gateway.submit(...)`** instead of writing fills
+   directly. Booking and capture both arrive as a consequence — pieces 1 and 2
+   of "What has to change" are satisfied by this single move.
+3. **Decide the Brier-bar question** (see above) with real captured decisions in
+   hand.
+4. **Gate on `decide(...)`** — last, and only once the books have completed
+   round trips.
