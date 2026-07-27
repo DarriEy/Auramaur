@@ -354,3 +354,65 @@ def reconcile_kalshi_orders(write: bool):
             await db.close()
 
     asyncio.run(_run())
+
+
+@main.command("ibkr-backfill-basis")
+@click.option("--apply", "apply_changes", is_flag=True,
+              help="Write the rows. Without this the command only reports.")
+def ibkr_backfill_basis(apply_changes: bool):
+    """Give pre-increment-2 IBKR paper positions a cost basis.
+
+    A position opened before the books routed through ExecutionGateway has no
+    cost_basis row, so PnLTracker caps its exit at a size of zero: the sell
+    books only its commission and the round trip's gross P&L is lost
+    permanently. Reports by default; pass --apply to write.
+    """
+    async def _run():
+        from auramaur.broker.ibkr_basis_backfill import (
+            apply_basis, load_existing_basis, plan_etf_basis,
+            plan_multiasset_basis,
+        )
+
+        db = Database()
+        await db.connect(ensure_schema=False)
+        try:
+            existing = await load_existing_basis(db)
+            planned = plan_multiasset_basis(
+                await db.fetchall(
+                    """SELECT book, instrument_key, quantity, multiplier,
+                              fx_to_usd, avg_cost FROM ibkr_paper_positions"""),
+                existing)
+            planned += plan_etf_basis(
+                await db.fetchall(
+                    """SELECT model_alias, symbol, quantity, avg_cost
+                       FROM ibkr_etf_positions WHERE quantity > 0"""),
+                existing)
+            if not planned:
+                console.print(
+                    f"[green]Nothing to do[/] — every open IBKR position "
+                    f"already has a basis ({len(existing)} tracked).")
+                return
+            table = Table(title="IBKR positions missing a cost basis")
+            for name in ("market_id", "size", "USD/unit", "total USD"):
+                table.add_column(name, justify="right")
+            for row in planned:
+                table.add_row(row.market_id, f"{row.size:.4f}",
+                              f"${row.usd_avg_cost:,.2f}",
+                              f"${row.total_cost:,.2f}")
+            console.print(table)
+            console.print(
+                f"[dim]Basis is USD per unit (avg_cost x multiplier x fx): "
+                f"record_fill realizes (price - avg_cost) * size and knows "
+                f"neither, so a local-currency basis books ~1000x wrong for "
+                f"FX.[/]")
+            if not apply_changes:
+                console.print(
+                    f"\n[yellow]Dry run[/] — {len(planned)} row(s) would be "
+                    f"written. Re-run with --apply to commit.")
+                return
+            written = await apply_basis(db, planned)
+            console.print(f"\n[green]Wrote {written} cost_basis row(s).[/] "
+                          f"Existing rows were left untouched.")
+        finally:
+            await db.close()
+    asyncio.run(_run())
