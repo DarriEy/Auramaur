@@ -543,3 +543,97 @@ def ibkr_exit_study(book: str, years: int, split: str, spread_bps: float):
                       "split is one experiment — re-running with a different "
                       "--split until it passes is how this lies to you.[/]")
     asyncio.run(_run())
+
+
+@main.command("ibkr-signal-study")
+@click.option("--book", default="global_etf",
+              type=click.Choice(("global_etf", "international_equity")))
+@click.option("--years", default=5, show_default=True)
+@click.option("--horizon", default=10, show_default=True,
+              help="Forward sessions to measure the signal against.")
+def ibkr_signal_study(book: str, years: int, horizon: int):
+    """Does normalized_momentum predict anything on this universe?
+
+    Measures information content, not a tuned rule: no search, no best-of-N.
+    Forward returns are EXCESS of the equal-weight universe on the same
+    session, so a rising market cannot masquerade as skill, and the t-statistic
+    samples only non-overlapping windows.
+    """
+    async def _run():
+        from auramaur.backtest.ibkr_signal_study import (
+            decile_buckets, gate_contrast, information_coefficient, observations,
+        )
+        from auramaur.exchange.alpaca_multiasset import build_multiasset_market_data
+        from auramaur.exchange.ibkr_instruments import BY_BOOK, IBKRBook
+
+        settings = Settings()
+        threshold = settings.ibkr.multiasset_min_normalized_momentum
+        client = build_multiasset_market_data(
+            settings, client_id=settings.ibkr.multiasset_preflight_client_id)
+        bars_by_key = {}
+        try:
+            for spec in BY_BOOK[IBKRBook(book)]:
+                try:
+                    bars = await client.get_daily_bars(spec, duration=f"{years} Y")
+                except Exception:  # noqa: BLE001
+                    continue
+                rows = [(str(d)[:10], float(c)) for d, c in (bars or []) if c and c > 0]
+                if len(rows) >= 150:
+                    bars_by_key[spec.key] = sorted(rows)
+        finally:
+            await client.close()
+        if not bars_by_key:
+            console.print("[red]No usable history.[/]")
+            return
+
+        obs = observations(bars_by_key, horizon=horizon)
+        if not obs:
+            console.print("[yellow]No observations.[/]")
+            return
+        mean_ic, t_stat, used, total = information_coefficient(obs, horizon=horizon)
+        console.print(Panel(
+            f"[bold]{book}[/] — {len(bars_by_key)} instruments, "
+            f"{len(obs):,} signal/forward pairs, {horizon}-session horizon\n"
+            f"returns are EXCESS of the equal-weight universe that session",
+            expand=False))
+
+        table = Table(title="mean excess forward return by momentum quintile",
+                      expand=False)
+        for c in ("bucket", "n", "mean momentum", "mean excess", "95% low",
+                  "hit rate"):
+            table.add_column(c, justify="right")
+        for b in decile_buckets(obs):
+            table.add_row(b.label, f"{b.n:,}", f"{b.mean_momentum:+.3f}",
+                          f"{b.mean_excess:+.3%}", f"{b.lcb:+.3%}",
+                          f"{b.hit_rate:.0%}")
+        console.print(table)
+
+        passing, failing = gate_contrast(obs, threshold)
+        gate = Table(title=f"the deployed entry gate (min_norm_momentum "
+                           f"{threshold:g})", expand=False)
+        for c in ("side", "n", "mean excess", "95% low", "hit rate"):
+            gate.add_column(c, justify="right")
+        for b in (passing, failing):
+            gate.add_row(b.label, f"{b.n:,}", f"{b.mean_excess:+.3%}",
+                         f"{b.lcb:+.3%}", f"{b.hit_rate:.0%}")
+        console.print(gate)
+
+        console.print(f"  information coefficient: [bold]{mean_ic:+.4f}[/] "
+                      f"(t={t_stat:+.2f} on {used} non-overlapping sessions of "
+                      f"{total})")
+        if passing.lcb > 0:
+            console.print("  [green]The gate's selections beat the universe "
+                          "with a positive lower bound.[/]")
+        elif passing.mean_excess > failing.mean_excess:
+            console.print("  [yellow]Selections lean better than rejections, "
+                          "but the lower bound does not clear zero — "
+                          "suggestive, not evidence.[/]")
+        else:
+            console.print("  [red]The gate does not separate winners from "
+                          "losers: what it buys does no better than what it "
+                          "skips.[/]")
+        console.print("\n[dim]No selection was performed here, so there is "
+                      "nothing to overfit — but this measures the SIGNAL, not "
+                      "the tradeable rule. Costs, sizing and exits still "
+                      "apply on top.[/]")
+    asyncio.run(_run())
