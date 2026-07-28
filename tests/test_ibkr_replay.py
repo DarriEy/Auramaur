@@ -100,3 +100,57 @@ def test_position_and_deployment_caps_are_respected():
 def test_too_little_history_yields_nothing_rather_than_guessing():
     result = _run(_series(50, 0.004))
     assert result.trips == () and result.sessions == 50
+
+
+def test_signal_functions_never_see_more_than_the_live_book_fetches(monkeypatch):
+    """IBKRMultiAssetPaperBook calls get_daily_bars(spec) with its default
+    "3 M" — 61 bars. normalized_momentum blends 20/60/120-session horizons and
+    silently drops the ones that do not fit, so handing the replay the full
+    accumulated history unlocks a 120-horizon term the live book can NEVER see.
+    That is a different strategy, and its P&L says nothing about the deployed
+    one. The first run of this harness made exactly that mistake.
+
+    Asserted on the wiring rather than on emergent trades: the lengths handed
+    to the signal functions are the thing that must match.
+    """
+    from auramaur.backtest import ibkr_replay
+    from auramaur.backtest.ibkr_replay import SIGNAL_WINDOW
+
+    assert SIGNAL_WINDOW == 61
+
+    seen = []
+    real_momentum = ibkr_replay.normalized_momentum
+    real_vol = ibkr_replay.annualized_volatility
+    monkeypatch.setattr(ibkr_replay, "normalized_momentum",
+                        lambda closes, *a, **k: (seen.append(len(closes)),
+                                                 real_momentum(closes, *a, **k))[1])
+    monkeypatch.setattr(ibkr_replay, "annualized_volatility",
+                        lambda closes, *a, **k: (seen.append(len(closes)),
+                                                 real_vol(closes, *a, **k))[1])
+
+    _run(_series(400, 0.004))
+    assert seen, "signal functions were never called"
+    assert max(seen) <= SIGNAL_WINDOW, (
+        f"a signal saw {max(seen)} closes; the live book only ever fetches "
+        f"{SIGNAL_WINDOW}")
+    # And the window is actually reached, so this is not passing by starvation.
+    assert max(seen) == SIGNAL_WINDOW
+
+
+def test_split_by_entry_puts_straddling_trips_in_train():
+    from auramaur.backtest.ibkr_replay import ReplayTrip, mean_lcb, split_by_entry
+
+    def trip(entry, exit_):
+        return ReplayTrip("A", "us_equity", entry, exit_, 1.0, 1.0, 1.0,
+                          0.0, 0.0, "x")
+
+    trips = [trip("2024-06-01", "2024-06-10"),
+             trip("2024-12-30", "2025-01-15"),   # straddles the split
+             trip("2025-02-01", "2025-02-10")]
+    train, test = split_by_entry(trips, "2025-01-01")
+    assert len(train) == 2 and len(test) == 1
+    assert test[0].entry_date == "2025-02-01"
+
+    assert mean_lcb([1.0]) == float("-inf")
+    assert mean_lcb([1.0, 1.0, 1.0]) == pytest.approx(1.0)
+    assert mean_lcb([-5.0, 5.0, -5.0, 5.0]) < 0

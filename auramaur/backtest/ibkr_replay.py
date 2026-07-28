@@ -40,6 +40,18 @@ from auramaur.risk.ibkr_math import (
     adverse_fill, annualized_volatility, normalized_momentum,
 )
 
+# Trailing closes handed to the signal functions. IBKRMultiAssetPaperBook calls
+# get_daily_bars(spec) and get_daily_bars_by_con_id(spec, con_id) with their
+# DEFAULT duration of "3 M", which the gateway returns as 61 daily bars
+# (measured 2026-07-27: "3 M: 61 bars 2026-04-29 -> 2026-07-27").
+#
+# This is load-bearing, not a tuning knob. normalized_momentum blends 20/60/120
+# session horizons and drops the ones that do not fit, so a replay that feeds
+# the whole accumulated history unlocks the 120-horizon term the live book can
+# never see — i.e. it measures a DIFFERENT strategy and its P&L means nothing.
+# The first run of this harness did exactly that.
+SIGNAL_WINDOW = 61
+
 
 @dataclass(frozen=True)
 class ReplayTrip:
@@ -100,14 +112,21 @@ def replay_momentum_book(
     min_norm_momentum: float,
     exit_norm_momentum: float,
     assumed_spread_bps: float,
-    warmup: int = 130,
+    signal_window: int = SIGNAL_WINDOW,
+    warmup: int | None = None,
 ) -> ReplayResult:
     """Replay the deployed entry/exit rules session by session.
 
     ``bars_by_key`` maps instrument key -> ascending (date, close). Only closes
     strictly BEFORE the decision session are ever passed to the signal
     functions, which is what keeps the momentum honest.
+
+    ``signal_window`` is the number of trailing closes handed to the signal
+    functions, and it must match what the live book fetches or this measures a
+    different strategy. See SIGNAL_WINDOW.
     """
+    if warmup is None:
+        warmup = signal_window + 1
     dates = sorted({day for bars in bars_by_key.values() for day, _ in bars})
     if len(dates) <= warmup:
         return ReplayResult((), len(dates), dates[0] if dates else "",
@@ -151,7 +170,7 @@ def replay_momentum_book(
                       "stop_loss_pct" if gain_pct <= -stop_loss_pct else
                       "take_profit" if gain_pct >= take_profit_pct else "")
             if not hard:
-                momentum = normalized_momentum(history[key])
+                momentum = normalized_momentum(history[key][-signal_window:])
                 if momentum is not None and momentum <= exit_norm_momentum:
                     hard, reason = True, "momentum"
             if not hard:
@@ -177,8 +196,9 @@ def replay_momentum_book(
             close = closes_by_key[key].get(day)
             if not close:
                 continue
-            momentum = normalized_momentum(history[key])
-            vol = annualized_volatility(history[key])
+            window = history[key][-signal_window:]
+            momentum = normalized_momentum(window)
+            vol = annualized_volatility(window)
             if momentum is None or vol is None or momentum < min_norm_momentum:
                 continue
             candidates.append((momentum, key, close, vol))
@@ -209,3 +229,29 @@ def replay_momentum_book(
 
     return ReplayResult(tuple(trips), len(dates), dates[0], dates[-1],
                         len(open_pos))
+
+
+def split_by_entry(trips, split_date: str):
+    """Partition round trips into (train, test) by ENTRY date.
+
+    Splitting on entry, not exit, is what makes the test set genuinely unseen:
+    a trip entered before the split was already decided by information the
+    tuner had, even if it closed afterwards.
+    """
+    train = [t for t in trips if t.entry_date < split_date]
+    test = [t for t in trips if t.entry_date >= split_date]
+    return train, test
+
+
+def mean_lcb(values, z: float = 1.96) -> float:
+    """95% lower bound on mean P&L — the live contract's own statistic.
+
+    -inf below two observations: a single trip has no sample variance and must
+    never look like evidence.
+    """
+    n = len(values)
+    if n < 2:
+        return float("-inf")
+    mean = sum(values) / n
+    variance = sum((v - mean) ** 2 for v in values) / (n - 1)
+    return mean - z * math.sqrt(variance / n)

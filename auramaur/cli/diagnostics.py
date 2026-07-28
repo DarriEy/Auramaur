@@ -402,3 +402,144 @@ def ibkr_backtest(book: str, years: int, spread_bps):
                       "gate's tables hold forward paper record, and replayed "
                       "history must never be mistaken for it.[/]")
     asyncio.run(_run())
+
+
+@main.command("ibkr-exit-study")
+@click.option("--book", default="global_etf",
+              type=click.Choice(("global_etf", "international_equity")))
+@click.option("--years", default=5, show_default=True)
+@click.option("--split", default="2025-01-01", show_default=True,
+              help="Trips entered before this date tune; on/after only score.")
+@click.option("--spread-bps", default=3.0, show_default=True)
+def ibkr_exit_study(book: str, years: int, split: str, spread_bps: float):
+    """Does the exit geometry explain the loss? Tuned on train, scored on test.
+
+    The deployed book wins 27% of round trips with winners and losers the same
+    size — a trend follower needs winners ~2.7x losers at that hit rate, which
+    points at the 5%-stop / 10%-target geometry cutting winners short.
+
+    Configurations are ranked ONLY on trips entered before --split, and the
+    winner is then scored ONCE on trips entered after it. Searching N
+    configurations and reporting the best inflates apparent edge, so the
+    number searched is printed, and the winner is compared against the MEDIAN
+    test result: a pick that is no better than the median did not generalise,
+    it was luck.
+    """
+    async def _run():
+        from statistics import median
+
+        from auramaur.backtest.ibkr_replay import (
+            mean_lcb, replay_momentum_book, split_by_entry,
+        )
+        from auramaur.exchange.alpaca_multiasset import build_multiasset_market_data
+        from auramaur.exchange.ibkr_instruments import BY_BOOK, IBKRBook
+
+        settings = Settings()
+        cfg = settings.ibkr.multiasset_books[book]
+        client = build_multiasset_market_data(
+            settings, client_id=settings.ibkr.multiasset_preflight_client_id)
+        bars_by_key, classes = {}, {}
+        try:
+            for spec in BY_BOOK[IBKRBook(book)]:
+                try:
+                    bars = await client.get_daily_bars(spec, duration=f"{years} Y")
+                except Exception:  # noqa: BLE001
+                    continue
+                rows = [(str(d)[:10], float(c)) for d, c in (bars or []) if c and c > 0]
+                if len(rows) >= 150:
+                    bars_by_key[spec.key] = sorted(rows)
+                    classes[spec.key] = spec.asset_class or "unknown"
+        finally:
+            await client.close()
+        if not bars_by_key:
+            console.print("[red]No usable history.[/]")
+            return
+
+        base = dict(
+            budget_usd=cfg.budget_usd, max_positions=cfg.max_positions,
+            max_position_pct=cfg.max_position_pct,
+            max_deployment_pct=cfg.max_deployment_pct,
+            risk_per_position_pct=cfg.risk_per_position_pct,
+            max_asset_class_risk_pct=cfg.max_asset_class_risk_pct,
+            stop_vol_multiple=cfg.stop_vol_multiple,
+            min_stop_pct=cfg.min_stop_pct, slippage_bps=cfg.slippage_bps,
+            min_norm_momentum=settings.ibkr.multiasset_min_normalized_momentum,
+            assumed_spread_bps=spread_bps)
+
+        NO_TARGET = 1e9
+        grid = [(sl, tp, ex)
+                for sl in (3.0, 5.0, 8.0, 12.0)
+                for tp in (10.0, 20.0, 40.0, NO_TARGET)
+                for ex in (-0.1, -0.5, 0.0)]
+        deployed = (cfg.stop_loss_pct, cfg.take_profit_pct,
+                    settings.ibkr.multiasset_exit_normalized_momentum)
+
+        rows = []
+        for sl, tp, ex in grid:
+            result = replay_momentum_book(
+                bars_by_key, classes, stop_loss_pct=sl, take_profit_pct=tp,
+                exit_norm_momentum=ex, **base)
+            train, test = split_by_entry(result.trips, split)
+            rows.append({
+                "cfg": (sl, tp, ex),
+                "train_n": len(train), "test_n": len(test),
+                "train_lcb": mean_lcb([t.net_usd for t in train]),
+                "train_net": sum(t.net_usd for t in train),
+                "test_net": sum(t.net_usd for t in test),
+                "test_mean": (sum(t.net_usd for t in test) / len(test)
+                              if test else 0.0),
+                "test_lcb": mean_lcb([t.net_usd for t in test]),
+                "test_win": (sum(1 for t in test if t.net_usd > 0) / len(test)
+                             if test else 0.0),
+            })
+
+        def label(cfg_tuple):
+            sl, tp, ex = cfg_tuple
+            return f"stop {sl:g}% / target {'none' if tp >= NO_TARGET else f'{tp:g}%'} / mom-exit {ex:g}"
+
+        eligible = [r for r in rows if r["train_n"] >= 30]
+        console.print(Panel(
+            f"[bold]{book}[/] — {len(bars_by_key)} instruments, "
+            f"{len(grid)} configurations searched\n"
+            f"tune on entries before {split}; score on entries after\n"
+            f"spread {spread_bps:g}bps + {cfg.slippage_bps:g}bps slippage per "
+            f"leg, commission both ways", expand=False))
+        if not eligible:
+            console.print("[yellow]No configuration produced 30+ training "
+                          "trips; nothing is selectable.[/]")
+            return
+
+        base_row = next((r for r in rows if r["cfg"] == deployed), None)
+        winner = max(eligible, key=lambda r: r["train_lcb"])
+        med_test = median([r["test_net"] for r in eligible])
+
+        table = Table(title="chosen on train, scored on test", expand=False)
+        for c in ("configuration", "train n", "train LCB", "test n",
+                  "test net", "test mean", "test win"):
+            table.add_column(c, justify="right")
+        for tag, r in (("deployed", base_row), ("best-on-train", winner)):
+            if r is None:
+                continue
+            table.add_row(f"{tag}: {label(r['cfg'])}", str(r["train_n"]),
+                          f"${r['train_lcb']:.2f}", str(r["test_n"]),
+                          f"${r['test_net']:,.2f}", f"${r['test_mean']:.2f}",
+                          f"{r['test_win']:.0%}")
+        console.print(table)
+        console.print(
+            f"  median test net across the {len(eligible)} eligible "
+            f"configurations: [bold]${med_test:,.2f}[/]")
+        if winner["test_net"] <= med_test:
+            console.print("  [yellow]The train-selected configuration is no "
+                          "better than the median out of sample — the ranking "
+                          "did not generalise. Treat it as noise.[/]")
+        elif winner["test_lcb"] <= 0:
+            console.print("  [yellow]Beats the median but its own 95% lower "
+                          "bound is still not positive: suggestive, not "
+                          "evidence.[/]")
+        else:
+            console.print("  [green]Beats the median AND clears a positive "
+                          "lower bound out of sample.[/]")
+        console.print("\n[dim]Backtest evidence only; nothing written. One "
+                      "split is one experiment — re-running with a different "
+                      "--split until it passes is how this lies to you.[/]")
+    asyncio.run(_run())
