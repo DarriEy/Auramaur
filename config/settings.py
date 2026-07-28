@@ -264,6 +264,17 @@ class RiskConfig(BaseModel):
     # (-$18.84) and sports (-$31.12) lose. Promoting the strategy without this
     # would arm the losing cells alongside the one that earned it.
     live_categories_only: dict[str, list[str]] = Field(default_factory=dict)
+    # Per-strategy live-VENUE restriction, same narrowing-only shape. Absent
+    # means unrestricted.
+    #
+    # Most multi-venue strategies carry a separate strategy_source per venue
+    # (agent_trader_opus vs agent_trader_opus_kalshi), so a Polymarket record
+    # cannot authorise Kalshi trading. `llm` does NOT: one source spans both,
+    # and its politics_us evidence is 100% Polymarket (27 live rows, +$210.16)
+    # against ZERO Kalshi politics_us rows. Granting it ladder exemption
+    # therefore armed a venue the evidence never covered. This restores the
+    # separation the naming convention gives everyone else.
+    live_venues_only: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class KellyConfig(BaseModel):

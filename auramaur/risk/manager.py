@@ -273,6 +273,15 @@ class RiskManager:
             only = (rc.live_categories_only or {}).get(signal.strategy_source)
             if only:
                 allowed = [c for c in allowed if c in set(only)]
+            # Per-strategy VENUE restriction. Strategies whose Kalshi lane has
+            # its own strategy_source get this separation for free from the
+            # naming convention; `llm` shares one source across both venues, so
+            # without this its Polymarket-earned exemption silently authorises
+            # Kalshi. Narrowing only, and only for a strategy named in the map.
+            venues = (rc.live_venues_only or {}).get(signal.strategy_source)
+            if venues and (market.exchange or "").lower() not in {
+                    v.lower() for v in venues}:
+                allowed = []
             pre_checks.append(await check_category_allowlist(
                 market.category or "", allowed,
                 applies=category_applies,

@@ -597,3 +597,42 @@ async def test_live_categories_only_narrows_and_never_widens():
     # An empty restriction list is treated as "unrestricted", not "nothing".
     rc.live_categories_only = {"llm": []}
     assert effective("llm") == ["crypto", "tech", "politics_us", "other"]
+
+
+@pytest.mark.asyncio
+async def test_live_venues_only_keeps_a_polymarket_record_off_kalshi():
+    """Ladder exemption is per-STRATEGY, and llm's strategy_source spans BOTH
+    venues while every other multi-venue strategy carries a per-venue source
+    (agent_trader_opus vs agent_trader_opus_kalshi).
+
+    llm's politics_us evidence is 100% Polymarket — 27 live rows, +$210.16,
+    against ZERO Kalshi politics_us rows — so exemption alone would authorise a
+    venue the evidence never covered.
+    """
+    from config.settings import Settings
+
+    rc = Settings().risk
+    rc.allowed_categories_live = ["politics_us", "crypto"]
+    rc.live_categories_only = {"llm": ["politics_us"]}
+    rc.live_venues_only = {"llm": ["polymarket"]}
+
+    def effective(strategy: str, exchange: str) -> list[str]:
+        allowed = list(rc.allowed_categories_live) + list(
+            (rc.allowed_categories_live_extra or {}).get(strategy, []))
+        only = (rc.live_categories_only or {}).get(strategy)
+        if only:
+            allowed = [c for c in allowed if c in set(only)]
+        venues = (rc.live_venues_only or {}).get(strategy)
+        if venues and exchange.lower() not in {v.lower() for v in venues}:
+            allowed = []
+        return allowed
+
+    assert effective("llm", "polymarket") == ["politics_us"]
+    assert effective("llm", "kalshi") == []          # the venue it never proved
+    assert effective("llm", "KALSHI") == []          # case-insensitive
+    # Unlisted strategies are untouched on every venue. (bias_harvest carries
+    # a tracked 'other' extension, so use one with no extras.)
+    assert effective("weather_temp", "kalshi") == ["politics_us", "crypto"]
+    # An empty list means unrestricted, not "nothing".
+    rc.live_venues_only = {"llm": []}
+    assert effective("llm", "kalshi") == ["politics_us"]
