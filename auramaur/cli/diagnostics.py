@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 import click
+from rich.panel import Panel
 from rich.table import Table
 
 from auramaur.db.database import Database
@@ -296,3 +297,108 @@ def _render_readiness_table(report) -> None:
     console.print(table)
     overall = "[green]READY[/]" if report.overall_pass else "[red]NOT READY[/]"
     console.print(f"\nOverall: {overall}")
+
+
+@main.command("ibkr-backtest")
+@click.option("--book", default="global_etf",
+              type=click.Choice(("global_etf", "international_equity")))
+@click.option("--years", default=5, show_default=True,
+              help="Years of daily history to replay.")
+@click.option("--spread-bps", default=None, type=float,
+              help="Assumed round-trip spread. Defaults to the book's "
+                   "max_spread_bps, i.e. the worst the live book would accept.")
+def ibkr_backtest(book: str, years: int, spread_bps):
+    """Replay the deployed momentum rules over history for an early read.
+
+    The live gate needs 180 elapsed days of FORWARD paper record, so it cannot
+    say whether this strategy has any edge until 2027. The rules are
+    deterministic, so history can answer that today.
+
+    This writes NOTHING. ibkr_paper_round_trips and ibkr_paper_daily_marks are
+    the pre-registered forward evidence the live gate reads; filling them with
+    replayed history would manufacture the very evidence the contract demands.
+    """
+    async def _run():
+        from auramaur.backtest.ibkr_replay import replay_momentum_book
+        from auramaur.exchange.alpaca_multiasset import build_multiasset_market_data
+        from auramaur.exchange.ibkr_instruments import BY_BOOK, IBKRBook
+        from auramaur.risk.ibkr_evidence import evaluate_ibkr_evidence
+
+        settings = Settings()
+        cfg = settings.ibkr.multiasset_books[book]
+        spread = cfg.max_spread_bps if spread_bps is None else spread_bps
+        specs = BY_BOOK[IBKRBook(book)]
+        client = build_multiasset_market_data(
+            settings, client_id=settings.ibkr.multiasset_preflight_client_id)
+        bars_by_key, classes = {}, {}
+        try:
+            for spec in specs:
+                try:
+                    bars = await client.get_daily_bars(spec, duration=f"{years} Y")
+                except Exception as exc:  # noqa: BLE001
+                    console.print(f"  [yellow]{spec.key}: {str(exc)[:70]}[/]")
+                    continue
+                rows = [(str(d)[:10], float(c)) for d, c in (bars or []) if c and c > 0]
+                if len(rows) < 150:
+                    console.print(f"  [dim]{spec.key}: only {len(rows)} bars, skipped[/]")
+                    continue
+                bars_by_key[spec.key] = sorted(rows)
+                classes[spec.key] = spec.asset_class or "unknown"
+        finally:
+            await client.close()
+        if not bars_by_key:
+            console.print("[red]No usable history fetched.[/]")
+            return
+
+        result = replay_momentum_book(
+            bars_by_key, classes,
+            budget_usd=cfg.budget_usd, max_positions=cfg.max_positions,
+            max_position_pct=cfg.max_position_pct,
+            max_deployment_pct=cfg.max_deployment_pct,
+            risk_per_position_pct=cfg.risk_per_position_pct,
+            max_asset_class_risk_pct=cfg.max_asset_class_risk_pct,
+            stop_vol_multiple=cfg.stop_vol_multiple,
+            min_stop_pct=cfg.min_stop_pct, slippage_bps=cfg.slippage_bps,
+            stop_loss_pct=cfg.stop_loss_pct, take_profit_pct=cfg.take_profit_pct,
+            min_norm_momentum=cfg.min_norm_momentum,
+            exit_norm_momentum=cfg.exit_norm_momentum,
+            assumed_spread_bps=spread)
+
+        net = result.net_pnls
+        wins = [p for p in net if p > 0]
+        console.print(Panel(
+            f"[bold]{book}[/] — {len(bars_by_key)} instruments, "
+            f"{result.sessions} sessions {result.first_date} to "
+            f"{result.last_date}\nassumed spread {spread:.0f}bps + "
+            f"{cfg.slippage_bps:.0f}bps slippage per leg, commission charged "
+            f"both ways", expand=False))
+        if not net:
+            console.print("[yellow]No round trips. The entry gate never "
+                          "qualified on this history.[/]")
+            return
+        table = Table(title="replayed round trips", expand=False)
+        for c in ("trips", "net P&L", "mean", "win rate", "best", "worst"):
+            table.add_column(c, justify="right")
+        table.add_row(str(len(net)), f"${sum(net):,.2f}",
+                      f"${sum(net) / len(net):,.2f}",
+                      f"{len(wins) / len(net):.1%}",
+                      f"${max(net):,.2f}", f"${min(net):,.2f}")
+        console.print(table)
+
+        # Same contract the live gate applies, on replayed instead of forward
+        # evidence. Passing here is NOT graduation; it is a reason to keep the
+        # forward clock running rather than abandon the book.
+        from datetime import date
+        span = (date.fromisoformat(result.last_date)
+                - date.fromisoformat(result.first_date)).days
+        verdict = evaluate_ibkr_evidence(
+            net, elapsed_days=span, budget_usd=cfg.budget_usd,
+            min_observations=30)
+        state = "[green]would clear[/]" if verdict.ready else "[yellow]would NOT clear[/]"
+        console.print(f"  Against the live contract on this history: {state}")
+        for reason in getattr(verdict, "reasons", ()) or ():
+            console.print(f"    [dim]- {reason}[/]")
+        console.print("\n[dim]Backtest evidence only. Nothing was written: the "
+                      "gate's tables hold forward paper record, and replayed "
+                      "history must never be mistaken for it.[/]")
+    asyncio.run(_run())
