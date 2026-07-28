@@ -345,3 +345,53 @@ Three things bind, in order of how fixable they are:
    180-day window against a 120-mark minimum, so only **4 missable days**. A
    week-long outage does not delay graduation by a week — it resets the
    earliest date by however long it takes to accumulate 120 marks.
+
+## Measured 2026-07-27: global_etf has no edge, and exits are not the reason
+
+The forward clock cannot answer "is this worth waiting for" until 2027-01-20.
+The book's logic is deterministic, so `auramaur ibkr-backtest` answered it in
+minutes. Replay writes nothing to `ibkr_paper_round_trips` /
+`ibkr_paper_daily_marks` — those hold the pre-registered forward record.
+
+**Deployed rules, 2021-07-29..2026-07-27, 35 instruments, 1253 sessions:**
+
+| assumed spread | trips | net | mean/trip | win rate |
+|---|---|---|---|---|
+| 3bps | 463 | **-$968.74** | -$2.09 | 28.1% |
+| 25bps | 470 | -$1,308.81 | -$2.78 | 24.9% |
+
+~19% of the $5,000 budget at realistic cost, on 463 observations against a
+30-trip minimum. Fails both arms of `evaluate_ibkr_evidence` at every cost
+level: LCB not positive, drawdown over budget.
+
+**Exit geometry was the leading hypothesis, and it is refuted.** A 27% win rate
+with best +$72 against worst -$56 suggested the 5%-stop / 10%-target geometry
+was cutting winners short. `auramaur ibkr-exit-study` searched 48
+stop/target/momentum-exit configurations, ranked on trips entered before
+2025-01-01, and scored the winner once on trips entered after:
+
+- the best-on-train configuration **is the deployed one** — the search found
+  nothing better to pick;
+- **no configuration reached a positive train LCB**; the best was -$4.94, in
+  sample, on the data it was chosen on;
+- that winner scored **-$136.06** on test against a **+$56.22 median** across
+  the 48 eligible configurations.
+
+A train ranking that lands *below* the median out of sample is the signature of
+a parameter surface with no exploitable structure. The defect is in the entry
+signal or the premise, not the exits, and further tuning fits noise.
+
+**Consequence for this spec.** Increments 1-3 put the IBKR books on the ladder
+so their evidence could be scored. That work stands and is correct. But for
+`global_etf` specifically the evidence is now in, six months early, and it says
+the book should not be graduated — it should be replaced or retired. The
+remaining ladder work matters for whatever strategy takes its place, not for
+this one.
+
+**Fidelity trap, worth remembering.** `IBKRMultiAssetPaperBook` calls
+`get_daily_bars(spec)` with its DEFAULT `duration="3 M"` — 61 bars. A replay fed
+the full accumulated history unlocks `normalized_momentum`'s 120-session horizon
+the live book can never see, and measures a *different, better* strategy. The
+first run of the harness did this and reported -$101 instead of -$969.
+`SIGNAL_WINDOW = 61` pins it, asserted on the lengths the signal functions
+receive rather than on emergent trade counts.
