@@ -7,6 +7,8 @@ the behaviour that is easy to regress by "improving" the statistics.
 
 import math
 
+import pytest
+
 from auramaur.evaluation.etf_calibration import (
     COIN,
     Forecast,
@@ -124,3 +126,65 @@ def test_brier_ignores_unresolved_and_scores_a_coin_at_quarter():
     assert brier_score(_run(0.5, "LOW", 1, 1)) == 0.25
     confident_and_right = brier_score(_run(0.9, "HIGH", 1, 0))
     assert confident_and_right < 0.25
+
+
+def _scored(probability, reference, hits, misses):
+    return (_forecasts([(probability, "LOW", 1)] * hits)
+            + _forecasts([(probability, "LOW", 0)] * misses))
+
+
+def _with_reference(forecasts, reference):
+    from auramaur.evaluation.etf_calibration import Forecast
+    return [Forecast(f.probability, f.confidence, f.actual_outcome, reference)
+            for f in forecasts]
+
+
+def test_trading_stays_locked_until_enough_forecasts_resolve():
+    """Forecasts are free and resolve in five sessions; trading is not free.
+    The gate is demonstrated skill, not elapsed time."""
+    from auramaur.evaluation.etf_calibration import clearance
+
+    thin = _with_reference(_scored(0.60, 0.50, 30, 10), 0.50)
+    verdict = clearance(thin, min_resolved=100)
+    assert not verdict.cleared
+    assert "40/100" in verdict.reason
+
+
+def test_beating_the_benchmark_opens_the_gate_and_luck_does_not():
+    from auramaur.evaluation.etf_calibration import clearance
+
+    # A real 10pp Brier edge still needs SIZE. At n=200 the mean edge is
+    # +0.010 but its lower bound is -0.0036, so the gate correctly refuses --
+    # ~370 resolutions are needed before that edge is distinguishable. This is
+    # the gate working, not a bug, and at ~125 forecasts/week it is ~3 weeks.
+    borderline = _with_reference(_scored(0.60, 0.50, 120, 80), 0.50)
+    assert clearance(borderline, min_resolved=100).brier_edge > 0
+    assert not clearance(borderline, min_resolved=100).cleared
+
+    skilled = _with_reference(_scored(0.60, 0.50, 360, 240), 0.50)
+    verdict = clearance(skilled, min_resolved=100)
+    assert verdict.cleared and verdict.brier_edge > 0
+    assert verdict.brier_edge_lo > 0
+
+    # Same hit rate, but the forecast adds nothing over the benchmark because
+    # it IS the benchmark. No edge, so no clearance.
+    noise = _with_reference(_scored(0.50, 0.50, 360, 240), 0.50)
+    assert not clearance(noise, min_resolved=100).cleared
+
+    # A forecast that is confidently WRONG must never clear.
+    wrong = _with_reference(_scored(0.60, 0.50, 180, 420), 0.50)
+    bad = clearance(wrong, min_resolved=100)
+    assert not bad.cleared and bad.brier_edge < 0
+
+
+def test_clearance_reports_conviction_because_the_economic_gate_needs_it():
+    """An arm can be perfectly calibrated and still unable to trade anything:
+    0.02 of conviction does not clear costs on any instrument in reach. That
+    is a different failure from being wrong, and must be visible."""
+    from auramaur.evaluation.etf_calibration import clearance
+
+    timid = _with_reference(_scored(0.52, 0.50, 120, 80), 0.50)
+    verdict = clearance(timid, min_resolved=100)
+    assert verdict.max_conviction == pytest.approx(0.02)
+    bold = _with_reference(_scored(0.60, 0.50, 120, 80), 0.50)
+    assert clearance(bold, min_resolved=100).max_conviction == pytest.approx(0.10)

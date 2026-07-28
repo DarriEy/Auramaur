@@ -54,10 +54,15 @@ CONFIDENCE_RANKS = {"LOW": 0, "MEDIUM_LOW": 1, "MEDIUM": 2,
 
 @dataclass(frozen=True)
 class Forecast:
-    """One resolved (or unresolved) directional forecast."""
+    """One resolved (or unresolved) directional forecast.
+
+    ``reference`` is the benchmark the forecast is scored against — the
+    instrument's own trailing up-rate, not 0.5. See horizon_up_rate.
+    """
     probability: float
     confidence: str
     actual_outcome: int | None
+    reference: float = COIN
 
     @property
     def resolved(self) -> bool:
@@ -237,3 +242,54 @@ def suggested_thresholds(forecasts, *, width: float = 0.02) -> list[float]:
     lowest, highest = min(probabilities), max(probabilities)
     steps = max(1, int((highest - lowest) / width) + 1)
     return [round(lowest + i * width, 4) for i in range(steps)]
+
+
+@dataclass(frozen=True)
+class TradingClearance:
+    """Whether an arm has earned the right to place a trade."""
+    cleared: bool
+    reason: str
+    resolved: int
+    brier_edge: float
+    brier_edge_lo: float
+    max_conviction: float
+
+
+def clearance(forecasts, *, min_resolved: int = 100,
+              z: float = DEFAULT_Z) -> TradingClearance:
+    """Gate trading on demonstrated forecast skill, not on elapsed time.
+
+    The previous book traded first and measured later, and the measuring said
+    it had been paying ~30bps to act on ~6bps of edge. This inverts that: an
+    arm forecasts freely — forecasts cost nothing and resolve in five sessions,
+    so ~125 a week accumulate — and may not trade until those forecasts have
+    beaten the benchmark with a lower bound clear of zero.
+
+    The statistic is the Brier EDGE against each forecast's own reference: mean
+    of ``(reference - outcome)^2 - (probability - outcome)^2``, positive when
+    the forecast was closer to the truth than the benchmark was. Its lower
+    bound must clear zero, so a run of luck does not open the gate.
+
+    ``max_conviction`` is reported because the economic gate needs it: an arm
+    whose forecasts never leave 0.02 of a coin flip cannot trade anything in
+    this universe whatever its calibration, and that is a different failure
+    from being wrong.
+    """
+    resolved = [f for f in forecasts if f.resolved]
+    conviction = max((abs(f.probability - 0.5) for f in forecasts), default=0.0)
+    if len(resolved) < min_resolved:
+        return TradingClearance(
+            False, f"{len(resolved)}/{min_resolved} resolved forecasts",
+            len(resolved), 0.0, float("-inf"), conviction)
+    edges = [((f.reference - f.actual_outcome) ** 2
+              - (f.probability - f.actual_outcome) ** 2) for f in resolved]
+    mean = sum(edges) / len(edges)
+    variance = sum((e - mean) ** 2 for e in edges) / (len(edges) - 1)
+    lo = mean - z * math.sqrt(variance / len(edges))
+    if lo <= 0:
+        return TradingClearance(
+            False, f"Brier edge lower bound {lo:+.5f} does not clear zero",
+            len(resolved), mean, lo, conviction)
+    return TradingClearance(
+        True, f"beat the benchmark on {len(resolved)} forecasts",
+        len(resolved), mean, lo, conviction)
