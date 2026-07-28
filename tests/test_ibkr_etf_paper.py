@@ -35,11 +35,11 @@ class QuotesOnlyClient:
         import math as _math
         from datetime import date as _date, timedelta as _td
 
-        out, day, i = [], _date.today() - _td(days=300), 0
-        while len(out) < 200:
+        out, day, i = [], _date.today() - _td(days=340), 0
+        while len(out) < 220:
             if day.weekday() < 5:
                 out.append((day.isoformat(),
-                            100.0 * (1.0008 ** i) * (1 + 0.03 * _math.sin(i * 0.6))))
+                            100.0 * (1 + 0.12 * _math.sin(i * 0.35))))
                 i += 1
             day += _td(days=1)
         return out
@@ -760,4 +760,33 @@ async def test_trading_is_locked_until_the_arm_earns_it():
     pillar._db.fetchall = AsyncMock(side_effect=RuntimeError("db gone"))
     verdict = await pillar._clearance()
     assert not verdict.cleared
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_clearance_does_not_pool_across_horizons():
+    """A 5-session forecast and a 42-session one answer different questions.
+
+    Pooling them would let a pile of resolved short-horizon forecasts open the
+    gate for a long-horizon trade whose skill was never demonstrated.
+    """
+    db = Database(":memory:")
+    await db.connect()
+    pillar = await _pillar(db, cleared=False)
+    traded = int(pillar._s.ibkr.etf_signal_horizon_days)
+
+    # 400 resolved forecasts at the WRONG horizon, all correct and confident.
+    for i in range(400):
+        await db.execute(
+            """INSERT INTO ibkr_etf_forecasts
+               (model_alias, model, symbol, probability, confidence,
+                reference_price, opened_session_date, horizon_sessions, due_at,
+                actual_outcome)
+               VALUES ('luna','m','SPY',0.9,'HIGH',100.0,'2026-01-01',?,
+                       datetime('now'), 1)""",
+            (traded - 1,))
+    await db.commit()
+    verdict = await pillar._clearance()
+    assert not verdict.cleared, "short-horizon results opened a long-horizon gate"
+    assert verdict.resolved == 0
     await db.close()

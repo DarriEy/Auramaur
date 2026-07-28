@@ -397,7 +397,16 @@ ibkr:
   etf_min_prob: 0.62
   etf_exit_prob: 0.47
   etf_min_confidence: "MEDIUM"
-  etf_signal_horizon_days: 5
+  # 42 sessions (~2 months), and this is the single setting that decides
+  # whether the book can trade at all. E|move| grows with sqrt(h) while the $1
+  # commission floor does not, so at $775 of capital:
+  #   h=5   1 instrument tradeable (SLV, and only at peak conviction)
+  #   h=21  2 instruments
+  #   h=42  7 instruments, and SLV clears at TYPICAL conviction (0.016 v 0.020)
+  #   h=63  still 7 -- no gain, twice the wait
+  # Longer holds also cut the number of round trips, which compounds because
+  # commission is charged per trip. See docs/ibkr_strategy_design.md.
+  etf_signal_horizon_days: 42
   etf_signal_refresh_hours: 6.0
   etf_cycle_seconds: 900
   etf_stop_loss_pct: 5.0

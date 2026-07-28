@@ -44,17 +44,33 @@ where the $10 cap binds, does it improve.
 
 `E|move|` grows with sqrt(h) while cost does not, so **horizon is the lever**:
 
-| horizon | tradeable at peak conviction (0.06) | at typical (0.02) |
-|---|---|---|
-| 5 sessions | 1 (SLV) | 0 |
-| 10 | 2 | 0 |
-| 21 | 5 | 1 |
-| 42 | 11 | 1 |
-| 63 | 13 | 1 |
+Recomputed at the CORRECTED $775 of capital, where the $1 commission floor
+binds and a round trip costs 32.8bps:
 
-A one-week horizon supports a universe of one. A **one-month horizon supports
-five**, and two months eleven. Longer horizons also mean fewer round trips,
-which compounds the benefit because commission is charged per trip.
+| horizon | tradeable at peak (0.06) | at typical (0.02) | names |
+|---|---|---|---|
+| 5 sessions | 1 | 0 | SLV |
+| 10 | 1 | 0 | SLV |
+| 21 | 2 | 0 | SLV, GLD |
+| **42** | **7** | **1** | SLV, GLD, XLE, QQQ, DBC, IWM, VWO |
+| 63 | 7 | 1 | same seven |
+
+**42 sessions is the setting.** It is where the universe stops being a single
+instrument and where SLV clears at TYPICAL conviction (0.016) rather than
+needing a peak call. 63 adds no names and doubles the wait, so the curve is
+flat past two months — there is nothing further to buy by holding longer.
+
+Longer holds also cut the number of round trips, which compounds because
+commission is charged per trip rather than per unit of time.
+
+**The cost: clearance moves out.** A 42-session forecast takes 42 sessions to
+resolve, so the traded horizon cannot be proven for roughly two months. The
+314 five-session forecasts already in flight are not wasted — they resolve over
+the next fortnight and serve as an EARLY KILL SIGNAL through
+`auramaur ibkr-calibration`. If the model shows no skill there, abandon before
+waiting out the long clock. They cannot open the gate, though: clearance is
+scoped to the traded horizon, because skill at five sessions is not evidence of
+skill at forty-two.
 
 ## The design
 

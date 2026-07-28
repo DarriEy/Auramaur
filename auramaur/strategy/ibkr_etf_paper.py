@@ -435,14 +435,24 @@ class IBKRETFPaperPillar:
         forecasts from day one and may not trade until its Brier edge over its
         own trailing benchmark has a 95% lower bound clear of zero.
 
+        Scoped to the TRADED horizon. A 5-session forecast and a 42-session
+        one answer different questions, and skill at one does not transfer to
+        the other -- pooling them would let short-horizon results open a
+        long-horizon gate. The 314 five-session forecasts already in flight
+        still resolve and are readable through `auramaur ibkr-calibration`,
+        where they serve as an early kill signal: if the model shows no skill
+        there within a few weeks, abandon before waiting out a 42-session
+        clock.
+
         Deliberately fails closed. Any error, and the arm does not trade.
         """
         try:
             rows = await self._db.fetchall(
                 """SELECT probability, confidence, actual_outcome, reference_price,
                           final_price
-                     FROM ibkr_etf_forecasts WHERE model_alias = ?""",
-                (self._alias,))
+                     FROM ibkr_etf_forecasts
+                    WHERE model_alias = ? AND horizon_sessions = ?""",
+                (self._alias, int(self._s.ibkr.etf_signal_horizon_days)))
         except Exception as exc:  # noqa: BLE001
             log.warning("ibkr_etf.clearance_unavailable", model_alias=self._alias,
                         error=str(exc)[:120])
