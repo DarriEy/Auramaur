@@ -6,10 +6,22 @@ from auramaur.exchange.ibkr_instruments import InstrumentSpec
 
 
 async def record_validation(db, spec: InstrumentSpec, contract, *, quote_source: str,
-                            has_history: bool, error: str = "") -> str:
-    """Upsert one declared instrument without overwriting operator approval."""
+                            has_history: bool, error: str = "",
+                            venue_closed: bool = False) -> str:
+    """Upsert one declared instrument without overwriting operator approval.
+
+    ``venue_closed`` means the probe learned nothing about live-data
+    eligibility, so an instrument already proven ``eligible`` KEEPS that status.
+    Without it, a preflight run outside market hours silently demoted every
+    instrument to ``qualified_no_live_data`` — and since ``eligible_keys``
+    filters on ``eligible``, that empties the book's universe, makes
+    ``run_once`` return before ``_record_daily_mark``, and stops the 180-day
+    live-execution clock dead. Observed 2026-07-27: an after-hours preflight
+    took global_etf from 35 eligible to 25 and international_equity from 2 to 0.
+    A closed exchange is not evidence against an instrument.
+    """
     existing = await db.fetchone(
-        "SELECT manifest_hash, con_id, approved FROM ibkr_contract_registry "
+        "SELECT manifest_hash, con_id, approved, status FROM ibkr_contract_registry "
         "WHERE instrument_key=?",
         (spec.key,))
     same_manifest = bool(existing and existing["manifest_hash"] == spec.manifest_hash())
@@ -25,6 +37,10 @@ async def record_validation(db, spec: InstrumentSpec, contract, *, quote_source:
         approved = 0
     elif spec.approval_required and not approved:
         status = "pending_approval"
+    elif (venue_closed and has_history and existing
+          and existing["status"] == "eligible"):
+        # Nothing was learned; do not demote what a live-hours probe proved.
+        status = "eligible"
     elif quote_source not in ("ibkr_live", "alpaca_iex") or not has_history:
         status = "qualified_no_live_data"
     else:

@@ -80,8 +80,11 @@ async def preflight(settings, db, *, client=None, timeout_seconds: float | None 
                     return f"{spec.key}: only {len(bars)} daily bars", None, None
                 if not market_open:
                     source = getattr(quote, "source", "none") if quote else "none"
+                    # venue_closed: the probe proves contract + history, and
+                    # proves NOTHING about live data. Demoting here emptied the
+                    # books' universes and stopped their daily-mark clocks.
                     await record_validation(db, spec, contract, quote_source=source,
-                                            has_history=True)
+                                            has_history=True, venue_closed=True)
                     return None, source, f"{spec.key}: venue closed; contract/history ready"
                 if quote is None:
                     await record_validation(db, spec, contract, quote_source="none",
