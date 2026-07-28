@@ -346,7 +346,11 @@ class ExecutionGateway:
                 # hashed an EMPTY config, so a book could be re-tuned mid-clock
                 # and keep claiming the same holdout experiment.
                 "ibkr" if source.startswith("ibkr_") else
-                "nlp" if source in {"llm", "news_speed"} else source
+                # llm_kalshi is the same engine on a second venue, so it
+                # freezes the same nlp config. Without this it would resolve to
+                # a non-existent section and hash an EMPTY dict, making its
+                # strategy_version constant and the parameter freeze a no-op.
+                "nlp" if source in {"llm", "llm_kalshi", "news_speed"} else source
             )
             section = getattr(self.settings, section_name, None)
             section_payload = (section.model_dump(mode="json")

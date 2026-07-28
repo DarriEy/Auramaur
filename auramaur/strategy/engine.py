@@ -616,6 +616,15 @@ class TradingEngine(CycleOrchestrationMixin):
         risk checks but does **not** place an order.  This is used by the
         two-phase allocate-then-execute cycle in ``run_cycle``.
         """
+        # Attribute the Kalshi lane separately. Every other multi-venue
+        # strategy carries a per-venue strategy_source (agent_trader_opus /
+        # agent_trader_opus_kalshi) so each venue's record is adjudicated on
+        # its own evidence. The engine ran both venues under a single "llm",
+        # which pooled their cells and — once llm was ladder-exempt — let a
+        # Polymarket record authorise Kalshi trading. Only the DEFAULT is
+        # split; an explicit strategy_source from a caller is respected.
+        if strategy_source == "llm" and (market.exchange or "").lower() == "kalshi":
+            strategy_source = "llm_kalshi"
         # Pre-screen: skip junk markets regardless of caller
         skip_reason = self._is_junk_market(market)
         if skip_reason:

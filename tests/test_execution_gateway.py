@@ -865,3 +865,20 @@ def test_frozen_config_is_scoped_to_what_the_strategy_uses():
     assert scope("llm", {"model": "x", "temperature": 0.2}) == {
         "model": "x", "temperature": 0.2}
     assert scope("ibkr_etf_luna", {}) == {}
+
+
+def test_llm_kalshi_freezes_the_same_config_as_llm():
+    """llm_kalshi is the same engine on a second venue, so it must hash the
+    same nlp config.
+
+    The section name is derived from strategy_source, and there is no
+    `settings.llm_kalshi` — so without the mapping it resolves to None, hashes
+    an EMPTY dict, and strategy_version becomes constant. The parameter freeze
+    would silently stop working for the lane: no config change would ever reset
+    its holdout, which is exactly backwards.
+    """
+    import inspect
+
+    src = inspect.getsource(ExecutionGateway._capture_decision)
+    assert '"llm", "llm_kalshi", "news_speed"' in src, (
+        "llm_kalshi must map to the nlp section")
