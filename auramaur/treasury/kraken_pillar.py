@@ -1045,6 +1045,90 @@ class KrakenPillar:
         _, a, b = cache
         return min(0.99, max(0.01, a + b * raw))
 
+    async def _desk_call(self) -> dict:
+        """One Opus call over the whole book, with the spot math in front of it.
+
+        Replaces three isolated "give me a probability" calls that could see
+        neither each other, nor the positions already open, nor what a trade
+        costs. Returns {pair: DeskDecision}; empty on any failure, which means
+        no trades — a desk that cannot be reached does not get to act.
+        """
+        from auramaur.nlp.analyzer import ClaudeAnalyzer
+        from auramaur.strategy.kraken_desk import (
+            SYSTEM_INSTRUCTIONS, parse_desk_response,
+        )
+        from auramaur.strategy.kraken_spot_features import build_features, desk_prompt
+
+        kcfg = self._s.kraken
+        pairs = list(kcfg.directional_pairs)
+        horizon_hours = float(getattr(kcfg, "directional_llm_horizon_days", 14)) * 24
+        features = []
+        for pair in pairs:
+            try:
+                data = await self._k._public("OHLC", {"pair": pair, "interval": 60})
+                candles = next((v for k, v in data.items()
+                                if k != "last" and isinstance(v, list)), None)
+                if not candles:
+                    continue
+                closes = [float(c[4]) for c in candles]
+                quote = await self._k.get_bid_ask(pair)
+                bid, ask = quote if quote else (closes[-1], closes[-1])
+                depth = await self._k._public("Depth", {"pair": pair, "count": 10})
+                book = next((v for k, v in depth.items() if isinstance(v, dict)), {})
+                features.append(build_features(
+                    pair, closes, bid=bid, ask=ask,
+                    fee_pct_per_side=getattr(kcfg, "directional_fee_pct", 0.26),
+                    horizon_hours=horizon_hours,
+                    bids=[(float(x[0]), float(x[1])) for x in book.get("bids", [])],
+                    asks=[(float(x[0]), float(x[1])) for x in book.get("asks", [])],
+                    slippage_bps=kcfg.directional_paper_slippage_bps))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("kraken.desk.features_failed", pair=pair,
+                            error=str(exc)[:140])
+        if not features:
+            return {}
+        self._desk_edge = {f.pair: f.edge_needed_prob for f in features}
+        positions = await self._open_positions_summary()
+        realised = await self._realised_pnl_usd()
+        # SYSTEM_INSTRUCTIONS already ends in a newline.
+        prompt = SYSTEM_INSTRUCTIONS + desk_prompt(
+            features, horizon_hours=horizon_hours,
+            budget_usd=kcfg.directional_budget_usd,
+            open_positions=positions, recent_pnl_usd=realised)
+        try:
+            reply = await ClaudeAnalyzer(self._s)._call_claude_cli(prompt)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("kraken.desk.call_failed", error=str(exc)[:160])
+            return {}
+        decisions = parse_desk_response(reply, pairs)
+        log.info("kraken.desk.decisions", horizon_hours=horizon_hours,
+                 pairs=len(features), decided=len(decisions),
+                 detail={p: (d.action, round(d.probability, 3))
+                         for p, d in decisions.items()},
+                 edge_needed={p: (None if v is None else round(v, 3))
+                              for p, v in self._desk_edge.items()})
+        return decisions
+
+    async def _open_positions_summary(self) -> list[dict]:
+        try:
+            rows = await self._db.fetchall(
+                "SELECT pair, quantity, entry_price, unrealized_usd "
+                "FROM kraken_paper_positions")
+        except Exception:  # noqa: BLE001
+            return []
+        return [{"pair": r["pair"], "quantity": r["quantity"],
+                 "entry": r["entry_price"],
+                 "unrealized_usd": r["unrealized_usd"]} for r in rows or []]
+
+    async def _realised_pnl_usd(self) -> float:
+        try:
+            row = await self._db.fetchone(
+                "SELECT COALESCE(SUM(pnl - fees), 0) AS v FROM pnl_ledger "
+                "WHERE strategy_source = 'kraken_directional'")
+        except Exception:  # noqa: BLE001
+            return 0.0
+        return float(row["v"] or 0.0) if row else 0.0
+
     async def _llm_view(self, pair: str, force: bool = False) -> tuple[float, str] | None:
         """LLM/news-driven P(asset higher over the horizon) for a pair.
 
