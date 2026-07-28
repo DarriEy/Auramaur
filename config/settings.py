@@ -1367,6 +1367,15 @@ class IBKRConfig(BaseModel):
     # (~03:45-05:00 UTC); a too-short deadline cancels the request client-side,
     # which IB reports as "Error 162 ... query cancelled".
     multiasset_preflight_timeout_seconds: float = 60.0
+    # Re-validate the contract registry on a schedule. Nothing did this until
+    # 2026-07-27: the registry only refreshed when an operator remembered the
+    # CLI, so futures sat quarantined for five days on a transient error and
+    # would have stayed so even after the underlying data returned. Safe to
+    # automate only since record_validation gained venue_closed -- before that,
+    # a run outside market hours DEMOTED every instrument and emptied the
+    # books. One pass per day: preflight probes ~108 instruments with a quote
+    # and a history request each, and the books share IBKR's pacing budget.
+    multiasset_registry_refresh_hours: float = 24.0
     # Require a current broker-qualified identity before opening new risk.
     # Kept false in model defaults so isolated test/library users can opt in;
     # tracked deployment defaults enable it.

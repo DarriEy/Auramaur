@@ -353,6 +353,9 @@ NON_STRATEGY_TASKS = frozenset(
         "_task_hydro_watch",
         "_task_intelligence_eval",
         "_task_intraday_drift",
+        # Re-validates the IBKR contract registry. Opens no risk and places no
+        # order: it probes quotes/history and updates instrument eligibility.
+        "_task_ibkr_registry_refresh",
         "_task_kill_switch_monitor",
         "_task_live_gate_monitor",
         "_task_market_scan",

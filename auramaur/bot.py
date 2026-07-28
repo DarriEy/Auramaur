@@ -831,6 +831,38 @@ class AuramaurBot(
             for analyzer in analyzers:
                 await analyzer.close()
 
+    async def _task_ibkr_registry_refresh(self) -> None:
+        """Re-validate the IBKR contract registry on a schedule.
+
+        Nothing did this until 2026-07-27: the registry only refreshed when an
+        operator ran `auramaur ibkr-multiasset-preflight` by hand. So a
+        transient probe failure quarantined an instrument indefinitely — the
+        futures book sat inert for five days and would have stayed inert even
+        after its data came back, because nothing re-checked. `eligible_keys`
+        filters on status, so an inert book records no daily mark, and the
+        180-day clock behind IBKRMultiAssetExecution.graduated() simply stops.
+
+        Only safe to automate since record_validation learned venue_closed: a
+        pass outside market hours used to DEMOTE every instrument. Now a pass
+        can only preserve or promote, so running it unattended cannot shrink a
+        book. Once a day, because preflight probes ~108 instruments with a
+        quote and a history request each and shares IBKR's pacing budget with
+        the trading loops.
+        """
+        from auramaur.monitoring.ibkr_multiasset_preflight import preflight
+
+        interval = max(3600.0, self.settings.ibkr.multiasset_registry_refresh_hours * 3600)
+        while self._running:
+            await asyncio.sleep(interval)
+            if await self._check_kill_switch():
+                return
+            try:
+                report = await preflight(self.settings, self._components.get("db"))
+                log.info("ibkr_registry.refreshed",
+                         ready=getattr(report, "ready", None))
+            except Exception as e:  # noqa: BLE001 - never take down the loop
+                log.warning("ibkr_registry.refresh_failed", error=str(e)[:200])
+
     async def _task_ibkr_multiasset_paper(self) -> None:
         """Six read-only quote feeds with isolated local paper accounting."""
         from auramaur.exchange.alpaca_multiasset import build_multiasset_market_data
@@ -1833,6 +1865,9 @@ class AuramaurBot(
         if self.settings.ibkr.enabled and self.settings.ibkr.multiasset_paper_enabled:
             tasks.append(asyncio.create_task(
                 self._task_ibkr_multiasset_paper(), name="ibkr_multiasset_paper"))
+            if self.settings.ibkr.multiasset_registry_refresh_hours > 0:
+                tasks.append(asyncio.create_task(
+                    self._task_ibkr_registry_refresh(), name="ibkr_registry_refresh"))
 
         # Fast path: momentum-coupling pillar (gated by momentum_coupling.enabled)
         if self.settings.momentum_coupling.enabled:
