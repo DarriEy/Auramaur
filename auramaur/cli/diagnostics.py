@@ -360,8 +360,8 @@ def ibkr_backtest(book: str, years: int, spread_bps):
             stop_vol_multiple=cfg.stop_vol_multiple,
             min_stop_pct=cfg.min_stop_pct, slippage_bps=cfg.slippage_bps,
             stop_loss_pct=cfg.stop_loss_pct, take_profit_pct=cfg.take_profit_pct,
-            min_norm_momentum=cfg.min_norm_momentum,
-            exit_norm_momentum=cfg.exit_norm_momentum,
+            min_norm_momentum=settings.ibkr.multiasset_min_normalized_momentum,
+            exit_norm_momentum=settings.ibkr.multiasset_exit_normalized_momentum,
             assumed_spread_bps=spread)
 
         net = result.net_pnls
