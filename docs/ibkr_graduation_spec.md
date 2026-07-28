@@ -259,6 +259,14 @@ so each week banks its own row and **nothing joins**. The data accumulates
 correctly and no false Brier edge can reach the ladder. The cost is honest —
 the ETF book still produces no countable prospective evidence.
 
+**DECIDED 2026-07-27: (iii).** Forecast scoring stays out of the shared ladder;
+`auramaur ibkr-calibration` is the forecast-quality instrument. The reason is
+not statistical, it is that **the ladder does not gate live IBKR trading at
+all** — see the next section. Changing `market_outcomes`'s uniqueness and the
+`_prospective_stats` join is a schema-and-query change to machinery 17
+prediction-market cells depend on, bought for no trading benefit. Revisit only
+if the ETF book is ever given a real order path.
+
 Closing it needs one of:
 
 - **(i)** join prospective evidence on `event_family` rather than `market_id`,
@@ -289,3 +297,51 @@ The unresolved part is which of these the *graduation decision* should rest on.
    hand.
 4. **Gate on `decide(...)`** — last, and only once the books have completed
    round trips.
+
+## The graduation ladder does NOT gate live IBKR trading (measured 2026-07-27)
+
+Worth stating loudly, because increments 1-3 were built on the assumption that
+it does. `IBKRMultiAssetExecution.graduated()` never touches
+`GraduationLadder`. It runs its own pre-registered contract
+(`auramaur/risk/ibkr_evidence.py`) over two book-owned tables:
+
+| gate | source | requirement |
+|---|---|---|
+| daily marks | `ibkr_paper_daily_marks` | 120 observations, 180 elapsed days, positive 95% LCB, drawdown <= 10% of budget |
+| round trips | `ibkr_paper_round_trips` | 30 observations, 180 elapsed days, same LCB and drawdown |
+
+Both must pass, and the operator gate chain
+(`multiasset_execution_enabled`, `multiasset_execution_confirm_live`,
+`multiasset_execution_books`, `settings.is_live`, `ibkr.environment == "live"`,
+no kill switch) sits on top. The ETF book cannot reach any of this: it is
+`PAPER_SIMULATED` against a local simulator that refuses a non-`dry_run` order.
+
+So the ladder work matures *evidence quality*; it does not shorten the path to
+a real order. That path runs only through the executable multiasset books
+(`global_etf`, `futures`, `international_equity`).
+
+### Where that clock actually stands
+
+| book | registry | daily marks | round trips | clock |
+|---|---|---|---|---|
+| `global_etf` | 35 eligible | 4 | 0/30 | started 2026-07-24 |
+| `international_equity` | **2 of 9 eligible** | 4 | 1/30 | started 2026-07-24 |
+| `futures` | **0 of 9 eligible — all quarantined** | **0** | 0/30 | **never started** |
+
+Earliest possible live date is therefore **2027-01-20** (first mark + 180 days),
+and only for `global_etf`, and only if turnover produces 30 round trips.
+
+Three things bind, in order of how fixable they are:
+
+1. **`futures` is quarantined on market data, not code.** All 9 contracts carry
+   `last_error: "no executable BBO"` and `quote_source: none` since 2026-07-23
+   — the same missing entitlement behind the `Error 10089` lines in the
+   container log. Its 180-day clock cannot start until the CME subscription
+   exists. Every day of delay is a day added to the earliest live date.
+2. **`international_equity` is running on 2 of 9 instruments** (4
+   `qualified_no_live_data`, 3 quarantined), which is why it has managed one
+   round trip. It will not reach 30 at that breadth.
+3. **The daily-mark streak has almost no slack**: ~124 trading days fall in the
+   180-day window against a 120-mark minimum, so only **4 missable days**. A
+   week-long outage does not delay graduation by a week — it resets the
+   earliest date by however long it takes to accumulate 120 marks.
