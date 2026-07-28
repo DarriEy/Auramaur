@@ -1373,9 +1373,13 @@ class IBKRConfig(BaseModel):
     # would have stayed so even after the underlying data returned. Safe to
     # automate only since record_validation gained venue_closed -- before that,
     # a run outside market hours DEMOTED every instrument and emptied the
-    # books. One pass per day: preflight probes ~108 instruments with a quote
-    # and a history request each, and the books share IBKR's pacing budget.
-    multiasset_registry_refresh_hours: float = 24.0
+    # Every 6h rather than daily, because the cadence is a fixed offset from
+    # container start: a 24h period would revalidate at one time of day
+    # forever, and if that lands after the US close no US instrument is ever
+    # re-proven (the venue_closed guard preserves, it cannot promote a closed
+    # venue). Four passes cover every session. ~108 instruments x 2 requests
+    # per pass is ~10% of IBKR's daily pacing budget, shared with the books.
+    multiasset_registry_refresh_hours: float = 6.0
     # Require a current broker-qualified identity before opening new risk.
     # Kept false in model defaults so isolated test/library users can opt in;
     # tracked deployment defaults enable it.

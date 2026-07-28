@@ -852,8 +852,13 @@ class AuramaurBot(
         from auramaur.monitoring.ibkr_multiasset_preflight import preflight
 
         interval = max(3600.0, self.settings.ibkr.multiasset_registry_refresh_hours * 3600)
+        # Short first delay so a fresh deploy revalidates within the hour
+        # instead of inheriting whatever the registry was left in, while still
+        # staying clear of startup's own IBKR traffic.
+        delay = 900.0
         while self._running:
-            await asyncio.sleep(interval)
+            await asyncio.sleep(delay)
+            delay = interval
             if await self._check_kill_switch():
                 return
             try:
