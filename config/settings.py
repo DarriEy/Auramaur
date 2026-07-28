@@ -252,6 +252,18 @@ class RiskConfig(BaseModel):
     # Consulted only by the gateway's category allowlist check (#18).
     allowed_categories_live_extra: dict[str, list[str]] = Field(
         default_factory=dict)
+    # Per-strategy live-category RESTRICTION, keyed by strategy_source. Where
+    # `_extra` widens, this narrows: a strategy listed here may trade live ONLY
+    # in the named categories, intersected with what it would otherwise be
+    # allowed. Absent from this map means unrestricted, so it changes nothing
+    # for anyone not named.
+    #
+    # Exists because ladder exemption is per-STRATEGY while performance is
+    # per-CELL. llm carries +$222.57 over 109 live markets, but essentially all
+    # of it is politics_us (+$230.18/19); tech (-$17.13), entertainment
+    # (-$18.84) and sports (-$31.12) lose. Promoting the strategy without this
+    # would arm the losing cells alongside the one that earned it.
+    live_categories_only: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class KellyConfig(BaseModel):

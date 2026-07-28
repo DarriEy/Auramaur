@@ -264,6 +264,15 @@ class RiskManager:
             allowed = list(rc.allowed_categories_live) + list(
                 (rc.allowed_categories_live_extra or {}).get(
                     signal.strategy_source, []))
+            # Per-strategy RESTRICTION, applied after the widening above so it
+            # cannot be widened around. Ladder exemption is per-strategy while
+            # performance is per-cell, so a promoted strategy would otherwise
+            # trade live in the cells that lose as well as the one that earned
+            # the promotion. Narrowing only: an unlisted strategy is untouched,
+            # and a listed one can never gain a category it did not already have.
+            only = (rc.live_categories_only or {}).get(signal.strategy_source)
+            if only:
+                allowed = [c for c in allowed if c in set(only)]
             pre_checks.append(await check_category_allowlist(
                 market.category or "", allowed,
                 applies=category_applies,

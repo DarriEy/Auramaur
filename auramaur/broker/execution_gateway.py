@@ -251,6 +251,41 @@ class ExecutionGateway:
             order, strategy_source=strategy_source, signal_id=None,
             exchange=exchange, exchange_name=exchange_name)
 
+    @staticmethod
+    def _scope_config(source: str, payload: dict) -> dict:
+        """Freeze only the parameters the strategy actually uses.
+
+        strategy_version is a hash of the strategy's config, and
+        _prospective_stats joins on the LATEST version — so any change to the
+        hashed config discards every decision captured under the old one and
+        restarts the 14-day holdout. That is correct when the strategy's own
+        parameters move, and wrong when someone else's do.
+
+        `settings.ibkr` is one section covering 77 fields across the ETF arms,
+        six multiasset books, the equity client, FX and options. Hashing all of
+        it meant tuning etf_signal_horizon_days reset the graduation clock for
+        ibkr_international_equity_paper, a book that does not read the field.
+        Under active tuning no IBKR book could ever hold a frozen parameter set
+        for the 30 days its own bar requires.
+
+        Non-IBKR sections are returned untouched: `nlp` for llm and
+        `agent_trader` for the agent arms are already the config those
+        strategies actually run on.
+        """
+        if not source.startswith("ibkr_") or not payload:
+            return payload
+        if source.startswith("ibkr_etf_"):
+            return {k: v for k, v in payload.items() if k.startswith("etf_")}
+        # ibkr_<book>_paper: the book's own config plus the shared multiasset
+        # knobs, and nothing from the ETF arms or the other five books.
+        book = source[len("ibkr_"):-len("_paper")] if source.endswith("_paper") else ""
+        scoped = {k: v for k, v in payload.items()
+                  if k.startswith("multiasset_") and k != "multiasset_books"}
+        books = payload.get("multiasset_books") or {}
+        if book and isinstance(books, dict) and book in books:
+            scoped["book"] = books[book]
+        return scoped
+
     async def _live_book(self, order: Order):
         """The book the order was actually BUILT against.
 
@@ -316,6 +351,7 @@ class ExecutionGateway:
             section = getattr(self.settings, section_name, None)
             section_payload = (section.model_dump(mode="json")
                                if hasattr(section, "model_dump") else {})
+            section_payload = self._scope_config(source, section_payload)
             contract = {
                 "strategy_source": source,
                 "strategy_config": section_payload,

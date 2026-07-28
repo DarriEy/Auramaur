@@ -821,3 +821,47 @@ async def test_a_paper_fill_that_crosses_is_countable_evidence():
     assert snap["fill_evidence"] == "book_cross"
     assert snap["filled"] == 1
     await db.close()
+
+
+def test_frozen_config_is_scoped_to_what_the_strategy_uses():
+    """strategy_version resets the 14-day holdout whenever the hashed config
+    changes, and _prospective_stats joins on the LATEST version — so an
+    unrelated setting must not discard a book's accumulated evidence.
+
+    settings.ibkr is ONE section covering the ETF arms, six multiasset books,
+    the equity client, FX and options. Hashing all 77 fields meant tuning
+    etf_signal_horizon_days reset the clock for ibkr_international_equity_paper,
+    which never reads it.
+    """
+    scope = ExecutionGateway._scope_config
+    payload = {
+        "etf_signal_horizon_days": 42,
+        "etf_paper_budget_usd": 775.0,
+        "multiasset_max_quote_age_seconds": 90,
+        "multiasset_books": {"international_equity": {"budget_usd": 700.0},
+                             "fx": {"budget_usd": 700.0}},
+        "equity_client_id": 2,
+        "paper_port": 7497,
+    }
+
+    etf = scope("ibkr_etf_luna", payload)
+    assert set(etf) == {"etf_signal_horizon_days", "etf_paper_budget_usd"}
+
+    intl = scope("ibkr_international_equity_paper", payload)
+    # Its own book config and the shared multiasset knobs — nothing ETF.
+    assert intl["book"] == {"budget_usd": 700.0}
+    assert "multiasset_max_quote_age_seconds" in intl
+    assert not any(k.startswith("etf_") for k in intl)
+    # And not the OTHER books, so tuning fx cannot reset this book's clock.
+    assert "fx" not in str(intl.get("book"))
+
+    # The decisive property: changing an ETF field must not move the
+    # multiasset book's frozen config.
+    moved = dict(payload, etf_signal_horizon_days=5, etf_paper_budget_usd=5000.0)
+    assert scope("ibkr_international_equity_paper", moved) == intl
+    assert scope("ibkr_etf_luna", moved) != etf      # its OWN change still counts
+
+    # Non-IBKR sections pass through untouched.
+    assert scope("llm", {"model": "x", "temperature": 0.2}) == {
+        "model": "x", "temperature": 0.2}
+    assert scope("ibkr_etf_luna", {}) == {}

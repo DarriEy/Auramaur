@@ -557,3 +557,43 @@ async def test_allowlist_extra_is_per_strategy(mock_kill):
     d2 = await manager.evaluate(sig2, market, available_cash=500.0)
     gate2 = next(c for c in d2.checks if c.name == "category_allowlist")
     assert gate2.passed is False
+
+
+@pytest.mark.asyncio
+async def test_live_categories_only_narrows_and_never_widens():
+    """Ladder exemption is per-STRATEGY; performance is per-CELL.
+
+    llm carries +$222.57 over 109 live markets, but ~all of it is politics_us
+    (+$230.18/19) while tech, entertainment and sports lose. Promoting the
+    strategy without a restriction arms the losing cells alongside the winner.
+    This map narrows only: it can never grant a category the strategy did not
+    already hold, and an unlisted strategy is untouched.
+    """
+    from config.settings import Settings
+
+    s = Settings()
+    rc = s.risk
+    rc.allowed_categories_live = ["crypto", "tech", "politics_us"]
+    rc.allowed_categories_live_extra = {"llm": ["other"]}
+    rc.live_categories_only = {"llm": ["politics_us", "commodities"]}
+
+    def effective(strategy: str) -> list[str]:
+        allowed = list(rc.allowed_categories_live) + list(
+            (rc.allowed_categories_live_extra or {}).get(strategy, []))
+        only = (rc.live_categories_only or {}).get(strategy)
+        if only:
+            allowed = [c for c in allowed if c in set(only)]
+        return allowed
+
+    # Restricted strategy: narrowed to the intersection, nothing else.
+    assert effective("llm") == ["politics_us"]
+    # 'commodities' was in the restriction but NOT otherwise allowed, so the
+    # map cannot be used to smuggle a category in.
+    assert "commodities" not in effective("llm")
+    # Its own _extra grant is also cut, since the restriction applies after.
+    assert "other" not in effective("llm")
+    # An unlisted strategy keeps exactly what it had.
+    assert effective("bias_harvest") == ["crypto", "tech", "politics_us"]
+    # An empty restriction list is treated as "unrestricted", not "nothing".
+    rc.live_categories_only = {"llm": []}
+    assert effective("llm") == ["crypto", "tech", "politics_us", "other"]
