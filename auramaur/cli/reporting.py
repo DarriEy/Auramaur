@@ -831,3 +831,73 @@ def _display_comparison(comparison: dict):
         f"Sharpe advantage: {comparison['sharpe_diff']:+.2f}",
         border_style="green" if winner == "A" else "yellow",
     ))
+
+
+@main.command("evidence-accrual")
+@click.option("--days", default=14, show_default=True,
+              help="Window for the recent-accrual columns.")
+def evidence_accrual(days: int):
+    """Is countable graduation evidence actually accumulating?
+
+    `require_executable_fills` admits only venue_fill / book_cross /
+    trade_through. A paper fill is stamped `book_cross` only when it CROSSED
+    the book — a resting maker fill is `synthetic` and can never count, which
+    is correct: live might never have filled it.
+
+    Until 2026-07-28 the gateway resolved the book from `orderbook_snapshots`,
+    a table a separate recorder populates on its own cadence, so 109 of 111
+    filled decisions had no book at all and were uncountable. This report
+    exists so that failure is visible rather than discovered months later.
+    """
+    async def _run():
+        from auramaur.web.db import ReadOnlyDatabase
+
+        settings = Settings()
+        credible = set(settings.graduation.credible_fill_evidence)
+        db = ReadOnlyDatabase()
+        await db.connect()
+        try:
+            rows = await db.fetchall(
+                f"""SELECT strategy_source,
+                           COUNT(*) AS decisions,
+                           SUM(filled = 1) AS filled,
+                           SUM(best_ask IS NOT NULL) AS with_book,
+                           SUM(filled = 1 AND fill_evidence IN
+                               ({",".join("?" * len(credible))})) AS countable,
+                           SUM(is_holdout = 1) AS holdout,
+                           MAX(observed_at) AS last
+                      FROM decision_snapshots
+                     WHERE observed_at >= datetime('now', ?)
+                     GROUP BY strategy_source
+                     ORDER BY countable DESC, filled DESC""",
+                (*sorted(credible), f"-{int(days)} days"))
+            if not rows:
+                console.print(f"[yellow]No decisions in the last {days}d.[/]")
+                return
+            table = Table(title=f"countable evidence accrual — last {days}d",
+                          expand=False)
+            for c in ("strategy", "decisions", "filled", "book", "countable",
+                      "taker rate", "holdout", "last"):
+                table.add_column(c, justify="right")
+            for r in rows:
+                filled = int(r["filled"] or 0)
+                countable = int(r["countable"] or 0)
+                rate = f"{countable / filled:.0%}" if filled else "—"
+                colour = ("green" if countable and countable == filled
+                          else "yellow" if countable else "red")
+                table.add_row(
+                    str(r["strategy_source"])[:24], str(r["decisions"]),
+                    str(filled), str(int(r["with_book"] or 0)),
+                    f"[{colour}]{countable}[/]", rate,
+                    str(int(r["holdout"] or 0)), str(r["last"])[5:16])
+            console.print(table)
+            console.print(
+                "  [dim]book = best_ask captured (the fix). countable = filled "
+                "AND evidence in credible_fill_evidence. taker rate = share of "
+                "fills that CROSSED; a resting maker fill is correctly "
+                "uncountable. holdout = decisions inside the scored window — "
+                "everything before holdout_starts_at is permanently "
+                "uncountable however good it is.[/]")
+        finally:
+            await db.close()
+    asyncio.run(_run())
