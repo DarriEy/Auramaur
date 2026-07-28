@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
 from auramaur.broker.pnl import PnLTracker
 from auramaur.db.database import Database
@@ -670,4 +672,152 @@ async def test_market_cap_bounds_capital_not_local_currency_notional():
     under = Order(market_id="m1", exchange="polymarket", side=OrderSide.BUY,
                   size=10.0, price=0.90)
     assert await gw._exceeds_market_cap(under, is_live=False) is None
+    await db.close()
+
+
+async def test_decision_records_the_book_the_order_was_built_against():
+    """The defect that made Polymarket ungraduatable.
+
+    _capture_decision resolved best_bid/best_ask only from orderbook_snapshots,
+    which a SEPARATE recorder task populates on its own cadence. Measured
+    2026-07-28: 51 of 111 filled decisions were on markets it had never
+    sampled, so best_ask was NULL, _place_and_record could not tell whether the
+    paper fill crossed, and stamped it 'synthetic' — not in
+    credible_fill_evidence. 109 of 111 filled decisions were uncountable
+    forever and no strategy could graduate under require_executable_fills.
+    """
+    db = Database(":memory:")
+    await db.connect()
+    settings = Settings()
+
+    class Book:
+        best_bid, best_ask = 0.48, 0.52
+
+    exchange = MagicMock()
+    exchange.get_order_book = AsyncMock(return_value=Book())
+    gw = ExecutionGateway(router=None, exchange=exchange,
+                          exchange_name="polymarket", settings=settings, db=db,
+                          pnl_tracker=PnLTracker(db, settings))
+    order = Order(market_id="m1", exchange="polymarket", token_id="tok-1",
+                  side=OrderSide.BUY, size=10.0, price=0.52)
+    intent = TradeIntent(signal=_signal("m1"),
+                         market=Market(id="m1", exchange="polymarket",
+                                       question="q", category="politics_us",
+                                       outcome_yes_price=0.5,
+                                       outcome_no_price=0.5),
+                         size_dollars=5.0)
+
+    # No orderbook_snapshots row exists at all — the recorder never sampled it.
+    assert await db.fetchone("SELECT * FROM orderbook_snapshots") is None
+    decision_id = await gw._capture_decision(intent, order)
+    assert decision_id is not None
+
+    snap = await db.fetchone("SELECT * FROM decision_snapshots WHERE id=?",
+                             (decision_id,))
+    assert snap["best_ask"] == pytest.approx(0.52), "book was not captured"
+    assert snap["best_bid"] == pytest.approx(0.48)
+    exchange.get_order_book.assert_awaited_once_with("tok-1")
+    await db.close()
+
+
+async def test_a_recorded_snapshot_is_preferred_over_a_refetch():
+    """When the recorder DID sample the market, use it — no extra network."""
+    db = Database(":memory:")
+    await db.connect()
+    settings = Settings()
+    await db.execute(
+        """INSERT INTO orderbook_snapshots
+           (market_id, token_id, exchange, best_bid, best_ask, mid, recorded_at)
+           VALUES ('m1','tok-1','polymarket',0.40,0.44,0.42,datetime('now'))""")
+    await db.commit()
+
+    exchange = MagicMock()
+    exchange.get_order_book = AsyncMock()
+    gw = ExecutionGateway(router=None, exchange=exchange,
+                          exchange_name="polymarket", settings=settings, db=db,
+                          pnl_tracker=PnLTracker(db, settings))
+    order = Order(market_id="m1", exchange="polymarket", token_id="tok-1",
+                  side=OrderSide.BUY, size=10.0, price=0.44)
+    intent = TradeIntent(signal=_signal("m1"),
+                         market=Market(id="m1", exchange="polymarket",
+                                       question="q", category="politics_us",
+                                       outcome_yes_price=0.5,
+                                       outcome_no_price=0.5),
+                         size_dollars=5.0)
+    decision_id = await gw._capture_decision(intent, order)
+    snap = await db.fetchone("SELECT * FROM decision_snapshots WHERE id=?",
+                             (decision_id,))
+    assert snap["best_ask"] == pytest.approx(0.44)
+    exchange.get_order_book.assert_not_awaited()
+    await db.close()
+
+
+async def test_capture_survives_an_exchange_with_no_book_accessor():
+    """Fails soft: an exchange without get_order_book (the IBKR simulator) must
+    capture the decision anyway, exactly as before."""
+    db = Database(":memory:")
+    await db.connect()
+    settings = Settings()
+    exchange = MagicMock(spec=[])          # no get_order_book at all
+    gw = ExecutionGateway(router=None, exchange=exchange,
+                          exchange_name="polymarket", settings=settings, db=db,
+                          pnl_tracker=PnLTracker(db, settings))
+    order = Order(market_id="m2", exchange="polymarket", token_id="tok-2",
+                  side=OrderSide.BUY, size=10.0, price=0.30)
+    intent = TradeIntent(signal=_signal("m2"),
+                         market=Market(id="m2", exchange="polymarket",
+                                       question="q", category="other",
+                                       outcome_yes_price=0.5,
+                                       outcome_no_price=0.5),
+                         size_dollars=5.0)
+    decision_id = await gw._capture_decision(intent, order)
+    assert decision_id is not None
+    snap = await db.fetchone("SELECT * FROM decision_snapshots WHERE id=?",
+                             (decision_id,))
+    assert snap["best_ask"] is None        # unchanged behaviour
+    await db.close()
+
+
+async def test_a_paper_fill_that_crosses_is_countable_evidence():
+    """End to end: the gate this unblocks.
+
+    require_executable_fills admits only venue_fill / book_cross /
+    trade_through. Before the live-book fallback, a paper fill with no recorded
+    snapshot was stamped 'synthetic' and could never count toward graduation.
+    """
+    db = Database(":memory:")
+    await db.connect()
+    settings = Settings()
+
+    class Book:
+        best_bid, best_ask = 0.48, 0.52
+
+    order = Order(market_id="m9", exchange="polymarket", token_id="tok-9",
+                  side=OrderSide.BUY, size=10.0, price=0.52, dry_run=True)
+    result = OrderResult(order_id="p1", market_id="m9", status="paper",
+                         filled_size=10.0, filled_price=0.52, is_paper=True)
+    exchange = _paper_exchange(order, result)
+    exchange.get_order_book = AsyncMock(return_value=Book())
+
+    gw = ExecutionGateway(router=None, exchange=exchange,
+                          exchange_name="polymarket", settings=settings, db=db,
+                          pnl_tracker=PnLTracker(db, settings))
+    intent = TradeIntent(signal=_signal("m9"),
+                         market=Market(id="m9", exchange="polymarket",
+                                       question="q", category="politics_us",
+                                       outcome_yes_price=0.5,
+                                       outcome_no_price=0.5),
+                         size_dollars=5.2)
+    decision_id = await gw._capture_decision(intent, order)
+    await gw._place_and_record(order, strategy_source="llm", signal_id=None,
+                               exchange=exchange, exchange_name="polymarket",
+                               decision_id=decision_id)
+
+    snap = await db.fetchone("SELECT * FROM decision_snapshots WHERE id=?",
+                             (decision_id,))
+    credible = set(settings.graduation.credible_fill_evidence)
+    assert snap["fill_evidence"] in credible, (
+        f"{snap['fill_evidence']} is not countable evidence")
+    assert snap["fill_evidence"] == "book_cross"
+    assert snap["filled"] == 1
     await db.close()

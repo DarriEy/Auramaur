@@ -391,7 +391,14 @@ def test_maker_entry_disabled_falls_back_to_observed_price():
         assert await pillar.run_once() == 1
         order_market = ex.prepare_order.call_args[0][1]
         assert abs(order_market.outcome_yes_price - 0.85) < 1e-9  # observed
-        ex.get_order_book.assert_not_called()
+        # The PRICING path must not consult the book with maker entry off.
+        # This used to assert the book was never fetched at all, but
+        # ExecutionGateway._capture_decision now fetches it once to record what
+        # the order was built against — evidence, not pricing, and the thing
+        # that makes a paper fill countable rather than 'synthetic'. Exactly
+        # one call means capture made it and pricing did not; two would mean
+        # the maker path had come back.
+        assert ex.get_order_book.call_count == 1
         await db.close()
 
     asyncio.run(run())

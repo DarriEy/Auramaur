@@ -22,6 +22,7 @@ per-leg ``submit`` could not.
 from __future__ import annotations
 
 import asyncio
+import math
 import uuid
 import hashlib
 import json
@@ -250,6 +251,53 @@ class ExecutionGateway:
             order, strategy_source=strategy_source, signal_id=None,
             exchange=exchange, exchange_name=exchange_name)
 
+    async def _live_book(self, order: Order):
+        """The book the order was actually BUILT against.
+
+        _capture_decision used to resolve best_bid/best_ask solely from
+        ``orderbook_snapshots`` — a table a SEPARATE recorder task populates on
+        its own cadence. At decision time that row frequently does not exist:
+        measured 2026-07-28, 51 of 111 filled decisions were on markets the
+        recorder had never sampled, and the remainder missed on token_id
+        (Kalshi orders carry ticker-style ids while the book holds Polymarket
+        CLOB numerics).
+
+        The consequence was total. best_ask landed NULL, so _place_and_record
+        could not tell whether a paper fill crossed and stamped it 'synthetic'
+        — which is not in graduation.credible_fill_evidence. 109 of 111 filled
+        decisions were therefore uncountable FOREVER, and with
+        require_executable_fills on, no strategy could graduate on merit.
+
+        Recording the state actually used, rather than hoping another component
+        recorded it first, is the fix. Best-effort by construction: any failure
+        leaves the previous behaviour untouched.
+        """
+        fetch = getattr(self.exchange, "get_order_book", None)
+        if not callable(fetch) or not order.token_id:
+            return None
+        try:
+            book = await fetch(order.token_id)
+        except Exception:  # noqa: BLE001 - evidence, never the money path
+            return None
+        def _price(value):
+            # Must be a real number. A duck-typed or mocked book hands back
+            # whatever attribute access produces, and writing that into a
+            # decision snapshot would poison the evidence with something no
+            # comparison can interpret.
+            try:
+                if value is None or isinstance(value, bool):
+                    return None
+                number = float(value)
+            except (TypeError, ValueError):
+                return None
+            return number if math.isfinite(number) and number > 0 else None
+
+        bid, ask = _price(getattr(book, "best_bid", None)), _price(
+            getattr(book, "best_ask", None))
+        if bid is None and ask is None:
+            return None
+        return {"best_bid": bid, "best_ask": ask}
+
     async def _capture_decision(self, intent: TradeIntent, order: Order) -> int | None:
         """Persist a parameter-frozen executable decision before submission."""
         try:
@@ -285,6 +333,8 @@ class ExecutionGateway:
                    ORDER BY recorded_at DESC LIMIT 1""",
                 (order.market_id, order.token_id or "", order.token_id or ""),
             )
+            if book is None or book["best_ask"] is None:
+                book = await self._live_book(order) or book
             coefficient = 0.0 if order.post_only else taker_fee_rate(
                 order.exchange or self.exchange_name, intent.market.category)
             fee = order.size * coefficient * order.price * (1.0 - order.price)
