@@ -188,3 +188,51 @@ def test_the_simulator_is_not_an_order_path():
     live = order.model_copy(update={"dry_run": False})
     with pytest.raises(RuntimeError):
         asyncio.run(sim.place_order(live))
+
+
+@pytest.mark.asyncio
+async def test_a_price_book_stores_a_probability_not_a_price():
+    """decision_snapshots.fair_probability held 4334.45 for SHEL.L — the USD
+    mark, in a column named for a probability.
+
+    It degraded safely (fair == reference gives a Brier edge of exactly zero,
+    the intended "no forecast claimed"), but nothing reading that table could
+    interpret it. A price book passes fair=None and the neutral 0.5 stands.
+    """
+    from auramaur.db.database import Database
+    from auramaur.exchange.ibkr_instruments import BY_KEY
+    from auramaur.broker.instrument_booking import (
+        InstrumentFill, book_instrument_fill,
+    )
+    from auramaur.exchange.ibkr_intent import SimulatedInstrumentExchange
+    from auramaur.broker.execution_gateway import ExecutionGateway
+    from auramaur.broker.pnl import PnLTracker
+    from auramaur.exchange.models import OrderSide
+    from config.settings import Settings
+
+    db = Database(":memory:")
+    await db.connect()
+    settings = Settings()
+    sim = SimulatedInstrumentExchange()
+    gw = ExecutionGateway(router=None, exchange=sim, exchange_name="ibkr",
+                          settings=settings, db=db,
+                          pnl_tracker=PnLTracker(db, settings))
+    spec = BY_KEY["SHEL.L"]
+    ok = await book_instrument_fill(db, gw, sim, InstrumentFill(
+        spec=spec, cell="international_equity",
+        strategy_source="ibkr_international_equity_paper", side=OrderSide.BUY,
+        quantity=1.0, price=4334.45, fee_usd=1.0, fill_ref="ref-1",
+        session_date="2026-07-28", bid=4330.0, ask=4340.0,
+        fair=None, usd_per_point=0.0126, usd_capital_per_unit=54.6))
+    assert ok
+
+    snap = await db.fetchone("SELECT * FROM decision_snapshots")
+    assert 0.0 <= snap["fair_probability"] <= 1.0, "a price is in a probability column"
+    assert snap["fair_probability"] == snap["reference_price"]   # claims no edge
+    # The BBO is recorded, so the fill can be judged executable rather than
+    # stamped 'synthetic' and dropped by require_executable_fills.
+    assert (await db.fetchone("SELECT * FROM orderbook_snapshots")) is not None
+    # And the family advances with time rather than being the bare market_id.
+    assert snap["event_family"].startswith("ibkr:international_equity:SHEL.L:")
+    assert snap["event_family"] != snap["market_id"]
+    await db.close()

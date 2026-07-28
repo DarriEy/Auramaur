@@ -143,47 +143,30 @@ EXPOSURE_PATHS = (
         "oddlot or originating strategy",
     ),
     _path(
-        # The ETF arms wrote fills by raw SQL with no record_fill call, so they
-        # had no registered exposure callsite at all (audit finding #7,
-        # 2026-07-26). They now route the already-simulated fill through
-        # ExecutionGateway.submit for decision capture and pnl_ledger booking.
-        # The execution boundary is a LOCAL simulator with no broker
-        # connection and an explicit refusal of any non-dry_run order — the
-        # book stays PAPER_SIMULATED, which is why paper is the only mode.
-        "ibkr_etf_paper",
+        # ONE booking rail for both IBKR books. They had near-duplicate copies
+        # and drifted into three defects: the multiasset side stored prices in
+        # fair_probability, stamped every fill 'synthetic', and used a
+        # per-instrument event family that caps a book at 28 families forever.
+        # The ETF arms separately had no registered callsite at all (audit
+        # finding #7, 2026-07-26) because they wrote fills by raw SQL.
+        #
+        # Runs AFTER the book's own venue-native accounting and cannot veto it.
+        # The execution boundary is a LOCAL simulator that refuses any
+        # non-dry_run order, and a LIVE multiasset fill is not booked at all,
+        # so paper is the only mode this can ever reach.
+        "ibkr_paper_booking",
         ExposureKind.PAPER_BOOKING,
-        "ETF arm forecast (LLM arms + momentum control)",
-        ("IBKR/Alpaca equity quotes", "news evidence", "adjusted daily closes"),
-        "ETF arm envelope (budget, per-class caps, portfolio risk)",
-        "ExecutionGateway.submit -> SimulatedInstrumentExchange",
-        {"paper"},
-        "ibkr_etf_ledger + ExecutionGateway/PnLTracker",
-        "arm cycle marks (ibkr_etf_positions)",
-        "arm exit proposal (stop/target/trailing/bearish)",
-        "arm-owned positions table",
-        "no settlement — instruments do not resolve",
-        "ibkr_etf_<alias> ledger",
-    ),
-    _path(
-        # Distinct from the ibkr_multiasset ENTRY path below: that one is
-        # IBKRMultiAssetExecution.place, which can move real money. This is the
-        # evidence rail that runs AFTER a fill and cannot veto it — booking and
-        # decision capture only. It refuses to book a LIVE fill outright,
-        # because an is_paper=0 row would feed the account-wide live
-        # daily-loss gate, so paper is the only mode it can ever reach.
-        "ibkr_multiasset_booking",
-        ExposureKind.PAPER_BOOKING,
-        "already-executed multiasset paper fill",
-        ("book's own venue-native fill", "IBKR quotes", "FX rate"),
+        "already-executed IBKR fill (ETF arm forecast or multiasset rule)",
+        ("IBKR/Alpaca quotes", "adjusted daily closes", "FX rate"),
         "none — cannot veto a fill the book already made",
         "ExecutionGateway.submit -> SimulatedInstrumentExchange",
         {"paper"},
-        "ibkr_paper_ledger + ExecutionGateway/PnLTracker",
-        "book cycle marks (ibkr_paper_positions)",
-        "book exit rules (stop/target/trailing)",
+        "ibkr_etf_ledger / ibkr_paper_ledger + ExecutionGateway/PnLTracker",
+        "book cycle marks (ibkr_etf_positions / ibkr_paper_positions)",
+        "book exit rules (stop/target/trailing/bearish)",
         "book-owned positions table",
         "no settlement — instruments do not resolve",
-        "ibkr_<book> ledger",
+        "ibkr_<book or alias> ledger",
     ),
     _path(
         "ibkr_multiasset",
@@ -420,14 +403,10 @@ REGISTERED_CALLSITES = Counter(
             "submit_paired",
             "prediction_paired",
         ): 1,
-        ("auramaur/strategy/ibkr_etf_paper.py", "_book_fill", "submit", "ibkr_etf_paper"): 1,
+        ("auramaur/broker/instrument_booking.py", "book_instrument_fill", "submit",
+         "ibkr_paper_booking"): 1,
         ("auramaur/strategy/ibkr_multiasset_paper.py", "_fill", "place", "ibkr_multiasset"): 1,
-        (
-            "auramaur/strategy/ibkr_multiasset_paper.py",
-            "_book_fill",
-            "submit",
-            "ibkr_multiasset_booking",
-        ): 1,
+
         (
             "auramaur/exchange/ibkr_multiasset_execution.py",
             "place",

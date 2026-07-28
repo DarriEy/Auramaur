@@ -21,10 +21,10 @@ from auramaur.broker.pnl import PnLTracker
 from auramaur.exchange.ibkr_instruments import (
     BY_BOOK, BY_KEY, ContractKind, IBKRBook, InstrumentSpec,
 )
-from auramaur.exchange.ibkr_intent import (
-    SimulatedInstrumentExchange, instrument_market, instrument_market_id,
-    instrument_signal, prepare_instrument_order,
+from auramaur.broker.instrument_booking import (
+    InstrumentFill, book_instrument_fill,
 )
+from auramaur.exchange.ibkr_intent import SimulatedInstrumentExchange
 from auramaur.exchange.models import OrderSide
 from auramaur.strategy.protocols import ExecutionMode
 from auramaur.risk.ibkr_math import (
@@ -313,29 +313,23 @@ class IBKRMultiAssetPaperBook:
         await self._book_fill(
             spec, side=side, quantity=quantity, price=price, fx=fx,
             multiplier=float(quote.multiplier or 1.0), fee=fee,
-            fill_ref=fill_ref, was_live=bool(execution_ref))
+            fill_ref=fill_ref, was_live=bool(execution_ref),
+            bid=float(quote.bid or 0), ask=float(quote.ask or 0))
         if execution_ref:
             await self._executor.acknowledge(execution_ref)
 
     async def _book_fill(self, spec, *, side: str, quantity: float, price: float,
                          fx: float, multiplier: float, fee: float,
-                         fill_ref: str, was_live: bool) -> None:
-        """Register an already-executed fill on the standard rails.
+                         fill_ref: str, was_live: bool,
+                         bid: float = 0.0, ask: float = 0.0) -> None:
+        """Register the fill on the shared rails (see book_instrument_fill).
 
-        Runs AFTER the book's own ibkr_paper_* rows and cannot veto them: this
-        increment is booking and capture only, so a booking failure must lose
-        evidence, not change what the book traded.
-
-        LIVE FILLS ARE DELIBERATELY NOT BOOKED. When the executor fills for
-        real, an honest row is is_paper=0 — and `pnl_ledger WHERE is_paper = 0`
-        is what the account-wide live daily-loss gate reads, so booking it here
-        would silently add IBKR P&L to a LIVE RISK GATE's inputs. Recording it
-        as paper instead would be a lie in the ladder's evidence. Neither is
-        mine to choose, so a live fill is skipped and logged loudly. Dormant
-        today (ibkr.multiasset_execution_enabled is false, books []).
+        LIVE FILLS ARE DELIBERATELY NOT BOOKED. An honest row for an executor
+        fill is is_paper=0, and `pnl_ledger WHERE is_paper = 0` is what the
+        account-wide live daily-loss gate reads -- booking it would add IBKR
+        P&L to a LIVE RISK GATE's inputs. Recording it as paper would be a lie
+        in the ladder's evidence. Neither is this increment's call.
         """
-        if self._db is None or self._gateway.pnl_tracker is None:
-            return
         if was_live:
             log.warning(
                 "ibkr_multiasset.live_fill_not_booked", book=self.book.value,
@@ -343,55 +337,20 @@ class IBKRMultiAssetPaperBook:
                 detail="live P&L would enter the account-wide daily-loss gate; "
                        "booking live fills needs an explicit operator decision")
             return
-        order_side = OrderSide.BUY if str(side).upper() == "BUY" else OrderSide.SELL
-        cell = self.book.value
-        market_id = instrument_market_id(spec, cell)
-        # The USD quantities the book already computes. usd_per_point scales a
-        # local price move into USD (record_fill has no notion of either, and
-        # booked $0.02 where this book books $21.61 on EURUSD). Capital is a
-        # SEPARATE number: one FX unit carries ~$1,081 of notional against
-        # ~$100 committed, and the aggregate cap is a capital budget.
-        usd_per_point = multiplier * fx
-        usd_capital_per_unit = self._capital_per_unit(spec, price, fx)
-        try:
-            await self._db.execute(
-                """INSERT OR IGNORE INTO markets
-                   (id, exchange, question, category, active,
-                    outcome_yes_price, outcome_no_price, last_updated)
-                   VALUES (?, 'ibkr', ?, ?, 0, 0, 0, datetime('now'))""",
-                (market_id, f"{cell}: {spec.description or spec.symbol}",
-                 spec.asset_class or ""))
-            order = prepare_instrument_order(
-                spec, side=order_side, quantity=quantity, price=price,
-                is_live=False, strategy_source=self.name, cell=cell,
-                usd_per_point=usd_per_point,
-                usd_capital_per_unit=usd_capital_per_unit)
-            if order is None:
-                return
-            self._sim.stage(order, order_id=fill_ref)
-            usd_mark = price * usd_per_point
-            result = await self._gateway.submit(TradeIntent(
-                signal=instrument_signal(
-                    spec, strategy_source=self.name, mark=usd_mark, fair=None,
-                    side=order_side, cell=cell,
-                    rationale=f"ibkr_{cell} {side} {spec.key}"),
-                market=instrument_market(spec, mark=usd_mark, cell=cell),
-                size_dollars=quantity * usd_capital_per_unit,
-                force_paper=True,
-            ))
-            if result.status not in ("paper", "filled", "partial"):
-                log.error("ibkr_multiasset.fill_not_booked", book=cell,
-                          instrument=spec.key, status=result.status,
-                          reason=result.reason,
-                          detail="venue-native fill stands; ladder evidence lost")
-                return
-            await record_ledger_event(
-                self._db, market_id=market_id, kind="commission", token="YES",
-                qty=quantity, pnl=-float(fee), fees=0.0, is_paper=True,
-                source_ref=f"{fill_ref}:commission")
-        except Exception as exc:  # noqa: BLE001 - evidence, never the money path
-            log.error("ibkr_multiasset.fill_booking_failed", book=cell,
-                      instrument=spec.key, error=str(exc)[:200])
+        await book_instrument_fill(self._db, self._gateway, self._sim,
+                                   InstrumentFill(
+            spec=spec, cell=self.book.value, strategy_source=self.name,
+            side=OrderSide.BUY if str(side).upper() == "BUY" else OrderSide.SELL,
+            quantity=quantity, price=price, fee_usd=fee, fill_ref=fill_ref,
+            session_date=datetime.now(timezone.utc).date().isoformat(),
+            bid=bid, ask=ask,
+            # A price book makes no forecast, so it claims no edge: fair=None
+            # leaves reference at the neutral 0.5. Passing the USD mark here is
+            # what put a price into fair_probability.
+            fair=None,
+            usd_per_point=multiplier * fx,
+            usd_capital_per_unit=self._capital_per_unit(spec, price, fx),
+            rationale=f"ibkr_{self.book.value} {side} {spec.key}"), log=log)
 
     async def run_once(self) -> int:
         cfg = self.config

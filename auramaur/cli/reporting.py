@@ -162,9 +162,12 @@ def ibkr_calibration(arm: str, width: float):
     """
     async def _run():
         from auramaur.evaluation.etf_calibration import (
-            COIN, CONFIDENCE_RANKS, Forecast, brier_score, confidence_bands,
-            probability_bands, samples_for_reliable_edge, suggested_thresholds,
-            threshold_sweep,
+            COIN, CONFIDENCE_RANKS, Forecast, brier_score, clearance,
+            confidence_bands, probability_bands, samples_for_reliable_edge,
+            suggested_thresholds, threshold_sweep,
+        )
+        from auramaur.strategy.ibkr_edge_economics import (
+            required_conviction, round_trip_cost_bps,
         )
         from auramaur.web.db import ReadOnlyDatabase
 
@@ -197,35 +200,42 @@ def ibkr_calibration(arm: str, width: float):
             for alias in sorted(by_arm):
                 forecasts = by_arm[alias]
                 resolved = [f for f in forecasts if f.resolved]
-                min_prob = float(settings.ibkr.etf_arm_min_prob.get(
-                    alias, settings.ibkr.etf_min_prob))
-                min_conf = str(settings.ibkr.etf_arm_min_confidence.get(
-                    alias, settings.ibkr.etf_min_confidence)).upper()
-                ceiling = max(f.probability for f in forecasts)
+                # The gate is ECONOMIC now: expected edge against cost. The
+                # old prob/confidence thresholds no longer decide anything, and
+                # printing them as "the gate" was actively misleading.
+                cap = settings.ibkr.etf_paper_budget_usd
+                horizon = int(settings.ibkr.etf_signal_horizon_days)
+                cost_bps = round_trip_cost_bps(
+                    cap, commission_usd=settings.ibkr.etf_fee_per_order_usd,
+                    spread_bps=3.0, slippage_bps=settings.ibkr.etf_slippage_bps)
+                ceiling = max(abs(f.probability - 0.5) for f in forecasts)
                 brier = brier_score(forecasts)
                 head = (f"[bold]{alias}[/] — {len(resolved)}/{len(forecasts)} "
-                        f"resolved | gate: prob>={min_prob} conf>={min_conf} | "
-                        f"observed ceiling {ceiling:.2f}")
+                        f"resolved | horizon {horizon} sessions | "
+                        f"${cap:,.0f} at {cost_bps:.0f}bps round trip | "
+                        f"peak conviction {ceiling:.3f}")
                 if brier is not None:
                     head += f" | Brier {brier:.3f}"
                 console.print(Panel(head, expand=False))
-                if min_prob > ceiling:
-                    # Scoped to the sample, not asserted structurally: a
-                    # deterministic arm returns 0.70/0.30 by construction, so a
-                    # run of negative-momentum forecasts caps at 0.30 without
-                    # the gate being unreachable in principle.
-                    if len(forecasts) >= 30:
-                        console.print(
-                            f"  [red]Gate unreachable on the record[/]: "
-                            f"min_prob {min_prob} exceeds all "
-                            f"{len(forecasts)} forecasts this arm has recorded "
-                            f"(max {ceiling:.2f}).")
-                    else:
-                        console.print(
-                            f"  [yellow]No forecast has reached min_prob "
-                            f"{min_prob}[/] (max {ceiling:.2f}), but only "
-                            f"{len(forecasts)} recorded — too few to call the "
-                            f"gate unreachable.")
+                # What the arm's peak conviction can actually reach, given
+                # this capital and horizon. An instrument needing more than the
+                # model has ever produced is out of the universe, not behind a
+                # tighter threshold.
+                reach = [(sym, required_conviction(vol, horizon, cost_bps))
+                         for sym, vol in (("SLV", 0.644), ("GLD", 0.284),
+                                          ("XLE", 0.210), ("QQQ", 0.190),
+                                          ("SPY", 0.127), ("TLT", 0.093))]
+                inside = [f"{s_}({n:.3f})" for s_, n in reach if n <= ceiling]
+                console.print(
+                    "  reachable at this arm's peak conviction: "
+                    + (", ".join(inside) if inside else
+                       "[red]nothing — no instrument's edge covers its fees[/]"))
+                verdict = clearance(
+                    forecasts,
+                    min_resolved=settings.ibkr.etf_min_resolved_to_trade)
+                console.print(
+                    f"  trading: {'[green]CLEARED[/]' if verdict.cleared else '[yellow]LOCKED[/]'}"
+                    f" — {verdict.reason}")
                 if not resolved:
                     nxt = min(pending.get(alias, [])) if pending.get(alias) else "—"
                     console.print(
@@ -267,12 +277,13 @@ def ibkr_calibration(arm: str, width: float):
                 reachable = min(
                     (b.label for b in confidence_bands(resolved)),
                     key=lambda c: CONFIDENCE_RANKS.get(c, 99), default="LOW")
-                floors = list(dict.fromkeys([min_conf, reachable]))
+                # Confidence no longer gates; sweep the reachable band only.
+                floors = [reachable]
                 sweeps = {floor: threshold_sweep(resolved, candidates,
                                                  min_confidence=floor)
                           for floor in floors}
                 for floor, sweep in sweeps.items():
-                    tag = " (configured)" if floor == min_conf else " (reachable)"
+                    tag = " (reachable)"
                     sweep_table = Table(
                         title=f"threshold sweep — confidence floor {floor}{tag}",
                         expand=False)
