@@ -369,11 +369,22 @@ ibkr:
     "VEA", "VWO", "INDA", "MCHI", "EWJ", "EWC", "EWZ",
     "TLT", "IEF", "SHY", "TIP", "LQD", "HYG", "EMB",
     "GLD", "SLV", "DBC", "VNQ", "UUP"]
-  etf_paper_budget_usd: 5000.0
-  etf_max_entry_usd: 250.0
-  etf_max_deployment_pct: 50.0
-  etf_max_asset_class_pct: 30.0
-  etf_max_positions: 4
+  # $1,100 is the real IBKR capital, and ONE position holds all of it. The
+  # commission is max($1, notional*0.1%), so splitting the book into four $250
+  # entries costs 80bps a round trip instead of 20 -- at $250 nothing in this
+  # universe clears its own fees. Diversification is not worth 4x the fee load
+  # at this size; see docs/ibkr_strategy_design.md.
+  etf_paper_budget_usd: 1100.0
+  etf_max_entry_usd: 1100.0
+  # 100% because the book now holds exactly ONE position. A 50% cap on a
+  # single-position book does not diversify anything -- it just halves the
+  # notional, which doubles the commission in bps and pushes every instrument
+  # back below its own fee floor.
+  etf_max_deployment_pct: 100.0
+  # Likewise: one position is one asset class, so a sub-100 cap can only
+  # shrink the trade. Breadth limits belong on a book that has breadth.
+  etf_max_asset_class_pct: 100.0
+  etf_max_positions: 1
   etf_daily_loss_limit_usd: 100.0
   etf_max_signal_refreshes_per_cycle: 4
   etf_fee_per_order_usd: 1.00
@@ -388,11 +399,15 @@ ibkr:
   etf_take_profit_pct: 8.0
   etf_trailing_stop_pct: 3.0
   etf_reentry_cooldown_hours: 24.0
-  etf_risk_per_position_pct: 0.25
+  # 2.5% so the single position can actually reach capital size. At 0.25% the
+  # risk budget is $2.75, which a vol-based stop turns into a ~$110 position --
+  # and at $110 the $1 commission is 91bps a LEG. Sizing that small is how a
+  # book guarantees its fees exceed its edge.
+  etf_risk_per_position_pct: 2.5
   etf_stop_vol_multiple: 2.0
   etf_min_stop_pct: 1.0
   etf_slippage_bps: 2.0
-  etf_max_portfolio_risk_pct: 1.0
+  etf_max_portfolio_risk_pct: 2.5
   # Intelligence-cap experiment: identical evidence/prompt/risk across three
   # independent, isolated paper cells. Only model tier/reasoning effort changes.
   etf_models:

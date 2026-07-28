@@ -277,9 +277,12 @@ def clearance(forecasts, *, min_resolved: int = 100,
     """
     resolved = [f for f in forecasts if f.resolved]
     conviction = max((abs(f.probability - 0.5) for f in forecasts), default=0.0)
-    if len(resolved) < min_resolved:
+    # Two is the floor regardless of configuration: sample variance is
+    # undefined below it, so a single lucky forecast could otherwise open the
+    # gate (or divide by zero trying).
+    if len(resolved) < max(2, min_resolved):
         return TradingClearance(
-            False, f"{len(resolved)}/{min_resolved} resolved forecasts",
+            False, f"{len(resolved)}/{max(2, min_resolved)} resolved forecasts",
             len(resolved), 0.0, float("-inf"), conviction)
     edges = [((f.reference - f.actual_outcome) ** 2
               - (f.probability - f.actual_outcome) ** 2) for f in resolved]

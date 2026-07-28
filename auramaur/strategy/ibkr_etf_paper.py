@@ -24,8 +24,12 @@ from auramaur.experiments.strategies.ibkr_etf_paper import (
     entry_proposal, exit_proposal,
 )
 from auramaur.strategy.protocols import ExecutionMode
+from auramaur.evaluation.etf_calibration import Forecast, clearance
 from auramaur.risk.ibkr_math import (
     annualized_volatility, horizon_up_rate, normalized_momentum,
+)
+from auramaur.strategy.ibkr_edge_economics import (
+    clears_costs, required_conviction, round_trip_cost_bps,
 )
 from auramaur.strategy.ibkr_etf_controls import completed_closes
 
@@ -421,6 +425,42 @@ class IBKRETFPaperPillar:
         await self._book_fill(symbol, side, qty, price, fee, fill_ref,
                               bid=bid, ask=ask)
 
+    async def _clearance(self):
+        """Has this arm earned the right to trade? Recomputed each cycle.
+
+        The whole design rests on this: forecasts are free and resolve in five
+        sessions, so an arm accumulates ~125 scoreable calls a week and can be
+        judged in about three weeks. Trading is not free -- ~27bps a round trip
+        at $1,100, of which 20bps is the $1 commission floor. So the arm
+        forecasts from day one and may not trade until its Brier edge over its
+        own trailing benchmark has a 95% lower bound clear of zero.
+
+        Deliberately fails closed. Any error, and the arm does not trade.
+        """
+        try:
+            rows = await self._db.fetchall(
+                """SELECT probability, confidence, actual_outcome, reference_price,
+                          final_price
+                     FROM ibkr_etf_forecasts WHERE model_alias = ?""",
+                (self._alias,))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ibkr_etf.clearance_unavailable", model_alias=self._alias,
+                        error=str(exc)[:120])
+            return clearance([], min_resolved=self._s.ibkr.etf_min_resolved_to_trade)
+        forecasts = []
+        for row in rows or []:
+            outcome = row["actual_outcome"]
+            forecasts.append(Forecast(
+                float(row["probability"]), str(row["confidence"]),
+                None if outcome is None else int(outcome),
+                # The benchmark each forecast was scored against. Stored
+                # forecasts predate the benchmark column, so fall back to a
+                # coin -- which UNDERSTATES the edge and therefore keeps the
+                # gate shut rather than opening it by accident.
+                0.5))
+        return clearance(forecasts,
+                         min_resolved=self._s.ibkr.etf_min_resolved_to_trade)
+
     async def _forecast_pair(self, symbol: str, side: OrderSide,
                              session_date: str) -> tuple[float | None, float]:
         """(fair, reference) for the Brier bar: the arm's forecast, and what it
@@ -566,6 +606,8 @@ class IBKRETFPaperPillar:
         # Bars are stable within a cycle; refetching them per consumer was three
         # identical historical requests per symbol against IBKR pacing.
         self._closes_cache.clear()
+        session_today = datetime.now(timezone.utc).astimezone(_ET).date().isoformat()
+        cleared = await self._clearance()
         entries = 0
         # Why a cycle produced no entry. Without this the arm reported only
         # "0 entries" and the cause was invisible: ibkr_etf_openai ran 382
@@ -683,10 +725,12 @@ class IBKRETFPaperPillar:
                 daily_loss_hit = await self._daily_equity_change() <= -cfg.etf_daily_loss_limit_usd
             elif view is None:
                 blocked["no_view"] += 1
-            elif not conf_ok:
-                blocked["confidence"] += 1
-            elif prob < self._min_prob:
-                blocked["probability"] += 1
+            elif not cleared.cleared:
+                # Forecast-only until the arm has DEMONSTRATED skill. Forecasts
+                # cost nothing and resolve in five sessions; trading costs
+                # ~27bps a round trip. The previous book inverted this and paid
+                # $926 in commission to learn its gross P&L was -$42.
+                blocked["not_cleared"] += 1
             elif daily_loss_hit:
                 blocked["daily_loss"] += 1
             elif unmarked_positions:
@@ -706,6 +750,17 @@ class IBKRETFPaperPillar:
                 if annual_vol is None or momentum is None or momentum <= 0:
                     blocked["momentum"] += 1
                     continue
+                # THE ENTRY TEST. A bare probability threshold knows nothing
+                # about the instrument or what it costs to trade: at $1,100,
+                # SPY needs 19pp of conviction to clear 27bps and this model
+                # has never produced 6pp, while SLV needs 3.7pp. So the gate is
+                # expected edge against cost, not a number.
+                horizon = int(cfg.etf_signal_horizon_days)
+                base_rate = horizon_up_rate(
+                    completed_closes(closes_raw, session_today), horizon)
+                if base_rate is None:
+                    blocked["no_benchmark"] += 1
+                    continue
                 risk_budget = cfg.etf_paper_budget_usd * cfg.etf_risk_per_position_pct / 100
                 open_risk = await self._db.fetchone(
                     """SELECT COALESCE(SUM(initial_risk_usd), 0) AS risk
@@ -715,11 +770,14 @@ class IBKRETFPaperPillar:
                     symbol=symbol, bid=quote.bid, ask=quote.ask,
                     probability=prob, confidence=confidence,
                     confidence_rank=self._CONF.get(confidence.upper(), 0),
-                    # Per-arm, not global: entry_proposal re-checks both
-                    # thresholds, so passing cfg.* here would silently veto any
-                    # per-arm override the outer gate just allowed through.
-                    min_confidence_rank=self._min_conf_rank,
-                    min_probability=self._min_prob,
+                    # Deliberately permissive: the economic gate above is
+                    # strictly stronger than any probability threshold, and it
+                    # has already run. Leaving the old thresholds here would
+                    # re-impose the very number this design replaced -- the
+                    # same silent double-veto that made etf_min_prob 0.62
+                    # reject 100% of forecasts.
+                    min_confidence_rank=0,
+                    min_probability=0.0,
                     annual_volatility=annual_vol, momentum=momentum,
                     remaining_deployment_usd=deployment_cap - allocated,
                     remaining_class_usd=class_cap - class_allocated.get(asset_class, 0.0),
@@ -734,6 +792,21 @@ class IBKRETFPaperPillar:
                     controls_allow_entry=True)
                 if proposal is None:
                     blocked["sizing"] += 1
+                    continue
+                # THE ENTRY TEST, priced on the REAL notional. Running it on
+                # the intended entry size instead would have been badly wrong:
+                # risk sizing can cut a $1,100 intent to $110, where the $1
+                # commission is 91bps a leg rather than 9. A bare probability
+                # threshold cannot see any of this — at $1,100 SPY needs 19pp
+                # of conviction and this model has never produced 6pp, while
+                # SLV needs 3.7pp.
+                notional = proposal.quantity * proposal.price
+                cost_bps = round_trip_cost_bps(
+                    notional, commission_usd=cfg.etf_fee_per_order_usd,
+                    spread_bps=spread_bps, slippage_bps=cfg.etf_slippage_bps)
+                if not clears_costs(prob, base_rate, annual_vol, horizon,
+                                    cost_bps, margin=cfg.etf_edge_cost_margin):
+                    blocked["economics"] += 1
                     continue
                 await self._fill(symbol, OrderSide.BUY, proposal.quantity,
                                  proposal.price, stop_price=proposal.stop_price,
@@ -755,7 +828,10 @@ class IBKRETFPaperPillar:
         # distinguishable from a dead task.
         log.info("ibkr_etf.cycle", model_alias=self._alias,
                  positions=position_count, entries=entries,
-                 min_prob=self._min_prob, min_conf_rank=self._min_conf_rank,
+                 cleared_to_trade=cleared.cleared, clearance=cleared.reason,
+                 resolved=cleared.resolved,
+                 brier_edge=round(cleared.brier_edge, 5),
+                 max_conviction=round(cleared.max_conviction, 4),
                  blocked=dict(blocked),
                  blocked_by=(blocked.most_common(1)[0][0] if blocked else None))
         return entries

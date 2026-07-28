@@ -24,7 +24,25 @@ class QuotesOnlyClient:
         return EquityQuote(self.bid, self.ask, time.time())
 
     async def get_adjusted_daily_closes(self, symbol):
-        return [(f"session-{day:03d}", 75 + day * 0.2) for day in range(121)]
+        """Real ISO session dates with realistic variance.
+
+        completed_closes() compares dates as STRINGS against the as-of date, so
+        the synthetic "session-NNN" ids this used to return sort above any 20xx
+        date and silently filtered the entire history away -- which left the
+        benchmark undefined and blocked every entry. A dead-straight ramp is
+        also wrong: its base rate is 1.0, so no forecast can beat it.
+        """
+        import math as _math
+        from datetime import date as _date, timedelta as _td
+
+        out, day, i = [], _date.today() - _td(days=300), 0
+        while len(out) < 200:
+            if day.weekday() < 5:
+                out.append((day.isoformat(),
+                            100.0 * (1.0008 ** i) * (1 + 0.03 * _math.sin(i * 0.6))))
+                i += 1
+            day += _td(days=1)
+        return out
 
 
 class Aggregator:
@@ -42,7 +60,7 @@ class Analyzer:
                                confidence=self.confidence, skipped_reason=None)
 
 
-async def _pillar(db, client=None, analyzer=None):
+async def _pillar(db, client=None, analyzer=None, cleared=True):
     settings = Settings()
     settings.ibkr.etf_paper_enabled = True
     settings.ibkr.etf_symbols = ["SPY"]
@@ -50,6 +68,14 @@ async def _pillar(db, client=None, analyzer=None):
         settings, client or QuotesOnlyClient(), db, Aggregator(),
         analyzer or Analyzer(), model_alias="luna")
     pillar.market_open = lambda: True
+    if cleared:
+        # These tests exercise entry sizing, fills and accounting. Trading is
+        # locked in production until ~370 forecasts resolve, so granting
+        # clearance here is what lets them test the mechanics rather than the
+        # lock. test_trading_is_locked_until_the_arm_earns_it covers the lock.
+        from auramaur.evaluation.etf_calibration import TradingClearance
+        pillar._clearance = AsyncMock(return_value=TradingClearance(
+            True, "granted for test", 400, 0.02, 0.005, 0.10))
     return pillar
 
 
@@ -104,9 +130,14 @@ async def test_entry_captures_a_decision_and_registers_a_graduation_clock():
     assert snap["venue"] == "ibkr"
     assert snap["market_id"] == "ibkr:luna:SPY"
     assert snap["is_paper"] == 1
-    # A price book asserts no probability edge: reference and fair must agree,
-    # or the ladder's Brier bar scores a forecast the strategy never made.
-    assert snap["fair_probability"] == snap["reference_price"]
+    # The arm's own probability against the instrument's trailing base rate.
+    # This assertion used to require them EQUAL (increment 2, when the book
+    # claimed no edge). Increment 3 made fair the real forecast — but the test
+    # fixture's synthetic "session-NNN" dates broke completed_closes, so the
+    # benchmark was always None and silently fell back to fair. Fixing the
+    # fixture is what finally exercised it.
+    assert snap["fair_probability"] == pytest.approx(0.70)
+    assert snap["reference_price"] != pytest.approx(snap["fair_probability"])
 
     experiment = await db.fetchone(
         "SELECT * FROM strategy_experiments WHERE strategy_source = 'ibkr_etf_luna'")
@@ -180,10 +211,13 @@ def test_default_profile_is_small_readonly_paper_book():
     assert {"SPY", "QQQ", "IWM", "TLT", "GLD", "VEA"}.issubset(
         settings.ibkr.etf_symbols)
     assert settings.ibkr.etf_paper_enabled is True
-    assert settings.ibkr.etf_paper_budget_usd == 5_000.0
-    assert settings.ibkr.etf_max_entry_usd == 250.0
-    assert settings.ibkr.etf_max_deployment_pct == 50.0
-    assert settings.ibkr.etf_max_positions == 4
+    # One position holding the real $1,100 of capital. Splitting it into four
+    # $250 entries costs 80bps a round trip instead of 20, and at $250 nothing
+    # in this universe clears its own fees (docs/ibkr_strategy_design.md).
+    assert settings.ibkr.etf_paper_budget_usd == 1_100.0
+    assert settings.ibkr.etf_max_entry_usd == 1_100.0
+    assert settings.ibkr.etf_max_deployment_pct == 100.0
+    assert settings.ibkr.etf_max_positions == 1
     assert settings.ibkr.etf_max_signal_refreshes_per_cycle == 4
     assert [(m.alias, m.model, m.effort) for m in settings.ibkr.etf_models] == [
         ("luna", "gpt-5.6-luna", "low"),
@@ -204,6 +238,11 @@ async def test_model_cells_hold_independent_positions():
     sol = IBKRETFPaperPillar(settings, QuotesOnlyClient(), db, Aggregator(),
                              Analyzer(0.70), model_alias="sol")
     luna.market_open = sol.market_open = lambda: True
+    # This test is about CELL ISOLATION, not the clearance lock.
+    from auramaur.evaluation.etf_calibration import TradingClearance
+    granted = TradingClearance(True, "granted for test", 400, 0.02, 0.005, 0.10)
+    luna._clearance = AsyncMock(return_value=granted)
+    sol._clearance = AsyncMock(return_value=granted)
     await luna.run_once()
     await sol.run_once()
     rows = await db.fetchall(
@@ -229,15 +268,19 @@ async def test_position_count_caps_broad_bullish_universe():
 
 
 @pytest.mark.asyncio
-async def test_asset_class_cap_reduces_entry_size():
+async def test_a_cap_that_shrinks_the_trade_below_its_fees_blocks_it():
+    """The cap still binds — but a $22 position is not a smaller trade, it is a
+    worse one: the $1 commission is 455bps a leg there. The old assertion
+    accepted any fill under the cap, which is exactly how the previous book
+    ended up paying $926 in fees on $42 of gross P&L.
+    """
     db = Database(":memory:")
     await db.connect()
     pillar = await _pillar(db)
-    pillar._s.ibkr.etf_max_asset_class_pct = 2.0  # $100 of $5k
-    await pillar.run_once()
-    row = await db.fetchone(
-        "SELECT quantity, avg_cost FROM ibkr_etf_positions WHERE model_alias='luna'")
-    assert row["quantity"] * row["avg_cost"] + 1.0 <= 100.0
+    pillar._s.ibkr.etf_max_asset_class_pct = 2.0      # $22 of $1,100
+    assert await pillar.run_once() == 0
+    assert await db.fetchone(
+        "SELECT * FROM ibkr_etf_positions WHERE model_alias='luna'") is None
     await db.close()
 
 
@@ -505,35 +548,40 @@ async def test_control_arm_records_a_scoreable_forecast():
 
 
 @pytest.mark.asyncio
-async def test_per_arm_threshold_overrides_the_global_gate():
-    """A calibrated arm must be able to carry its own entry thresholds.
+async def test_the_economic_gate_replaces_the_probability_threshold():
+    """A bare probability threshold is the thing this design removed.
 
-    The global defaults (0.62 / MEDIUM) were set for a control that returns
-    0.70/HIGH by construction. The OpenAI arms are instructed to sit near
-    0.50/LOW on weak evidence, so they produced 0.43-0.56 / MEDIUM_LOW and the
-    shared gate rejected 100% of 282 forecasts.
+    etf_arm_min_prob / etf_arm_min_confidence still exist and still resolve
+    per-arm, but they no longer decide entries and are no longer forwarded to
+    entry_proposal — the economic test is strictly stronger and already ran.
+    Leaving them in place would re-impose the number that rejected 100% of 282
+    forecasts.
+
+    What decides now is whether expected edge beats cost, which depends on the
+    INSTRUMENT and the SIZE, not on a probability alone: at $1,100 SPY needs
+    19pp of conviction and SLV needs 3.7pp.
     """
+    from auramaur.strategy.ibkr_edge_economics import (
+        clears_costs, round_trip_cost_bps,
+    )
+
     db = Database(":memory:")
     await db.connect()
     pillar = await _pillar(db, analyzer=Analyzer(probability=0.55,
                                                  confidence="MEDIUM_LOW"))
-    # Global gate: no entry, and the arm must say which gate bound.
-    assert await pillar.run_once() == 0
+    # The per-arm accessors still work; they simply no longer gate.
+    pillar._s.ibkr.etf_arm_min_prob = {"luna": 0.53}
+    pillar._s.ibkr.etf_arm_min_confidence = {"luna": "MEDIUM_LOW"}
+    assert pillar._min_prob == 0.53
+    await pillar.run_once()
+    await db.close()
 
-    db2 = Database(":memory:")
-    await db2.connect()
-    relaxed = await _pillar(db2, analyzer=Analyzer(probability=0.55,
-                                                   confidence="MEDIUM_LOW"))
-    relaxed._s.ibkr.etf_arm_min_prob = {"luna": 0.53}
-    relaxed._s.ibkr.etf_arm_min_confidence = {"luna": "MEDIUM_LOW"}
-    assert relaxed._min_prob == 0.53
-    assert await relaxed.run_once() == 1, (
-        "per-arm override did not reach entry_proposal, which re-checks both "
-        "thresholds and would veto with the global values")
-
-    # A non-overridden arm keeps the global gate.
-    relaxed._alias = "terra"
-    assert relaxed._min_prob == relaxed._s.ibkr.etf_min_prob
+    # The gate that DOES decide: identical conviction, opposite verdicts,
+    # because the instruments differ.
+    cost = round_trip_cost_bps(1_100.0, commission_usd=1.0, spread_bps=3.0,
+                               slippage_bps=2.0)
+    assert not clears_costs(0.56, 0.50, 0.127, 5, cost)      # SPY
+    assert clears_costs(0.56, 0.50, 0.644, 5, cost)          # SLV
 
 
 @pytest.mark.asyncio
@@ -585,23 +633,11 @@ async def test_event_family_advances_weekly_so_the_book_can_reach_thirty():
 
 @pytest.mark.asyncio
 async def test_entry_captures_a_real_forecast_against_a_real_benchmark():
-    from datetime import date, timedelta
-
     db = Database(":memory:")
     await db.connect()
-    client = QuotesOnlyClient()
-    # Real ISO session dates: completed_closes compares them as strings against
-    # the as_of date, so the synthetic "session-NNN" ids the other fixtures use
-    # sort ABOVE any 20xx date and silently filter the whole history away.
-    start = date(2026, 7, 27) - timedelta(days=260)
-    bars, day, i = [], start, 0
-    while len(bars) < 200:
-        if day.weekday() < 5:
-            bars.append((day.isoformat(), 75 + i * 0.2))
-            i += 1
-        day += timedelta(days=1)
-    client.get_adjusted_daily_closes = AsyncMock(return_value=bars)
-    pillar = await _pillar(db, client=client)
+    # The default fixture's series is solved to give a base rate near a coin.
+    # A straight ramp would have a base rate of 1.0, which no forecast can beat.
+    pillar = await _pillar(db)
     await pillar.run_once()
 
     snap = await db.fetchone("SELECT * FROM decision_snapshots")
@@ -695,4 +731,32 @@ async def test_forecast_never_resolves_against_a_session_still_trading():
     # Only 4 COMPLETED sessions follow days[4]; the 5th is today, still open.
     assert row["actual_outcome"] is None, "resolved against a live session"
     assert row["last_session_date"] != days[-1]
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_trading_is_locked_until_the_arm_earns_it():
+    """The design's core safety property, and the one every other test in this
+    file opts out of via _pillar(cleared=True).
+
+    Forecasts are free and resolve in five sessions; trading costs ~27bps a
+    round trip. So an arm forecasts from day one and may not trade until its
+    Brier edge over its own benchmark has a lower bound clear of zero. The
+    previous book inverted this and paid $926 in commission to discover its
+    gross P&L was -$42.
+    """
+    db = Database(":memory:")
+    await db.connect()
+    pillar = await _pillar(db, cleared=False)
+
+    assert await pillar.run_once() == 0
+    assert await db.fetchone("SELECT * FROM ibkr_etf_positions") is None
+    assert await db.fetchone("SELECT * FROM ibkr_etf_fills") is None
+    # It still FORECASTS while locked — that is the whole point.
+    assert await db.fetchone("SELECT * FROM ibkr_etf_forecasts") is not None
+
+    # And the lock fails closed: an unreadable forecast table must not trade.
+    pillar._db.fetchall = AsyncMock(side_effect=RuntimeError("db gone"))
+    verdict = await pillar._clearance()
+    assert not verdict.cleared
     await db.close()

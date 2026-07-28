@@ -1420,6 +1420,17 @@ class IBKRConfig(BaseModel):
     etf_arm_min_prob: dict[str, float] = Field(default_factory=dict)
     etf_arm_min_confidence: dict[str, str] = Field(default_factory=dict)
     etf_signal_horizon_days: int = 5
+    # Entry is an ECONOMIC test, not a probability threshold: expected edge
+    # 2*(p - base_rate)*E|move| must beat this multiple of the round-trip cost.
+    # 2.0 is the smallest multiple at which a 50% overestimate of the edge
+    # still breaks even, and the edge rests on a calibration that is itself
+    # uncertain. See auramaur/strategy/ibkr_edge_economics.py.
+    etf_edge_cost_margin: float = 2.0
+    # Resolved forecasts required before an arm may trade at all. A genuine
+    # 10pp Brier edge needs ~370 resolutions before its lower bound clears
+    # zero; at ~125 scoreable forecasts a week that is about three weeks, and
+    # nothing is risked while waiting.
+    etf_min_resolved_to_trade: int = 370
     etf_signal_refresh_hours: float = 6.0
     etf_cycle_seconds: int = 900
     etf_stop_loss_pct: float = 5.0
