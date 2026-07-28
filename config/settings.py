@@ -134,6 +134,19 @@ class ExecutionConfig(BaseModel):
     # paper cash is never the binding constraint on entries; a too-small book
     # starves them. Recycles on settlement (see #132).
     paper_initial_balance: float = 5000.0
+    # Paper fills for NON-MARKETABLE orders are deferred until the market
+    # actually trades through the price, instead of being credited instantly.
+    #
+    # Without this a resting bid filled at once, at the bid — a fill live would
+    # never have granted. Measured 2026-07-28: llm crossed on 14% of its fills
+    # and every other strategy on 0%, so this flattered essentially every paper
+    # maker fill in the system, and the evidence layer compensated by stamping
+    # them 'synthetic' (uncountable) — which left maker strategies permanently
+    # ungraduatable. Deferred fills are stamped 'trade_through', which IS
+    # credible evidence and had no producer until now.
+    #
+    # Set false to restore immediate fills without a code change.
+    paper_defer_resting_fills: bool = True
     limit_order_ttl_seconds: int = 120
     # Max cents the router may pay above the signal's reference price to lift
     # the ask (marketable entry) instead of resting a maker quote at bid+1

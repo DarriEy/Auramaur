@@ -134,6 +134,7 @@ class ExecutionGateway:
                 pass
             return ExecutionResult(status="skipped", reason=capped)
         decision_id = await self._capture_decision(intent, order)
+        order.decision_id = decision_id
         return await self._place_and_record(
             order, strategy_source=intent.signal.strategy_source,
             signal_id=getattr(intent.signal, "id", None),
@@ -380,6 +381,15 @@ class ExecutionGateway:
             fee = order.size * coefficient * order.price * (1.0 - order.price)
             family = intent.market.neg_risk_market_id or intent.market.id
             venue = order.exchange or self.exchange_name
+            # Hand the book and the decision id to the order itself: the PAPER
+            # trader needs the book to tell a marketable order from a resting
+            # one, and a deferred fill needs the decision id to be attributed
+            # back when it eventually trades through.
+            if book is not None:
+                order.best_bid = (None if book["best_bid"] is None
+                                  else float(book["best_bid"]))
+                order.best_ask = (None if book["best_ask"] is None
+                                  else float(book["best_ask"]))
             return await DecisionTracker(self.db).capture(
                 market_id=order.market_id, strategy_source=source,
                 signal_id=getattr(intent.signal, "id", None), side=order.side.value,

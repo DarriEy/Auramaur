@@ -16,6 +16,11 @@ log = structlog.get_logger()
 class PaperTrader:
     """Simulates order execution for paper trading."""
 
+    # Set False to restore immediate fills for non-marketable paper orders
+    # (execution.paper_defer_resting_fills). Kept as an attribute rather than
+    # read from settings here so PaperTrader stays constructible without them.
+    _defer_resting = True
+
     def __init__(self, db: Database, initial_balance: float = 1000.0):
         self.db = db
         self.initial_balance = initial_balance
@@ -81,8 +86,25 @@ class PaperTrader:
         open_cost = float(cost_row["c"]) if cost_row else 0.0
         return self.initial_balance + realized - open_cost
 
-    async def execute(self, order: Order) -> OrderResult:
-        """Simulate order execution."""
+    async def execute(self, order: Order, *, force: bool = False) -> OrderResult:
+        """Simulate order execution.
+
+        A NON-MARKETABLE order is queued rather than filled. Crediting a
+        resting bid instantly, at the bid, is a fill live would never have
+        granted — and measured 2026-07-28 that was essentially every paper
+        maker fill in the system (llm crossed on 14%, every other strategy on
+        0%). The evidence layer compensated by stamping them 'synthetic',
+        which is uncountable, so maker strategies could never graduate.
+
+        ``force`` bypasses the check and is used by check_fills, which has
+        already established trade-through and must not re-queue.
+        """
+        if (not force and self._defer_resting and order.marketable is False):
+            log.info("paper.order_rests", market_id=order.market_id,
+                     side=order.side.value, price=order.price,
+                     best_bid=order.best_bid, best_ask=order.best_ask,
+                     detail="not marketable; awaiting trade-through")
+            return self.submit_limit_order(order)
         order_id = f"PAPER-{uuid.uuid4().hex[:12]}"
         cost = order.size * order.price
 
@@ -166,13 +188,18 @@ class PaperTrader:
         )
 
 
-    async def check_fills(self, current_prices: dict[str, float]) -> list[OrderResult]:
+    async def check_fills(self, current_prices: dict[str, float]) -> list[tuple]:
         """Fill maker orders only after strict trade-through evidence.
 
         Merely touching the limit is not evidence that our queue position
         executed, so no random fill credit is awarded.
+
+        Returns (result, order) pairs: the caller has to book the fill and
+        stamp its evidence, and needs the ORDER for the side/token the ledger
+        requires. Returning bare results is why deferred fills used to be
+        logged and then dropped.
         """
-        filled: list[OrderResult] = []
+        filled: list[tuple[OrderResult, Order]] = []
         remaining: list[tuple[Order, str]] = []
         for order, order_id in self.pending_orders:
             market_price = current_prices.get(order.market_id)
@@ -185,10 +212,10 @@ class PaperTrader:
                 order.side == OrderSide.SELL and market_price > order.price
             )
             if should_fill:
-                result = await self.execute(order)
+                result = await self.execute(order, force=True)
                 result.order_id = order_id
                 result.status = "filled"
-                filled.append(result)
+                filled.append((result, order))
                 log.info("paper.limit_filled", order_id=order_id, price=order.price)
                 continue
             remaining.append((order, order_id))

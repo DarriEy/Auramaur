@@ -28,6 +28,36 @@ log = structlog.get_logger()
 class OrderMonitorMixin:
     """Order-lifecycle + resolution services for AuramaurBot (see module docstring)."""
 
+    async def _record_deferred_paper_fills(self, filled: list) -> None:
+        """Book a traded-through paper fill and stamp it as real evidence.
+
+        Fails soft: a bookkeeping error here must never take down the monitor
+        loop that also reaps live orders.
+        """
+        from auramaur.exchange.models import Fill
+        from auramaur.research.polymarket_strategies import DecisionTracker
+
+        db = self._components.get("db")
+        tracker = self._components.get("pnl_tracker")
+        if db is None:
+            return
+        for result, order in filled:
+            try:
+                if tracker is not None:
+                    await tracker.record_fill(Fill(
+                        market_id=order.market_id, token=order.token.value,
+                        token_id=order.token_id, side=order.side,
+                        size=result.filled_size, price=result.filled_price,
+                        fee=0.0, is_paper=True, order_id=result.order_id))
+                if order.decision_id is not None:
+                    await DecisionTracker(db).mark_fill(
+                        int(order.decision_id),
+                        filled_price=result.filled_price,
+                        evidence="trade_through")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("order_monitor.deferred_fill_unbooked",
+                            order_id=result.order_id, error=str(exc)[:160])
+
     async def _task_order_monitor(self) -> None:
         """Monitor pending limit orders for fills and expiry."""
         from datetime import datetime, timezone
@@ -82,6 +112,13 @@ class OrderMonitorMixin:
                     filled = await paper.check_fills(prices)
                     if filled:
                         log.info("order_monitor.fills", count=len(filled))
+                        # A deferred fill only exists because the market traded
+                        # THROUGH a resting price, which is exactly what
+                        # `trade_through` means and is credible evidence. Before
+                        # this the fill was logged and dropped: no ledger row,
+                        # no decision stamp, so a resting strategy accrued
+                        # nothing at all.
+                        await self._record_deferred_paper_fills(filled)
 
                     await paper.cancel_expired(ttl)
 

@@ -143,6 +143,26 @@ EXPOSURE_PATHS = (
         "oddlot or originating strategy",
     ),
     _path(
+        # A resting PAPER order that the market later traded through. The fill
+        # is established by check_fills' strict trade-through test; this path
+        # only books it and stamps the evidence. Before it existed, deferred
+        # fills were logged and dropped -- no ledger row, no decision stamp --
+        # so a resting strategy accrued nothing at all.
+        "paper_deferred_fill",
+        ExposureKind.PAPER_BOOKING,
+        "market traded through a resting paper order",
+        ("venue mid price", "the queued order"),
+        "none -- the entry was already risk-approved when it was placed",
+        "PaperTrader.check_fills (no venue call)",
+        {"paper"},
+        "PnLTracker + decision stamped trade_through",
+        "order monitor",
+        "originating strategy's exit path",
+        "paper position tables",
+        "resolution tracker",
+        "originating strategy_source",
+    ),
+    _path(
         # ONE booking rail for both IBKR books. They had near-duplicate copies
         # and drifted into three defects: the multiasset side stored prices in
         # fair_probability, stamped every fill 'synthetic', and used a
@@ -405,6 +425,8 @@ REGISTERED_CALLSITES = Counter(
         ): 1,
         ("auramaur/broker/instrument_booking.py", "book_instrument_fill", "submit",
          "ibkr_paper_booking"): 1,
+        ("auramaur/bot_order_monitor.py", "_record_deferred_paper_fills",
+         "record_fill", "paper_deferred_fill"): 1,
         ("auramaur/strategy/ibkr_multiasset_paper.py", "_fill", "place", "ibkr_multiasset"): 1,
 
         (

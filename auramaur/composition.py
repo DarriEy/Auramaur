@@ -376,6 +376,10 @@ async def assemble_components(
 
     # Exchange
     paper = PaperTrader(db=db, initial_balance=s.execution.paper_initial_balance)
+    # Non-marketable paper orders rest until the market trades through them,
+    # instead of being credited instantly at the bid. See
+    # execution.paper_defer_resting_fills for why and how to revert.
+    paper._defer_resting = bool(s.execution.paper_defer_resting_fills)
     await paper.load_state()
 
     # NLP

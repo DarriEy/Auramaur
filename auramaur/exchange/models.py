@@ -188,6 +188,27 @@ class Order(BaseModel):
     # `paper_capital_per_unit_usd` override); this field carries it to the
     # gateway rather than having the gateway re-derive it.
     usd_capital_per_unit: float | None = None
+    # The book this order was priced against, and the decision it belongs to.
+    # Set by ExecutionGateway just before placement so the PAPER trader can
+    # tell a marketable order from a resting one, and so a deferred fill can
+    # be attributed back to its decision. Both default to None, so any caller
+    # that does not set them keeps the previous immediate-fill behaviour.
+    best_bid: float | None = None
+    best_ask: float | None = None
+    decision_id: int | None = None
+
+    @property
+    def marketable(self) -> bool | None:
+        """Would this order cross the book right now? None if unknown.
+
+        A BUY at or above the ask (or a SELL at or below the bid) takes
+        liquidity and fills. Anything else RESTS, and a resting order only
+        fills if the market later trades through it — which is why paper must
+        not credit it immediately.
+        """
+        if self.side == OrderSide.BUY:
+            return None if self.best_ask is None else self.price >= self.best_ask
+        return None if self.best_bid is None else self.price <= self.best_bid
 
     @property
     def notional(self) -> float:
