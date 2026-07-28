@@ -395,3 +395,56 @@ the live book can never see, and measures a *different, better* strategy. The
 first run of the harness did this and reported -$101 instead of -$969.
 `SIGNAL_WINDOW = 61` pins it, asserted on the lengths the signal functions
 receive rather than on emergent trade counts.
+
+## The entry signal carries no information, and the book is too small to trade
+
+`auramaur ibkr-signal-study` measures the signal's information content rather
+than searching thresholds — no selection, nothing to overfit. Forward returns
+are EXCESS of the equal-weight universe that session, so market drift cannot
+pose as skill, and the t-statistic samples only non-overlapping windows.
+
+**Information coefficient, 41,370 signal/forward pairs, 35 instruments:**
+
+| horizon | IC | t | deployed gate: excess (95% low) |
+|---|---|---|---|
+| 5 | -0.0074 | -0.57 | -0.010% (-0.041%) |
+| 10 | -0.0008 | -0.16 | +0.013% (-0.030%) |
+| 21 | +0.0087 | +0.68 | +0.069% (+0.006%) |
+| 42 | -0.0291 | -1.31 | -0.045% (-0.140%) |
+
+Zero at every horizon, with the sign flipping. `normalized_momentum` over 61
+bars does not predict 10-session excess returns on this universe.
+
+The quintile shape is consistent and it is **not momentum**: Q1 (most negative
+momentum) has the HIGHEST forward excess return at every horizon (+0.61% at
+h=42), Q3 (the middle) the worst (-0.46%), Q5 recovering modestly. The book buys
+momentum >= 0.25 — roughly Q4/Q5 — so it is not merely uninformed, it is
+systematically avoiding the best-performing bucket. That U-shape is an
+observation on one universe over one 5-year window with a plausible
+compositional explanation, and it is NOT a strategy proposal; turning it into
+one needs its own pre-registered out-of-sample test.
+
+**Why the book loses is arithmetic, not signal.** Splitting the replay:
+
+| trips | gross | commission | net |
+|---|---|---|---|
+| 463 | **-$42.74** | **-$926.00** | -$968.74 |
+
+Gross is flat. **96% of the loss is commission.** `_commission` charges
+`max(1.0, min(notional*0.001, 10.0))`, and at a $5,000 budget across 6 slots a
+position is ~$600-830 — so the $1 MINIMUM binds, at ~12-17bps per leg, ~30bps
+round trip, against a gate edge of 1-7bps that is not statistically distinct
+from zero. The book cannot size out of the minimum-commission regime because
+one position at the marginal rate would need ~$1,000+ and the whole budget is
+$5,000.
+
+**So three separate things are true**, and only the first was suspected:
+
+1. exits are not the problem (48 configurations, none with a positive train LCB);
+2. the entry signal has no information at any horizon tested;
+3. even with a perfect signal, 463 round trips at this position size costs $926
+   — the turnover/size economics are broken independently of the strategy.
+
+Fixing commission alone reaches break-even, not profit, because gross is flat.
+This book needs a different signal AND a different turnover profile; it is not
+a tuning problem.

@@ -377,12 +377,14 @@ def ibkr_backtest(book: str, years: int, spread_bps):
                           "qualified on this history.[/]")
             return
         table = Table(title="replayed round trips", expand=False)
-        for c in ("trips", "net P&L", "mean", "win rate", "best", "worst"):
+        for c in ("trips", "gross P&L", "commission", "net P&L", "mean",
+                  "win rate"):
             table.add_column(c, justify="right")
-        table.add_row(str(len(net)), f"${sum(net):,.2f}",
-                      f"${sum(net) / len(net):,.2f}",
-                      f"{len(wins) / len(net):.1%}",
-                      f"${max(net):,.2f}", f"${min(net):,.2f}")
+        gross = sum(t.gross_usd for t in result.trips)
+        fees = sum(t.commission_usd for t in result.trips)
+        table.add_row(str(len(net)), f"${gross:,.2f}", f"${-fees:,.2f}",
+                      f"${sum(net):,.2f}", f"${sum(net) / len(net):,.2f}",
+                      f"{len(wins) / len(net):.1%}")
         console.print(table)
 
         # Same contract the live gate applies, on replayed instead of forward
