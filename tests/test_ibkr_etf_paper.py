@@ -211,11 +211,12 @@ def test_default_profile_is_small_readonly_paper_book():
     assert {"SPY", "QQQ", "IWM", "TLT", "GLD", "VEA"}.issubset(
         settings.ibkr.etf_symbols)
     assert settings.ibkr.etf_paper_enabled is True
-    # One position holding the real $1,100 of capital. Splitting it into four
-    # $250 entries costs 80bps a round trip instead of 20, and at $250 nothing
-    # in this universe clears its own fees (docs/ibkr_strategy_design.md).
-    assert settings.ibkr.etf_paper_budget_usd == 1_100.0
-    assert settings.ibkr.etf_max_entry_usd == 1_100.0
+    # USD, and the unit matters: the account holds 1,099.29 CAD, which at the
+    # measured USDCAD of 1.4117 is $778.69 USD -- not $1,100. Treating the CAD
+    # balance as USD overstated the book by 41% and, worse, moved it off the $1
+    # commission floor that actually binds at this size.
+    assert settings.ibkr.etf_paper_budget_usd == 775.0
+    assert settings.ibkr.etf_max_entry_usd == 775.0
     assert settings.ibkr.etf_max_deployment_pct == 100.0
     assert settings.ibkr.etf_max_positions == 1
     assert settings.ibkr.etf_max_signal_refreshes_per_cycle == 4

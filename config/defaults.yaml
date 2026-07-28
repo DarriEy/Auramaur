@@ -369,13 +369,18 @@ ibkr:
     "VEA", "VWO", "INDA", "MCHI", "EWJ", "EWC", "EWZ",
     "TLT", "IEF", "SHY", "TIP", "LQD", "HYG", "EMB",
     "GLD", "SLV", "DBC", "VNQ", "UUP"]
-  # $1,100 is the real IBKR capital, and ONE position holds all of it. The
-  # commission is max($1, notional*0.1%), so splitting the book into four $250
-  # entries costs 80bps a round trip instead of 20 -- at $250 nothing in this
-  # universe clears its own fees. Diversification is not worth 4x the fee load
-  # at this size; see docs/ibkr_strategy_design.md.
-  etf_paper_budget_usd: 1100.0
-  etf_max_entry_usd: 1100.0
+  # USD, and that distinction is the point: the IBKR account holds 1,099.29
+  # CAD, which at the measured USDCAD of 1.4117 (2026-07-28) is $778.69 USD.
+  # This field was briefly set to 1100.0 by treating the CAD balance as USD --
+  # a 41% overstatement of a book that buys USD-denominated ETFs. Rounded down
+  # to 775 for FX drift; re-check when the rate moves materially.
+  #
+  # ONE position holds all of it. Commission is max($1, notional*0.1%), and at
+  # this size the $1 FLOOR binds (0.1% of $775 is $0.78), so cost is 32.7bps a
+  # round trip. Splitting into four $194 entries would cost 103bps instead --
+  # at that size nothing in this universe clears its own fees.
+  etf_paper_budget_usd: 775.0
+  etf_max_entry_usd: 775.0
   # 100% because the book now holds exactly ONE position. A 50% cap on a
   # single-position book does not diversify anything -- it just halves the
   # notional, which doubles the commission in bps and pushes every instrument

@@ -1,7 +1,14 @@
 # One IBKR strategy, designed from the cost arithmetic
 
-Written 2026-07-27, after the previous book was measured and rejected. Capital:
-**$1,100**. Every number below is measured, not assumed.
+Written 2026-07-27, after the previous book was measured and rejected. Capital: **$778.69 USD** — the account holds 1,099.29 CAD and USDCAD measured
+1.4117 on 2026-07-28. The first draft of this document said $1,100 by reading
+the CAD balance as USD, a 41% overstatement of a book that buys USD-denominated
+ETFs. Worse than the size error: $1,100 sits ABOVE the $1,000 point where
+IBKR's $1 commission minimum and its 0.1% marginal rate cross, and $779 sits
+below it, so the draft assumed the marginal rate (27bps) when the floor
+actually binds (32.7bps). Every conviction threshold below inherits that.
+
+Every other number here is measured, not assumed.
 
 ## The constraint nobody had priced
 
@@ -18,8 +25,8 @@ maximum ever. Against that, at a 5-session horizon:
 
 | | ann vol | conviction needed (2x margin) | verdict |
 |---|---|---|---|
-| SLV | 64.4% | 0.037 | tradeable |
-| GLD | 28.4% | 0.085 | only at peak conviction |
+| SLV | 64.4% | 0.045 | tradeable |
+| GLD | 28.4% | 0.102 | out |
 | XLK | 24.9% | 0.097 | out |
 | QQQ | 19.0% | 0.126 | out |
 | SPY | 12.7% | 0.189 | out |

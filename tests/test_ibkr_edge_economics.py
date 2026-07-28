@@ -121,3 +121,25 @@ def test_horizon_scales_the_move_as_square_root_of_time():
     # Sanity against the closed form for a half-normal.
     assert expected_absolute_move(0.20, 252) == pytest.approx(
         0.20 * math.sqrt(2 / math.pi))
+
+
+def test_the_commission_floor_binds_below_one_thousand_dollars():
+    """The $1 minimum and the 0.1% marginal rate cross at exactly $1,000, so
+    which side of that line the book sits on changes its cost structure.
+
+    Reading a 1,099.29 CAD balance as $1,100 USD put the book on the wrong
+    side: it assumed the marginal rate and 27bps, when the real $778.69 sits on
+    the floor at 32.7bps. A 21% understatement of cost, which feeds straight
+    into every conviction threshold.
+    """
+    below = round_trip_cost_bps(778.69, commission_usd=max(1.0, 778.69 * 0.001),
+                                spread_bps=3.0, slippage_bps=2.0)
+    above = round_trip_cost_bps(1_100.0, commission_usd=max(1.0, 1_100.0 * 0.001),
+                                spread_bps=3.0, slippage_bps=2.0)
+    assert below == pytest.approx(32.7, abs=0.2)
+    assert above == pytest.approx(27.0, abs=0.2)
+    # Smaller book, HIGHER cost in bps — the floor does not scale down.
+    assert below > above
+    # And it propagates: SLV needs 0.045 rather than 0.037.
+    assert required_conviction(0.644, 5, below) == pytest.approx(0.045, abs=0.002)
+    assert required_conviction(0.644, 5, above) == pytest.approx(0.037, abs=0.002)
