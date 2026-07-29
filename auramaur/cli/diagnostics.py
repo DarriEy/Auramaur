@@ -639,3 +639,88 @@ def ibkr_signal_study(book: str, years: int, horizon: int):
                       "the tradeable rule. Costs, sizing and exits still "
                       "apply on top.[/]")
     asyncio.run(_run())
+
+
+@main.command("ibkr-costs")
+@click.option("--ingest/--no-ingest", default=True,
+              help="Pull this session's fills from IBKR before reporting.")
+@click.option("--probe-label", default="",
+              help="Tag the ingested fills with which calibration probe they are.")
+@click.option("--mid", "mids", multiple=True, metavar="ORDERREF=PRICE",
+              help="Mid price at submission, per orderRef. Cannot be recovered "
+                   "later, so supply it here or slippage stays unknown.")
+def ibkr_costs(ingest, probe_label, mids):
+    """Measure what IBKR execution actually costs, from real fills.
+
+    Read-only against the broker: asks what happened, records it, reports it.
+    There is no order path here and there must never be one.
+
+    The screen that decides the tradeable universe currently runs on ASSUMED
+    commission/spread/slippage. At USD 800 notional the difference between
+    4bps and 32bps decides whether anything clears its costs at all, so these
+    numbers are worth measuring rather than guessing.
+    """
+    async def _run():
+        from auramaur.broker.execution_costs import ingest_fills, measure
+
+        settings = Settings()
+        db = Database()
+        await db.connect(ensure_schema=False)
+        try:
+            if ingest:
+                parsed = {}
+                for item in mids:
+                    ref, _, price = item.partition("=")
+                    try:
+                        parsed[ref.strip()] = float(price)
+                    except ValueError:
+                        console.print(f"[red]bad --mid {item!r}, expected REF=PRICE[/]")
+                        return
+                from ib_async import IB
+                cfg = settings.ibkr
+                port = cfg.paper_port if cfg.environment == "paper" else cfg.live_port
+                ib = IB()
+                try:
+                    await asyncio.wait_for(ib.connectAsync(
+                        host=cfg.host, port=port,
+                        clientId=cfg.balance_client_id + 1, readonly=True),
+                        timeout=30)
+                except Exception as exc:  # noqa: BLE001
+                    console.print(f"[red]IBKR connect failed:[/] {str(exc)[:160]}")
+                    return
+                try:
+                    n = await ingest_fills(db, ib, probe_label=probe_label,
+                                           mids=parsed)
+                    console.print(f"  ingested [cyan]{n}[/] new fill(s)")
+                finally:
+                    ib.disconnect()
+
+            rows = await measure(db)
+            if not rows:
+                console.print("[dim]No fills recorded yet — place the "
+                              "calibration probes, then re-run.[/]")
+                return
+            table = Table(title="Measured execution cost by venue class")
+            table.add_column("venue class", style="cyan")
+            table.add_column("fills", justify="right")
+            table.add_column("mean notional", justify="right")
+            table.add_column("commission", justify="right")
+            table.add_column("comm bps", justify="right")
+            table.add_column("slippage", justify="right")
+            for r in rows:
+                # Dollars AND bps: dollars exposes the fixed minimum that
+                # dominates at small size, bps the marginal rate. Only one of
+                # them is how a $1 floor gets mistaken for a 0.1% rate.
+                slip = (f"{r.slippage_bps:.1f} bps ({r.mids_available})"
+                        if r.slippage_bps is not None else "[dim]no mids[/]")
+                table.add_row(
+                    r.venue_class, str(r.fills), f"${r.mean_notional:,.0f}",
+                    f"${r.commission_usd:.2f}", f"{r.commission_bps:.1f}", slip)
+            console.print(table)
+            console.print("[dim]Feed commission/slippage into "
+                          "ibkr_edge_economics.round_trip_cost_bps() and re-run "
+                          "the universe screen on measured numbers.[/]")
+        finally:
+            await db.close()
+
+    asyncio.run(_run())

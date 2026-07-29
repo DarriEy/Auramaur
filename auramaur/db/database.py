@@ -376,6 +376,38 @@ class Database:
             await self._migrate_v43_to_v44()
         if from_version < 45:
             await self._migrate_v44_to_v45()
+        if from_version < 46:
+            await self._migrate_v45_to_v46()
+
+    async def _migrate_v45_to_v46(self) -> None:
+        """Measured execution costs, ingested read-only from the broker."""
+        await self._db.executescript("""
+            CREATE TABLE IF NOT EXISTS cost_observations (
+                exec_id TEXT PRIMARY KEY,
+                account TEXT NOT NULL DEFAULT '',
+                symbol TEXT NOT NULL,
+                sec_type TEXT NOT NULL DEFAULT '',
+                exchange TEXT NOT NULL DEFAULT '',
+                currency TEXT NOT NULL DEFAULT '',
+                venue_class TEXT NOT NULL DEFAULT '',
+                side TEXT NOT NULL,
+                shares REAL NOT NULL,
+                price REAL NOT NULL,
+                notional REAL NOT NULL,
+                commission REAL,
+                commission_currency TEXT NOT NULL DEFAULT '',
+                mid_at_submit REAL,
+                order_ref TEXT NOT NULL DEFAULT '',
+                probe_label TEXT NOT NULL DEFAULT '',
+                filled_at TEXT NOT NULL,
+                ingested_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_cost_obs_class
+                ON cost_observations(venue_class, filled_at);
+            UPDATE schema_version SET version = 46;
+        """)
+        await self._db.commit()
+        log.info("database.migrated", from_version=45, to_version=46)
 
     async def _migrate_v44_to_v45(self) -> None:
         """Label score facts with their experimental condition and abstention.

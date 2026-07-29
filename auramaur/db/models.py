@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 45
+SCHEMA_VERSION = 46
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -1082,6 +1082,41 @@ CREATE INDEX IF NOT EXISTS idx_market_outcomes_market
     ON market_outcomes(market_id, venue);
 
 -- Rebuildable, explicitly-versioned scores over the normalized evidence view.
+-- Measured execution costs, one row per IBKR fill. Read-only ingest: the
+-- broker is the source of truth, we never write orders from here.
+--
+-- Exists because every cost figure in the IBKR viability screen is currently
+-- ASSUMED (commission schedule, spread, slippage), and those assumptions
+-- decide the entire tradeable universe -- at USD 800 notional the difference
+-- between 4bps and 32bps is the difference between FX being the best
+-- instrument available and nothing clearing its costs at all. A handful of
+-- deliberate small fills replaces the guesses with measurements.
+--
+-- mid_at_submit is the field that cannot be recovered later: without the mid
+-- at the moment of submission, slippage is unrecoverable from the fill alone.
+CREATE TABLE IF NOT EXISTS cost_observations (
+    exec_id TEXT PRIMARY KEY,           -- IBKR execId, natural idempotency key
+    account TEXT NOT NULL DEFAULT '',
+    symbol TEXT NOT NULL,
+    sec_type TEXT NOT NULL DEFAULT '',  -- STK / CASH / OPT / FUT
+    exchange TEXT NOT NULL DEFAULT '',
+    currency TEXT NOT NULL DEFAULT '',
+    venue_class TEXT NOT NULL DEFAULT '',  -- us_equity / fx / eu_equity / ...
+    side TEXT NOT NULL,
+    shares REAL NOT NULL,
+    price REAL NOT NULL,
+    notional REAL NOT NULL,
+    commission REAL,                    -- NULL until the report arrives
+    commission_currency TEXT NOT NULL DEFAULT '',
+    mid_at_submit REAL,                 -- operator-supplied; see above
+    order_ref TEXT NOT NULL DEFAULT '',
+    probe_label TEXT NOT NULL DEFAULT '',  -- which calibration probe this is
+    filled_at TEXT NOT NULL,
+    ingested_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_cost_obs_class
+    ON cost_observations(venue_class, filled_at);
+
 CREATE TABLE IF NOT EXISTS forecast_score_facts (
     forecast_key TEXT PRIMARY KEY,
     event_key TEXT NOT NULL,
