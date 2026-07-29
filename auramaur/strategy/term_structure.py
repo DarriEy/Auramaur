@@ -915,14 +915,23 @@ class TermStructurePillar:
         )
         await self._persist_signal(signal, market)
 
-        decision = await self._risk.evaluate(signal, market)
+        # A ladder that did not earn HIGH trades in PAPER rather than being
+        # refused. Declared before the gate runs, because the adverse-
+        # divergence band is live-only: judged as live, a MEDIUM entry inside
+        # the band is rejected outright and the cell accumulates no record at
+        # all — the same dead end the hardcoded MEDIUM created, just narrowed
+        # to thin ladders. Declared as paper, the band is skipped and the
+        # entry books a paper fill that the graduation ladder can adjudicate.
+        paper_intent = bool(cfg.paper) or not curve_strong
+        decision = await self._risk.evaluate(
+            signal, market, force_paper=paper_intent)
         if not decision.approved or decision.position_size <= 0:
             log.info("term_structure.risk_rejected", market_id=market.id,
                      reason=decision.reason, confidence=confidence.value,
-                     curve_strong=curve_strong)
+                     curve_strong=curve_strong, paper_intent=paper_intent)
             return False
         size = min(decision.position_size, cfg.stake_usd)
-        force_paper = cfg.paper or getattr(decision, "force_paper", False)
+        force_paper = paper_intent or getattr(decision, "force_paper", False)
         res = await self._gateway.submit(TradeIntent(
             signal=signal, market=market, size_dollars=size,
             force_paper=force_paper))

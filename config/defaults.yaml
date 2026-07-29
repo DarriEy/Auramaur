@@ -893,8 +893,11 @@ term_structure:
   # and min_edge_pts 8 puts this pillar's entire range inside it — so the old
   # hardcoded MEDIUM rejected 100% of live candidates from its 2026-07-24
   # promotion onward. A monotone ladder with >= this many strikes now reports
-  # HIGH and is judged on edge; thinner or self-contradicting ladders stay
-  # MEDIUM, which keeps them paper-only. 4 covers ~84% of observed candidates.
+  # HIGH and is judged on edge. Thinner or self-contradicting ladders stay
+  # MEDIUM and trade in PAPER — the pillar declares that intent to the risk
+  # gate up front (2026-07-29), because the band REJECTS rather than demotes:
+  # judged as live, a MEDIUM entry was refused outright and its cell built no
+  # record either way. 4 covers ~84% of observed candidates.
   high_conf_min_strikes: 4
   llm_timeout_seconds: 420
   # Claude weekly/daily exhaustion must not starve exploration. The grounded

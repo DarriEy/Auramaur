@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from auramaur.exchange.models import Confidence, Market, OrderSide, Signal
+from auramaur.risk.graduation import CellDecision
 from auramaur.risk.manager import RiskManager
 
 
@@ -636,3 +637,67 @@ async def test_live_venues_only_keeps_a_polymarket_record_off_kalshi():
     # An empty list means unrestricted, not "nothing".
     rc.live_venues_only = {"llm": []}
     assert effective("llm", "kalshi") == ["politics_us"]
+
+
+@pytest.mark.asyncio
+@patch("auramaur.risk.manager.check_kill_switch")
+async def test_caller_declared_force_paper_skips_the_live_only_band(mock_kill):
+    """A caller may declare an entry paper BEFORE the gate runs.
+
+    The adverse-divergence band is live-only and REJECTS rather than demotes,
+    so a strategy intending to trade paper was being refused outright and its
+    graduation cell learned nothing (term_structure's thin ladders,
+    2026-07-29). Declared paper, the band is skipped and the entry books.
+    """
+    from auramaur.risk.checks import CheckResult
+    mock_kill.return_value = CheckResult(
+        name="kill_switch", passed=True, reason="", value=False)
+
+    settings = _make_settings(is_live=True, min_edge_pct=2.5,
+                              allowed_categories_live=["politics"])
+    settings.risk.divergence_filter_enabled = True
+    settings.risk.divergence_require_confidence = "HIGH"
+    db = MagicMock()
+    db.fetchone = AsyncMock(return_value=None)
+    manager = RiskManager(settings, db)
+    manager.portfolio = _mock_portfolio()
+    manager.graduation.decide = AsyncMock(
+        return_value=CellDecision(False, 1.0, "exempt", "test"))
+
+    # 13pts of divergence at MEDIUM — squarely inside the adverse band.
+    signal = _make_signal(edge=13.0, claude_prob=0.63, market_prob=0.50,
+                          confidence=Confidence.MEDIUM)
+    market = _make_market()
+
+    live = await manager.evaluate(signal, market, available_cash=500.0)
+    assert live.approved is False
+    assert "adverse band" in live.reason
+
+    paper = await manager.evaluate(
+        signal, market, available_cash=500.0, force_paper=True)
+    assert paper.approved is True
+    assert paper.force_paper is True     # reported back, so callers submit paper
+
+
+@pytest.mark.asyncio
+@patch("auramaur.risk.manager.check_kill_switch")
+async def test_force_paper_is_restriction_only(mock_kill):
+    """It must never move an entry toward live. force_paper=False on a cell
+    the ladder already paper-forces has to stay paper."""
+    from auramaur.risk.checks import CheckResult
+    mock_kill.return_value = CheckResult(
+        name="kill_switch", passed=True, reason="", value=False)
+
+    settings = _make_settings(is_live=True, min_edge_pct=2.5,
+                              allowed_categories_live=["politics"])
+    db = MagicMock()
+    db.fetchone = AsyncMock(return_value=None)
+    manager = RiskManager(settings, db)
+    manager.portfolio = _mock_portfolio()
+    manager.graduation.decide = AsyncMock(
+        return_value=CellDecision(True, 1.0, "unproven", "test"))
+
+    signal = _make_signal(edge=10.0, claude_prob=0.60, market_prob=0.50)
+    decision = await manager.evaluate(
+        signal, _make_market(), available_cash=500.0, force_paper=False)
+    assert decision.force_paper is True

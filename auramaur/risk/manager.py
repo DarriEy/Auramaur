@@ -87,8 +87,22 @@ class RiskManager:
         market: Market,
         price_history: dict[str, list[float]] | None = None,
         available_cash: float | None = None,
+        force_paper: bool = False,
     ) -> RiskDecision:
-        """Run every risk check and, if all pass, compute position size."""
+        """Run every risk check and, if all pass, compute position size.
+
+        ``force_paper`` lets a caller declare an entry paper BEFORE the gate
+        runs, so the live-only checks (the adverse-divergence band, the live
+        category allowlist) judge it as what it actually is. Without it a
+        strategy that intends to trade paper is still measured against live
+        rules and can be REJECTED outright rather than demoted — which is how
+        term_structure's thin ladders were being refused instead of building a
+        paper record.
+
+        RESTRICTION-ONLY, and it must stay that way: it is OR-ed into
+        ``is_paper_entry``, so it can only ever move an entry toward paper,
+        never toward live.
+        """
         # Apply the global risk-tolerance lever (0=conservative..100=YOLO) — one
         # dial scales the whole prob/stat/risk surface at this gateway.
         from auramaur.risk.tolerance import scale_risk, current_tolerance
@@ -188,6 +202,7 @@ class RiskManager:
             or self.live_entries_blocked  # operational preflight BLOCK
             or self._paper_forced_strategy(signal.strategy_source)
             or cell.force_paper
+            or force_paper  # caller-declared, restriction-only
         )
 
         # Correlation, MODE-SCOPED. A paper entry adds NO real exposure, so it must
@@ -403,7 +418,10 @@ class RiskManager:
             checks=checks,
             position_size=position_size,
             reason=reason,
-            force_paper=cell.force_paper,
+            # Report the effective mode, not just the ladder's view — a
+            # caller-declared paper entry must come back marked paper or the
+            # pillar would submit it live after the gate judged it as paper.
+            force_paper=cell.force_paper or force_paper,
             graduation_status=cell.status,
         )
 

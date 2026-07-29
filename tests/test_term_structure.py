@@ -724,3 +724,46 @@ async def test_max_output_tokens_is_configurable(tmp_path):
             "max_output_tokens"] == 8000
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_thin_ladder_trades_paper_instead_of_being_refused(tmp_path):
+    """A MEDIUM ladder must reach the book as a PAPER fill, not a rejection.
+
+    The adverse-divergence band rejects; it does not demote. Judged as live, a
+    3-strike family was refused outright (observed 2026-07-29 01:52, market
+    2734400) and its graduation cell accumulated nothing — the original dead
+    end, narrowed to thin ladders. The pillar now declares paper intent before
+    the gate runs, which is also what skips the live-only band.
+    """
+    pillar, db, risk = await _pillar(tmp_path, _ladder(), _reply(
+        [("a", 0.30), ("b", 0.50), ("c", 0.70)]))
+    try:
+        assert await pillar.run_once() > 0
+        # Declared paper to the gate...
+        assert risk.evaluate.await_args.kwargs["force_paper"] is True
+        # ...and submitted paper.
+        intent = pillar._gateway.submit.await_args.args[0]
+        assert intent.force_paper is True
+        assert intent.signal.claude_confidence is Confidence.MEDIUM
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_strong_ladder_is_not_paper_forced(tmp_path):
+    """The escalation must still buy something: a HIGH curve goes to the gate
+    as live, or the whole confidence mechanism is decorative."""
+    ladder = [_strike("a", 5, 0.10), _strike("b", 15, 0.20),
+              _strike("c", 25, 0.30), _strike("d", 30, 0.40)]
+    pillar, db, risk = await _pillar(tmp_path, ladder, _reply(
+        [("a", 0.30), ("b", 0.40), ("c", 0.50), ("d", 0.60)]))
+    pillar._settings.term_structure.paper = False
+    try:
+        assert await pillar.run_once() > 0
+        assert risk.evaluate.await_args.kwargs["force_paper"] is False
+        intent = pillar._gateway.submit.await_args.args[0]
+        assert intent.force_paper is False
+        assert intent.signal.claude_confidence is Confidence.HIGH
+    finally:
+        await db.close()
