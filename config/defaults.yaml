@@ -888,6 +888,14 @@ term_structure:
   min_days: 0.25
   max_days: 180.0
   min_edge_pts: 8.0
+  # Confidence is the curve's, not a constant (2026-07-29). The adverse-
+  # divergence band ([5%,20%) requires HIGH) is applied to LIVE entries only,
+  # and min_edge_pts 8 puts this pillar's entire range inside it — so the old
+  # hardcoded MEDIUM rejected 100% of live candidates from its 2026-07-24
+  # promotion onward. A monotone ladder with >= this many strikes now reports
+  # HIGH and is judged on edge; thinner or self-contradicting ladders stay
+  # MEDIUM, which keeps them paper-only. 4 covers ~84% of observed candidates.
+  high_conf_min_strikes: 4
   llm_timeout_seconds: 420
   # Claude weekly/daily exhaustion must not starve exploration. The grounded
   # Gemini fallback shares the agent-trader's paid-call ceiling.

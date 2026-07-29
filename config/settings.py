@@ -822,6 +822,12 @@ class TermStructureConfig(BaseModel):
     max_days: float = 180.0
     context_min_liquidity: float = 100.0
     min_edge_pts: float = 8.0
+    # Strikes required before a family's curve read is called HIGH confidence
+    # (with a monotone ladder) instead of MEDIUM. Gates the adverse-divergence
+    # band, which is live-only — see strategy/term_structure.py::_try_enter.
+    # 4 covers ~84% of observed candidates; 3-strike ladders (the family
+    # minimum) stay MEDIUM and so stay paper-only.
+    high_conf_min_strikes: int = 4
     llm_timeout_seconds: int = 420
     gemini_fallback: bool = True
     gemini_daily_call_limit: int = 30

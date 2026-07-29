@@ -57,6 +57,32 @@ from auramaur.strategy.classifier import blocked_category_hit, ensure_category
 
 log = structlog.get_logger()
 
+# Spread noise on a quiet strike routinely moves the mid a point or two; only
+# a break wider than this is treated as a real ordering violation.
+MONOTONICITY_TOLERANCE = 0.03
+
+
+def monotonicity_violations(
+    strikes: list[Market],
+) -> list[tuple[Market, float]]:
+    """Strikes breaking P(by T1) <= P(by T2), with the earlier-strike price.
+
+    Model-free coherence test on the ladder itself: a later deadline can only
+    be at least as likely as an earlier one. Violations are surfaced for
+    entailment_arb, and (2026-07-29) withhold the HIGH-confidence escalation
+    in ``_try_enter`` — a ladder that contradicts itself has not earned the
+    benefit of the doubt on its curve read.
+
+    ``strikes`` must already be sorted by deadline.
+    """
+    out: list[tuple[Market, float]] = []
+    prev = 0.0
+    for m in strikes:
+        if m.outcome_yes_price < prev - MONOTONICITY_TOLERANCE:
+            out.append((m, prev))
+        prev = max(prev, m.outcome_yes_price)
+    return out
+
 _MONTHS = {m.lower(): i + 1 for i, m in enumerate(
     ["January", "February", "March", "April", "May", "June", "July",
      "August", "September", "October", "November", "December"])}
@@ -413,13 +439,10 @@ class TermStructurePillar:
     def _log_monotonicity(fam: str, strikes: list[Market]) -> None:
         """P(by T1) <= P(by T2) must hold; a violation is model-free signal
         for entailment_arb — here it is only surfaced, not traded."""
-        prev = 0.0
-        for m in strikes:
-            if m.outcome_yes_price < prev - 0.03:  # tolerance for spread noise
-                log.info("term_structure.monotonicity_violation",
-                         family=fam, market_id=m.id,
-                         price=m.outcome_yes_price, earlier_strike=prev)
-            prev = max(prev, m.outcome_yes_price)
+        for m, prev in monotonicity_violations(strikes):
+            log.info("term_structure.monotonicity_violation",
+                     family=fam, market_id=m.id,
+                     price=m.outcome_yes_price, earlier_strike=prev)
 
     # ------------------------------------------------------------------
     # Curve read — one LLM call per family, cached
@@ -644,10 +667,19 @@ class TermStructurePillar:
             max_entries=cfg.max_entries_per_family,
             stake_usd=cfg.stake_usd,
         ))
+        # A well-formed ladder earns HIGH confidence downstream (see
+        # `_try_enter`): monotone strike prices are the model-free coherence
+        # test, and more strikes pin the event-time curve harder. Computed
+        # per family so every strike priced off the same read agrees.
+        curve_strong = (
+            not monotonicity_violations(strikes)
+            and len(strikes) >= cfg.high_conf_min_strikes
+        )
         for proposal in proposals:
             market = markets_by_id[proposal.market_id]
             if await self._try_enter(
-                market, proposal.fair_probability, thesis, cfg
+                market, proposal.fair_probability, thesis, cfg,
+                curve_strong=curve_strong,
             ):
                 entered += 1
         return entered
@@ -671,14 +703,25 @@ class TermStructurePillar:
         return row is not None
 
     async def _try_enter(self, market: Market, prob_yes: float, thesis: str,
-                         cfg) -> bool:
+                         cfg, *, curve_strong: bool = False) -> bool:
         market_yes = market.outcome_yes_price
         side = OrderSide.BUY if prob_yes > market_yes else OrderSide.SELL
+        # Confidence is the curve's, not a constant. The adverse-divergence
+        # band (risk/checks.py: [5%,20%) requires HIGH) is evaluated on LIVE
+        # entries only, and this pillar's whole operating range — min_edge_pts
+        # 8 -> divergence 0.08 — sits inside it. A hardcoded MEDIUM therefore
+        # rejected 100% of live candidates from the 2026-07-24 promotion
+        # onward (80 consecutive `risk_rejected` rows, zero entries), so the
+        # exemption that armed it was also what silenced it. Same defect class
+        # as the kraken_desk confidence floor fixed 2026-07-28. A well-formed
+        # ladder now says HIGH and is judged on its edge; a thin or
+        # self-contradicting one stays MEDIUM and remains paper-only live.
+        confidence = Confidence.HIGH if curve_strong else Confidence.MEDIUM
         signal = Signal(
             market_id=market.id,
             market_question=market.question,
             claude_prob=prob_yes,
-            claude_confidence=Confidence.MEDIUM,
+            claude_confidence=confidence,
             market_prob=market_yes,
             edge=abs(prob_yes - market_yes) * 100.0,
             evidence_summary=thesis[:500],
@@ -693,7 +736,8 @@ class TermStructurePillar:
         decision = await self._risk.evaluate(signal, market)
         if not decision.approved or decision.position_size <= 0:
             log.info("term_structure.risk_rejected", market_id=market.id,
-                     reason=decision.reason)
+                     reason=decision.reason, confidence=confidence.value,
+                     curve_strong=curve_strong)
             return False
         size = min(decision.position_size, cfg.stake_usd)
         force_paper = cfg.paper or getattr(decision, "force_paper", False)
@@ -708,6 +752,7 @@ class TermStructurePillar:
         log.info("term_structure.entered", market_id=market.id,
                  token=res.order.token.value, price=res.order.price,
                  size=res.order.size, model_prob=round(prob_yes, 2),
+                 confidence=confidence.value, curve_strong=curve_strong,
                  paper=res.result.is_paper)
         return True
 

@@ -10,10 +10,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from auramaur.db.database import Database
-from auramaur.exchange.models import Market
+from auramaur.exchange.models import Confidence, Market
 from auramaur.strategy.term_structure import (
     TermStructurePillar,
     family_key,
+    monotonicity_violations,
     parse_curve,
     parse_deadline,
 )
@@ -102,6 +103,7 @@ def _settings():
     cfg.min_days = 0.25
     cfg.max_days = 90.0
     cfg.min_edge_pts = 8.0
+    cfg.high_conf_min_strikes = 4
     cfg.llm_timeout_seconds = 420
     cfg.gemini_fallback = True
     cfg.gemini_daily_call_limit = 30
@@ -337,5 +339,85 @@ async def test_grounded_gemini_fallback_records_cost(tmp_path):
         assert row["usd"] == pytest.approx(0.008)
         body = pillar._gemini_request.await_args.args[1]
         assert body["tools"] == [{"google_search": {}}]
+    finally:
+        await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Confidence escalation — gates the live-only adverse-divergence band
+# ---------------------------------------------------------------------------
+
+
+def test_monotonicity_violations_tolerates_spread_noise():
+    """A 2pt dip is quote noise; a 10pt one breaks P(by T1) <= P(by T2)."""
+    assert monotonicity_violations(
+        [_strike("a", 5, 0.30), _strike("b", 15, 0.28)]) == []
+    bad = monotonicity_violations(
+        [_strike("a", 5, 0.40), _strike("b", 15, 0.30)])
+    assert [m.id for m, _ in bad] == ["b"]
+
+
+def test_monotonicity_violations_compares_against_running_max():
+    """One bad strike must not re-baseline the ladder and mask the next."""
+    bad = monotonicity_violations(
+        [_strike("a", 5, 0.50), _strike("b", 15, 0.10), _strike("c", 25, 0.20)])
+    assert [m.id for m, _ in bad] == ["b", "c"]
+    assert [prev for _, prev in bad] == [0.50, 0.50]
+
+
+def _reply(ids_probs):
+    entries = ", ".join(
+        '{"market_id": "%s", "prob": %s}' % (i, p) for i, p in ids_probs)
+    return '{"thesis": "t", "curve": [%s]}' % entries
+
+
+@pytest.mark.asyncio
+async def test_wide_monotone_ladder_earns_high_confidence(tmp_path):
+    """4+ strikes, monotone: the curve is well-formed, so it says HIGH.
+
+    Guards the fix for the 2026-07-24 promotion silence — a hardcoded MEDIUM
+    put every entry inside the live-only adverse-divergence band [5%,20%),
+    which requires HIGH, so 100% of live candidates were rejected.
+    """
+    ladder = [_strike("a", 5, 0.10), _strike("b", 15, 0.20),
+              _strike("c", 25, 0.30), _strike("d", 30, 0.40)]
+    pillar, db, risk = await _pillar(tmp_path, ladder, _reply(
+        [("a", 0.30), ("b", 0.40), ("c", 0.50), ("d", 0.60)]))
+    try:
+        assert await pillar.run_once() > 0
+        confidences = {
+            call.args[0].claude_confidence for call in risk.evaluate.await_args_list}
+        assert confidences == {Confidence.HIGH}
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_thin_ladder_stays_medium(tmp_path):
+    """A 3-strike family is the bare minimum curve — it has not earned HIGH."""
+    pillar, db, risk = await _pillar(tmp_path, _ladder(), _reply(
+        [("a", 0.30), ("b", 0.50), ("c", 0.70)]))
+    try:
+        assert await pillar.run_once() > 0
+        confidences = {
+            call.args[0].claude_confidence for call in risk.evaluate.await_args_list}
+        assert confidences == {Confidence.MEDIUM}
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_self_contradicting_ladder_stays_medium(tmp_path):
+    """Width alone is not enough: a ladder that breaks its own ordering is
+    withheld from HIGH even at 4 strikes."""
+    ladder = [_strike("a", 5, 0.60), _strike("b", 15, 0.20),
+              _strike("c", 25, 0.30), _strike("d", 30, 0.40)]
+    pillar, db, risk = await _pillar(tmp_path, ladder, _reply(
+        [("a", 0.80), ("b", 0.85), ("c", 0.90), ("d", 0.95)]))
+    try:
+        assert await pillar.run_once() > 0
+        confidences = {
+            call.args[0].claude_confidence for call in risk.evaluate.await_args_list}
+        assert confidences == {Confidence.MEDIUM}
     finally:
         await db.close()
