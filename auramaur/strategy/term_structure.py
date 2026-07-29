@@ -686,18 +686,32 @@ class TermStructurePillar:
             "input": prompt,
             "reasoning": {"effort": str(cfg.openai_effort)},
             "store": False,
-            "max_output_tokens": 2048,
+            "max_output_tokens": int(cfg.openai_max_output_tokens),
         }
         if cfg.openai_grounded:
             body["tools"] = [{"type": "web_search"}]
         data = await self._openai_request(
             body, int(cfg.llm_timeout_seconds), key)
+        # BILL FIRST, then judge the reply. Reasoning tokens are charged even
+        # when the response comes back truncated or refused, so accounting
+        # after an early `raise` leaves real spend invisible to the daily cap
+        # — an arm that fails every cycle would burn budget uncapped. Observed
+        # 2026-07-29 01:51: an incomplete sol read cost money and recorded
+        # nothing.
+        usd = await self._record_openai_cost(cfg, data.get("usage") or {})
+        status = str(data.get("status") or "")
         # The Responses API returns "error": null on success, so test the
         # VALUE, not key presence — str(None) is truthy and would make every
         # successful read raise.
         if data.get("error"):
             raise RuntimeError(
                 f"term-structure OpenAI error: {str(data['error'])[:200]}")
+        if status == "incomplete":
+            raise RuntimeError(
+                "term-structure OpenAI reply truncated "
+                f"({str(data.get('incomplete_details'))[:120]}) — raise "
+                f"openai_max_output_tokens (now {cfg.openai_max_output_tokens}); "
+                f"reasoning tokens count against it. Billed ${usd:.5f}")
         text = ""
         for output in data.get("output", []) or []:
             if output.get("type") != "message":
@@ -711,7 +725,14 @@ class TermStructurePillar:
         if not text:
             raise RuntimeError(
                 f"term-structure OpenAI reply: {str(data)[:200]}")
-        usage = data.get("usage", {}) or {}
+        self._last_reader = ("openai", model)
+        log.info("term_structure.openai_call", model=model, reason=reason,
+                 grounded=bool(cfg.openai_grounded), usd=round(usd, 5))
+        return text
+
+    async def _record_openai_cost(self, cfg, usage: dict) -> float:
+        """Charge one call to the daily cap, whatever the reply turned out to
+        be. Returns the dollar cost so callers can surface it."""
         prices = cfg.openai_price_per_mtok
         usd = (
             float(usage.get("input_tokens", 0) or 0) * float(prices[0])
@@ -725,10 +746,7 @@ class TermStructurePillar:
             (usd,),
         )
         await self._db.commit()
-        self._last_reader = ("openai", model)
-        log.info("term_structure.openai_call", model=model, reason=reason,
-                 grounded=bool(cfg.openai_grounded), usd=round(usd, 5))
-        return text
+        return usd
 
     async def _openai_request(
         self, body: dict, timeout_seconds: int, key: str,

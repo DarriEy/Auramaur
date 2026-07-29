@@ -113,7 +113,8 @@ def _settings():
     cfg.openai_effort = "high"
     cfg.openai_primary_on_claude_block = True
     cfg.openai_grounded = True
-    cfg.openai_daily_call_limit = 30
+    cfg.openai_daily_call_limit = 16
+    cfg.openai_max_output_tokens = 8000
     cfg.openai_price_per_mtok = [5.0, 30.0]
     cfg.exclude_categories = []
     s.openai_api_key = "test-openai-key"
@@ -679,5 +680,47 @@ async def test_openai_lead_still_falls_back_to_gemini(tmp_path):
         assert await pillar._fallback(
             "p", pillar._settings.term_structure, "claude_quota_circuit"
         ) == "gemini text"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_truncated_read_is_still_billed_and_capped(tmp_path):
+    """Reasoning tokens are billed even when the reply comes back incomplete.
+
+    Accounting only successes made a failing arm burn budget invisibly — the
+    cap never saw it. Observed live 2026-07-29 01:51 with max_output_tokens
+    2048 against sol at effort=high.
+    """
+    pillar, db, _ = await _pillar(tmp_path, _ladder(), "")
+    cfg = pillar._settings.term_structure
+    pillar._openai_request = AsyncMock(return_value={
+        "status": "incomplete",
+        "incomplete_details": {"reason": "max_output_tokens"},
+        "output": [],
+        "usage": {"input_tokens": 40000, "output_tokens": 2048},
+    })
+    try:
+        with pytest.raises(RuntimeError, match="truncated"):
+            await pillar._call_openai("p", cfg, "r")
+        row = await db.fetchone(
+            """SELECT calls, usd FROM agent_trader_costs
+                WHERE model_alias='term_structure_openai'""")
+        assert row["calls"] == 1          # counted against the cap
+        assert row["usd"] == pytest.approx(40000 * 5.0 / 1e6 + 2048 * 30.0 / 1e6)
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_max_output_tokens_is_configurable(tmp_path):
+    pillar, db, _ = await _pillar(tmp_path, _ladder(), "")
+    cfg = pillar._settings.term_structure
+    pillar._openai_request = AsyncMock(
+        return_value=_openai_reply('{"thesis": "t", "curve": []}'))
+    try:
+        await pillar._call_openai("p", cfg, "r")
+        assert pillar._openai_request.await_args.args[0][
+            "max_output_tokens"] == 8000
     finally:
         await db.close()

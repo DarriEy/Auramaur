@@ -933,14 +933,19 @@ term_structure:
   # plus high effort is the driver, not the tier alone — the same sol arm runs
   # ~$0.008 ungrounded in the ETF experiment.
   #
-  # The cap is therefore the real budget lever. Steady state is ~16 reads/day
-  # (max_families 16 on a 24h curve_ttl_hours), so 20 leaves modest headroom
-  # at a ~$5.00/day ceiling, and only while Claude is down. Do NOT raise this
-  # without re-doing the arithmetic. Cheaper knobs, in order: openai_model
-  # back to gpt-5.6-terra (7.6x), openai_effort to medium (fewer searches),
+  # The cap is therefore the real budget lever, and it now counts FAILED reads
+  # too — reasoning tokens are billed even when a reply comes back truncated,
+  # so charging only successes left real spend invisible. 16 == max_families,
+  # the true steady-state need on a 24h curve_ttl_hours, for a ~$5/day ceiling
+  # that applies only while Claude is down. Do NOT raise this without re-doing
+  # the arithmetic. Cheaper knobs, in order: openai_model back to
+  # gpt-5.6-terra (7.6x), openai_effort to medium (fewer searches),
   # openai_grounded false (~14x, but forfeits the reading edge).
-  openai_daily_call_limit: 20
+  openai_daily_call_limit: 16
   openai_price_per_mtok: [5.0, 30.0]
+  # Reasoning tokens count against this. 2048 (sized for the answer alone)
+  # truncated the first live production read and billed for nothing.
+  openai_max_output_tokens: 8000
   exclude_categories: []
 
 vol_anchor:

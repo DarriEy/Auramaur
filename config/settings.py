@@ -851,11 +851,17 @@ class TermStructureConfig(BaseModel):
     # about current reporting, so an ungrounded arm is materially weaker.
     # Set false if the account cannot use the web_search tool.
     openai_grounded: bool = True
+    # Reasoning tokens count against this, so a value sized for the ANSWER
+    # truncates the reply and bills for nothing: 2048 produced status
+    # "incomplete" on the first live production read (2026-07-29 01:51).
+    # A curve is a few hundred tokens; the rest is sol's reasoning at high
+    # effort.
+    openai_max_output_tokens: int = 8000
     # The real budget lever: sol grounded at effort=high measured ~$0.249/read
-    # live (five web searches, ~42.7k input tokens). Steady state is ~16
-    # reads/day, so 20 is headroom at a ~$5.00/day ceiling. Re-do the
-    # arithmetic before raising it.
-    openai_daily_call_limit: int = 20
+    # live (five web searches, ~42.7k input tokens), and truncated reads bill
+    # too. 16 == max_families, the true steady-state need on a 24h curve TTL,
+    # for a ~$5/day ceiling. Re-do the arithmetic before raising it.
+    openai_daily_call_limit: int = 16
     # [input, output] USD per million tokens; matches the sol arm in
     # ibkr.etf_models. Update together with the model.
     openai_price_per_mtok: list[float] = [5.0, 30.0]
