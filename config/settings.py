@@ -832,6 +832,21 @@ class TermStructureConfig(BaseModel):
     gemini_fallback: bool = True
     gemini_daily_call_limit: int = 30
     gemini_price_per_mtok: list[float] = [2.0, 12.0]
+    # Third reader, tried only after Claude and Gemini are both spent. Its
+    # daily cap is scoped to its OWN alias, unlike the Gemini cap which is
+    # shared across every agent_trader arm — a shared cap cannot relieve the
+    # exhaustion of another shared cap, which is the whole point of this arm.
+    openai_fallback: bool = True
+    openai_model: str = "gpt-5.6-terra"
+    # Grounded, matching the other two arms (Claude gets WebSearch/WebFetch,
+    # Gemini gets google_search). A deadline-ladder read is mostly a question
+    # about current reporting, so an ungrounded arm is materially weaker.
+    # Set false if the account cannot use the web_search tool.
+    openai_grounded: bool = True
+    openai_daily_call_limit: int = 20
+    # [input, output] USD per million tokens; matches the terra arm in
+    # ibkr.etf_models. Update together with the model.
+    openai_price_per_mtok: list[float] = [2.5, 15.0]
     exclude_categories: list[str] = []
 
 

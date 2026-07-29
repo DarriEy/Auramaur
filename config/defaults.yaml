@@ -902,6 +902,24 @@ term_structure:
   gemini_fallback: true
   gemini_daily_call_limit: 30
   gemini_price_per_mtok: [2.0, 12.0]
+  # THIRD ARM ADDED 2026-07-29. Gemini alone was not enough relief: its cap is
+  # shared across every agent_trader arm, so on 07-28 Claude's weekly limit and
+  # an exhausted shared Gemini pool coincided and the pillar logged
+  # "shared Gemini daily call limit exhausted" on every family — zero curve
+  # reads for a full day. One shared pool cannot relieve another, so this arm
+  # carries its OWN daily cap. Order is Claude -> Gemini -> OpenAI; a family
+  # errors out only when all three are spent.
+  openai_fallback: true
+  openai_model: "gpt-5.6-terra"
+  # Grounded, like the other two arms. Measured live 2026-07-29: grounding
+  # costs ~$0.033/read against ~$0.003 ungrounded — web_search pulls ~11k
+  # input tokens vs ~100 — but the ungrounded read is guessing at timelines,
+  # which is the entire edge here. Worst case at the cap below is ~$0.65/day,
+  # and only on days Claude AND Gemini are both spent. Set false to halve the
+  # bill at the cost of the reading edge.
+  openai_grounded: true
+  openai_daily_call_limit: 20
+  openai_price_per_mtok: [2.5, 15.0]
   exclude_categories: []
 
 vol_anchor:

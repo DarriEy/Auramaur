@@ -108,7 +108,13 @@ def _settings():
     cfg.gemini_fallback = True
     cfg.gemini_daily_call_limit = 30
     cfg.gemini_price_per_mtok = [2.0, 12.0]
+    cfg.openai_fallback = True
+    cfg.openai_model = "gpt-5.6-terra"
+    cfg.openai_grounded = True
+    cfg.openai_daily_call_limit = 20
+    cfg.openai_price_per_mtok = [2.5, 15.0]
     cfg.exclude_categories = []
+    s.openai_api_key = "test-openai-key"
     s.risk.blocked_categories = []
     s.nlp.daily_claude_call_budget = 0
     s.gemini.enabled = True
@@ -419,5 +425,114 @@ async def test_self_contradicting_ladder_stays_medium(tmp_path):
         confidences = {
             call.args[0].claude_confidence for call in risk.evaluate.await_args_list}
         assert confidences == {Confidence.MEDIUM}
+    finally:
+        await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Reader fallback chain: Claude -> Gemini -> OpenAI
+# ---------------------------------------------------------------------------
+
+
+def _openai_reply(text: str, in_tok: int = 1000, out_tok: int = 200) -> dict:
+    return {
+        "output": [{"type": "message",
+                    "content": [{"type": "output_text", "text": text}]}],
+        "usage": {"input_tokens": in_tok, "output_tokens": out_tok},
+    }
+
+
+@pytest.mark.asyncio
+async def test_openai_takes_over_when_gemini_cap_is_spent(tmp_path):
+    """The 2026-07-28 outage: Claude weekly-limited AND the shared Gemini cap
+    exhausted meant zero curve reads. OpenAI must carry the read instead."""
+    pillar, db, _ = await _pillar(tmp_path, _ladder(), "")
+    cfg = pillar._settings.term_structure
+    pillar._call_gemini = AsyncMock(
+        side_effect=RuntimeError("shared Gemini daily call limit exhausted"))
+    pillar._openai_request = AsyncMock(
+        return_value=_openai_reply('{"thesis": "t", "curve": []}'))
+    try:
+        text = await pillar._fallback("prompt", cfg, "claude_call_failed")
+        assert text == '{"thesis": "t", "curve": []}'
+        assert pillar._last_reader == ("openai", "gpt-5.6-terra")
+        row = await db.fetchone(
+            """SELECT calls, usd FROM agent_trader_costs
+                WHERE model_alias='term_structure_openai'""")
+        assert row["calls"] == 1
+        assert row["usd"] == pytest.approx(1000 * 2.5 / 1e6 + 200 * 15.0 / 1e6)
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_gemini_still_preferred_over_openai(tmp_path):
+    """Cost order holds: OpenAI is not called while Gemini can still answer."""
+    pillar, db, _ = await _pillar(tmp_path, _ladder(), "")
+    pillar._call_gemini = AsyncMock(return_value="gemini text")
+    pillar._openai_request = AsyncMock()
+    try:
+        text = await pillar._fallback(
+            "prompt", pillar._settings.term_structure, "claude_daily_budget")
+        assert text == "gemini text"
+        pillar._openai_request.assert_not_awaited()
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_all_arms_spent_reports_every_failure(tmp_path):
+    """A family errors out only when every arm is spent, and the error names
+    each one — silence about which reader died is what cost a day of reads."""
+    pillar, db, _ = await _pillar(tmp_path, _ladder(), "")
+    pillar._call_gemini = AsyncMock(side_effect=RuntimeError("gemini cap"))
+    pillar._openai_request = AsyncMock(return_value={"error": "insufficient_quota"})
+    try:
+        with pytest.raises(RuntimeError) as excinfo:
+            await pillar._fallback(
+                "prompt", pillar._settings.term_structure, "claude_call_failed")
+        detail = str(excinfo.value)
+        assert "gemini cap" in detail and "insufficient_quota" in detail
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_openai_respects_its_own_daily_cap(tmp_path):
+    """The cap is scoped to this alias — a drained shared pool must not also
+    disable the arm that exists to relieve it."""
+    pillar, db, _ = await _pillar(tmp_path, _ladder(), "")
+    cfg = pillar._settings.term_structure
+    cfg.openai_daily_call_limit = 1
+    await pillar._ensure_schema()
+    # A different arm burning the shared day total must not block this one.
+    await db.execute(
+        """INSERT INTO agent_trader_costs (day, model_alias, calls, usd)
+           VALUES (date('now'), 'some_other_arm', 99, 1.0)""")
+    await db.commit()
+    pillar._openai_request = AsyncMock(
+        return_value=_openai_reply('{"thesis": "t", "curve": []}'))
+    try:
+        assert await pillar._call_openai("p", cfg, "r")
+        with pytest.raises(RuntimeError, match="daily call limit exhausted"):
+            await pillar._call_openai("p", cfg, "r")
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_openai_grounding_toggle(tmp_path):
+    """Grounded by default (parity with the other two arms), off on request."""
+    pillar, db, _ = await _pillar(tmp_path, _ladder(), "")
+    cfg = pillar._settings.term_structure
+    pillar._openai_request = AsyncMock(
+        return_value=_openai_reply('{"thesis": "t", "curve": []}'))
+    try:
+        await pillar._call_openai("p", cfg, "r")
+        assert pillar._openai_request.await_args.args[0]["tools"] == [
+            {"type": "web_search"}]
+        cfg.openai_grounded = False
+        await pillar._call_openai("p", cfg, "r")
+        assert "tools" not in pillar._openai_request.await_args.args[0]
     finally:
         await db.close()

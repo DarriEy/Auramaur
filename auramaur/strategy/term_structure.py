@@ -511,13 +511,13 @@ class TermStructurePillar:
 
         now = datetime.now(timezone.utc)
         if self._claude_blocked_until and now < self._claude_blocked_until:
-            return await self._call_gemini(prompt, cfg, "claude_quota_circuit")
+            return await self._fallback(prompt, cfg, "claude_quota_circuit")
         budget = self._settings.nlp.daily_claude_call_budget
         if budget > 0:
             limit = call_budget.non_reserved_limit(self._settings)
             if call_budget.calls_today() >= limit:
-                if cfg.gemini_fallback:
-                    return await self._call_gemini(
+                if self._fallbacks_enabled(cfg):
+                    return await self._fallback(
                         prompt, cfg, "claude_daily_budget")
                 raise BudgetExhausted(
                     f"non-reserved Claude budget ({limit}/{budget}, paced) exhausted")
@@ -545,16 +545,45 @@ class TermStructurePillar:
             detail = (stderr.decode().strip() or stdout.decode().strip())[:300]
             if "weekly limit" in detail.lower() or "usage limit" in detail.lower():
                 self._claude_blocked_until = now + timedelta(hours=12)
-            if cfg.gemini_fallback:
+            if self._fallbacks_enabled(cfg):
                 log.warning(
                     "term_structure.claude_fallback", error=detail,
                     blocked_until=(self._claude_blocked_until.isoformat()
                                    if self._claude_blocked_until else ""),
                 )
-                return await self._call_gemini(prompt, cfg, "claude_call_failed")
+                return await self._fallback(prompt, cfg, "claude_call_failed")
             raise RuntimeError(f"curve read failed: {detail}")
         self._last_reader = ("claude", str(cfg.model))
         return stdout.decode()
+
+    @staticmethod
+    def _fallbacks_enabled(cfg) -> bool:
+        return bool(cfg.gemini_fallback) or bool(cfg.openai_fallback)
+
+    async def _fallback(self, prompt: str, cfg, reason: str) -> str:
+        """Non-Claude readers in cost order: grounded Gemini, then OpenAI.
+
+        Each arm raises on its own exhaustion and the next one is tried, so a
+        family errors out only when every arm is spent. Gemini alone was not
+        enough: its cap is shared with the agent_trader arms, and on
+        2026-07-28 an exhausted shared pool coincided with Claude's weekly
+        limit and stopped curve reads outright for a day.
+        """
+        errors: list[str] = []
+        for name, call, enabled in (
+            ("gemini", self._call_gemini, bool(cfg.gemini_fallback)),
+            ("openai", self._call_openai, bool(cfg.openai_fallback)),
+        ):
+            if not enabled:
+                continue
+            try:
+                return await call(prompt, cfg, reason)
+            except Exception as exc:  # noqa: BLE001 — try the next arm
+                errors.append(f"{name}: {str(exc)[:120]}")
+                log.warning("term_structure.fallback_arm_spent", arm=name,
+                            reason=reason, error=str(exc)[:200])
+        raise RuntimeError(
+            "curve read fallbacks exhausted — " + "; ".join(errors))
 
     async def _call_gemini(self, prompt: str, cfg, reason: str) -> str:
         """Grounded Gemini fallback with the agent-trader's shared cost cap."""
@@ -613,6 +642,93 @@ class TermStructurePillar:
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 url, json=body,
+                timeout=aiohttp.ClientTimeout(total=timeout_seconds),
+            ) as response:
+                return await response.json()
+
+    async def _call_openai(self, prompt: str, cfg, reason: str) -> str:
+        """OpenAI curve reader — the last arm, on its own daily budget.
+
+        Responses API, same shape the ETF experiment already runs against
+        (nlp/openai_etf.py), but this pillar wants free-form curve JSON rather
+        than that experiment's fixed schema, so it posts directly instead of
+        reusing OpenAIETFAnalyzer.
+        """
+        await self._ensure_schema()
+        key = self._settings.openai_api_key
+        if not key:
+            raise RuntimeError("term-structure OpenAI fallback is unavailable")
+        # Scoped to this alias, NOT the shared day total: the point of this arm
+        # is to survive the shared Gemini pool being drained by other readers.
+        row = await self._db.fetchone(
+            """SELECT COALESCE(SUM(calls), 0) AS n FROM agent_trader_costs
+                WHERE day = date('now')
+                  AND model_alias = 'term_structure_openai'""")
+        calls = int(row["n"]) if row else 0
+        if (cfg.openai_daily_call_limit > 0
+                and calls >= cfg.openai_daily_call_limit):
+            raise RuntimeError("term-structure OpenAI daily call limit exhausted")
+        model = str(cfg.openai_model)
+        body = {
+            "model": model,
+            "input": prompt,
+            "reasoning": {"effort": str(cfg.effort)},
+            "store": False,
+            "max_output_tokens": 2048,
+        }
+        if cfg.openai_grounded:
+            body["tools"] = [{"type": "web_search"}]
+        data = await self._openai_request(
+            body, int(cfg.llm_timeout_seconds), key)
+        # The Responses API returns "error": null on success, so test the
+        # VALUE, not key presence — str(None) is truthy and would make every
+        # successful read raise.
+        if data.get("error"):
+            raise RuntimeError(
+                f"term-structure OpenAI error: {str(data['error'])[:200]}")
+        text = ""
+        for output in data.get("output", []) or []:
+            if output.get("type") != "message":
+                continue
+            for content in output.get("content", []) or []:
+                if content.get("type") == "refusal":
+                    raise RuntimeError("term-structure OpenAI refused the read")
+                if content.get("type") == "output_text":
+                    text += content.get("text", "")
+        text = text.strip()
+        if not text:
+            raise RuntimeError(
+                f"term-structure OpenAI reply: {str(data)[:200]}")
+        usage = data.get("usage", {}) or {}
+        prices = cfg.openai_price_per_mtok
+        usd = (
+            float(usage.get("input_tokens", 0) or 0) * float(prices[0])
+            + float(usage.get("output_tokens", 0) or 0) * float(prices[1])
+        ) / 1e6
+        await self._db.execute(
+            """INSERT INTO agent_trader_costs (day, model_alias, calls, usd)
+               VALUES (date('now'), 'term_structure_openai', 1, ?)
+               ON CONFLICT(day, model_alias) DO UPDATE SET
+                   calls=calls+1, usd=usd+excluded.usd""",
+            (usd,),
+        )
+        await self._db.commit()
+        self._last_reader = ("openai", model)
+        log.info("term_structure.openai_call", model=model, reason=reason,
+                 grounded=bool(cfg.openai_grounded), usd=round(usd, 5))
+        return text
+
+    async def _openai_request(
+        self, body: dict, timeout_seconds: int, key: str,
+    ) -> dict:
+        """One Responses API request, split out for deterministic tests."""
+        import aiohttp
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.openai.com/v1/responses", json=body,
+                headers={"Authorization": f"Bearer {key}",
+                         "Content-Type": "application/json"},
                 timeout=aiohttp.ClientTimeout(total=timeout_seconds),
             ) as response:
                 return await response.json()
