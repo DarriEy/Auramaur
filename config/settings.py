@@ -246,6 +246,31 @@ class RiskConfig(BaseModel):
     # performance bears that out. Blocked outright rather than left to the
     # feedback loop, which needs a sample sports keeps losing money to build.
     blocked_categories: list[str] = ["sports"]
+    # Strategies exempt from CATEGORY CONTAINMENT — structural, two-sided
+    # pillars only. A market maker quoting both sides or an arb executor
+    # closing a pair takes no directional view, so gating them by category
+    # would break the strategy without protecting anything.
+    #
+    # This used to be read from graduation.exempt_strategies, which overloaded
+    # ONE flag with TWO unrelated meanings: "skip the evidence ladder" and
+    # "skip category containment". Promoting a DIRECTIONAL strategy into the
+    # ladder exemption therefore silently removed its category and venue
+    # limits too. On 2026-07-29 `llm` — nominally bounded to four categories
+    # on Polymarket — placed a live $28 BUY on a Kalshi ECONOMICS market,
+    # because both live_categories_only and live_venues_only are evaluated
+    # inside the block this flag disables. Every llm category/venue setting
+    # made since it joined the exempt list had been inert.
+    #
+    # Corroboration that gating was always intended for these: an
+    # allowed_categories_live_extra entry exists for agent_trader_opus, a
+    # per-strategy category EXTENSION written for a strategy whose category
+    # checks were switched off — dead config until this split.
+    #
+    # Keep this list structural. Adding a directional strategy here re-opens
+    # the same hole.
+    category_gate_exempt_strategies: list[str] = [
+        "arbitrage", "order_monitor", "market_maker",
+    ]
     # LIVE entries are allowlist-gated (fail-safe): a category must be ON this
     # list to trade real money; unknown/''/'other'/mislabeled categories can
     # paper-trade but never go live. The blocklist above still governs paper

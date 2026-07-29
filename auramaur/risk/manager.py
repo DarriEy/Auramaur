@@ -256,8 +256,17 @@ class RiskManager:
         from auramaur.strategy.classifier import classify_market
         fresh_category = classify_market(
             market.question or "", market.description or "")
+        # Category containment is NOT the graduation exemption. This used to
+        # read graduation.exempt_strategies, overloading one flag with two
+        # unrelated meanings — "skip the evidence ladder" and "skip category
+        # containment" — so promoting a DIRECTIONAL strategy into the ladder
+        # exemption silently removed its category AND venue limits, since
+        # live_categories_only / live_venues_only are evaluated inside the
+        # block this flag disables. Caught 2026-07-29: `llm`, nominally
+        # bounded to four categories on Polymarket, placed a live $28 BUY on
+        # a Kalshi economics market.
         category_applies = signal.strategy_source not in set(
-            self.settings.graduation.exempt_strategies)
+            rc.category_gate_exempt_strategies)
         pre_checks.append(await check_blocked_category(
             market.category or "", rc.blocked_categories,
             applies=category_applies,

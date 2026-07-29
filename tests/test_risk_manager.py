@@ -701,3 +701,97 @@ async def test_force_paper_is_restriction_only(mock_kill):
     decision = await manager.evaluate(
         signal, _make_market(), available_cash=500.0, force_paper=False)
     assert decision.force_paper is True
+
+
+@pytest.mark.asyncio
+@patch("auramaur.risk.manager.check_kill_switch")
+async def test_ladder_exemption_does_not_disable_venue_containment(mock_kill):
+    """The 2026-07-29 breach: `llm` is graduation-exempt, and that exemption
+    used to switch off the category block — which is where live_venues_only is
+    evaluated. A live $28 BUY landed on a Kalshi economics market while llm
+    was nominally bounded to Polymarket. Ladder exemption must not imply
+    category/venue exemption."""
+    from auramaur.risk.checks import CheckResult
+    mock_kill.return_value = CheckResult(
+        name="kill_switch", passed=True, reason="", value=False)
+
+    settings = _make_settings(is_live=True, min_edge_pct=2.5,
+                              allowed_categories_live=["economics", "politics"])
+    settings.graduation.exempt_strategies = ["llm"]          # ladder-exempt
+    settings.risk.category_gate_exempt_strategies = ["arbitrage"]  # NOT llm
+    settings.risk.live_venues_only = {"llm": ["polymarket"]}
+    settings.risk.live_categories_only = {}
+    db = MagicMock()
+    db.fetchone = AsyncMock(return_value=None)
+    manager = RiskManager(settings, db)
+    manager.portfolio = _mock_portfolio()
+    manager.graduation.decide = AsyncMock(
+        return_value=CellDecision(False, 1.0, "exempt", "test"))
+
+    signal = _make_signal(edge=10.0, claude_prob=0.60, market_prob=0.50)
+    kalshi = _make_market(category="economics")
+    kalshi.exchange = "kalshi"
+
+    decision = await manager.evaluate(signal, kalshi, available_cash=500.0)
+    assert decision.approved is False
+    assert "not allowed for live entries" in decision.reason
+
+    poly = _make_market(category="economics")
+    poly.exchange = "polymarket"
+    assert (await manager.evaluate(
+        signal, poly, available_cash=500.0)).approved is True
+
+
+@pytest.mark.asyncio
+@patch("auramaur.risk.manager.check_kill_switch")
+async def test_structural_strategies_keep_their_category_exemption(mock_kill):
+    """A two-sided quoter/arb takes no directional view, so category gating
+    would break it without protecting anything. That carve-out must survive."""
+    from auramaur.risk.checks import CheckResult
+    mock_kill.return_value = CheckResult(
+        name="kill_switch", passed=True, reason="", value=False)
+
+    settings = _make_settings(is_live=True, min_edge_pct=2.5,
+                              allowed_categories_live=["politics"])
+    settings.risk.category_gate_exempt_strategies = ["arbitrage"]
+    settings.risk.live_venues_only = {}
+    settings.risk.live_categories_only = {}
+    db = MagicMock()
+    db.fetchone = AsyncMock(return_value=None)
+    manager = RiskManager(settings, db)
+    manager.portfolio = _mock_portfolio()
+    manager.graduation.decide = AsyncMock(
+        return_value=CellDecision(False, 1.0, "exempt", "test"))
+
+    signal = _make_signal(edge=10.0, claude_prob=0.60, market_prob=0.50)
+    signal.strategy_source = "arbitrage"
+    off_list = _make_market(category="economics")   # not on the allowlist
+    assert (await manager.evaluate(
+        signal, off_list, available_cash=500.0)).approved is True
+
+
+@pytest.mark.asyncio
+@patch("auramaur.risk.manager.check_kill_switch")
+async def test_ladder_exemption_does_not_disable_category_containment(mock_kill):
+    """Same split, the live_categories_only half."""
+    from auramaur.risk.checks import CheckResult
+    mock_kill.return_value = CheckResult(
+        name="kill_switch", passed=True, reason="", value=False)
+
+    settings = _make_settings(is_live=True, min_edge_pct=2.5,
+                              allowed_categories_live=["economics", "politics"])
+    settings.graduation.exempt_strategies = ["llm"]
+    settings.risk.category_gate_exempt_strategies = ["arbitrage"]
+    settings.risk.live_categories_only = {"llm": ["politics"]}
+    settings.risk.live_venues_only = {}
+    db = MagicMock()
+    db.fetchone = AsyncMock(return_value=None)
+    manager = RiskManager(settings, db)
+    manager.portfolio = _mock_portfolio()
+    manager.graduation.decide = AsyncMock(
+        return_value=CellDecision(False, 1.0, "exempt", "test"))
+
+    signal = _make_signal(edge=10.0, claude_prob=0.60, market_prob=0.50)
+    econ = _make_market(category="economics")   # allowed globally, not for llm
+    assert (await manager.evaluate(
+        signal, econ, available_cash=500.0)).approved is False
