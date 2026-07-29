@@ -142,3 +142,24 @@ async def test_extra_payload_reaches_critic_stage():
     stages = {r.stage for r in rich.requests}
     assert stages == {"sample", "critic"}
     assert all("distilled_evidence" in r.episode_payload for r in rich.requests)
+
+
+def test_aggregate_preserves_a_majority_abstention():
+    """An arm whose samples abstained for want of evidence must not emit a
+    confident YES. The sample actions used to be discarded and the aggregate
+    recomputed from probability > 0.5, so abstention survived only on
+    single-sample arms."""
+    from auramaur.evaluation.runner import _aggregate, Forecast
+
+    all_abstain = [Forecast(0.65, "ABSTAIN") for _ in range(4)]
+    assert _aggregate(all_abstain).action == "ABSTAIN"
+
+    half = [Forecast(0.65, "ABSTAIN"), Forecast(0.65, "ABSTAIN"),
+            Forecast(0.65, "YES"), Forecast(0.65, "YES")]
+    assert _aggregate(half).action == "ABSTAIN"
+
+    minority = [Forecast(0.65, "ABSTAIN"), Forecast(0.65, "YES"),
+                Forecast(0.65, "YES"), Forecast(0.65, "YES")]
+    assert _aggregate(minority).action != "ABSTAIN"
+    # The mean is unaffected either way.
+    assert _aggregate(all_abstain).prob_yes == pytest.approx(0.65)

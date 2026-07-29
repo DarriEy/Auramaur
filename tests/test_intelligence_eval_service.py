@@ -311,3 +311,78 @@ async def test_selection_prefers_markets_where_the_claims_arm_can_run(tmp_path):
                 < service._information_priority(far))
     finally:
         await db.close()
+
+
+async def test_forecast_prompt_carries_no_price(tmp_path):
+    """The forecaster must not see the number it is scored against.
+
+    Under forecast-v1 the snapshot carried market_prob_yes and every one of
+    2412 forecasts came back with prob_yes EXACTLY equal to it — all four
+    arms scoring brier skill +0.000. yes_bid/yes_ask leave too: they are
+    mid -/+ spread/2, so keeping them hands the mid back by averaging.
+    """
+    db = Database(str(tmp_path / "eval-blind.db"))
+    await db.connect()
+    try:
+        settings = Settings()
+        settings.intelligence_eval.enabled = True
+        settings.intelligence_eval.markets_per_cycle = 1
+        settings.local_llm.enabled = True
+        client = LocalClient()
+        service = IntelligenceEvalService(db, settings, Discovery(), client)
+        assert await service.run_once() == 3
+
+        assert client.calls, "no prompt was issued"
+        for prompt, _ in client.calls:
+            for leaked in ("market_prob_yes", "yes_bid", "yes_ask"):
+                assert leaked not in prompt, f"{leaked} leaked into the prompt"
+            # The forecastable content must still be there.
+            assert "question" in prompt and "rules" in prompt
+
+        # The stored episode keeps the price — the scorer needs the baseline.
+        episode = await db.fetchone("SELECT * FROM evaluation_episodes")
+        assert episode["market_prob_yes"] == 0.55
+    finally:
+        await db.close()
+
+
+async def test_action_is_rederived_against_the_touch(tmp_path):
+    """A blind model's own action would be noise, so it is recomputed: the
+    0.65 forecast clears an ask of 0.56, so YES."""
+    db = Database(str(tmp_path / "eval-action.db"))
+    await db.connect()
+    try:
+        settings = Settings()
+        settings.intelligence_eval.enabled = True
+        settings.intelligence_eval.markets_per_cycle = 1
+        settings.local_llm.enabled = True
+        service = IntelligenceEvalService(db, settings, Discovery(), LocalClient())
+        assert await service.run_once() == 3
+        rows = await db.fetchall("SELECT action FROM evaluation_forecasts")
+        assert {r["action"] for r in rows} == {"YES"}
+    finally:
+        await db.close()
+
+
+async def test_model_abstain_survives_the_price_rule(tmp_path):
+    """ABSTAIN is a claim about evidence sufficiency, which a price rule
+    cannot make — it must not be overwritten by one."""
+    class Abstainer(LocalClient):
+        async def generate_json(self, prompt, **kwargs):
+            await super().generate_json(prompt, **kwargs)
+            return {"prob_yes": 0.65, "action": "ABSTAIN", "confidence": 0.2,
+                    "thesis": "Snapshot is insufficient."}
+
+    db = Database(str(tmp_path / "eval-abstain.db"))
+    await db.connect()
+    try:
+        settings = Settings()
+        settings.intelligence_eval.enabled = True
+        settings.intelligence_eval.markets_per_cycle = 1
+        settings.local_llm.enabled = True
+        service = IntelligenceEvalService(db, settings, Discovery(), Abstainer())
+        assert await service.run_once() == 3
+        rows = await db.fetchall("SELECT action FROM evaluation_forecasts")
+        assert {r["action"] for r in rows} == {"ABSTAIN"}
+    finally:
+        await db.close()

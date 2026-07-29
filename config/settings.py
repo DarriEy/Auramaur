@@ -1893,7 +1893,14 @@ class IntelligenceEvalConfig(BaseModel):
     reevaluate_after_hours: float = Field(default=24.0, ge=0)
     near_resolution_days: float = Field(default=14.0, ge=0)
     expensive_fraction: float = Field(default=0.25, ge=0, le=1)
-    prompt_version: str = "forecast-v1"
+    # Share of the expensive tier held for markets that HAVE distilled claims.
+    # horizon_bucket outranks claims_bucket in _information_priority, so
+    # near-resolution markets crowded the claims arm out entirely: 50 markets
+    # carried both claims and an episode, yet the arm produced 9 forecasts
+    # all-time. Only ever filled with markets that actually have claims, so a
+    # quiet distiller changes nothing.
+    claims_expensive_reserve: float = Field(default=0.5, ge=0, le=1)
+    prompt_version: str = "forecast-v2"
     output_schema_version: str = "binary-v1"
     treatments: list[IntelligenceEvalTreatment] = Field(default_factory=lambda: [
         IntelligenceEvalTreatment(name="local_single"),

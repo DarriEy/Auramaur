@@ -619,7 +619,18 @@ intelligence_eval:
   reevaluate_after_hours: 24
   near_resolution_days: 14
   expensive_fraction: 0.25
-  prompt_version: "forecast-v1"
+  # Half the expensive tier held for markets carrying distilled claims. The
+  # claims arm was starved to 9 forecasts all-time despite 50 markets having
+  # both claims and an episode, because near-resolution markets outrank
+  # claims markets in the sort. Only filled with markets that have claims.
+  claims_expensive_reserve: 0.5
+  # v2 (2026-07-29): the prompt no longer carries the market price. Under v1
+  # every one of 2412 forecasts returned prob_yes EXACTLY equal to
+  # market_prob_yes — all four arms scored brier skill +0.000, because the
+  # snapshot handed the model the very number it was being scored against.
+  # BUMPED, not edited in place: v1 rows measured a different (degenerate)
+  # condition and must never be pooled with v2 evidence.
+  prompt_version: "forecast-v2"
   output_schema_version: "binary-v1"
   treatments:
     - {name: "local_single", policy: "single", samples: 1, base_seed: 11}

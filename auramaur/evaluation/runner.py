@@ -199,9 +199,24 @@ def _parse(output: Mapping[str, Any] | str) -> Forecast:
 
 
 def _aggregate(forecasts: Sequence[Forecast]) -> Forecast | None:
+    """Mean probability, with abstention preserved.
+
+    The samples' own actions used to be discarded and the aggregate action
+    recomputed from `probability > 0.5`, so an arm whose every sample
+    abstained for want of evidence still emitted a confident YES or NO — the
+    abstention signal existed only on single-sample arms. A majority of
+    abstentions now carries through.
+
+    The YES/NO branch is a placeholder: the caller re-derives the trade action
+    against the bid/ask this forecaster deliberately never saw. A 0.5
+    threshold is a coin-flip rule, not a trading decision.
+    """
     if not forecasts:
         return None
     probability = math.fsum(item.prob_yes for item in forecasts) / len(forecasts)
+    abstained = sum(1 for item in forecasts if item.action == "ABSTAIN")
+    if abstained * 2 >= len(forecasts):
+        return Forecast(probability, "ABSTAIN")
     action = "YES" if probability > 0.5 else "NO" if probability < 0.5 else "ABSTAIN"
     return Forecast(probability, action)
 

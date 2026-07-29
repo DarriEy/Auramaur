@@ -37,6 +37,47 @@ def _plain(value):
         return [_plain(item) for item in value]
     return value
 
+
+# Every field that leaks the market's own view of the probability. The
+# scorecard is MARKET-RELATIVE (brier_skill = 1 - brier/market_brier), which
+# only measures anything if the forecast is arrived at independently — so
+# showing the model the price makes the metric measure nothing. It did
+# exactly that: on 2026-07-29 all 2412 forecasts across all four arms came
+# back with prob_yes EXACTLY equal to market_prob_yes, every arm scoring
+# skill +0.000 to four decimals.
+#
+# yes_bid/yes_ask go too, not just market_prob_yes. They are derived as
+# mid -/+ spread/2, so leaving them in hands back the mid by averaging.
+_PRICE_FIELDS = ("market_prob_yes", "yes_bid", "yes_ask",
+                 "bid_depth", "ask_depth")
+
+
+def _forecast_view(payload: Mapping) -> dict:
+    """The snapshot as the forecaster sees it: everything except the price.
+
+    Applied to the PROMPT only. The stored episode keeps every field — the
+    scorer needs market_prob_yes for the market baseline — and episode_hash
+    is computed from the full snapshot, so cross-arm pairing is unchanged.
+    """
+    return {key: value for key, value in payload.items()
+            if key not in _PRICE_FIELDS}
+
+
+def _price_action(prob_yes: float, yes_bid, yes_ask) -> str:
+    """Trade action from a blind forecast against the touch.
+
+    The model no longer sees prices, so its own action field would be noise.
+    Buy YES only when fair value clears the ask, sell only when it sits under
+    the bid; inside the spread there is no trade. A model ABSTAIN is honoured
+    upstream of this — that is a statement about evidence sufficiency, which
+    a price rule cannot make.
+    """
+    if yes_ask is not None and prob_yes > float(yes_ask):
+        return "YES"
+    if yes_bid is not None and prob_yes < float(yes_bid):
+        return "NO"
+    return "ABSTAIN"
+
 _OUTPUT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -69,6 +110,11 @@ class LocalForecastAdapter:
             "the frozen snapshot below. Do not use knowledge or events after "
             "evidence_cutoff. ABSTAIN when the snapshot is insufficient. "
             "Return strict JSON matching the supplied schema.\n"
+            "The snapshot deliberately contains NO market price. Reason from "
+            "the question, the rules and any evidence to an independent "
+            "probability; do not try to infer or reconstruct what the market "
+            "is trading at. Your prob_yes is scored against the market's own "
+            "price, so echoing a guess at it scores exactly zero skill.\n"
             f"STAGE: {request.stage}\nSNAPSHOT:\n"
             f"{json.dumps(_plain(request.episode_payload), sort_keys=True)}"
             f"{candidates}"
@@ -127,7 +173,22 @@ class IntelligenceEvalService:
         )]
         selected = await self._select_markets(eligible, cycle_started)
         expensive_n = math.ceil(len(selected) * self._cfg.expensive_fraction)
-        informative = sorted(selected, key=self._information_priority)[:expensive_n]
+        ranked = sorted(selected, key=self._information_priority)
+        informative = ranked[:expensive_n]
+        # Hold part of the expensive tier for markets that HAVE claims. The
+        # claims arm can only run where claims exist, and horizon_bucket
+        # outranks claims_bucket in the sort, so near-resolution markets
+        # crowded it out — 50 markets carried both claims and an episode while
+        # the arm produced 9 forecasts all-time. Rank order is preserved
+        # within each group, and the reserve is only ever filled with markets
+        # that genuinely have claims, so a quiet distiller changes nothing.
+        reserve = int(round(expensive_n * self._cfg.claims_expensive_reserve))
+        if reserve and self._claims_markets:
+            with_claims = [m for m in ranked
+                           if m.id in self._claims_markets][:reserve]
+            without = [m for m in ranked
+                       if m.id not in self._claims_markets]
+            informative = (with_claims + without)[:expensive_n]
         expensive_ids = {market.id for market in informative}
         semaphore = asyncio.Semaphore(self._cfg.market_concurrency)
 
@@ -296,7 +357,10 @@ class IntelligenceEvalService:
             },
         )
         await self._store.put_episode(snapshot)
-        payload = json.loads(snapshot.canonical_json())
+        stored_payload = json.loads(snapshot.canonical_json())
+        # The episode keeps its full payload (and its hash); only the prompt
+        # is blinded. See _forecast_view.
+        payload = _forecast_view(stored_payload)
         episode = Episode(snapshot.episode_hash, payload)
         treatments = treatments or self._treatments
         treatments = await self._attach_claims(treatments, market.id)
@@ -341,10 +405,17 @@ class IntelligenceEvalService:
                 continue
             forecast_id = hashlib.sha256(f"{run_id}:forecast".encode()).hexdigest()
             forecast = result.final_forecast
+            # prob_yes is the model's, untouched — it is what gets scored.
+            # The ACTION is re-derived against the touch the model never saw,
+            # except when the model abstained, which is its own judgement
+            # about evidence sufficiency and not a pricing call.
+            action = (forecast.action if forecast.action == "ABSTAIN"
+                      else _price_action(forecast.prob_yes,
+                                         snapshot.yes_bid, snapshot.yes_ask))
             await self._store.put_forecast(EvaluationForecast(
                 forecast_id=forecast_id, run_id=run_id,
                 episode_hash=snapshot.episode_hash, prob_yes=forecast.prob_yes,
-                action=forecast.action, thesis=forecast.thesis or "",
+                action=action, thesis=forecast.thesis or "",
                 uncertainty=None if forecast.confidence is None
                 else 1 - forecast.confidence,
             ))
