@@ -81,6 +81,13 @@ def _conn() -> sqlite3.Connection:
                    claude_calls INTEGER NOT NULL DEFAULT 0
                )"""
         )
+        # CREATE TABLE IF NOT EXISTS never adds a column to an existing
+        # sidecar, so the OpenAI counter needs a guarded ALTER.
+        cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(llm_call_counter)")}
+        if "openai_calls" not in cols:
+            conn.execute("ALTER TABLE llm_call_counter "
+                         "ADD COLUMN openai_calls INTEGER NOT NULL DEFAULT 0")
         # Preserve today's spend when upgrading from the historical row.
         # MAX makes this restart-safe: legacy state can never roll us back.
         from pathlib import Path
@@ -224,3 +231,59 @@ def record_call() -> int:
                 log.debug("call_budget.write_deferred", error=str(e),
                           pending=_pending)
     return _mem_calls
+
+
+def openai_calls_today() -> int:
+    """OpenAI analysis-fallback calls recorded today.
+
+    Separate counter from ``claude_calls``: the Claude budget protects a
+    subscription allowance, this one caps real per-call spend during a Claude
+    outage. Same fail-fast read policy — a lock miss reports 0 rather than
+    blocking the loop, which can only ever let a call through, never wrongly
+    block one.
+    """
+    today = date.today().isoformat()
+    with _lock:
+        try:
+            row = _conn().execute(
+                "SELECT openai_calls FROM llm_call_counter WHERE day = ?",
+                (today,),
+            ).fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+        except sqlite3.Error as e:
+            log.debug("call_budget.openai_read_error", error=str(e))
+            _reset_conn()
+            return 0
+
+
+def record_openai_call() -> int:
+    """Count one OpenAI analysis call (successful or not) — returns the total.
+
+    Failures are counted deliberately: OpenAI bills for reasoning tokens even
+    when a reply comes back truncated or errored, so counting only successes
+    would let a failing arm spend with the cap blind to it.
+    """
+    today = date.today().isoformat()
+    with _lock:
+        try:
+            conn = _conn()
+            conn.execute(
+                """INSERT INTO llm_call_counter (day, openai_calls)
+                   VALUES (?, 1)
+                   ON CONFLICT(day) DO UPDATE SET
+                       openai_calls = openai_calls + 1""",
+                (today,),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT openai_calls FROM llm_call_counter WHERE day = ?",
+                (today,),
+            ).fetchone()
+            return int(row[0]) if row else 1
+        except sqlite3.Error as e:
+            # Unlike the Claude counter there is no _pending fold here: an
+            # uncounted paid call is worse than a missed one, so on failure
+            # report the cap as reached rather than under-counting spend.
+            log.warning("call_budget.openai_write_error", error=str(e))
+            _reset_conn()
+            return 1 << 30

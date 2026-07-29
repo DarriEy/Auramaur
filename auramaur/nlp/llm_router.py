@@ -48,15 +48,129 @@ async def call_gemini(settings, prompt: str) -> str:
     return data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
 
+async def call_openai(settings, prompt: str) -> str:
+    """Last-resort analysis arm. Ungrounded, capped, counted.
+
+    Deliberately no web_search: this carries the analyzer's full volume and
+    the grounded configuration measured ~$0.249/call, which is $37-73/day at
+    the observed 150-293 calls/day. The analyzer prompt already carries
+    gathered evidence.
+
+    The cap rides call_budget's sidecar rather than the trading DB — same
+    reason the Claude counter does: no analyzer constructor has to grow an
+    async Database dependency (see that module's docstring).
+    """
+    import aiohttp
+
+    from auramaur.nlp import call_budget
+
+    cfg = settings.nlp
+    key = getattr(settings, "openai_api_key", "")
+    if not key:
+        raise RuntimeError("OpenAI analysis fallback unavailable: no API key")
+
+    if (cfg.openai_daily_call_limit > 0
+            and call_budget.openai_calls_today() >= cfg.openai_daily_call_limit):
+        raise RuntimeError(
+            f"OpenAI analysis daily cap ({cfg.openai_daily_call_limit}) reached")
+    # Counted BEFORE the reply is judged: OpenAI bills reasoning tokens even
+    # on a truncated or errored response, so counting only successes would let
+    # a failing arm spend with the cap blind to it.
+    call_budget.record_openai_call()
+
+    body = {
+        "model": str(cfg.openai_model),
+        "input": prompt,
+        "reasoning": {"effort": str(cfg.openai_effort)},
+        "store": False,
+        "max_output_tokens": int(cfg.openai_max_output_tokens),
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://api.openai.com/v1/responses", json=body,
+            headers={"Authorization": f"Bearer {key}",
+                     "Content-Type": "application/json"},
+            timeout=aiohttp.ClientTimeout(total=180),
+        ) as response:
+            data = await response.json()
+
+    usage = data.get("usage") or {}
+    prices = cfg.openai_price_per_mtok
+    usd = (float(usage.get("input_tokens", 0) or 0) * float(prices[0])
+           + float(usage.get("output_tokens", 0) or 0) * float(prices[1])) / 1e6
+    log.info("llm.openai_call", model=cfg.openai_model,
+             calls_today=call_budget.openai_calls_today(),
+             cap=cfg.openai_daily_call_limit, usd=round(usd, 5))
+
+    if data.get("error"):
+        raise RuntimeError(f"OpenAI analysis error: {str(data['error'])[:200]}")
+    if str(data.get("status") or "") == "incomplete":
+        raise RuntimeError(
+            "OpenAI analysis truncated "
+            f"({str(data.get('incomplete_details'))[:120]}) — raise "
+            f"nlp.openai_max_output_tokens (now {cfg.openai_max_output_tokens})")
+    text = ""
+    for output in data.get("output", []) or []:
+        if output.get("type") != "message":
+            continue
+        for content in output.get("content", []) or []:
+            if content.get("type") == "refusal":
+                raise RuntimeError("OpenAI analysis refused")
+            if content.get("type") == "output_text":
+                text += content.get("text", "")
+    text = text.strip()
+    if not text:
+        raise RuntimeError(f"OpenAI analysis empty reply: {str(data)[:200]}")
+    return text
+
+
 async def route(settings, daily_calls: int, prompt: str,
                 claude_fn: Callable[[str], Awaitable[str]]) -> str:
-    """Route to Gemini when appropriate; else call `claude_fn`. Falls back to
-    Claude if Gemini errors."""
+    """Route analysis to a working model.
+
+    Preference order is unchanged: Gemini when off-hours or the Claude daily
+    budget is near-exhausted, otherwise Claude.
+
+    What IS new (2026-07-29) is that a CLAUDE FAILURE now has somewhere to go.
+    The fallback used to run one way only — Gemini failing fell back to Claude,
+    but Claude failing propagated and the caller produced nothing. That is not
+    a rare corner: `should_use_gemini` keys off the DAILY budget, and
+    `call_budget.record_call()` only counts SUCCESSES, so a weekly-limit
+    outage leaves the counter low, never trips the threshold, and every
+    analysis outside the off-hours window dies. On 2026-07-29 that silenced
+    the llm pillar — the only book with live authority — for a full day while
+    the CLI logged 1189 consecutive rc=1 failures.
+
+    pin_claude callers do NOT come through here. They bypass routing entirely
+    because for them the model identity IS the edge (resolution_lens), and
+    that stays true.
+    """
+    tried_gemini = False
     if should_use_gemini(settings, daily_calls):
+        tried_gemini = True
         try:
             out = await call_gemini(settings, prompt)
             log.info("llm.routed", provider="gemini", model=settings.gemini.model)
             return out
         except Exception as e:  # noqa: BLE001 — fall back to Claude
             log.warning("gemini.failed_fallback_claude", error=str(e)[:120])
-    return await claude_fn(prompt)
+
+    try:
+        return await claude_fn(prompt)
+    except Exception as claude_error:  # noqa: BLE001 — try the remaining arms
+        errors = [f"claude: {str(claude_error)[:120]}"]
+        arms = []
+        if not tried_gemini:
+            arms.append(("gemini", lambda: call_gemini(settings, prompt)))
+        if getattr(settings.nlp, "openai_fallback", False):
+            arms.append(("openai", lambda: call_openai(settings, prompt)))
+        for name, fn in arms:
+            try:
+                out = await fn()
+                log.warning("llm.claude_failed_fell_back", provider=name,
+                            claude_error=str(claude_error)[:160])
+                return out
+            except Exception as e:  # noqa: BLE001 — try the next arm
+                errors.append(f"{name}: {str(e)[:120]}")
+        log.error("llm.all_arms_failed", errors=errors)
+        raise claude_error

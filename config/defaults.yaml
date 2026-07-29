@@ -234,6 +234,32 @@ nlp:
   selection_rotation_seconds: 3600
   evidence_per_source: 5
   daily_claude_call_budget: 175
+  # LAST-RESORT ANALYSIS ARM (2026-07-29, user: "can we have llm fall back on
+  # OpenAI sol when Claude is not available?"). Reached only when Claude has
+  # actually FAILED and Gemini could not cover it — this is not a routing
+  # preference and does not change which model normally answers.
+  #
+  # Why it was needed: llm_router.route's fallback ran ONE way only. Gemini
+  # failing fell back to Claude, but Claude failing propagated and the caller
+  # produced nothing. should_use_gemini keys off the DAILY budget, and
+  # record_call() counts only SUCCESSES, so a WEEKLY-limit outage leaves the
+  # counter low, never trips the 0.8 threshold, and every analysis outside
+  # off_hours_utc dies. On 2026-07-29 that silenced the llm pillar — the only
+  # book with live authority — for a full day across 1189 rc=1 CLI failures.
+  #
+  # UNGROUNDED and CAPPED on purpose. This path carries the analyzer's whole
+  # volume (150-293 Claude calls/day observed). Grounded web_search measured
+  # ~$0.249/call on 2026-07-29, i.e. $37-73/day at that rate; ungrounded on
+  # analyzer-sized prompts is ~$0.04, so the 100/day cap holds the ceiling
+  # near $4/day and only during a Claude outage. The analyzer prompt already
+  # carries gathered evidence, so search adds cost without adding much.
+  # Revert: openai_fallback: false.
+  openai_fallback: true
+  openai_model: "gpt-5.6-sol"
+  openai_effort: "medium"
+  openai_daily_call_limit: 100
+  openai_price_per_mtok: [5.0, 30.0]
+  openai_max_output_tokens: 4000
 
 calibration:
   min_samples: 30

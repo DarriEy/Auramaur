@@ -358,6 +358,23 @@ class NLPConfig(BaseModel):
     selection_rotation_seconds: int = 3600
     evidence_per_source: int = 3
     daily_claude_call_budget: int = 100
+    # OpenAI as the LAST analysis arm, reached only when Claude has actually
+    # FAILED and Gemini could not cover it. Not a routing preference — see
+    # nlp/llm_router.route.
+    #
+    # UNGROUNDED on purpose. This path carries the analyzer's whole volume
+    # (150-293 Claude calls/day observed), and the grounded web_search
+    # configuration measured ~$0.249/call on 2026-07-29 — $37-73/day at that
+    # rate. The analyzer prompt already carries gathered evidence, so the
+    # search adds cost without adding much.
+    openai_fallback: bool = True
+    openai_model: str = "gpt-5.6-sol"
+    openai_effort: str = "medium"
+    # Hard ceiling so a long Claude outage cannot run up an unbounded bill.
+    # ~$0.04/call on analyzer-sized prompts, so 100 caps the day near $4.
+    openai_daily_call_limit: int = 100
+    openai_price_per_mtok: list[float] = [5.0, 30.0]
+    openai_max_output_tokens: int = 4000
     # Slice of the daily budget held back for pin_claude callers (the proven
     # edges whose quality depends on the specific model). Unpinned callers stop
     # at budget - reserve; pinned callers can spend up to the full budget, so a
