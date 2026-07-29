@@ -837,16 +837,28 @@ class TermStructureConfig(BaseModel):
     # shared across every agent_trader arm — a shared cap cannot relieve the
     # exhaustion of another shared cap, which is the whole point of this arm.
     openai_fallback: bool = True
-    openai_model: str = "gpt-5.6-terra"
+    openai_model: str = "gpt-5.6-sol"
+    # Its own effort, not the Claude arm's: sol is the high-effort tier in
+    # ibkr.etf_models and reading a deadline ladder is the reasoning-heavy
+    # part of this pillar.
+    openai_effort: str = "high"
+    # Lead with OpenAI while Claude's weekly limit is open. Cost order is
+    # right for a transient Claude failure; a weekly limit is a multi-day
+    # outage that Gemini's SHARED cap cannot cover.
+    openai_primary_on_claude_block: bool = True
     # Grounded, matching the other two arms (Claude gets WebSearch/WebFetch,
     # Gemini gets google_search). A deadline-ladder read is mostly a question
     # about current reporting, so an ungrounded arm is materially weaker.
     # Set false if the account cannot use the web_search tool.
     openai_grounded: bool = True
+    # The real budget lever: sol grounded at effort=high measured ~$0.249/read
+    # live (five web searches, ~42.7k input tokens). Steady state is ~16
+    # reads/day, so 20 is headroom at a ~$5.00/day ceiling. Re-do the
+    # arithmetic before raising it.
     openai_daily_call_limit: int = 20
-    # [input, output] USD per million tokens; matches the terra arm in
+    # [input, output] USD per million tokens; matches the sol arm in
     # ibkr.etf_models. Update together with the model.
-    openai_price_per_mtok: list[float] = [2.5, 15.0]
+    openai_price_per_mtok: list[float] = [5.0, 30.0]
     exclude_categories: list[str] = []
 
 

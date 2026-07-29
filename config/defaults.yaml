@@ -910,7 +910,16 @@ term_structure:
   # carries its OWN daily cap. Order is Claude -> Gemini -> OpenAI; a family
   # errors out only when all three are spent.
   openai_fallback: true
-  openai_model: "gpt-5.6-terra"
+  # PROMOTED TO CARRY CLAUDE OUTAGES 2026-07-29 (user: "let openai carry the
+  # load when claude's weekly limit is hit, Sol's good"). While the weekly
+  # circuit is open this arm goes FIRST, ahead of Gemini: cost order suits a
+  # transient Claude failure, but a weekly limit is a multi-day outage and
+  # Gemini's cap is shared with the agent_trader arms — on 2026-07-28 it
+  # drained and the pillar read zero curves for a day. Revert: set
+  # openai_primary_on_claude_block false (order returns to gemini-first).
+  openai_model: "gpt-5.6-sol"
+  openai_effort: "high"
+  openai_primary_on_claude_block: true
   # Grounded, like the other two arms. Measured live 2026-07-29: grounding
   # costs ~$0.033/read against ~$0.003 ungrounded — web_search pulls ~11k
   # input tokens vs ~100 — but the ungrounded read is guessing at timelines,
@@ -918,8 +927,20 @@ term_structure:
   # and only on days Claude AND Gemini are both spent. Set false to halve the
   # bill at the cost of the reading edge.
   openai_grounded: true
+  # COST, MEASURED not estimated (2026-07-29, live): sol at effort=high runs
+  # FIVE web searches per read and pulls ~42.7k input tokens -> ~$0.249/read.
+  # That is ~7.6x terra grounded ($0.033, one search, ~11k tokens); grounding
+  # plus high effort is the driver, not the tier alone — the same sol arm runs
+  # ~$0.008 ungrounded in the ETF experiment.
+  #
+  # The cap is therefore the real budget lever. Steady state is ~16 reads/day
+  # (max_families 16 on a 24h curve_ttl_hours), so 20 leaves modest headroom
+  # at a ~$5.00/day ceiling, and only while Claude is down. Do NOT raise this
+  # without re-doing the arithmetic. Cheaper knobs, in order: openai_model
+  # back to gpt-5.6-terra (7.6x), openai_effort to medium (fewer searches),
+  # openai_grounded false (~14x, but forfeits the reading edge).
   openai_daily_call_limit: 20
-  openai_price_per_mtok: [2.5, 15.0]
+  openai_price_per_mtok: [5.0, 30.0]
   exclude_categories: []
 
 vol_anchor:

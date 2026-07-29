@@ -569,11 +569,23 @@ class TermStructurePillar:
         2026-07-28 an exhausted shared pool coincided with Claude's weekly
         limit and stopped curve reads outright for a day.
         """
-        errors: list[str] = []
-        for name, call, enabled in (
+        arms = [
             ("gemini", self._call_gemini, bool(cfg.gemini_fallback)),
             ("openai", self._call_openai, bool(cfg.openai_fallback)),
-        ):
+        ]
+        # While Claude is weekly-limited, OpenAI LEADS. Cost order is the right
+        # default for a one-off Claude hiccup, but a weekly limit is a
+        # multi-day outage, and across one Gemini's shared cap is the binding
+        # constraint — it is drained by the agent_trader arms and then this
+        # pillar reads nothing (2026-07-28: zero curve reads for a full day).
+        # Its own capped arm is what carries a sustained outage.
+        now = datetime.now(timezone.utc)
+        if (cfg.openai_primary_on_claude_block
+                and self._claude_blocked_until
+                and now < self._claude_blocked_until):
+            arms.reverse()
+        errors: list[str] = []
+        for name, call, enabled in arms:
             if not enabled:
                 continue
             try:
@@ -672,7 +684,7 @@ class TermStructurePillar:
         body = {
             "model": model,
             "input": prompt,
-            "reasoning": {"effort": str(cfg.effort)},
+            "reasoning": {"effort": str(cfg.openai_effort)},
             "store": False,
             "max_output_tokens": 2048,
         }
@@ -745,7 +757,26 @@ class TermStructurePillar:
         for m in strikes:
             if m.id not in probs:
                 continue
-            gap = abs(probs[m.id] - m.outcome_yes_price) * 100.0
+            # Edge at the price an entry actually transacts at, not at the
+            # mid. `outcome_yes_price` is Gamma's outcomePrices[0]; buying YES
+            # lifts the ask and selling it hits the bid, so on a wide book a
+            # mid-based gap is mostly spread. Measured 2026-07-29: market
+            # 2245064 showed a 15.5pt mid gap against a 16pt spread — ~6pts
+            # actually reachable. Gamma gives the touch width, not the sides,
+            # so a half-spread each way is the best available proxy.
+            #
+            # SIGNED, deliberately: direction is chosen at the mid, and a
+            # model landing INSIDE the spread yields a negative edge and is
+            # dropped as below_edge. An abs() here would resurrect it as a
+            # trade in the opposite direction, at a price worse than fair on
+            # that side too.
+            mid = m.outcome_yes_price
+            half_spread = max(0.0, float(m.spread or 0.0)) / 2.0
+            buy_yes = probs[m.id] > mid
+            exec_price = (min(1.0, mid + half_spread) if buy_yes
+                          else max(0.0, mid - half_spread))
+            gap = (((probs[m.id] - exec_price) if buy_yes
+                    else (exec_price - probs[m.id])) * 100.0)
             claimed = await self._market_claimed(m.id)
             liquid = m.liquidity >= cfg.min_liquidity
             if claimed:
@@ -770,8 +801,15 @@ class TermStructurePillar:
             )
             if disposition == "candidate":
                 candidates.append(TermStructureCandidate(
+                    # The EXECUTABLE price, not the mid. The selector ranks on
+                    # |model - market_probability| and sizes off it, so
+                    # handing it the mid would rank phantom spread-edge above
+                    # real edge and buy the wrong quantity. A candidate only
+                    # exists when the signed gap above already cleared
+                    # min_edge_pts, so the selector's abs() equals that
+                    # signed edge and its direction still agrees.
+                    market_probability=exec_price,
                     market_id=m.id,
-                    market_probability=m.outcome_yes_price,
                     model_probability=probs[m.id],
                     liquidity=m.liquidity,
                     claimed=claimed,
@@ -796,6 +834,7 @@ class TermStructurePillar:
             if await self._try_enter(
                 market, proposal.fair_probability, thesis, cfg,
                 curve_strong=curve_strong,
+                executable_price=proposal.market_probability,
             ):
                 entered += 1
         return entered
@@ -819,9 +858,18 @@ class TermStructurePillar:
         return row is not None
 
     async def _try_enter(self, market: Market, prob_yes: float, thesis: str,
-                         cfg, *, curve_strong: bool = False) -> bool:
+                         cfg, *, curve_strong: bool = False,
+                         executable_price: float | None = None) -> bool:
         market_yes = market.outcome_yes_price
         side = OrderSide.BUY if prob_yes > market_yes else OrderSide.SELL
+        # Two different quantities, deliberately kept apart:
+        #   market_prob -> the MID, the market's actual view. The adverse-
+        #     divergence band measures disagreement with the market, so
+        #     shrinking it by half a spread would understate divergence and
+        #     let entries slip under the band's floor.
+        #   edge -> what is reachable after paying the touch. This is what
+        #     check_min_edge must see; the mid figure overstates it.
+        entry_price = market_yes if executable_price is None else executable_price
         # Confidence is the curve's, not a constant. The adverse-divergence
         # band (risk/checks.py: [5%,20%) requires HIGH) is evaluated on LIVE
         # entries only, and this pillar's whole operating range — min_edge_pts
@@ -839,7 +887,7 @@ class TermStructurePillar:
             claude_prob=prob_yes,
             claude_confidence=confidence,
             market_prob=market_yes,
-            edge=abs(prob_yes - market_yes) * 100.0,
+            edge=abs(prob_yes - entry_price) * 100.0,
             evidence_summary=thesis[:500],
             recommended_side=side,
             strategy_source="term_structure",

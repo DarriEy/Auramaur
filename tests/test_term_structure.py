@@ -109,10 +109,12 @@ def _settings():
     cfg.gemini_daily_call_limit = 30
     cfg.gemini_price_per_mtok = [2.0, 12.0]
     cfg.openai_fallback = True
-    cfg.openai_model = "gpt-5.6-terra"
+    cfg.openai_model = "gpt-5.6-sol"
+    cfg.openai_effort = "high"
+    cfg.openai_primary_on_claude_block = True
     cfg.openai_grounded = True
-    cfg.openai_daily_call_limit = 20
-    cfg.openai_price_per_mtok = [2.5, 15.0]
+    cfg.openai_daily_call_limit = 30
+    cfg.openai_price_per_mtok = [5.0, 30.0]
     cfg.exclude_categories = []
     s.openai_api_key = "test-openai-key"
     s.risk.blocked_categories = []
@@ -455,12 +457,12 @@ async def test_openai_takes_over_when_gemini_cap_is_spent(tmp_path):
     try:
         text = await pillar._fallback("prompt", cfg, "claude_call_failed")
         assert text == '{"thesis": "t", "curve": []}'
-        assert pillar._last_reader == ("openai", "gpt-5.6-terra")
+        assert pillar._last_reader == ("openai", "gpt-5.6-sol")
         row = await db.fetchone(
             """SELECT calls, usd FROM agent_trader_costs
                 WHERE model_alias='term_structure_openai'""")
         assert row["calls"] == 1
-        assert row["usd"] == pytest.approx(1000 * 2.5 / 1e6 + 200 * 15.0 / 1e6)
+        assert row["usd"] == pytest.approx(1000 * 5.0 / 1e6 + 200 * 30.0 / 1e6)
     finally:
         await db.close()
 
@@ -534,5 +536,148 @@ async def test_openai_grounding_toggle(tmp_path):
         cfg.openai_grounded = False
         await pillar._call_openai("p", cfg, "r")
         assert "tools" not in pillar._openai_request.await_args.args[0]
+    finally:
+        await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Executable-price edge, and OpenAI leading during a Claude outage
+# ---------------------------------------------------------------------------
+
+
+def _wide(mid: float, spread: float, mid_day: int = 15) -> Market:
+    m = _strike("w", mid_day, mid)
+    m.spread = spread
+    return m
+
+
+@pytest.mark.asyncio
+async def test_spread_edge_is_not_traded(tmp_path):
+    """A 15pt mid gap on a 16pt spread is ~7pt reachable — below the floor.
+
+    Market 2245064 on 2026-07-29: model 0.68 vs mid 0.525 looked like 15.5pts
+    while bid/ask were 0.46/0.62. Paying the ask leaves ~6pts. It must not
+    become a candidate.
+    """
+    wide = _wide(0.525, 0.16)
+    ladder = [_strike("a", 5, 0.10), wide, _strike("c", 25, 0.70)]
+    reply = ('{"thesis": "t", "curve": [{"market_id": "a", "prob": 0.11},'
+             '{"market_id": "w", "prob": 0.68},'
+             '{"market_id": "c", "prob": 0.70}]}')
+    pillar, db, risk = await _pillar(tmp_path, ladder, reply)
+    try:
+        assert await pillar.run_once() == 0
+        risk.evaluate.assert_not_awaited()
+        row = await db.fetchone(
+            "SELECT disposition, gap_pts FROM term_structure_observations "
+            "WHERE market_id='w'")
+        assert row["disposition"] == "below_edge"
+        assert row["gap_pts"] == pytest.approx(7.5)   # 68 - 60.5, not 15.5
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_tight_book_keeps_its_edge(tmp_path):
+    """The same gap on a 1pt spread still trades — the haircut is the spread,
+    not a blanket penalty."""
+    tight = _wide(0.525, 0.01)
+    ladder = [_strike("a", 5, 0.10), tight, _strike("c", 25, 0.70)]
+    reply = ('{"thesis": "t", "curve": [{"market_id": "a", "prob": 0.11},'
+             '{"market_id": "w", "prob": 0.68},'
+             '{"market_id": "c", "prob": 0.70}]}')
+    pillar, db, risk = await _pillar(tmp_path, ladder, reply)
+    try:
+        assert await pillar.run_once() == 1
+        row = await db.fetchone(
+            "SELECT disposition, gap_pts FROM term_structure_observations "
+            "WHERE market_id='w'")
+        assert row["disposition"] == "candidate"
+        assert row["gap_pts"] == pytest.approx(15.0)  # 68 - 53
+        # The risk gate must see the reachable edge, not the mid figure.
+        signal = risk.evaluate.await_args.args[0]
+        assert signal.edge == pytest.approx(15.0)
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_model_inside_the_spread_never_flips_direction(tmp_path):
+    """Fair value between bid and ask is NO trade. An abs() edge would turn it
+    into a sell at a price also worse than fair."""
+    wide = _wide(0.50, 0.20)          # bid 0.40 / ask 0.60
+    ladder = [_strike("a", 5, 0.10), wide, _strike("c", 25, 0.70)]
+    reply = ('{"thesis": "t", "curve": [{"market_id": "a", "prob": 0.11},'
+             '{"market_id": "w", "prob": 0.55},'
+             '{"market_id": "c", "prob": 0.70}]}')
+    pillar, db, risk = await _pillar(tmp_path, ladder, reply)
+    try:
+        assert await pillar.run_once() == 0
+        risk.evaluate.assert_not_awaited()
+        row = await db.fetchone(
+            "SELECT disposition, gap_pts FROM term_structure_observations "
+            "WHERE market_id='w'")
+        assert row["disposition"] == "below_edge"
+        assert row["gap_pts"] < 0     # signed, so it cannot resurface
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_openai_leads_while_claude_is_weekly_blocked(tmp_path):
+    """A weekly limit is a multi-day outage; Gemini's shared cap cannot cover
+    it, so the arm with its own budget goes first."""
+    from datetime import timedelta
+
+    pillar, db, _ = await _pillar(tmp_path, _ladder(), "")
+    cfg = pillar._settings.term_structure
+    pillar._call_gemini = AsyncMock(return_value="gemini text")
+    pillar._openai_request = AsyncMock(
+        return_value=_openai_reply('{"thesis": "t", "curve": []}'))
+    pillar._claude_blocked_until = (
+        datetime.now(timezone.utc) + timedelta(hours=6))
+    try:
+        text = await pillar._fallback("p", cfg, "claude_quota_circuit")
+        assert text == '{"thesis": "t", "curve": []}'
+        pillar._call_gemini.assert_not_awaited()
+        assert pillar._last_reader == ("openai", "gpt-5.6-sol")
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_gemini_leads_again_once_the_block_expires(tmp_path):
+    """Cost order returns the moment the circuit closes."""
+    from datetime import timedelta
+
+    pillar, db, _ = await _pillar(tmp_path, _ladder(), "")
+    pillar._call_gemini = AsyncMock(return_value="gemini text")
+    pillar._openai_request = AsyncMock()
+    pillar._claude_blocked_until = (
+        datetime.now(timezone.utc) - timedelta(minutes=1))   # expired
+    try:
+        text = await pillar._fallback(
+            "p", pillar._settings.term_structure, "claude_call_failed")
+        assert text == "gemini text"
+        pillar._openai_request.assert_not_awaited()
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_openai_lead_still_falls_back_to_gemini(tmp_path):
+    """Leading is not exclusive — if OpenAI is also spent, Gemini still runs."""
+    from datetime import timedelta
+
+    pillar, db, _ = await _pillar(tmp_path, _ladder(), "")
+    pillar._call_gemini = AsyncMock(return_value="gemini text")
+    pillar._openai_request = AsyncMock(
+        return_value={"error": {"message": "insufficient_quota"}})
+    pillar._claude_blocked_until = (
+        datetime.now(timezone.utc) + timedelta(hours=6))
+    try:
+        assert await pillar._fallback(
+            "p", pillar._settings.term_structure, "claude_quota_circuit"
+        ) == "gemini text"
     finally:
         await db.close()
