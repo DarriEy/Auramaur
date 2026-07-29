@@ -75,7 +75,11 @@ def intelligence_eval_report(all_streams: bool):
                     values.append(f"{row['probability_kind']} {row['horizon_bucket']}")
                 n = int(row["forecasts"] or 0)
                 abstains = int(row["abstains"] or 0)
-                values.extend([model, row["prompt_version"] or "—", str(n),
+                # "forecast-v2" -> "v2". The whole point of this column is
+                # telling conditions apart at a glance, which a truncated
+                # "forecast-…" defeats on a narrow terminal.
+                prompt = (row["prompt_version"] or "").replace("forecast-", "")
+                values.extend([model, prompt or "—", str(n),
                                f"{abstains}/{n}" if abstains else "—"])
                 # NULL brier means every observation in this group was an
                 # abstention. Report that, rather than printing a 0.0000 the
