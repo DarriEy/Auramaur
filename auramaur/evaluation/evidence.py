@@ -74,6 +74,22 @@ class OutcomeRepository:
         return False
 
 
+def _resolved_before_observed(observed_at: str, resolved_at: str) -> bool:
+    """True when the market had already resolved before it was forecast.
+
+    Not a prospective forecast, so it must not be scored as one.
+    `_horizon_bucket` clamps the negative lag to zero, which quietly filed
+    these under '0-1d' instead of rejecting them. Unparseable timestamps
+    return False — drop the guard, not the row.
+    """
+    try:
+        observed = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+        resolved = datetime.fromisoformat(resolved_at.replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return resolved < observed
+
+
 def _horizon_bucket(observed_at: str, resolved_at: str) -> str:
     observed = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
     resolved = datetime.fromisoformat(resolved_at.replace("Z", "+00:00"))
@@ -100,6 +116,10 @@ class ForecastScoreMaterializer:
                WHERE outcome IS NOT NULL AND status='succeeded'""")
         facts = []
         for row in rows:
+            # A market that resolved BEFORE it was observed was never a
+            # prospective forecast. 8 of 959 resolved episodes on 2026-07-29.
+            if _resolved_before_observed(row["observed_at"], row["resolved_at"]):
+                continue
             score = score_forecast(
                 float(row["probability"]), float(row["market_probability"]),
                 int(row["outcome"]),
@@ -110,6 +130,7 @@ class ForecastScoreMaterializer:
                 row["observed_at"], _horizon_bucket(row["observed_at"], row["resolved_at"]),
                 row["outcome"], score.brier, score.log_loss, score.market_brier,
                 score.brier_delta, score.brier_skill, self._version,
+                row["prompt_version"] or "", int(row["abstained"] or 0),
             ))
         async with self._db.transaction():
             await self._db.execute(
@@ -119,25 +140,43 @@ class ForecastScoreMaterializer:
                     """INSERT INTO forecast_score_facts
                        (forecast_key,event_key,event_family,stream,arm,probability_kind,
                         observed_at,horizon_bucket,outcome,brier,log_loss,market_brier,
-                        brier_delta,brier_skill,score_version)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", facts)
+                        brier_delta,brier_skill,score_version,prompt_version,abstained)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", facts)
         return len(facts)
 
     async def event_weighted_summary(self) -> list[dict]:
-        """One predeclared earliest observation per event-family/horizon/arm."""
+        """One predeclared earliest observation per event-family/horizon/arm.
+
+        Partitioned by prompt_version so separate experimental conditions are
+        never pooled: v1 and v2 rows otherwise share every partition key, and
+        because v1 observations are always earlier the window would keep them
+        and drop v2 entirely.
+
+        Brier aggregates exclude abstentions — "no opinion" is not a
+        prediction — while `events` counts every observation and `abstentions`
+        reports how many were withheld. An all-abstained group therefore has a
+        NULL brier, which callers must render as "no scored forecasts" rather
+        than zero.
+        """
         rows = await self._db.fetchall(
             """WITH ranked AS (
                  SELECT *, ROW_NUMBER() OVER (
-                   PARTITION BY stream,arm,probability_kind,event_family,horizon_bucket
+                   PARTITION BY stream,arm,probability_kind,event_family,
+                                horizon_bucket,prompt_version
                    ORDER BY observed_at ASC,forecast_key ASC) AS rn
                  FROM forecast_score_facts WHERE score_version=?
                )
-               SELECT stream,arm,probability_kind,horizon_bucket,COUNT(*) AS events,
-                      AVG(brier) AS brier,AVG(log_loss) AS log_loss,
-                      AVG(market_brier) AS market_brier,AVG(brier_delta) AS brier_delta
+               SELECT stream,arm,probability_kind,horizon_bucket,prompt_version,
+                      COUNT(*) AS events,
+                      SUM(abstained) AS abstentions,
+                      SUM(CASE WHEN abstained=0 THEN 1 ELSE 0 END) AS scored,
+                      AVG(CASE WHEN abstained=0 THEN brier END) AS brier,
+                      AVG(CASE WHEN abstained=0 THEN log_loss END) AS log_loss,
+                      AVG(CASE WHEN abstained=0 THEN market_brier END) AS market_brier,
+                      AVG(CASE WHEN abstained=0 THEN brier_delta END) AS brier_delta
                  FROM ranked WHERE rn=1
-                GROUP BY stream,arm,probability_kind,horizon_bucket
-                ORDER BY stream,arm,probability_kind,horizon_bucket""",
+                GROUP BY stream,arm,probability_kind,horizon_bucket,prompt_version
+                ORDER BY stream,arm,probability_kind,horizon_bucket,prompt_version""",
             (self._version,),
         )
         return [dict(row) for row in rows]

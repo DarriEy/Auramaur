@@ -30,19 +30,29 @@ def intelligence_eval_report(all_streams: bool):
         await db.connect()
         try:
             if all_streams:
+                # prompt_version partitions AND groups: pooling separate
+                # prompt conditions would let the earlier one win the dedup
+                # window and hide the newer one completely. Abstentions are
+                # counted but never averaged into a Brier.
                 rows = await db.fetchall(
                     """WITH ranked AS (
                          SELECT *,ROW_NUMBER() OVER (
-                           PARTITION BY stream,arm,probability_kind,event_family,horizon_bucket
+                           PARTITION BY stream,arm,probability_kind,event_family,
+                                        horizon_bucket,prompt_version
                            ORDER BY observed_at,forecast_key) rn
                          FROM forecast_score_facts
                          WHERE score_version='binary-proper-v1')
                        SELECT stream,arm,probability_kind,horizon_bucket,
-                              COUNT(*) forecasts,AVG(brier) brier,
-                              AVG(market_brier) market_brier
+                              prompt_version,
+                              COUNT(*) forecasts,
+                              SUM(abstained) abstains,
+                              AVG(CASE WHEN abstained=0 THEN brier END) brier,
+                              AVG(CASE WHEN abstained=0 THEN market_brier END) market_brier
                          FROM ranked WHERE rn=1
-                        GROUP BY stream,arm,probability_kind,horizon_bucket
-                        ORDER BY stream,arm,probability_kind,horizon_bucket""")
+                        GROUP BY stream,arm,probability_kind,horizon_bucket,
+                                 prompt_version
+                        ORDER BY stream,arm,probability_kind,horizon_bucket,
+                                 prompt_version""")
                 rows = [dict(row) for row in rows]
             else:
                 rows = await EvaluationStore(db).summary()
@@ -51,19 +61,31 @@ def intelligence_eval_report(all_streams: bool):
             if all_streams:
                 table.add_column("Kind")
             table.add_column("Model")
+            table.add_column("Prompt")
             table.add_column("N", justify="right")
+            table.add_column("Abst", justify="right")
             table.add_column("Brier", justify="right")
             table.add_column("Market", justify="right")
             table.add_column("Δ vs market", justify="right")
             for row in rows:
-                brier, market = float(row["brier"]), float(row["market_brier"])
                 arm = row.get("arm_name") or f"{row['stream']}:{row['arm']}"
                 model = row.get("model") or ""
                 values = [arm]
                 if all_streams:
                     values.append(f"{row['probability_kind']} {row['horizon_bucket']}")
-                values.extend([model, str(row["forecasts"]), f"{brier:.4f}",
-                               f"{market:.4f}", f"{market - brier:+.4f}"])
+                n = int(row["forecasts"] or 0)
+                abstains = int(row["abstains"] or 0)
+                values.extend([model, row["prompt_version"] or "—", str(n),
+                               f"{abstains}/{n}" if abstains else "—"])
+                # NULL brier means every observation in this group was an
+                # abstention. Report that, rather than printing a 0.0000 the
+                # arm never earned.
+                if row["brier"] is None or row["market_brier"] is None:
+                    values.extend(["—", "—", "[dim]all abstained[/]"])
+                else:
+                    brier, market = float(row["brier"]), float(row["market_brier"])
+                    values.extend([f"{brier:.4f}", f"{market:.4f}",
+                                   f"{market - brier:+.4f}"])
                 table.add_row(*values)
             console.print(table)
         finally:

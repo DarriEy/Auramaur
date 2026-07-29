@@ -80,3 +80,98 @@ async def test_store_round_trip_idempotence_settlement_and_score(tmp_path):
 def test_perfect_market_has_undefined_skill():
     from auramaur.evaluation.scoring import score_forecast
     assert score_forecast(0.8, 1.0, 1).brier_skill is None
+
+
+# ---------------------------------------------------------------------------
+# Scorecard trustworthiness (2026-07-29)
+# ---------------------------------------------------------------------------
+
+
+async def _fact(db, **kw):
+    """Insert one forecast_score_fact directly — these guard the read model."""
+    values = dict(
+        forecast_key="fk1", event_key="polymarket:m1", event_family="fam-1",
+        stream="intelligence_eval", arm="local_single",
+        probability_kind="single", observed_at="2026-07-21T00:00:00+00:00",
+        horizon_bucket="0-1d", outcome=1, brier=0.09, log_loss=0.3,
+        market_brier=0.16, brier_delta=0.07, brier_skill=0.4,
+        score_version="binary-proper-v1", prompt_version="forecast-v2",
+        abstained=0,
+    )
+    values.update(kw)
+    cols = ",".join(values)
+    await db.execute(
+        f"INSERT INTO forecast_score_facts ({cols}) "
+        f"VALUES ({','.join('?' * len(values))})", tuple(values.values()))
+    await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_newer_prompt_version_is_not_hidden_by_the_older_one(tmp_path):
+    """v1 and v2 share every other partition key and v1 is always earlier, so
+    without prompt_version in the window the dedup keeps v1 and v2 vanishes
+    from the scorecard entirely — silently."""
+    from auramaur.evaluation.evidence import ForecastScoreMaterializer
+
+    db = Database(str(tmp_path / "facts.db"))
+    await db.connect()
+    try:
+        await _fact(db, forecast_key="v1", prompt_version="forecast-v1",
+                    observed_at="2026-07-20T00:00:00+00:00", brier=0.25)
+        await _fact(db, forecast_key="v2", prompt_version="forecast-v2",
+                    observed_at="2026-07-21T00:00:00+00:00", brier=0.09)
+        rows = await ForecastScoreMaterializer(db).event_weighted_summary()
+        versions = {r["prompt_version"] for r in rows}
+        assert versions == {"forecast-v1", "forecast-v2"}
+        by_version = {r["prompt_version"]: r for r in rows}
+        assert by_version["forecast-v2"]["brier"] == pytest.approx(0.09)
+        assert by_version["forecast-v1"]["brier"] == pytest.approx(0.25)
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_abstentions_are_counted_but_not_scored(tmp_path):
+    """"No opinion" is not a prediction. It must not be averaged into a Brier,
+    and an all-abstained arm must report NULL rather than a manufactured 0."""
+    from auramaur.evaluation.evidence import ForecastScoreMaterializer
+
+    db = Database(str(tmp_path / "abstain.db"))
+    await db.connect()
+    try:
+        await _fact(db, forecast_key="a", event_family="fam-1",
+                    abstained=0, brier=0.09)
+        await _fact(db, forecast_key="b", event_family="fam-2",
+                    abstained=1, brier=0.25)
+        rows = await ForecastScoreMaterializer(db).event_weighted_summary()
+        row = next(r for r in rows if r["arm"] == "local_single")
+        assert row["events"] == 2          # both observations counted
+        assert row["abstentions"] == 1
+        assert row["scored"] == 1
+        assert row["brier"] == pytest.approx(0.09)   # NOT (0.09+0.25)/2
+
+        # An arm that only ever abstained has no Brier at all.
+        await _fact(db, forecast_key="c", arm="all_abstain",
+                    event_family="fam-3", abstained=1, brier=0.25)
+        rows = await ForecastScoreMaterializer(db).event_weighted_summary()
+        silent = next(r for r in rows if r["arm"] == "all_abstain")
+        assert silent["abstentions"] == 1
+        assert silent["brier"] is None
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_lookahead_rows_are_not_materialised(tmp_path):
+    """A market that resolved before it was observed was never a prospective
+    forecast. _horizon_bucket clamps the negative lag to zero, which used to
+    file these under '0-1d' instead of rejecting them."""
+    from auramaur.evaluation.evidence import _resolved_before_observed
+
+    assert _resolved_before_observed(
+        "2026-07-21T00:00:00+00:00", "2026-07-20T00:00:00+00:00") is True
+    assert _resolved_before_observed(
+        "2026-07-20T00:00:00+00:00", "2026-07-21T00:00:00+00:00") is False
+    # Unparseable timestamps drop the guard, not the row.
+    assert _resolved_before_observed("nonsense", "2026-07-21") is False
+    assert _resolved_before_observed(None, None) is False

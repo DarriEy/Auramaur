@@ -168,25 +168,56 @@ class EvaluationStore:
         return score_forecast(row["prob_yes"], row["market_prob_yes"], row["outcome"])
 
     async def summary(self) -> list[dict]:
-        """Read-only per-arm resolved scorecard for CLI/reporting consumers."""
+        """Read-only per-arm resolved scorecard for CLI/reporting consumers.
+
+        Three properties this query must keep:
+
+        * prompt_version partitions and groups everything. Separate prompt
+          conditions are separate experiments; pooling them would have let
+          forecast-v1's degenerate rows (prob_yes == market price, skill
+          exactly 0) mask forecast-v2 entirely, since v1 rows are always
+          earlier and would win the dedup window.
+        * Abstentions are counted but not scored. "No opinion" is not a
+          prediction, and averaging it in manufactures a Brier from nothing.
+          A fully-abstained arm returns NULL brier — render it, do not zero it.
+        * A market resolved before it was observed is not a prospective
+          forecast. julianday() parses both timestamp formats in this DB;
+          NULLs are kept rather than silently dropping rows.
+        """
         rows = await self._db.fetchall(
             """WITH resolved AS (
                  SELECT u.*, ROW_NUMBER() OVER (
-                   PARTITION BY u.arm,u.event_family
+                   PARTITION BY u.arm,u.event_family,u.prompt_version
                    ORDER BY u.observed_at ASC,u.forecast_key ASC) AS rn
                  FROM unified_forecast_evidence u
                  WHERE u.stream='intelligence_eval' AND u.outcome IS NOT NULL
+                   AND (julianday(u.resolved_at) IS NULL
+                        OR julianday(u.observed_at) IS NULL
+                        OR julianday(u.resolved_at) >= julianday(u.observed_at))
                ), ranked AS (SELECT * FROM resolved WHERE rn=1),
-               arm_count AS (SELECT COUNT(DISTINCT arm) AS n FROM ranked),
+               arm_count AS (
+                 SELECT prompt_version, COUNT(DISTINCT arm) AS n
+                   FROM ranked GROUP BY prompt_version
+               ),
                paired AS (
-                 SELECT event_family FROM ranked GROUP BY event_family
-                 HAVING COUNT(DISTINCT arm)=(SELECT n FROM arm_count)
+                 SELECT r.event_family, r.prompt_version
+                   FROM ranked r JOIN arm_count a
+                     ON a.prompt_version = r.prompt_version
+                  GROUP BY r.event_family, r.prompt_version
+                 HAVING COUNT(DISTINCT r.arm) = MAX(a.n)
                )
-               SELECT arm AS arm_name,model,COUNT(*) AS forecasts,
-                      AVG((probability-outcome)*(probability-outcome)) AS brier,
-                      AVG((market_probability-outcome)*
-                          (market_probability-outcome)) AS market_brier,
-                      SUM(abstained) AS abstains
-                 FROM ranked JOIN paired USING(event_family)
-                GROUP BY arm,model ORDER BY brier ASC""")
+               SELECT arm AS arm_name,model,ranked.prompt_version,
+                      COUNT(*) AS forecasts,
+                      SUM(abstained) AS abstains,
+                      SUM(CASE WHEN abstained=0 THEN 1 ELSE 0 END) AS scored,
+                      AVG(CASE WHEN abstained=0
+                          THEN (probability-outcome)*(probability-outcome) END) AS brier,
+                      AVG(CASE WHEN abstained=0
+                          THEN (market_probability-outcome)*
+                               (market_probability-outcome) END) AS market_brier
+                 FROM ranked JOIN paired
+                   ON paired.event_family = ranked.event_family
+                  AND paired.prompt_version = ranked.prompt_version
+                GROUP BY arm,model,ranked.prompt_version
+                ORDER BY ranked.prompt_version DESC, brier ASC""")
         return [dict(row) for row in rows]

@@ -299,13 +299,29 @@ class IntelligenceEvalService:
         except Exception:  # noqa: BLE001 — preference only, never block a cycle
             return frozenset()
 
+    async def _resolved_markets(self) -> frozenset[str]:
+        """`venue:market_id` keys that already have a recorded outcome."""
+        try:
+            rows = await self._db.fetchall(
+                "SELECT event_key FROM market_outcomes WHERE outcome IS NOT NULL")
+            return frozenset(r["event_key"] for r in rows or [])
+        except Exception:  # noqa: BLE001 — a guard, never block a cycle
+            return frozenset()
+
     async def _select_markets(self, eligible, now):
         """Select changed/novel markets, one per family, with category rotation."""
         latest = await self._store.latest_market_observations()
         self._claims_markets = await self._markets_with_claims()
+        # Forecasting a market that has already resolved is not a prospective
+        # forecast — 8 of 959 resolved episodes on 2026-07-29 were observed
+        # after their outcome was known. The scorer drops them; skipping here
+        # stops paying for them in the first place.
+        resolved = await self._resolved_markets()
         candidates = []
         for market in eligible:
             venue = (market.exchange or "polymarket").lower()
+            if f"{venue}:{market.id}" in resolved:
+                continue
             previous = latest.get((venue, market.id))
             if previous:
                 observed = datetime.fromisoformat(previous["observed_at"])

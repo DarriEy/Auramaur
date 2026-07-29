@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 44
+SCHEMA_VERSION = 45
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -1098,6 +1098,15 @@ CREATE TABLE IF NOT EXISTS forecast_score_facts (
     brier_delta REAL,
     brier_skill REAL,
     score_version TEXT NOT NULL,
+    -- The experimental condition this observation belongs to. WITHOUT it the
+    -- dedup window in event_weighted_summary() partitions v1 and v2 rows into
+    -- the same bucket and keeps the EARLIEST, which is always v1 — the newer
+    -- condition vanishes from the scorecard silently. See the 2026-07-29
+    -- forecast-v1 anchor defect.
+    prompt_version TEXT NOT NULL DEFAULT '',
+    -- An abstention is "no opinion", not a prediction. Stored (the abstention
+    -- RATE is itself a result) but excluded from Brier aggregates.
+    abstained INTEGER NOT NULL DEFAULT 0,
     scored_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_forecast_score_stream_event

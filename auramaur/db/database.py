@@ -374,6 +374,36 @@ class Database:
             await self._migrate_v42_to_v43()
         if from_version < 44:
             await self._migrate_v43_to_v44()
+        if from_version < 45:
+            await self._migrate_v44_to_v45()
+
+    async def _migrate_v44_to_v45(self) -> None:
+        """Label score facts with their experimental condition and abstention.
+
+        Both already exist on unified_forecast_evidence; the materializer was
+        dropping them. Without prompt_version the summary's dedup window keeps
+        the earliest row per event-family, so a newer prompt condition is
+        silently discarded. Without abstained, an "I have no opinion" is
+        scored as though it were a prediction.
+        """
+        additions = {
+            "forecast_score_facts": (
+                ("prompt_version", "TEXT NOT NULL DEFAULT ''"),
+                ("abstained", "INTEGER NOT NULL DEFAULT 0"),
+            ),
+        }
+        for table, columns in additions.items():
+            existing = {row["name"] for row in
+                        await self.fetchall(f"PRAGMA table_info({table})")}
+            for name, definition in columns:
+                if name not in existing:
+                    await self._db.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+        # Facts are rebuilt wholesale from the view on the next refresh, so the
+        # backfill happens there rather than needing a data migration here.
+        await self._db.execute("UPDATE schema_version SET version = 45")
+        await self._db.commit()
+        log.info("database.migrated", from_version=44, to_version=45)
 
     async def _migrate_v43_to_v44(self) -> None:
         """Add consumer-level data delivery telemetry."""
