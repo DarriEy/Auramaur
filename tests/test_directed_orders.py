@@ -357,3 +357,28 @@ def test_directed_orders_default_to_ioc():
     order nobody is watching."""
     assert _order().tif == "IOC"
     assert _fx().tif == "IOC"
+
+
+def test_non_usd_instruments_are_capped_in_usd():
+    """The caps are USD. A CAD-priced TSX listing must be converted before it
+    is compared to them — otherwise the notional is in the wrong units, which
+    happens to be conservative for CAD and silently WRONG for any currency
+    stronger than USD."""
+    cad = _order(symbol="XUU", currency="CAD", quantity=4.0)
+    # 4 x CAD 75.52 = CAD 302.08 -> ~USD 215 at 0.7117
+    assert cad.notional_usd(75.52, 0.7117) == pytest.approx(215.0, abs=1.0)
+    # Unconverted it would read as 302 and be refused against a $250 cap.
+    assert cad.notional_usd(75.52) == pytest.approx(302.08)
+
+
+@pytest.mark.asyncio
+async def test_cad_order_within_cap_after_conversion(tmp_path):
+    ex, db = await _exec(tmp_path, _settings(
+        directed_orders_allowlist=["XUU", "SPY", "SLV", "USDCAD"]))
+    try:
+        order = _order(symbol="XUU", currency="CAD", quantity=4.0)
+        # CAD 302 is over the $250 cap only if you forget to convert.
+        n = order.notional_usd(75.52, 0.7117)
+        assert await ex.gate_reason(order, n, "U24897594") == ""
+    finally:
+        await db.close()

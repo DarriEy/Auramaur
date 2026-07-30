@@ -70,8 +70,14 @@ class DirectedOrder:
         held. It adds no market exposure, so it is capped separately."""
         return self.sec_type.upper() == "CASH"
 
-    def notional_usd(self, reference_price: float) -> float:
-        """USD notional of this order.
+    def notional_usd(self, reference_price: float,
+                     fx_to_usd: float = 1.0) -> float:
+        """USD notional of this order. The caps are USD-denominated.
+
+        `fx_to_usd` converts the instrument's own currency to USD (for a
+        CAD-priced TSX listing, ~0.71). Without it, a CAD-priced order is
+        measured against a USD cap in the wrong units — conservative for CAD,
+        but silently WRONG the other way for any currency stronger than USD.
 
         For an FX pair whose BASE is USD (USDCAD, USDJPY), the quantity is
         already denominated in USD and multiplying by the rate would yield the
@@ -80,7 +86,7 @@ class DirectedOrder:
         """
         if self.is_treasury and self.symbol.upper().startswith("USD"):
             return abs(self.quantity)
-        return abs(self.quantity) * abs(reference_price)
+        return abs(self.quantity) * abs(reference_price) * abs(fx_to_usd)
 
 
 @dataclass(frozen=True)
@@ -175,13 +181,14 @@ class DirectedOrderExecutor:
     # Placement
     # ------------------------------------------------------------------
     async def place(self, order: DirectedOrder, *, ib,
-                    reference_price: float) -> DirectedOrderResult:
+                    reference_price: float,
+                    fx_to_usd: float = 1.0) -> DirectedOrderResult:
         """Record the attempt, gate it, and send it only if every gate passes.
 
         The audit row is written BEFORE anything is sent, so an order that is
         refused, errors, or never returns is still answerable after the fact.
         """
-        notional = order.notional_usd(reference_price)
+        notional = order.notional_usd(reference_price, fx_to_usd)
         accounts = list(getattr(ib, "managedAccounts", lambda: [])() or [])
         connected = accounts[0] if accounts else ""
 
