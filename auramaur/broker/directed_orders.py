@@ -277,6 +277,27 @@ class DirectedOrderExecutor:
         if not qualified:
             raise RuntimeError(f"could not qualify contract {order.symbol}")
 
+        # Validate TIF against what this exchange/secType actually accepts,
+        # rather than trusting a default. Setting TIF explicitly (2026-07-30)
+        # fixed a gateway preset silently choosing DAY — but the value chosen,
+        # IOC, is valid on IDEALPRO and INVALID on TSE equities, so all five
+        # TSE orders came back "Error 201: time-in-force IOC is invalid for
+        # this combination of exchange and security type". Making a value
+        # explicit is only half the job; it also has to be a legal value here.
+        try:
+            details = await ib.reqContractDetailsAsync(qualified[0])
+        except Exception:  # noqa: BLE001 — validation is best-effort
+            details = None
+        if details:
+            allowed = {t for t in (details[0].orderTypes or "").split(",") if t}
+            want = order.tif.upper()
+            if allowed and want not in allowed:
+                usable = [t for t in ("DAY", "IOC", "GTC", "GTD")
+                          if t in allowed]
+                raise RuntimeError(
+                    f"TIF {want} invalid for {order.symbol} on "
+                    f"{qualified[0].exchange}; accepted: {usable or sorted(allowed)[:6]}")
+
         if order.order_type.upper() == "MKT":
             ib_order = MarketOrder(order.side.upper(), order.quantity)
         else:

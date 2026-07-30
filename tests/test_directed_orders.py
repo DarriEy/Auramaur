@@ -382,3 +382,75 @@ async def test_cad_order_within_cap_after_conversion(tmp_path):
         assert await ex.gate_reason(order, n, "U24897594") == ""
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_invalid_tif_is_refused_locally_with_the_valid_set(tmp_path):
+    """Explicit is not the same as valid.
+
+    Setting TIF explicitly fixed a gateway preset choosing DAY, but the value
+    chosen (IOC) is legal on IDEALPRO and ILLEGAL on TSE equities — all five
+    TSE orders came back Error 201 on 2026-07-30. Validate against what the
+    contract actually accepts, and name the accepted set in the error.
+    """
+    placed = []
+
+    class _IB:
+        def managedAccounts(self):
+            return ["U24897594"]
+
+        async def qualifyContractsAsync(self, c):
+            c.exchange = "TSE"
+            return [c]
+
+        async def reqContractDetailsAsync(self, c):
+            # TSE equities: no IOC.
+            return [SimpleNamespace(orderTypes="ACTIVETIM,DAY,GTC,GTD,GTT,LMT,MKT,OPG")]
+
+        def placeOrder(self, contract, order):
+            placed.append(order)
+            raise AssertionError("must not reach the broker")
+
+    ex, db = await _exec(tmp_path, _settings(
+        directed_orders_allowlist=["XUU", "SPY", "SLV", "USDCAD"]))
+    try:
+        order = _order(symbol="XUU", currency="CAD", dry_run=False, tif="IOC")
+        res = await ex.place(order, ib=_IB(), reference_price=75.86,
+                             fx_to_usd=0.7119)
+        assert res.accepted is False and res.status == "error"
+        assert "TIF IOC invalid" in res.reason
+        assert "DAY" in res.reason          # names what IS accepted
+        assert not placed                    # never reached the broker
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_valid_tif_passes_validation(tmp_path):
+    class _IB:
+        def managedAccounts(self):
+            return ["U24897594"]
+
+        async def qualifyContractsAsync(self, c):
+            c.exchange = "TSE"
+            return [c]
+
+        async def reqContractDetailsAsync(self, c):
+            return [SimpleNamespace(orderTypes="DAY,GTC,GTD,LMT,MKT")]
+
+        def placeOrder(self, contract, order):
+            assert order.tif == "DAY"
+            return SimpleNamespace(
+                order=SimpleNamespace(orderId=99),
+                orderStatus=SimpleNamespace(status="Filled", filled=4.0,
+                                            avgFillPrice=75.90))
+
+    ex, db = await _exec(tmp_path, _settings(
+        directed_orders_allowlist=["XUU", "SPY", "SLV", "USDCAD"]))
+    try:
+        order = _order(symbol="XUU", currency="CAD", dry_run=False, tif="DAY")
+        res = await ex.place(order, ib=_IB(), reference_price=75.86,
+                             fx_to_usd=0.7119)
+        assert res.status == "filled" and res.filled_qty == 4.0
+    finally:
+        await db.close()
