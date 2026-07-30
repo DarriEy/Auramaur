@@ -262,3 +262,56 @@ async def test_trading_and_treasury_daily_budgets_are_separate(tmp_path):
         assert "treasury" in r
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("broker_status", [
+    "ValidationError", "Cancelled", "ApiCancelled", "Inactive"])
+async def test_broker_refusal_is_recorded_as_error_not_submitted(
+        tmp_path, broker_status):
+    """A refusal is not a submission.
+
+    Observed 2026-07-30: IB Gateway in Read-Only API mode returned
+    ValidationError, which was missing from _TERMINAL, so the executor burned
+    the full fill timeout and then recorded a REJECTED order as 'submitted' —
+    claiming a live working order, and consuming the daily cap for exposure
+    that never existed.
+    """
+    from auramaur.broker.directed_orders import DirectedOrderResult
+
+    ex, db = await _exec(tmp_path)
+    try:
+        ib = SimpleNamespace(managedAccounts=lambda: ["U24897594"])
+        ex._send = AsyncMock(return_value=DirectedOrderResult(
+            True, broker_status, ib_order_id="7", filled_qty=0.0))
+        res = await ex.place(_order(dry_run=False), ib=ib, reference_price=100.0)
+
+        assert res.accepted is False
+        assert res.status == "error"
+        assert broker_status in res.reason
+        row = await db.fetchone(
+            "SELECT status, refuse_reason FROM directed_orders")
+        assert row["status"] == "error"
+        assert broker_status in row["refuse_reason"]
+
+        # And it must not have consumed the daily trading budget.
+        assert await ex.gate_reason(_order(), 250.0, "U24897594") == ""
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_a_real_fill_is_still_recorded_as_filled(tmp_path):
+    from auramaur.broker.directed_orders import DirectedOrderResult
+
+    ex, db = await _exec(tmp_path)
+    try:
+        ib = SimpleNamespace(managedAccounts=lambda: ["U24897594"])
+        ex._send = AsyncMock(return_value=DirectedOrderResult(
+            True, "Filled", ib_order_id="8", filled_qty=1.0, filled_price=99.5))
+        res = await ex.place(_order(dry_run=False), ib=ib, reference_price=100.0)
+        assert res.accepted is True and res.status == "filled"
+        row = await db.fetchone("SELECT status, filled_price FROM directed_orders")
+        assert row["status"] == "filled" and row["filled_price"] == 99.5
+    finally:
+        await db.close()

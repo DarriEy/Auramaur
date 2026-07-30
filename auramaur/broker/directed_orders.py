@@ -31,7 +31,15 @@ from auramaur.killswitch import kill_switch_present
 
 log = structlog.get_logger()
 
-_TERMINAL = {"Filled", "Cancelled", "ApiCancelled", "Inactive"}
+_TERMINAL = {"Filled", "Cancelled", "ApiCancelled", "Inactive",
+             "ValidationError"}
+# Terminal states that mean the broker REFUSED the order. Recording these as
+# 'submitted' claims an order is live and working when it was rejected
+# outright — and 'submitted' consumes the daily cap, so a refusal would eat
+# budget it never used. Observed 2026-07-30: IB Gateway in Read-Only API mode
+# returned ValidationError, which was absent from _TERMINAL entirely, so the
+# call also burned the full fill timeout before reporting the wrong state.
+_REJECTED = {"ValidationError", "Cancelled", "ApiCancelled", "Inactive"}
 
 
 @dataclass(frozen=True)
@@ -216,15 +224,29 @@ class DirectedOrderExecutor:
             return DirectedOrderResult(False, "error", str(exc)[:200],
                                        row_id=row_id)
 
-        await self._settle(row_id, "filled" if result.filled_qty else "submitted",
-                           ib_order_id=result.ib_order_id,
+        # `result.status` carries the broker's own terminal word. A refusal is
+        # NOT a submission: recording it as one claims a live working order
+        # and consumes the daily cap for exposure that never existed.
+        broker_status = result.status or ""
+        if result.filled_qty:
+            status = "filled"
+        elif broker_status in _REJECTED:
+            status = "error"
+        else:
+            status = "submitted"
+
+        await self._settle(row_id, status, ib_order_id=result.ib_order_id,
                            filled_qty=result.filled_qty,
-                           filled_price=result.filled_price)
+                           filled_price=result.filled_price,
+                           reason="" if status != "error" else
+                           f"broker returned {broker_status}")
         log.info("directed_order.settled", symbol=order.symbol,
                  ib_order_id=result.ib_order_id, filled_qty=result.filled_qty,
-                 filled_price=result.filled_price)
+                 filled_price=result.filled_price, status=status,
+                 broker_status=broker_status)
         return DirectedOrderResult(
-            True, "filled" if result.filled_qty else "submitted",
+            status != "error", status,
+            reason="" if status != "error" else f"broker returned {broker_status}",
             ib_order_id=result.ib_order_id, filled_qty=result.filled_qty,
             filled_price=result.filled_price, row_id=row_id)
 
