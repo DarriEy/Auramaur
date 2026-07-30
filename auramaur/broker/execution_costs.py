@@ -58,8 +58,9 @@ class VenueCosts:
 
     venue_class: str
     fills: int
-    commission_usd: float          # mean per fill
-    commission_bps: float          # mean, as bps of that fill's notional
+    commission_usd: float | None   # mean per fill; None = not yet reported
+    commission_bps: float | None   # mean, as bps of that fill's notional
+    commission_unknown: int        # fills whose commission report has not landed
     slippage_bps: float | None     # mean |filled - mid| / mid; None if no mids
     mids_available: int
     mean_notional: float
@@ -80,7 +81,12 @@ async def ingest_fills(db, ib, *, probe_label: str = "",
     """
     mids = mids or {}
     fills = await ib.reqExecutionsAsync()
+    # UPSERT makes rowcount 1 for an update too, so "written" would count
+    # refreshes as new rows. Classify against what is already stored.
+    existing = {r["exec_id"] for r in
+                (await db.fetchall("SELECT exec_id FROM cost_observations") or [])}
     written = 0
+    updated = 0
     for fill in fills:
         ex, con = fill.execution, fill.contract
         report = getattr(fill, "commissionReport", None)
@@ -93,13 +99,25 @@ async def ingest_fills(db, ib, *, probe_label: str = "",
         shares = abs(float(ex.shares or 0))
         price = float(ex.price or 0)
         cls = venue_class(con.secType, con.currency)
+        # UPSERT, not INSERT OR IGNORE. The commission report is a SEPARATE
+        # async message, so a fill ingested moments after execution has none
+        # — and with IGNORE it would stay NULL forever, since re-ingesting
+        # would skip the row. Backfill it when it arrives, but never
+        # overwrite a known commission with NULL.
         cur = await db.execute(
-            """INSERT OR IGNORE INTO cost_observations
+            """INSERT INTO cost_observations
                  (exec_id, account, symbol, sec_type, exchange, currency,
                   venue_class, side, shares, price, notional, commission,
                   commission_currency, mid_at_submit, order_ref, probe_label,
                   filled_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(exec_id) DO UPDATE SET
+                   commission = COALESCE(excluded.commission, commission),
+                   commission_currency = CASE
+                       WHEN excluded.commission IS NOT NULL
+                       THEN excluded.commission_currency
+                       ELSE commission_currency END,
+                   mid_at_submit = COALESCE(excluded.mid_at_submit, mid_at_submit)""",
             (ex.execId, ex.acctNumber or "", con.symbol or "",
              con.secType or "", ex.exchange or "", con.currency or "",
              cls, (ex.side or "").upper(), shares, price, shares * price,
@@ -107,11 +125,14 @@ async def ingest_fills(db, ib, *, probe_label: str = "",
              getattr(report, "currency", "") if report else "",
              mids.get(ex.orderRef or ""), ex.orderRef or "", probe_label,
              str(fill.time)))
-        if getattr(cur, "rowcount", 0):
+        if ex.execId in existing:
+            updated += 1
+        else:
             written += 1
+            existing.add(ex.execId)
     await db.commit()
     log.info("execution_costs.ingested", seen=len(fills), written=written,
-             probe_label=probe_label)
+             refreshed=updated, probe_label=probe_label)
     return written
 
 
@@ -130,6 +151,7 @@ async def measure(db, venue: str | None = None) -> list[VenueCosts]:
         f"""SELECT venue_class,
                    COUNT(*) AS fills,
                    AVG(commission) AS comm_usd,
+                   SUM(CASE WHEN commission IS NULL THEN 1 ELSE 0 END) AS comm_unknown,
                    AVG(commission / NULLIF(notional,0)) * 10000 AS comm_bps,
                    AVG(notional) AS mean_notional,
                    SUM(CASE WHEN mid_at_submit IS NOT NULL THEN 1 ELSE 0 END) AS mids,
@@ -143,8 +165,13 @@ async def measure(db, venue: str | None = None) -> list[VenueCosts]:
     for r in rows or []:
         out.append(VenueCosts(
             venue_class=r["venue_class"], fills=int(r["fills"] or 0),
-            commission_usd=float(r["comm_usd"] or 0.0),
-            commission_bps=float(r["comm_bps"] or 0.0),
+            # None, never 0.0: an unreported commission is UNKNOWN, and
+            # rendering it as zero claims the trade was free.
+            commission_usd=(float(r["comm_usd"])
+                            if r["comm_usd"] is not None else None),
+            commission_bps=(float(r["comm_bps"])
+                            if r["comm_bps"] is not None else None),
+            commission_unknown=int(r["comm_unknown"] or 0),
             slippage_bps=(float(r["slip_bps"]) if r["slip_bps"] is not None
                           else None),
             mids_available=int(r["mids"] or 0),

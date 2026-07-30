@@ -114,3 +114,51 @@ async def test_slippage_needs_the_mid_at_submission(tmp_path):
         assert us.slippage_bps == pytest.approx(10.0)      # 10c on $100
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_commission_backfills_when_the_report_arrives(tmp_path):
+    """The commission report is a separate async message. A fill ingested
+    before it lands has none — and under INSERT OR IGNORE it would stay NULL
+    forever, because re-ingesting skipped the row. Observed live on
+    2026-07-30: five real fills reported '$0.00 commission', which is a claim
+    the trade was free."""
+    db = Database(str(tmp_path / "c.db"))
+    await db.connect()
+    try:
+        # First pass: fill known, commission not yet reported.
+        ib = SimpleNamespace(reqExecutionsAsync=AsyncMock(
+            return_value=[_fill("e1", commission=None)]))
+        assert await ingest_fills(db, ib) == 1
+        [us] = await measure(db, venue="us_equity")
+        assert us.commission_usd is None          # unknown, NOT 0.0
+        assert us.commission_unknown == 1
+
+        # Second pass: the report has landed.
+        ib.reqExecutionsAsync = AsyncMock(
+            return_value=[_fill("e1", commission=1.25)])
+        assert await ingest_fills(db, ib) == 0     # not a new row
+        [us] = await measure(db, venue="us_equity")
+        assert us.commission_usd == pytest.approx(1.25)
+        assert us.commission_unknown == 0
+        row = await db.fetchone("SELECT COUNT(*) AS n FROM cost_observations")
+        assert row["n"] == 1                       # still one row, not two
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_known_commission_is_never_overwritten_by_a_later_null(tmp_path):
+    db = Database(str(tmp_path / "c.db"))
+    await db.connect()
+    try:
+        ib = SimpleNamespace(reqExecutionsAsync=AsyncMock(
+            return_value=[_fill("e1", commission=2.50)]))
+        await ingest_fills(db, ib)
+        ib.reqExecutionsAsync = AsyncMock(
+            return_value=[_fill("e1", commission=None)])
+        await ingest_fills(db, ib)
+        [us] = await measure(db, venue="us_equity")
+        assert us.commission_usd == pytest.approx(2.50)
+    finally:
+        await db.close()

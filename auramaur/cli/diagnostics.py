@@ -713,9 +713,17 @@ def ibkr_costs(ingest, probe_label, mids):
                 # them is how a $1 floor gets mistaken for a 0.1% rate.
                 slip = (f"{r.slippage_bps:.1f} bps ({r.mids_available})"
                         if r.slippage_bps is not None else "[dim]no mids[/]")
+                # "unknown" is not "$0.00" — the commission report is a
+                # separate async message and may not have landed yet.
+                comm = ("[dim]unknown[/]" if r.commission_usd is None
+                        else f"${r.commission_usd:.2f}")
+                cbps = ("—" if r.commission_bps is None
+                        else f"{r.commission_bps:.1f}")
+                if r.commission_unknown:
+                    comm += f" [dim]({r.commission_unknown} pending)[/]"
                 table.add_row(
                     r.venue_class, str(r.fills), f"${r.mean_notional:,.0f}",
-                    f"${r.commission_usd:.2f}", f"{r.commission_bps:.1f}", slip)
+                    comm, cbps, slip)
             console.print(table)
             console.print("[dim]Feed commission/slippage into "
                           "ibkr_edge_economics.round_trip_cost_bps() and re-run "
