@@ -767,3 +767,37 @@ async def test_strong_ladder_is_not_paper_forced(tmp_path):
         assert intent.signal.claude_confidence is Confidence.HIGH
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_entries_route_through_the_smart_order_router(tmp_path):
+    """The pillar's gateway must carry a router, not None.
+
+    With `router=None` the gateway falls back to `prepare_order`, which prices
+    a Polymarket BUY at the token MID. The mid sits below the ask, so the
+    order rests, the 120s TTL reaper cancels it, and the pillar re-enters the
+    same strike next cycle. Observed live 2026-07-30 on markets
+    3128887/3128888: 15 cancels against 2 fills (12%) while paper — which
+    simulates the fill at the reference price — filled 100% of the time.
+
+    Asserting on the router's presence rather than a price keeps this pinned
+    to the wiring defect itself; the crossing arithmetic is covered by the
+    router's own tests.
+    """
+    from auramaur.broker.router import SmartOrderRouter
+
+    db = Database(str(tmp_path / "router.db"))
+    await db.connect()
+    try:
+        discovery = MagicMock()
+        discovery.get_markets = AsyncMock(return_value=[])
+        pillar = TermStructurePillar(
+            db=db, settings=_settings(), discovery=discovery,
+            exchange=MagicMock(), risk_manager=MagicMock(),
+            pnl_tracker=MagicMock(), calibration=MagicMock())
+        assert pillar._gateway.router is not None, (
+            "term_structure gateway lost its router — entries will post at "
+            "the mid, rest below the ask, and churn on the TTL reaper")
+        assert isinstance(pillar._gateway.router, SmartOrderRouter)
+    finally:
+        await db.close()

@@ -47,6 +47,7 @@ import structlog
 from auramaur.strategy.protocols import ExecutionMode
 
 from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
+from auramaur.broker.router import SmartOrderRouter
 from auramaur.experiments.strategies.term_structure import (
     TermStructureCandidate,
     TermStructureRules,
@@ -273,8 +274,20 @@ class TermStructurePillar:
         self._risk = risk_manager
         self._pnl = pnl_tracker
         self._calibration = calibration
+        # Entries route through the SmartOrderRouter, which prices a BUY at
+        # the live best ask (taker-or-skip). Without it `prepare_order` prices
+        # at the token MID, and on Polymarket a buy limit at the mid sits
+        # BELOW the ask: it rests, the 120s TTL reaper cancels it, and the
+        # pillar re-enters the same strike next cycle forever. Measured
+        # 2026-07-30 on markets 3128887/3128888 — NO ask 0.32/0.22, orders
+        # posted at 0.30/0.20 (the bid), 15 cancels against 2 fills, a 12%
+        # live fill rate against 100% in paper. That gap is not a market
+        # condition, it is the missing router: paper simulates the fill at the
+        # reference price, so the graduation ladder was being fed fills live
+        # could never get.
         self._gateway = ExecutionGateway(
-            router=None, exchange=exchange, exchange_name="polymarket",
+            router=SmartOrderRouter(settings=settings, exchange=exchange),
+            exchange=exchange, exchange_name="polymarket",
             settings=settings, db=db, pnl_tracker=pnl_tracker,
         )
         self._schema_ready = False
