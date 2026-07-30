@@ -54,6 +54,13 @@ class DirectedOrder:
     quantity: float
     order_type: str = "LMT"       # LMT | MKT
     limit_price: float | None = None
+    # ALWAYS set explicitly. Left unset, the gateway applies whatever the
+    # account's order preset says: on 2026-07-30 a preset silently forced
+    # TIF=DAY (warning 10349) and the order was cancelled without filling.
+    # A directed order is a one-shot instruction, so IOC is the right default
+    # — it either executes now or goes away, and never leaves a resting order
+    # nobody is watching.
+    tif: str = "IOC"
     label: str = ""               # probe name, or "beta"
     dry_run: bool = True          # gate 3 — must be explicitly cleared
 
@@ -269,6 +276,8 @@ class DirectedOrderExecutor:
             ib_order = LimitOrder(order.side.upper(), order.quantity,
                                   float(order.limit_price))
         ib_order.orderRef = order.label or "directed"
+        # Explicit, never inherited from the account's order preset.
+        ib_order.tif = order.tif.upper()
 
         trade = ib.placeOrder(qualified[0], ib_order)
         timeout = float(self._settings.ibkr.multiasset_execution_fill_timeout_seconds)

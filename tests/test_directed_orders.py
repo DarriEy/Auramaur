@@ -315,3 +315,45 @@ async def test_a_real_fill_is_still_recorded_as_filled(tmp_path):
         assert row["status"] == "filled" and row["filled_price"] == 99.5
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_tif_is_set_explicitly_and_never_left_to_a_preset(tmp_path):
+    """A gateway order preset silently forced TIF=DAY on 2026-07-30 (warning
+    10349) and cancelled the order without filling. TIF must be ours."""
+    sent = {}
+
+    class _Trade:
+        order = SimpleNamespace(orderId=42)
+        orderStatus = SimpleNamespace(status="Filled", filled=760.0,
+                                      avgFillPrice=1.4048)
+
+    class _IB:
+        def managedAccounts(self):
+            return ["U24897594"]
+
+        async def qualifyContractsAsync(self, c):
+            return [c]
+
+        def placeOrder(self, contract, order):
+            sent["tif"] = order.tif
+            sent["ref"] = order.orderRef
+            return _Trade()
+
+    ex, db = await _exec(tmp_path)
+    try:
+        order = _fx(dry_run=False, order_type="LMT", limit_price=1.41,
+                    tif="IOC")
+        res = await ex.place(order, ib=_IB(), reference_price=1.4048)
+        assert res.status == "filled"
+        assert sent["tif"] == "IOC"          # not DAY, not preset-derived
+        assert sent["ref"] == "probe-fx"
+    finally:
+        await db.close()
+
+
+def test_directed_orders_default_to_ioc():
+    """One-shot instruction: execute now or go away. Never leave a resting
+    order nobody is watching."""
+    assert _order().tif == "IOC"
+    assert _fx().tif == "IOC"
