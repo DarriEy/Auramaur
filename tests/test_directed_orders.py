@@ -20,9 +20,11 @@ def _settings(**over):
     ibkr = SimpleNamespace(
         directed_orders_enabled=True, directed_orders_confirm_live=True,
         directed_orders_account="U24897594",
-        directed_orders_allowlist=["SPY", "SLV"],
+        directed_orders_allowlist=["SPY", "SLV", "USDCAD"],
         directed_orders_max_notional_usd=250.0,
         directed_orders_daily_notional_usd=1000.0,
+        directed_orders_treasury_max_notional_usd=1000.0,
+        directed_orders_treasury_daily_notional_usd=2000.0,
         directed_orders_client_id=5,
         multiasset_execution_fill_timeout_seconds=5,
     )
@@ -195,5 +197,68 @@ async def test_audit_row_is_written_before_sending(tmp_path):
         row = await db.fetchone("SELECT status, refuse_reason FROM directed_orders")
         assert row["status"] == "error"
         assert "gateway exploded" in row["refuse_reason"]
+    finally:
+        await db.close()
+
+
+def _fx(**over):
+    base = dict(symbol="USDCAD", sec_type="CASH", currency="CAD", exchange="IDEALPRO",
+                side="BUY", quantity=800.0, order_type="MKT", limit_price=None,
+                label="probe-fx", dry_run=True)
+    base.update(over)
+    return DirectedOrder(**base)
+
+
+def test_usd_base_fx_notional_is_the_quantity_not_quantity_times_rate():
+    """USDCAD quantity is already USD. Multiplying by the 1.37 rate would
+    report 800 USD as 1,096 and measure it against a USD cap it never
+    breached."""
+    assert _fx(quantity=800.0).notional_usd(1.37) == pytest.approx(800.0)
+    # A non-USD-base pair still converts through the rate.
+    assert _fx(symbol="EURUSD", quantity=100.0).notional_usd(1.08) == pytest.approx(108.0)
+    # Equities are unaffected.
+    assert _order(quantity=2.0).notional_usd(50.0) == pytest.approx(100.0)
+
+
+@pytest.mark.asyncio
+async def test_conversion_uses_the_treasury_cap_not_the_trading_cap(tmp_path):
+    """$800 exceeds the $250 trading cap but sits inside the treasury cap —
+    a currency conversion is not a market position."""
+    ex, db = await _exec(tmp_path)
+    try:
+        assert await ex.gate_reason(_fx(), 800.0, "U24897594") == ""
+        # The same notional as an EQUITY order is still refused.
+        r = await ex.gate_reason(_order(), 800.0, "U24897594")
+        assert "per-order cap" in r
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_treasury_cap_still_binds(tmp_path):
+    ex, db = await _exec(tmp_path)
+    try:
+        r = await ex.gate_reason(_fx(), 1000.01, "U24897594")
+        assert "treasury cap" in r
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_trading_and_treasury_daily_budgets_are_separate(tmp_path):
+    """A conversion must not consume the trading allowance, nor the reverse —
+    otherwise one $800 conversion eats most of the day's trading budget."""
+    ex, db = await _exec(tmp_path)
+    try:
+        await db.execute(
+            """INSERT INTO directed_orders
+                 (symbol, sec_type, side, quantity, order_type, notional_usd, status)
+               VALUES ('USDCAD','CASH','BUY',800,'MKT',800.0,'filled')""")
+        await db.commit()
+        # Trading budget untouched by the conversion.
+        assert await ex.gate_reason(_order(), 250.0, "U24897594") == ""
+        # Treasury budget did move.
+        r = await ex.gate_reason(_fx(quantity=1300.0), 1300.0, "U24897594")
+        assert "treasury" in r
     finally:
         await db.close()

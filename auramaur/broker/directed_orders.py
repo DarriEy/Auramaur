@@ -49,7 +49,22 @@ class DirectedOrder:
     label: str = ""               # probe name, or "beta"
     dry_run: bool = True          # gate 3 — must be explicitly cleared
 
+    @property
+    def is_treasury(self) -> bool:
+        """A currency conversion changes the denomination of cash already
+        held. It adds no market exposure, so it is capped separately."""
+        return self.sec_type.upper() == "CASH"
+
     def notional_usd(self, reference_price: float) -> float:
+        """USD notional of this order.
+
+        For an FX pair whose BASE is USD (USDCAD, USDJPY), the quantity is
+        already denominated in USD and multiplying by the rate would yield the
+        QUOTE-currency amount instead — 800 USD would read as 1,096, and be
+        measured against a USD cap it never actually breached.
+        """
+        if self.is_treasury and self.symbol.upper().startswith("USD"):
+            return abs(self.quantity)
         return abs(self.quantity) * abs(reference_price)
 
 
@@ -112,20 +127,33 @@ class DirectedOrderExecutor:
         if order.quantity <= 0:
             return "quantity must be positive"
 
-        if notional_usd > cfg.directed_orders_max_notional_usd:
-            return (f"notional ${notional_usd:,.2f} exceeds per-order cap "
-                    f"${cfg.directed_orders_max_notional_usd:,.2f}")
+        # Treasury (currency conversion) is capped separately from trading:
+        # it changes the denomination of cash already held rather than taking
+        # a position, so it neither borrows the trading allowance nor forces
+        # the trading cap wider to accommodate a non-trade.
+        treasury = order.is_treasury
+        kind = "treasury" if treasury else "per-order"
+        max_cap = (cfg.directed_orders_treasury_max_notional_usd if treasury
+                   else cfg.directed_orders_max_notional_usd)
+        daily_cap = (cfg.directed_orders_treasury_daily_notional_usd if treasury
+                     else cfg.directed_orders_daily_notional_usd)
+
+        if notional_usd > max_cap:
+            return (f"notional ${notional_usd:,.2f} exceeds {kind} cap "
+                    f"${max_cap:,.2f}")
 
         # Counts what was SUBMITTED today, not what filled: an unfilled order
-        # is still committed exposure until it is cancelled.
+        # is still committed exposure until it is cancelled. Scoped to the same
+        # kind, so a conversion and a trade do not consume each other's budget.
         row = await self._db.fetchone(
-            """SELECT COALESCE(SUM(notional_usd), 0) AS n FROM directed_orders
-                WHERE date(submitted_at) = date('now')
-                  AND status IN ('submitted','filled')""")
+            f"""SELECT COALESCE(SUM(notional_usd), 0) AS n FROM directed_orders
+                 WHERE date(submitted_at) = date('now')
+                   AND status IN ('submitted','filled')
+                   AND sec_type {'=' if treasury else '!='} 'CASH'""")
         used = float(row["n"]) if row else 0.0
-        if used + notional_usd > cfg.directed_orders_daily_notional_usd:
-            return (f"daily cap: ${used:,.2f} used + ${notional_usd:,.2f} "
-                    f"exceeds ${cfg.directed_orders_daily_notional_usd:,.2f}")
+        if used + notional_usd > daily_cap:
+            return (f"{kind} daily cap: ${used:,.2f} used + "
+                    f"${notional_usd:,.2f} exceeds ${daily_cap:,.2f}")
         return ""
 
     # ------------------------------------------------------------------

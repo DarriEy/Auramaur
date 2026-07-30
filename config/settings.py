@@ -1487,6 +1487,17 @@ class IBKRConfig(BaseModel):
     directed_orders_allowlist: list[str] = Field(default_factory=list)
     directed_orders_max_notional_usd: float = 250.0
     directed_orders_daily_notional_usd: float = 1000.0
+    # Currency conversion is TREASURY, not a market position: it changes the
+    # denomination of cash already held, it does not add or remove exposure.
+    # It gets its own caps and its own daily budget so a conversion neither
+    # borrows the trading allowance nor forces the trading cap wider.
+    #
+    # Splitting a conversion is actively HARMFUL, which is why this cap needs
+    # to be generous: IBKR FX is 0.20bp with a USD 2.00 MINIMUM, so four
+    # $200 conversions cost $8 where one $800 conversion costs $2 -- 100bps
+    # against 25bps for the identical economic result.
+    directed_orders_treasury_max_notional_usd: float = 1000.0
+    directed_orders_treasury_daily_notional_usd: float = 2000.0
     directed_orders_client_id: int = 5
     multiasset_execution_fill_timeout_seconds: float = 30.0
     multiasset_cycle_seconds: int = 900
@@ -1610,6 +1621,12 @@ class IBKRConfig(BaseModel):
         if self.directed_orders_daily_notional_usd < self.directed_orders_max_notional_usd:
             raise ValueError(
                 "directed order daily cap must be at least the per-order cap")
+        if self.directed_orders_treasury_max_notional_usd <= 0:
+            raise ValueError("treasury per-order cap must be positive")
+        if (self.directed_orders_treasury_daily_notional_usd
+                < self.directed_orders_treasury_max_notional_usd):
+            raise ValueError(
+                "treasury daily cap must be at least the treasury per-order cap")
         executable = {"global_etf", "futures", "international_equity"}
         if len(self.multiasset_execution_books) != len(set(self.multiasset_execution_books)):
             raise ValueError("IBKR execution books must be unique")
