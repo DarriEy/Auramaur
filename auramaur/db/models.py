@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 46
+SCHEMA_VERSION = 47
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -1082,6 +1082,39 @@ CREATE INDEX IF NOT EXISTS idx_market_outcomes_market
     ON market_outcomes(market_id, venue);
 
 -- Rebuildable, explicitly-versioned scores over the normalized evidence view.
+-- Audit trail for OPERATOR-DIRECTED orders (calibration probes, the beta
+-- deployment). Every attempt is recorded BEFORE it is sent and updated after,
+-- so "what did we actually send?" is always answerable — including for
+-- attempts that were refused, errored, or never came back.
+--
+-- Also the source of the daily notional cap: the cap counts what was
+-- SUBMITTED, not what filled, because an unfilled order still represents
+-- committed exposure until it is cancelled.
+CREATE TABLE IF NOT EXISTS directed_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    label TEXT NOT NULL DEFAULT '',
+    symbol TEXT NOT NULL,
+    sec_type TEXT NOT NULL,
+    currency TEXT NOT NULL DEFAULT '',
+    exchange TEXT NOT NULL DEFAULT '',
+    side TEXT NOT NULL,
+    quantity REAL NOT NULL,
+    order_type TEXT NOT NULL,
+    limit_price REAL,
+    notional_usd REAL NOT NULL,
+    account TEXT NOT NULL DEFAULT '',
+    dry_run INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'submitted',  -- refused|dry_run|submitted|filled|error
+    refuse_reason TEXT NOT NULL DEFAULT '',
+    ib_order_id TEXT NOT NULL DEFAULT '',
+    filled_qty REAL NOT NULL DEFAULT 0,
+    filled_price REAL,
+    submitted_at TEXT NOT NULL DEFAULT (datetime('now')),
+    settled_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_directed_orders_day
+    ON directed_orders(submitted_at, status);
+
 -- Measured execution costs, one row per IBKR fill. Read-only ingest: the
 -- broker is the source of truth, we never write orders from here.
 --

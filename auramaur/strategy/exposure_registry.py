@@ -204,6 +204,28 @@ EXPOSURE_PATHS = (
         "IBKR book ledger",
     ),
     _path(
+        # Operator instructions, not strategy output: calibration probes and
+        # the beta deployment. Deliberately NOT ibkr_multiasset — that path's
+        # authority is the graduation evidence contract, which is the right
+        # test for a book claiming edge and a category error for a probe that
+        # is paying a known cost to measure one. Its authority is instead a
+        # declared account, an explicit symbol allowlist and hard notional
+        # caps, none of which the strategy paths carry.
+        "ibkr_directed",
+        ExposureKind.ENTRY,
+        "operator instruction (no signal input)",
+        ("IBKR quotes", "operator-supplied reference price"),
+        "directed-order gates: account match, allowlist, per-order + daily caps",
+        "DirectedOrderExecutor.place",
+        {"paper", "live"},
+        "directed_orders audit table",
+        "directed_orders status + cost_observations ingest",
+        "operator instruction",
+        "broker fill ingest",
+        "broker fill",
+        "directed_orders label",
+    ),
+    _path(
         "kraken_directional",
         ExposureKind.ENTRY,
         "Kraken directional signal",
@@ -434,6 +456,12 @@ REGISTERED_CALLSITES = Counter(
             "place",
             "placeOrder",
             "ibkr_multiasset",
+        ): 1,
+        (
+            "auramaur/broker/directed_orders.py",
+            "_send",
+            "placeOrder",
+            "ibkr_directed",
         ): 1,
         (
             "auramaur/strategy/informed_flow_pillar.py",

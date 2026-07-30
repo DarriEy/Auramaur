@@ -1465,6 +1465,29 @@ class IBKRConfig(BaseModel):
     multiasset_execution_confirm_live: bool = False
     multiasset_execution_books: list[str] = []
     multiasset_execution_client_id: int = 4
+    # ---- Directed orders -------------------------------------------------
+    # An OPERATOR-DIRECTED order path: calibration probes and the beta
+    # deployment. It executes an explicit instruction and never derives one —
+    # no signal, no sizing, no strategy input reaches it.
+    #
+    # It deliberately does NOT reuse the multiasset execution gate. That gate
+    # requires graduation evidence (120 daily marks / 30 round trips over 180
+    # days), which is the right contract for a STRATEGY claiming edge and a
+    # category error for a probe that is paying a known cost to measure one.
+    # Separate purpose, separate gate, tighter caps.
+    directed_orders_enabled: bool = False
+    directed_orders_confirm_live: bool = False
+    # Must match the account the gateway is actually serving, or the order is
+    # refused. Not paranoia: on 2026-07-29 `ibkr.environment: paper` was found
+    # pointing at port 4002 serving a LIVE U-prefixed individual account, so
+    # the environment label cannot be trusted to say which account is at risk.
+    # Empty means refuse everything — fail closed.
+    directed_orders_account: str = ""
+    # Explicit symbols only. No wildcards, no "all of book X".
+    directed_orders_allowlist: list[str] = Field(default_factory=list)
+    directed_orders_max_notional_usd: float = 250.0
+    directed_orders_daily_notional_usd: float = 1000.0
+    directed_orders_client_id: int = 5
     multiasset_execution_fill_timeout_seconds: float = 30.0
     multiasset_cycle_seconds: int = 900
     multiasset_refreshes_per_cycle: int = 12
@@ -1578,9 +1601,15 @@ class IBKRConfig(BaseModel):
             raise ValueError("IBKR multi-asset config must define exactly six books")
         client_ids = {self.client_id, self.equity_client_id,
                       self.multiasset_client_id, self.multiasset_preflight_client_id,
-                      self.multiasset_execution_client_id, self.balance_client_id}
-        if len(client_ids) != 6:
+                      self.multiasset_execution_client_id, self.balance_client_id,
+                      self.directed_orders_client_id}
+        if len(client_ids) != 7:
             raise ValueError("IBKR API client ids must be unique")
+        if self.directed_orders_max_notional_usd <= 0:
+            raise ValueError("directed order max notional must be positive")
+        if self.directed_orders_daily_notional_usd < self.directed_orders_max_notional_usd:
+            raise ValueError(
+                "directed order daily cap must be at least the per-order cap")
         executable = {"global_etf", "futures", "international_equity"}
         if len(self.multiasset_execution_books) != len(set(self.multiasset_execution_books)):
             raise ValueError("IBKR execution books must be unique")

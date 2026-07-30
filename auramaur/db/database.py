@@ -378,6 +378,40 @@ class Database:
             await self._migrate_v44_to_v45()
         if from_version < 46:
             await self._migrate_v45_to_v46()
+        if from_version < 47:
+            await self._migrate_v46_to_v47()
+
+    async def _migrate_v46_to_v47(self) -> None:
+        """Audit trail for operator-directed orders."""
+        await self._db.executescript("""
+            CREATE TABLE IF NOT EXISTS directed_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                label TEXT NOT NULL DEFAULT '',
+                symbol TEXT NOT NULL,
+                sec_type TEXT NOT NULL,
+                currency TEXT NOT NULL DEFAULT '',
+                exchange TEXT NOT NULL DEFAULT '',
+                side TEXT NOT NULL,
+                quantity REAL NOT NULL,
+                order_type TEXT NOT NULL,
+                limit_price REAL,
+                notional_usd REAL NOT NULL,
+                account TEXT NOT NULL DEFAULT '',
+                dry_run INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL DEFAULT 'submitted',
+                refuse_reason TEXT NOT NULL DEFAULT '',
+                ib_order_id TEXT NOT NULL DEFAULT '',
+                filled_qty REAL NOT NULL DEFAULT 0,
+                filled_price REAL,
+                submitted_at TEXT NOT NULL DEFAULT (datetime('now')),
+                settled_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_directed_orders_day
+                ON directed_orders(submitted_at, status);
+            UPDATE schema_version SET version = 47;
+        """)
+        await self._db.commit()
+        log.info("database.migrated", from_version=46, to_version=47)
 
     async def _migrate_v45_to_v46(self) -> None:
         """Measured execution costs, ingested read-only from the broker."""
