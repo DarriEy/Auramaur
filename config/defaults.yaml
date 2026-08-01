@@ -612,7 +612,21 @@ momentum_coupling:
 gemini:
   # Route analysis to Gemini during off-hours OR when Claude's daily budget is
   # near-exhausted; falls back to Claude on Gemini error. Needs GEMINI_API_KEY.
-  enabled: true
+  #
+  # OFF as of 2026-08-01 (user: "chill on Gemini"). This route carried the
+  # analyzer's full volume — 150-293 calls/day — through a premium model for
+  # the whole off_hours window plus every budget-threshold switch, with no
+  # cap, no counter and no log line, and ran to roughly $1000. What it bought:
+  # 11 realizations, mean -$3.95, t=-1.33. Not a proven loser (n=11 settles
+  # nothing) but a terrible cost-per-unit-of-evidence, and the only line item
+  # of its size in the stack.
+  #
+  # This flag governs the PROACTIVE route only. Gemini stays available as an
+  # emergency arm when Claude fails (llm_router.route appends it regardless),
+  # now bounded by daily_call_limit — so a Claude outage still has somewhere
+  # to go, which is the resilience the 2026-07-29 blackout showed we need.
+  # Revert: set true.
+  enabled: false
   model: "gemini-3.1-pro-preview"
   off_hours_utc: [4, 5, 6, 7, 8, 9]   # deep-night ET — conserve Claude
   claude_budget_threshold: 0.8        # switch at 80% of daily_claude_call_budget
@@ -875,8 +889,14 @@ agent_trader:
   paper: true
   interval_seconds: 7200
   models:
-    - alias: haiku
-      model: claude-haiku-4-5
+    # haiku CUT 2026-08-01. The only arm in the whole agent_trader family with
+    # a statistically significant result, and it was significantly BAD:
+    # n=12 realizations, mean -$6.31/trade, t=-3.16. Every other arm (sonnet,
+    # opus, and all three gemini) is indistinguishable from zero, so this is
+    # the one cut the evidence actually supports. Its graduation entries in
+    # the block above are deliberately LEFT in place — the historical rows
+    # still need their cell config to be adjudicated correctly.
+    # Revert: restore the alias/model pair.
     - alias: sonnet
       model: claude-sonnet-5
     - alias: opus
