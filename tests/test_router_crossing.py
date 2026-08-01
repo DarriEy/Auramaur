@@ -176,9 +176,14 @@ async def test_depth_sweep_prices_at_marginal_level():
     assert order.price == 0.55         # marginal sweep level, not the 0.50 ask
     # Size is re-derived from the dollar intent (40 tokens * 0.49 reference)
     # at each price lift: 19.6 / 0.50 = 39.2 at the ask, then 19.6 / 0.55 =
-    # 35.64 at the sweep price — the notional stays at the intent instead of
+    # 35.6363 at the sweep price — the notional stays at the intent instead of
     # inflating with the limit.
-    assert order.size == 35.64
+    #
+    # 35.63, not 35.64: the re-derivation FLOORS. round() would return 35.64,
+    # whose notional is $19.602 — above the $19.60 intent, contradicting the
+    # invariant this test exists to assert.
+    assert order.size == 35.63
+    assert order.size * order.price <= 40.0 * 0.49 + 1e-9
 
 
 @pytest.mark.asyncio
@@ -264,13 +269,22 @@ async def test_waiver_uses_no_token_fair_value():
 @pytest.mark.asyncio
 async def test_cross_rederives_size_from_dollar_intent():
     """Crossing up re-derives the token count from the dollar intent at the
-    limit price: 10 tokens sized at 0.22 ($2.20) become 9.17 at the 0.24 ask
-    instead of 10 tokens costing $2.40."""
+    limit price: 10 tokens sized at 0.22 ($2.20) become 9.16 at the 0.24 ask
+    instead of 10 tokens costing $2.40.
+
+    9.16, not 9.17: the re-derivation FLOORS, because its whole purpose is
+    that notional cannot inflate above the dollar intent. round() gives 9.17,
+    costing $2.2008 — over intent. That fraction of a cent is not cosmetic:
+    the allocator routinely sizes right at the per-market cap and the
+    gateway's tolerance is 1e-9, so an over-round is a hard block (live
+    2026-08-01, market 2821657 — a 20pt-edge entry killed over $0.0016)."""
     router = _router(_book(0.20, 0.24), base_price=0.22)
     order = await router.route(_signal(edge=10.0), Market(id="m1", question="Q?"), 10.0, False)
     assert order is not None
     assert order.price == 0.24
-    assert order.size == 9.17
+    assert order.size == 9.16
+    # The invariant, stated directly — never exceed the dollar intent.
+    assert order.size * order.price <= 10.0 * 0.22 + 1e-9
 
 
 @pytest.mark.asyncio
@@ -324,3 +338,44 @@ async def test_sell_keeps_passive_path():
     assert order.order_type == OrderType.LIMIT
     assert order.price == 0.49  # best_ask - 1 tick
     assert order.post_only is True
+
+
+@pytest.mark.asyncio
+async def test_cross_never_breaches_the_per_market_cap_by_rounding():
+    """The re-derived notional must never exceed the dollar intent.
+
+    Regression (live 2026-08-01, market 2821657): the allocator sized 56.45
+    tokens @ 0.62 = $34.999 against a $35.00 per-market cap. The router
+    crossed to 0.64 and round(54.685938, 2) returned 54.69 tokens = $35.0016.
+    The gateway compares with a 1e-9 tolerance, so `gateway.market_cap_block`
+    refused an otherwise-valid 20pt-edge entry over $0.0016 — and because the
+    allocator clamps to the cap as a matter of course, this was systematic
+    rather than a one-off.
+
+    Swept across prices so it pins the invariant, not one arithmetic case.
+    """
+    reference = 0.62
+    # The intent is the BASE ORDER's notional, which `_router` fixes at 10
+    # tokens — not the size_dollars argument, which the mocked prepare_order
+    # ignores. Asserting against the wrong figure makes this pass vacuously;
+    # an earlier draft did exactly that and survived the bug it was written to
+    # catch.
+    intent_dollars = 10.0 * reference
+    # Fair value must sit above every ask swept below, or the router correctly
+    # refuses on edge rather than exercising the rounding path under test.
+    settings = _settings(max_cross_cents=25, min_edge_pct=2.5)
+    breaching_asks = []
+    for ask in (0.63, 0.64, 0.65, 0.66, 0.67, 0.71):
+        router = _router(_book(reference - 0.02, ask), base_price=reference,
+                         settings=settings)
+        order = await router.route(
+            _signal(edge=20.0, claude_prob=0.95), Market(id="m1", question="Q?"),
+            intent_dollars, False)
+        assert order is not None, f"no order at ask {ask}"
+        notional = order.size * order.price
+        if notional > intent_dollars + 1e-9:
+            breaching_asks.append((ask, order.size, notional))
+    assert not breaching_asks, (
+        "re-derived notional exceeds the dollar intent "
+        f"${intent_dollars:.4f} at {breaching_asks} — the gateway compares "
+        "with a 1e-9 tolerance, so this is a hard market-cap block")

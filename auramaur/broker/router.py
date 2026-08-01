@@ -180,7 +180,20 @@ class SmartOrderRouter:
             def _rederived_size(current: float, price: float) -> float:
                 if price <= base_order.price + 1e-9 or price <= 0:
                     return current
-                resized = round(intended_dollars / price, 2)
+                # FLOOR, not round. This re-derivation exists so the notional
+                # cannot inflate when the ask sits above the reference — and
+                # round() defeats that whenever the third decimal is >= 5,
+                # handing back MORE tokens than the dollar intent buys.
+                #
+                # It breaches by fractions of a cent, which is exactly enough:
+                # the allocator routinely sizes right at the per-market cap and
+                # the gateway's tolerance is 1e-9. Measured live 2026-08-01 on
+                # market 2821657 — intent 56.45 @ 0.62 = $34.999 against a
+                # $35.00 cap, crossed to 0.64, round(54.685938, 2) = 54.69
+                # tokens = $35.0016, and gateway.market_cap_block killed an
+                # otherwise-valid 20pt-edge entry over $0.0016. Flooring gives
+                # 54.68 tokens = $34.9952 and it places.
+                resized = math.floor(intended_dollars / price * 100.0) / 100.0
                 # Venue minimums (5 tokens / $1 notional), same floor as
                 # prepare_order; the bump never exceeds the pre-cross size.
                 resized = max(resized, max(5.0, math.ceil(100.0 / price) / 100))
