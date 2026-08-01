@@ -512,7 +512,31 @@ kraken:
   refill_cash_floor: 20.0
   # Directional spot — speculation. NO validated edge (Path B momentum); bounded
   # by directional_budget_usd + max_order_usd. USDC-funded pairs (you hold USDC).
-  directional_enabled: true
+  #
+  # PARKED 2026-08-01. This restores the stated intent three lines above
+  # ("Directional trading stays OFF until a validated edge exists"), which the
+  # flag had been contradicting. Treasury is unaffected — it is a separate
+  # loop citizen and POL->USDC conversion is a utility, not a bet.
+  #
+  # Why, in the order the evidence lands:
+  #  1. The only cohort that traded went 0-for-26 (2026-06-02..06-11),
+  #     -$36.53 net. Gross of fees it was -$29.09, so fees were 20% of the
+  #     damage — negative edge, not a cost problem. t = -9.21.
+  #  2. The desk has never issued a view above 0.540 across 249 measurements
+  #     (median 0.490, p90 0.530). Break-even P(up) measured from 721 daily
+  #     bars is 0.541/0.525/0.524 (XBT/ETH/SOL) at 14d taker — so 0% of views
+  #     have ever cleared even the easiest bar.
+  #  3. Longer horizons lower the bar but destroy the sample rate, and the two
+  #     cancel. Best cell anywhere (ETH 60d, desk at p90) needs 3,329 trades
+  #     for t=2 against 18 trades/yr => 182 YEARS to verify. Every other cell
+  #     is worse.
+  #  4. That best cell yields $6.34/yr gross on the $30 max_order_usd, against
+  #     a desk running 4,380 Opus calls/yr — 249 views to open 3 signals, i.e.
+  #     83 calls per signal. Claude is subscription-priced so the marginal
+  #     dollar cost is ~0, but those are reserved calls from a budget that was
+  #     exhausting daily.
+  # Revert: set true (and re-read the four points above first).
+  directional_enabled: false
   # Pairs are ARBITRARY now: any base/quote works. Sizing + the per-order cap are
   # quote-currency-aware (USD-converted via a live <fiat>USD rate), and each
   # pair's ordermin is respected, so USDC / USD / USDT / EUR / … quotes all size
