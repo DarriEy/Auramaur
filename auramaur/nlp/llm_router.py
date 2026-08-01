@@ -28,10 +28,36 @@ def should_use_gemini(settings, daily_calls: int) -> bool:
 
 
 async def call_gemini(settings, prompt: str) -> str:
-    """Call Gemini via REST (JSON mode). No SDK dependency."""
+    """Call Gemini via REST (JSON mode). No SDK dependency.
+
+    Capped, counted and priced — none of which it was until 2026-08-01.
+
+    This route is not the agent_trader/term_structure Gemini arms. Those log
+    `*.gemini_call` with a usd figure and share a 30/day ceiling, and over the
+    retained window they totalled 89 calls and $0.49. THIS one carries the
+    analyzer's entire volume (150-293 calls/day) for the whole `off_hours_utc`
+    window plus every `claude_budget_threshold` switch, through a premium
+    model, and it had no cap, no counter, and emitted no log line at all. It
+    ran to roughly $1000 while the instrumented arms showed under a dollar,
+    which is precisely how an audit of "Gemini spend" reached the wrong answer
+    by three orders of magnitude.
+
+    The sibling `call_openai` had all three guards from the start; this is the
+    same treatment applied to the arm that actually carries the volume.
+    """
     import aiohttp
 
+    from auramaur.nlp import call_budget
+
     g = settings.gemini
+    limit = int(getattr(g, "daily_call_limit", 0) or 0)
+    if limit > 0 and call_budget.gemini_calls_today() >= limit:
+        raise RuntimeError(f"Gemini analysis daily cap ({limit}) reached")
+    # Counted BEFORE the reply is judged: the prompt is billed whether or not
+    # the response parses, so counting only successes leaves the cap blind to
+    # a failing arm.
+    call_budget.record_gemini_call()
+
     url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
            f"{g.model}:generateContent?key={settings.gemini_api_key}")
     body = {
@@ -45,6 +71,16 @@ async def call_gemini(settings, prompt: str) -> str:
     async with aiohttp.ClientSession() as s:
         async with s.post(url, json=body, timeout=aiohttp.ClientTimeout(total=120)) as r:
             data = await r.json()
+
+    usage = data.get("usageMetadata") or {}
+    prices = list(getattr(g, "price_per_mtok", None) or [0.0, 0.0])
+    usd = (float(usage.get("promptTokenCount", 0) or 0) * float(prices[0])
+           + float(usage.get("candidatesTokenCount", 0) or 0) * float(prices[1])) / 1e6
+    log.info("llm.gemini_call", model=g.model,
+             calls_today=call_budget.gemini_calls_today(), cap=limit,
+             in_tok=usage.get("promptTokenCount"),
+             out_tok=usage.get("candidatesTokenCount"), usd=round(usd, 5))
+
     return data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
 

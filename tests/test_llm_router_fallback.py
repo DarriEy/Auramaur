@@ -171,3 +171,54 @@ async def test_failed_openai_call_still_consumes_the_cap():
         with pytest.raises(RuntimeError, match="truncated"):
             await call_openai(settings, "prompt")
     assert call_budget.openai_calls_today() == before + 1
+
+
+@pytest.mark.asyncio
+async def test_call_gemini_is_capped_and_counted(tmp_path):
+    """The analyzer Gemini route must refuse past its daily ceiling.
+
+    Regression (2026-08-01): this route had no cap, no counter and no log
+    line, while its `call_openai` sibling had all three. It carries the
+    analyzer's full volume (150-293 calls/day) through a premium model for the
+    entire off-hours window plus every budget-threshold switch, and quietly
+    ran to roughly $1000 — an audit that measured only the *instrumented*
+    Gemini arms put the total at $0.49 and was wrong by three orders of
+    magnitude.
+    """
+    from auramaur.nlp.llm_router import call_gemini
+
+    call_budget.set_db_path(str(tmp_path / "budget.db"))
+    settings = SimpleNamespace(
+        gemini=SimpleNamespace(
+            enabled=True, model="gemini-test", off_hours_utc=[],
+            claude_budget_threshold=0.8, daily_call_limit=2,
+            price_per_mtok=[2.0, 12.0]),
+        gemini_api_key="gem-key",
+        nlp=SimpleNamespace(max_tokens=256),
+    )
+
+    payload = {
+        "candidates": [{"content": {"parts": [{"text": '{"ok": true}'}]}}],
+        "usageMetadata": {"promptTokenCount": 1000, "candidatesTokenCount": 100},
+    }
+
+    class _Resp:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def json(self): return payload
+
+    class _Session:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        def post(self, *a, **k): return _Resp()
+
+    with patch("aiohttp.ClientSession", lambda *a, **k: _Session()):
+        assert await call_gemini(settings, "p") == '{"ok": true}'
+        assert call_budget.gemini_calls_today() == 1
+        await call_gemini(settings, "p")
+        assert call_budget.gemini_calls_today() == 2
+
+        # Third call is over the ceiling and must not reach the API.
+        with pytest.raises(RuntimeError, match="daily cap"):
+            await call_gemini(settings, "p")
+        assert call_budget.gemini_calls_today() == 2

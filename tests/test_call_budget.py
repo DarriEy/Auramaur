@@ -145,3 +145,29 @@ def test_non_reserved_limit_subtracts_reserve_then_paces(monkeypatch):
     limit = cb.non_reserved_limit(s)
     assert captured["base"] == 150          # reserve subtracted first
     assert limit in (60, 150)               # paced by wall clock
+
+
+def test_gemini_counter_is_separate_and_persistent(tmp_path):
+    """The Gemini analyzer counter must exist and be independent.
+
+    Regression (2026-08-01): `llm_router.call_gemini` carried the analyzer's
+    full volume — the whole off-hours window plus every budget-threshold
+    switch — with no cap, no counter and no log line, while the instrumented
+    agent_trader/term_structure arms showed $0.49. The uncounted route ran to
+    roughly $1000. Its sibling `call_openai` had all three guards from day one.
+    """
+    _use_tmp_db(tmp_path)
+    assert call_budget.gemini_calls_today() == 0
+
+    assert call_budget.record_gemini_call() == 1
+    assert call_budget.record_gemini_call() == 2
+    assert call_budget.gemini_calls_today() == 2
+
+    # Independent of the other two counters.
+    call_budget.record_call()
+    call_budget.record_openai_call()
+    assert call_budget.gemini_calls_today() == 2
+
+    # Survives a reconnect — the whole point of the sidecar.
+    call_budget._reset_conn()
+    assert call_budget.gemini_calls_today() == 2

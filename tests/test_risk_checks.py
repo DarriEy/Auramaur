@@ -301,3 +301,52 @@ async def test_divergence_exceeded():
 async def test_divergence_none():
     result = await check_second_opinion_divergence(None, 0.15)
     assert result.passed is True  # No second opinion = skip check
+
+
+# ---------------------------------------------------------------------------
+# Extreme divergence — the upper guard on the adverse-divergence band
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_extreme_divergence_force_papers_beyond_threshold():
+    """A 79pt disagreement routes to paper, and does NOT fail the trade.
+
+    Pins the live shape of term_structure market 676829 (2026-08-01): model
+    0.10 against a market at 0.89. `passed` must stay True — this is a
+    restriction, and a False here would reject the entry and destroy the
+    record the restriction exists to preserve.
+    """
+    from auramaur.risk.checks import check_extreme_divergence
+
+    result = await check_extreme_divergence(0.10, 0.89, enabled=True,
+                                            threshold=0.50)
+    assert result.force_paper is True
+    assert result.passed is False       # signals the restriction to the caller
+    assert result.value == pytest.approx(0.79)
+    assert "more likely a model error" in result.reason
+
+
+@pytest.mark.asyncio
+async def test_extreme_divergence_leaves_the_profitable_band_alone():
+    """35-50% divergence must NOT be paper-routed.
+
+    Measured live: 20-35% is +$0.96/trade (n=1200) and 35-50% is +$0.41/trade
+    (n=453). An earlier draft used a 0.35 threshold and would have papered a
+    profitable band; this pins the line where the data actually puts it.
+    """
+    from auramaur.risk.checks import check_extreme_divergence
+
+    for div in (0.25, 0.40, 0.49):
+        result = await check_extreme_divergence(0.10, 0.10 + div,
+                                                enabled=True, threshold=0.50)
+        assert result.force_paper is False, f"{div} should not be papered"
+        assert result.passed is True
+
+
+@pytest.mark.asyncio
+async def test_extreme_divergence_inert_when_disabled():
+    from auramaur.risk.checks import check_extreme_divergence
+
+    result = await check_extreme_divergence(0.10, 0.89, enabled=False)
+    assert result.force_paper is False
+    assert result.passed is True

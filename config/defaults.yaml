@@ -113,6 +113,14 @@ risk:
   divergence_adverse_low: 0.05
   divergence_adverse_high: 0.20
   divergence_require_confidence: "HIGH"
+  # Upper guard (2026-08-01). The band above stops at 20% because 20%+ measured
+  # positive — still true: live means are +0.96/trade at 20-35% (n=1200) and
+  # +0.41 at 35-50% (n=453). But past 50% it inverts hard: -$0.51/trade over
+  # n=792, t=-4.59. Those entries now route to PAPER rather than being
+  # rejected, so the cell keeps accumulating a record. Prompted by
+  # term_structure's first live entry (676829, model 0.10 vs market 0.89).
+  extreme_divergence_enabled: true
+  extreme_divergence_threshold: 0.50
   # Name-the-gap gate (2026-06-09): an llm-source trade with >=5pt divergence
   # from the market must NAME the mechanism why the market is wrong
   # (structural / behavioral / informational, via a cached post-hoc gap-audit

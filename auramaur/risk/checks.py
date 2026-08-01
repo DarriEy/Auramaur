@@ -15,6 +15,11 @@ class CheckResult(BaseModel):
     passed: bool
     reason: str = ""
     value: Any = None
+    # A RESTRICTION, not a rejection: the entry proceeds but is booked to the
+    # paper world. Checks that set this must not be placed in the pass/fail
+    # lists, where `passed=False` would refuse the trade outright and destroy
+    # the record the restriction exists to preserve.
+    force_paper: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +159,10 @@ async def check_divergence_band(
     div = abs((claude_prob or 0.0) - (market_prob or 0.0))
     if not enabled or not (low <= div < high):
         return CheckResult(name="divergence_band", passed=True, reason="", value=div)
+    # NOTE: divergence >= `high` deliberately exits above and is NOT judged
+    # here -- see `check_extreme_divergence`, which guards that end. Widening
+    # this band instead would force those entries to be REJECTED, destroying
+    # the record needed to find out whether they are ever right.
     rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
     conf = (confidence.value if hasattr(confidence, "value") else str(confidence)).upper()
     ok = rank.get(conf, 0) >= rank.get(require_confidence.upper(), 2)
@@ -164,6 +173,59 @@ async def check_divergence_band(
                 f"divergence {div:.0%} in adverse band [{low:.0%},{high:.0%}) "
                 f"with confidence {conf} < {require_confidence}"),
         value=div,
+    )
+
+
+async def check_extreme_divergence(
+    claude_prob: float,
+    market_prob: float,
+    enabled: bool = False,
+    threshold: float = 0.50,
+) -> CheckResult:
+    """Force PAPER when the model disagrees with the market enormously.
+
+    The threshold is MEASURED, not assumed. Realized live P&L by
+    |model - market| across the whole ledger (2026-08-01):
+
+        bucket      n     total    mean/trade      t
+        <5%      1502   +$1273        +0.85     +2.30
+        5-20%    1844   +$1499        +0.81     +2.52
+        20-35%   1200   +$1155        +0.96     +4.25
+        35-50%    453    +$185        +0.41     +1.98
+        >=50%     792    -$405        -0.51     -4.59   <-- guarded
+
+    Everything below 50% is significantly POSITIVE; only past 50% does live
+    P&L invert, and it does so decisively. An earlier draft of this guard used
+    0.35 and would have paper-routed the profitable 35-50% band -- the record
+    moved the line, and the same data explains why the adverse band above
+    stops at 20% ("+$6.00 for 20%+" in its comment was right, it just never
+    looked far enough out).
+
+    Found live 2026-08-01: term_structure's first live entry was market 676829
+    in the "will gpt-6 be released" ladder -- model 0.100 against a liquid
+    market at 0.890, a 79-point gap, squarely in the losing bucket. The curve
+    was internally monotone, so `curve_strong` awarded it HIGH; monotonicity
+    is a coherence test, and a confidently WRONG curve satisfies it perfectly.
+    Nothing downstream looked at whether the claim was plausible.
+
+    Force-paper rather than reject, deliberately. A rejection leaves no record
+    and the question "is the model ever right when it disagrees this hard?"
+    stays permanently unanswerable -- the same dead end the hardcoded-MEDIUM
+    confidence bug created. A paper fill keeps the evidence flowing to the
+    graduation ladder while real money stays out of it.
+    """
+    div = abs((claude_prob or 0.0) - (market_prob or 0.0))
+    if not enabled or threshold <= 0 or div < threshold:
+        return CheckResult(name="extreme_divergence", passed=True,
+                           reason="", value=div)
+    return CheckResult(
+        name="extreme_divergence",
+        passed=False,
+        reason=(f"divergence {div:.0%} exceeds {threshold:.0%} — a "
+                f"disagreement this large with a priced market is more "
+                f"likely a model error than an edge; routed to paper"),
+        value=div,
+        force_paper=True,
     )
 
 

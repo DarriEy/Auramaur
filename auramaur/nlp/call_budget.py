@@ -88,6 +88,9 @@ def _conn() -> sqlite3.Connection:
         if "openai_calls" not in cols:
             conn.execute("ALTER TABLE llm_call_counter "
                          "ADD COLUMN openai_calls INTEGER NOT NULL DEFAULT 0")
+        if "gemini_calls" not in cols:
+            conn.execute("ALTER TABLE llm_call_counter "
+                         "ADD COLUMN gemini_calls INTEGER NOT NULL DEFAULT 0")
         # Preserve today's spend when upgrading from the historical row.
         # MAX makes this restart-safe: legacy state can never roll us back.
         from pathlib import Path
@@ -285,5 +288,59 @@ def record_openai_call() -> int:
             # uncounted paid call is worse than a missed one, so on failure
             # report the cap as reached rather than under-counting spend.
             log.warning("call_budget.openai_write_error", error=str(e))
+            _reset_conn()
+            return 1 << 30
+
+
+def gemini_calls_today() -> int:
+    """Gemini ANALYZER calls recorded today.
+
+    Third counter, and the one whose absence was expensive. The agent_trader
+    and term_structure Gemini arms carry their own caps; this counts the
+    shared analyzer route in `llm_router.call_gemini`, which had none.
+    Same fail-fast read policy as the others.
+    """
+    today = date.today().isoformat()
+    with _lock:
+        try:
+            row = _conn().execute(
+                "SELECT gemini_calls FROM llm_call_counter WHERE day = ?",
+                (today,),
+            ).fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+        except sqlite3.Error as e:
+            log.debug("call_budget.gemini_read_error", error=str(e))
+            _reset_conn()
+            return 0
+
+
+def record_gemini_call() -> int:
+    """Count one Gemini analyzer call (successful or not) — returns the total.
+
+    Counted before the reply is judged, for the same reason as OpenAI: the
+    API bills for the prompt whether or not the response is usable, so
+    counting only successes would let a failing arm spend unmetered.
+    """
+    today = date.today().isoformat()
+    with _lock:
+        try:
+            conn = _conn()
+            conn.execute(
+                """INSERT INTO llm_call_counter (day, gemini_calls)
+                   VALUES (?, 1)
+                   ON CONFLICT(day) DO UPDATE SET
+                       gemini_calls = gemini_calls + 1""",
+                (today,),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT gemini_calls FROM llm_call_counter WHERE day = ?",
+                (today,),
+            ).fetchone()
+            return int(row[0]) if row else 1
+        except sqlite3.Error as e:
+            # Same asymmetry as OpenAI: report the cap as reached rather than
+            # under-count real spend.
+            log.warning("call_budget.gemini_write_error", error=str(e))
             _reset_conn()
             return 1 << 30

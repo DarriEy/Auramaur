@@ -232,6 +232,15 @@ class RiskConfig(BaseModel):
     divergence_adverse_low: float = 0.05
     divergence_adverse_high: float = 0.20
     divergence_require_confidence: str = "HIGH"
+    # Upper guard on the SAME finding. The adverse band above is skeptical of
+    # moderate disagreement because the market is usually right there; that
+    # argument only strengthens as the gap widens, but the band's top edge was
+    # open, so a 15pt disagreement was challenged and a 79pt one was not.
+    # Entries at or above this divergence are routed to PAPER (not rejected —
+    # the record is what tells us whether the model is ever right when it
+    # disagrees this hard). See checks.check_extreme_divergence.
+    extreme_divergence_enabled: bool = False
+    extreme_divergence_threshold: float = 0.50
     # Name-the-gap gate: an LLM signal whose probability diverges from the
     # market by >= min_divergence must carry a NAMED mispricing mechanism
     # (structural/behavioral/informational) from the post-hoc gap audit, or
@@ -1885,6 +1894,16 @@ class GeminiConfig(BaseModel):
     off_hours_utc: list[int] = Field(default_factory=lambda: [4, 5, 6, 7, 8, 9])
     # Switch to Gemini once Claude calls reach this fraction of the daily budget.
     claude_budget_threshold: float = 0.8
+    # Daily ceiling on ANALYZER calls through this route. This path is not the
+    # agent_trader/term_structure arms -- those have their own caps and their
+    # own (trivial) spend. This one carries the analyzer's FULL volume, 150-293
+    # calls/day, for the whole off_hours window plus every budget-threshold
+    # switch, through a premium model. Until 2026-08-01 it had no cap, no
+    # counter and no log line, and quietly ran to ~$1000 while the instrumented
+    # arms showed $0.49. 0 disables the ceiling -- do not set it to 0.
+    daily_call_limit: int = 60
+    # $/1M tokens [input, output] for `model`. Update from the rate card.
+    price_per_mtok: list[float] = Field(default_factory=lambda: [2.0, 12.0])
 
 
 class LocalDistillerConfig(BaseModel):

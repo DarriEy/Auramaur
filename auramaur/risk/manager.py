@@ -16,6 +16,7 @@ from auramaur.risk.checks import (
     check_correlation,
     check_daily_loss,
     check_divergence_band,
+    check_extreme_divergence,
     check_drawdown_heat,
     check_implied_prob_bounds,
     check_kill_switch,
@@ -197,12 +198,27 @@ class RiskManager:
             market.category or "")
         cell = await self.graduation.decide(
             signal.strategy_source, cell_category)
+        # Extreme model-vs-market disagreement routes to paper. Evaluated HERE,
+        # before is_paper_entry, for two reasons: it must be able to restrict
+        # that flag, and several checks below are scoped by it (the adverse
+        # divergence band is live-only), so deciding it first keeps them
+        # consistent with where the entry is actually going.
+        extreme_div = await check_extreme_divergence(
+            signal.claude_prob, signal.market_prob,
+            rc.extreme_divergence_enabled, rc.extreme_divergence_threshold)
+        if extreme_div.force_paper:
+            log.warning(
+                "risk.extreme_divergence_paper", market_id=signal.market_id,
+                strategy=signal.strategy_source, divergence=extreme_div.value,
+                threshold=rc.extreme_divergence_threshold,
+                model_prob=signal.claude_prob, market_prob=signal.market_prob)
         is_paper_entry = (
             not self.settings.is_live
             or self.live_entries_blocked  # operational preflight BLOCK
             or self._paper_forced_strategy(signal.strategy_source)
             or cell.force_paper
             or force_paper  # caller-declared, restriction-only
+            or extreme_div.force_paper
         )
 
         # Correlation, MODE-SCOPED. A paper entry adds NO real exposure, so it must
