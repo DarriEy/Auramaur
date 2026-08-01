@@ -10,13 +10,75 @@ instead of silently trusted.
 
 from __future__ import annotations
 
+from datetime import date
+
 from rich.console import Group
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
 
-async def gather_ledger_report(db, *, is_paper: bool) -> dict:
+def risk_free_benchmark(*, net_pnl: float, first_at, last_at,
+                        settings=None) -> dict:
+    """What the same capital would have earned doing nothing.
+
+    Every graduation and profitability judgement in this system was scored
+    against ZERO until 2026-08-01, which flatters any strategy that merely
+    avoids losing money. Idle capital in the same account earns the risk-free
+    rate for no work and no drawdown, so that is the honest hurdle.
+
+    Returns a dict with `available=False` when the span or the book size is
+    unknown. `book_capital_usd` defaults to 0 precisely so this stays silent
+    rather than dividing by a guessed denominator — a wrong book size would
+    produce a confidently wrong verdict, which is worse than no verdict.
+    """
+    out = {"available": False, "net_pnl": net_pnl}
+    if settings is None:
+        try:
+            from config.settings import Settings
+            settings = Settings()
+        except Exception:
+            return out
+    cfg = getattr(settings, "benchmark", None)
+    if cfg is None:
+        return out
+
+    def _day(v):
+        try:
+            return date.fromisoformat(str(v)[:10])
+        except Exception:
+            return None
+
+    d0, d1 = _day(first_at), _day(last_at)
+    if d0 is None or d1 is None:
+        return out
+    days = (d1 - d0).days
+    if days < 1:
+        # Under a day of record, annualising multiplies noise by ~365.
+        return out
+
+    annualised = net_pnl * 365.0 / days
+    out.update({"days": days, "first_at": str(first_at)[:10],
+                "last_at": str(last_at)[:10], "annualised": annualised,
+                "rate": float(cfg.risk_free_annual_rate)})
+    capital = float(cfg.book_capital_usd or 0.0)
+    if capital <= 0:
+        # Annualised dollars are still meaningful; the percentage is not.
+        out["available"] = True
+        return out
+    rf_dollars = capital * float(cfg.risk_free_annual_rate)
+    out.update({
+        "available": True, "capital": capital,
+        "return_pct": 100.0 * annualised / capital,
+        "rf_dollars": rf_dollars,
+        "excess_dollars": annualised - rf_dollars,
+        "excess_pct": 100.0 * annualised / capital
+        - 100.0 * float(cfg.risk_free_annual_rate),
+    })
+    return out
+
+
+async def gather_ledger_report(db, *, is_paper: bool, settings=None) -> dict:
     flag = 1 if is_paper else 0
 
     async def _group(dim: str) -> list[dict]:
@@ -49,6 +111,13 @@ async def gather_ledger_report(db, *, is_paper: bool) -> dict:
         (flag,),
     )
 
+    # Span of the record, for annualising against the risk-free hurdle.
+    span = await db.fetchone(
+        """SELECT MIN(realized_at) AS first_at, MAX(realized_at) AS last_at
+           FROM pnl_ledger WHERE is_paper = ?""",
+        (flag,),
+    )
+
     # Reconciliation vs the legacy accountings (live-scoped like they are):
     # cost_basis.realized_pnl books sells + settlements; the ledger should
     # match its mode-scoped total. resolution_pnl is whole-market (its
@@ -64,6 +133,13 @@ async def gather_ledger_report(db, *, is_paper: bool) -> dict:
 
     return {
         "is_paper": is_paper,
+        "benchmark": risk_free_benchmark(
+            net_pnl=float((total["pnl"] if total else 0) or 0)
+            - float((total["fees"] if total else 0) or 0),
+            first_at=(span["first_at"] if span else None),
+            last_at=(span["last_at"] if span else None),
+            settings=settings,
+        ),
         "total": dict(total) if total else {"n": 0, "pnl": 0.0, "fees": 0.0, "wins": 0},
         "by_venue": await _group("venue"),
         "by_strategy": await _group("strategy_source"),
@@ -109,6 +185,36 @@ def render_ledger_report(state: dict) -> Panel:
     head.append(f"{n} realization events, {win:.0f}% wins, ")
     head.append(f"fees ${float(tot['fees'] or 0):,.2f}, net ")
     head.append(_pnl_text(float(tot["pnl"] or 0)))
+
+    bench = state.get("benchmark") or {}
+    if bench.get("available"):
+        head.append("\n")
+        # "net of fees" stated explicitly: the header's `net` above is
+        # SUM(pnl) with fees broken out separately, while this annualises
+        # SUM(pnl - fees) — the same figure graduation judges cells on. Same
+        # word, two meanings, so name which one this is.
+        head.append(
+            f"\n{bench['days']}d of record ({bench['first_at']} → "
+            f"{bench['last_at']}), net of fees ")
+        head.append(_pnl_text(bench["net_pnl"]))
+        head.append(" → annualised ")
+        head.append(_pnl_text(bench["annualised"]))
+        if "return_pct" in bench:
+            rf = bench["rate"] * 100.0
+            excess = bench["excess_pct"]
+            head.append(f"  =  {bench['return_pct']:+.2f}%/yr on "
+                        f"${bench['capital']:,.0f}")
+            head.append("\nvs risk-free ")
+            head.append(f"{rf:.2f}%/yr", style="bold")
+            head.append(":  ")
+            # The whole point of the line: below zero means idle cash in the
+            # same account would have done better, for no work and no risk.
+            head.append(
+                f"{excess:+.2f}%/yr (${bench['excess_dollars']:+,.0f}/yr)",
+                style="bold green" if excess >= 0 else "bold red")
+            if excess < 0:
+                head.append(
+                    "  — behind cash", style="red")
 
     recon = Table(title="reconciliation", title_justify="left")
     recon.add_column("source")

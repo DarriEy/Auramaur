@@ -2078,6 +2078,28 @@ class MonitoringConfig(BaseModel):
     candidate_summary_retention_days: int = 90
 
 
+class BenchmarkConfig(BaseModel):
+    """The hurdle every strategy is actually competing against.
+
+    Until 2026-08-01 every graduation and profitability judgement in this
+    system was scored against ZERO. That is the wrong benchmark: capital
+    sitting in the same account earns the risk-free rate for no work, no
+    model, and no drawdown. Measured that day, the live book had returned
+    +0.96%/yr since 2026-04-08 against a ~4.5% cash rate — i.e. it was behind
+    cash by roughly $99/yr, a fact no report surfaced.
+    """
+
+    # Annualised risk-free rate the book is measured against. Roughly the
+    # T-bill / money-market rate available on idle balances.
+    risk_free_annual_rate: float = 0.045
+    # Total deployable capital across ALL venues, in USD. Operator-maintained:
+    # only Polymarket reports capital numerically in venue_balances, and the
+    # rest are mixed-currency, so this cannot be derived reliably. 0 disables
+    # the percentage comparison rather than inventing a denominator — a wrong
+    # book size would produce a confidently wrong verdict.
+    book_capital_usd: float = 0.0
+
+
 class Settings(BaseSettings):
     # API Keys
     anthropic_api_key_primary: str = Field(default="", repr=False, exclude=True)
@@ -2204,6 +2226,7 @@ class Settings(BaseSettings):
     hybrid: HybridConfig = Field(default_factory=lambda: HybridConfig(**_DEFAULTS.get("hybrid", {})))
     logging: LoggingConfig = Field(default_factory=lambda: LoggingConfig(**_DEFAULTS.get("logging", {})))
     monitoring: MonitoringConfig = Field(default_factory=lambda: MonitoringConfig(**_DEFAULTS.get("monitoring", {})))
+    benchmark: BenchmarkConfig = Field(default_factory=lambda: BenchmarkConfig(**_DEFAULTS.get("benchmark", {})))
 
     # Resolve .env to an absolute path anchored at the repo root so Settings
     # loads the same secrets regardless of the caller's CWD. A bare ".env"

@@ -1333,3 +1333,17 @@ cross_venue_arb:
   max_pairs_per_cycle: 2
   max_llm_calls_per_cycle: 8
   interval_seconds: 1200
+
+# The hurdle every strategy is actually competing against. Added 2026-08-01
+# after measuring that the live book returned +0.96%/yr since 2026-04-08
+# ($8.36 net over 474 realizations, 114 days) against a ~4.5% cash rate —
+# behind cash by roughly $99/yr, which no report surfaced because every
+# judgement in the system was scored against zero.
+benchmark:
+  risk_free_annual_rate: 0.045
+  # Total deployable capital across ALL venues, USD. Operator-maintained:
+  # only Polymarket reports capital numerically, and the venues are
+  # mixed-currency, so this cannot be derived. Measured 2026-08-01:
+  # Polymarket $1,180 equity + IBKR ~$795 + Kalshi $221 + Kraken ~$145.
+  # Set to 0 to suppress the percentage comparison rather than guess.
+  book_capital_usd: 2340.0
