@@ -884,17 +884,32 @@ def evidence_accrual(days: int):
         await db.connect()
         try:
             rows = await db.fetchall(
-                f"""SELECT strategy_source,
+                f"""WITH latest AS (
+                        SELECT strategy_source,
+                               MAX(holdout_starts_at) AS holdout_starts_at
+                          FROM strategy_experiments e
+                         WHERE registered_at = (SELECT MAX(registered_at)
+                                                  FROM strategy_experiments e2
+                                                 WHERE e2.strategy_source
+                                                       = e.strategy_source)
+                         GROUP BY strategy_source
+                    )
+                    SELECT d.strategy_source,
                            COUNT(*) AS decisions,
-                           SUM(filled = 1) AS filled,
-                           SUM(best_ask IS NOT NULL) AS with_book,
-                           SUM(filled = 1 AND fill_evidence IN
+                           SUM(d.filled = 1) AS filled,
+                           SUM(d.best_ask IS NOT NULL) AS with_book,
+                           SUM(d.filled = 1 AND d.fill_evidence IN
                                ({",".join("?" * len(credible))})) AS countable,
-                           SUM(is_holdout = 1) AS holdout,
-                           MAX(observed_at) AS last
-                      FROM decision_snapshots
-                     WHERE observed_at >= datetime('now', ?)
-                     GROUP BY strategy_source
+                           SUM(d.is_holdout = 1) AS holdout,
+                           MAX(l.holdout_starts_at) AS holdout_opens,
+                           MAX(l.holdout_starts_at) <= datetime('now')
+                               AS holdout_open_now,
+                           MAX(d.observed_at) AS last
+                      FROM decision_snapshots d
+                      LEFT JOIN latest l
+                             ON l.strategy_source = d.strategy_source
+                     WHERE d.observed_at >= datetime('now', ?)
+                     GROUP BY d.strategy_source
                      ORDER BY countable DESC, filled DESC""",
                 (*sorted(credible), f"-{int(days)} days"))
             if not rows:
@@ -903,7 +918,7 @@ def evidence_accrual(days: int):
             table = Table(title=f"countable evidence accrual — last {days}d",
                           expand=False)
             for c in ("strategy", "decisions", "filled", "book", "countable",
-                      "taker rate", "holdout", "last"):
+                      "taker rate", "holdout", "holdout opens", "last"):
                 table.add_column(c, justify="right")
             for r in rows:
                 filled = int(r["filled"] or 0)
@@ -911,11 +926,17 @@ def evidence_accrual(days: int):
                 rate = f"{countable / filled:.0%}" if filled else "—"
                 colour = ("green" if countable and countable == filled
                           else "yellow" if countable else "red")
+                if r["holdout_opens"] is None:
+                    opens = "[dim]—[/]"
+                elif r["holdout_open_now"]:
+                    opens = "[green]open[/]"
+                else:
+                    opens = f"[yellow]{str(r['holdout_opens'])[5:16]}[/]"
                 table.add_row(
                     str(r["strategy_source"])[:24], str(r["decisions"]),
                     str(filled), str(int(r["with_book"] or 0)),
                     f"[{colour}]{countable}[/]", rate,
-                    str(int(r["holdout"] or 0)), str(r["last"])[5:16])
+                    str(int(r["holdout"] or 0)), opens, str(r["last"])[5:16])
             console.print(table)
             console.print(
                 "  [dim]book = best_ask captured (the fix). countable = filled "
@@ -923,7 +944,10 @@ def evidence_accrual(days: int):
                 "fills that CROSSED; a resting maker fill is correctly "
                 "uncountable. holdout = decisions inside the scored window — "
                 "everything before holdout_starts_at is permanently "
-                "uncountable however good it is.[/]")
+                "uncountable however good it is. holdout opens = the LATEST "
+                "version's clock: ANY change to the strategy's frozen config "
+                "(or the shared risk keys) re-versions it and restarts the "
+                "14-day warmup, discarding accrued evidence.[/]")
         finally:
             await db.close()
     asyncio.run(_run())
