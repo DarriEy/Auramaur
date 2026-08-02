@@ -75,6 +75,39 @@ _ENTRY_STRATEGY_SQL = """COALESCE(
 )"""
 
 
+# Settlement-size sanity bound. A settlement realizes tokens the position
+# tables say we hold — but those tables are not append-only truth: the
+# 2026-07-23/24 all-paper window let instant-filled MM quote inventory (no
+# trades/fills ancestry, blended ~mid price) persist into `portfolio`, and
+# each such row settled into the cell of the earliest REAL entrant on the
+# market (280 tokens booked against a 13.7-token entry: -$138.10 into
+# term_structure's record). A named strategy is therefore only credited when
+# the settled quantity is explainable by that mode's actually-placed BUYs;
+# anything larger books to `phantom_unattributed` so a per-cell record can
+# never again be moved by inventory nobody ordered. The bound is deliberately
+# loose (stacked entries, partial exits, rounding all fit under 2x + 5) —
+# the incident class overshoots by 5-20x.
+_SETTLEMENT_QTY_MULT = 2.0
+_SETTLEMENT_QTY_SLACK = 5.0
+PHANTOM_STRATEGY = "phantom_unattributed"
+
+
+async def _settlement_qty_explained(
+    db: Database, market_id: str, qty: float, is_paper: bool,
+) -> bool:
+    """True when ``qty`` is coverable by this mode's placed (non-cancelled)
+    BUY trades on the market. Order size bounds fill size from above, so a
+    pending/partial order only ever loosens the bound — safe direction."""
+    row = await db.fetchone(
+        "SELECT COALESCE(SUM(size), 0) AS bought FROM trades "
+        "WHERE market_id = ? AND side = 'BUY' AND is_paper = ? "
+        "AND status NOT IN ('cancelled', 'rejected')",
+        (market_id, 1 if is_paper else 0),
+    )
+    bought = float(row["bought"]) if row else 0.0
+    return qty <= bought * _SETTLEMENT_QTY_MULT + _SETTLEMENT_QTY_SLACK
+
+
 def _looks_like_kraken_pair(market_id: str) -> bool:
     return (
         market_id.isupper()
@@ -155,6 +188,14 @@ async def record_ledger_event(
     try:
         venue, category, strategy = await _market_context(
             db, market_id, token=token, is_paper=is_paper)
+        if kind == "settlement" and strategy and not await _settlement_qty_explained(
+                db, market_id, qty, is_paper):
+            log.warning(
+                "ledger.phantom_settlement_quarantined",
+                market_id=market_id, qty=round(qty, 2),
+                displaced_strategy=strategy, is_paper=is_paper,
+            )
+            strategy = PHANTOM_STRATEGY
         if realized_at is None:
             await db.execute(
                 """INSERT OR IGNORE INTO pnl_ledger
