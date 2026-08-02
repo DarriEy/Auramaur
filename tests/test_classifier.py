@@ -139,6 +139,45 @@ def test_unmarked_governance_defaults_us():
     assert classify_market("Who will win the presidential election?") == "politics_us"
 
 
+def test_gubernatorial_elections_are_politics_us():
+    """The Kalshi 2026-midterm wave (2026-08-02) arrived phrased
+    '...United States gubernatorial elections' and classified 'other' — the
+    live-excluded fail-open bucket — because 'gubernatorial' was unlisted
+    and the plural 'elections' slips the \\belection\\b word boundary."""
+    assert classify_market(
+        "Will Wisconsin have the smallest margin of victory in 2026 "
+        "United States gubernatorial elections?"
+    ) == "politics_us"
+    assert classify_market(
+        "Will the Republicans sweep the 2026 midterms?") == "politics_us"
+
+
+def test_new_mexico_is_not_the_country_mexico():
+    """The bare 'mexico' country marker filed the New Mexico governor race
+    as politics_intl; the lookbehind pattern keeps the country and excludes
+    the state — and the country must still classify intl."""
+    assert classify_market(
+        "Will New Mexico have the smallest margin of victory in 2026 "
+        "United States gubernatorial elections?"
+    ) == "politics_us"
+    assert classify_market(
+        "Will Mexico hold a presidential election in 2030?"
+    ) == "politics_intl"
+    assert classify_market(
+        "Will the Mexican peso strengthen after the election?"
+    ) == "politics_intl"
+
+
+def test_special_election_is_us_byelection_is_intl():
+    """'special election' is the US counterpart of the Commonwealth
+    'by-election' marker — the pair must route to opposite buckets."""
+    assert classify_market(
+        "Will Democrats win the Texas special election?") == "politics_us"
+    assert classify_market(
+        "Will Andy Burnham win the 2026 Makerfield by-election?"
+    ) == "politics_intl"
+
+
 def test_commodity_not_politics():
     """A commodities/price market must not land in any politics bucket."""
     assert classify_market("Will WTI Crude Oil close above $88 on Friday?") not in (

@@ -124,6 +124,13 @@ CATEGORY_KEYWORDS: dict[str, list[str]] = {
 POLITICS_US_KEYWORDS: list[str] = [
     "congress", "senate", "democrat", "republican", "biden", "trump",
     "gop", "white house", "governor", "midterm", "vance", "scotus",
+    # 2026-08-02: the Kalshi 2026-midterm wave arrived phrased "...2026
+    # United States gubernatorial elections" and landed in 'other' — the
+    # live-excluded fail-open bucket — three months before the election.
+    # "gubernatorial" is US-only phrasing; "midterms" is the plural the
+    # word-boundary compile of "midterm" cannot reach; "special election"
+    # is the US counterpart of the Commonwealth "by-election" marker below.
+    "gubernatorial", "midterms", "special election",
 ]
 POLITICS_US_PATTERNS: list[str] = [
     r"\bhouse (seat|race|majority)\b", r"\bcontrol (of )?the house\b",
@@ -132,7 +139,7 @@ POLITICS_US_PATTERNS: list[str] = [
 POLITICS_INTL_KEYWORDS: list[str] = [
     "ukraine", "russia", "china", "eu", "nato", "war", "un", "geopoliti",
     "france", "french", "germany", "german", "uk", "britain", "british",
-    "canada", "canadian", "mexico", "mexican", "brazil", "brazilian",
+    "canada", "canadian", "mexican", "brazil", "brazilian",
     "india", "indian", "japan", "japanese", "israel", "israeli",
     "iran", "iranian", "venezuela", "argentina", "bolivia", "bolivian",
     "poland", "polish", "italy", "italian", "spain", "spanish",
@@ -152,6 +159,13 @@ POLITICS_INTL_KEYWORDS: list[str] = [
     "by-election", "alberta", "quebec", "ontario",
     "scotland", "scottish", "wales", "welsh", "catalonia", "catalan",
 ]
+# Patterns for country markers a bare keyword gets wrong. "mexico" as a
+# keyword filed the NEW MEXICO governor race as politics_intl (2026-08-02);
+# the lookbehind keeps the country while excluding the US state. "mexican"
+# stays a plain keyword above.
+POLITICS_INTL_PATTERNS: list[str] = [
+    r"(?<!new )\bmexico\b",
+]
 # "primary" is intentionally absent: description boilerplate ("primary
 # listing", "primary market") filed SpaceX-IPO and tennis markets as
 # politics_us. Election-primary markets always carry a party/office marker
@@ -159,6 +173,10 @@ POLITICS_INTL_KEYWORDS: list[str] = [
 POLITICS_GOVERNANCE_KEYWORDS: list[str] = [
     "president", "presidential", "election", "vote", "parliament",
     "prime minister", "referendum", "chancellor", "coalition",
+    # 2026-08-02: keywords compile with word boundaries, so "election" can
+    # never match "electionS" — "...gubernatorial elections" carried zero
+    # governance score. Plural listed explicitly, like "midterms" above.
+    "elections",
 ]
 
 
@@ -212,7 +230,7 @@ _CATEGORY_RES: dict[str, list[re.Pattern]] = {
 _MATCHUP_RE = re.compile(r"\b[\w.'-]+ vs\.? [\w.'-]+", re.IGNORECASE)
 
 _POLITICS_US_RE = _compile_many(POLITICS_US_KEYWORDS, POLITICS_US_PATTERNS)
-_POLITICS_INTL_RE = _compile_many(POLITICS_INTL_KEYWORDS)
+_POLITICS_INTL_RE = _compile_many(POLITICS_INTL_KEYWORDS, POLITICS_INTL_PATTERNS)
 _POLITICS_GOV_RE = _compile_many(POLITICS_GOVERNANCE_KEYWORDS)
 
 
