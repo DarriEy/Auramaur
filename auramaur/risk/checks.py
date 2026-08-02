@@ -399,6 +399,56 @@ async def check_time_to_resolution(
 
 
 # ---------------------------------------------------------------------------
+# Long-settlement bucket
+# ---------------------------------------------------------------------------
+
+async def check_long_settlement_bucket(
+    hours_remaining: float,
+    horizon_days: float,
+    bucket_pct: float,
+    long_dated_cost: float,
+    proposed_stake: float,
+    venue_bankroll: float,
+    applies: bool = True,
+) -> CheckResult:
+    """Cap the share of a venue's bankroll parked in far-settlement markets.
+
+    Far-dated inventory is where this book's measured edge is largest, but
+    every cap-sized multi-year LIVE entry locks bankroll until settlement or
+    exit — a venue that fills its slots with them stops trading (and
+    learning) entirely, the same silencing the category and discovery fixes
+    of 2026-08-02 removed, rebuilt out of conviction. Long-dated live cost
+    basis is bounded to *bucket_pct* of the venue bankroll (venue cash +
+    venue live cost basis).
+
+    Restriction-only: near-dated entries pass untouched however full the
+    bucket is, paper entries never consult it, and exits (which drain the
+    bucket) do not pass through evaluate(). An unknown end_date arrives as
+    hours_remaining=inf and counts as long-dated — a horizon we cannot see
+    is not evidence it is short. bucket_pct=0 or horizon_days=0 disables.
+    """
+    name = "long_settlement_bucket"
+    if (not applies or bucket_pct <= 0 or horizon_days <= 0
+            or hours_remaining <= horizon_days * 24.0):
+        return CheckResult(name=name, passed=True, reason="", value=long_dated_cost)
+    cap = bucket_pct / 100.0 * max(venue_bankroll, 0.0)
+    projected = long_dated_cost + max(proposed_stake, 0.0)
+    over = projected > cap
+    return CheckResult(
+        name=name,
+        passed=not over,
+        reason=(
+            f"long-settlement bucket ${projected:.2f} would exceed "
+            f"${cap:.2f} cap ({bucket_pct:.0f}% of venue bankroll "
+            f"${venue_bankroll:.2f})"
+            if over
+            else ""
+        ),
+        value=projected,
+    )
+
+
+# ---------------------------------------------------------------------------
 # 15. Second opinion divergence
 # ---------------------------------------------------------------------------
 

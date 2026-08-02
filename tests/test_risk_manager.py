@@ -147,7 +147,8 @@ async def test_evaluate_passing_case(mock_kill):
     assert decision.approved is True
     assert decision.position_size > 0
     # 15 pre + mispricing_named + blocked_category + max_stake
-    assert len(decision.checks) == 18
+    # + long_settlement_bucket (2026-08-02)
+    assert len(decision.checks) == 19
     assert all(c.passed for c in decision.checks)
 
 
@@ -795,3 +796,63 @@ async def test_ladder_exemption_does_not_disable_category_containment(mock_kill)
     econ = _make_market(category="economics")   # allowed globally, not for llm
     assert (await manager.evaluate(
         signal, econ, available_cash=500.0)).approved is False
+
+
+# ---------------------------------------------------------------------------
+# Long-settlement bucket (2026-08-02): far-dated edge must not silence a
+# venue by capital exhaustion — the check caps long-dated LIVE cost basis
+# at a share of the venue bankroll. Restriction-only by construction.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_long_settlement_bucket_blocks_only_over_the_cap():
+    from auramaur.risk.checks import check_long_settlement_bucket
+
+    two_years = 2 * 365 * 24.0
+    # Bankroll 800, cap 50% = 400. Existing long-dated 320.
+    ok = await check_long_settlement_bucket(
+        two_years, 365, 50.0, 320.0, 30.0, 800.0)
+    assert ok.passed  # 350 <= 400
+
+    over = await check_long_settlement_bucket(
+        two_years, 365, 50.0, 390.0, 30.0, 800.0)
+    assert not over.passed  # 420 > 400
+    assert "long-settlement bucket" in over.reason
+
+
+@pytest.mark.asyncio
+async def test_long_settlement_bucket_ignores_near_dated_and_paper():
+    from auramaur.risk.checks import check_long_settlement_bucket
+
+    # Near-dated entry passes however full the bucket is.
+    near = await check_long_settlement_bucket(
+        30 * 24.0, 365, 50.0, 999.0, 30.0, 100.0)
+    assert near.passed
+    # applies=False is how the manager scopes paper entries (and lookup
+    # failures) out — the check must fail open.
+    paper = await check_long_settlement_bucket(
+        2 * 365 * 24.0, 365, 50.0, 999.0, 30.0, 100.0, applies=False)
+    assert paper.passed
+
+
+@pytest.mark.asyncio
+async def test_long_settlement_bucket_unknown_horizon_counts_as_long():
+    """A missing end_date arrives as hours_remaining=inf: a horizon we
+    cannot see is not evidence it is short."""
+    from auramaur.risk.checks import check_long_settlement_bucket
+
+    unknown = await check_long_settlement_bucket(
+        float("inf"), 365, 50.0, 390.0, 30.0, 800.0)
+    assert not unknown.passed
+
+
+@pytest.mark.asyncio
+async def test_long_settlement_bucket_disabled_by_zero_knobs():
+    from auramaur.risk.checks import check_long_settlement_bucket
+
+    two_years = 2 * 365 * 24.0
+    assert (await check_long_settlement_bucket(
+        two_years, 365, 0.0, 999.0, 30.0, 100.0)).passed
+    assert (await check_long_settlement_bucket(
+        two_years, 0, 50.0, 999.0, 30.0, 100.0)).passed

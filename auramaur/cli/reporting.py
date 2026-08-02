@@ -862,32 +862,46 @@ def _display_comparison(comparison: dict):
 # Pre-registered operator checks. SOURCE OF TRUTH is the dated comment on
 # each decision in runtime/config/defaults.local.yaml — update BOTH places
 # when a decision is made or retired. Each row:
-# (strategy_source, venue, category, epoch, settle_bar, usd_floor) —
-# the operator pre-committed to re-examine the cell when live settlements
-# since epoch reach settle_bar OR cumulative live realized PnL reaches
-# usd_floor, whichever comes first.
+# (strategy_source, venue, category, epoch, settle_bar, usd_floor,
+#  review_by) — the operator pre-committed to re-examine the cell when live
+# settlements since epoch reach settle_bar OR cumulative live realized PnL
+# reaches usd_floor, whichever comes first. review_by (nullable ISO date)
+# is a CALENDAR checkpoint for cells whose entries settle too far out for
+# the settlement counter to ever adjudicate them: the llm_kalshi lane's
+# first live entries (2026-08-02) settle in 2028-29, so its cells get a
+# 90-day mark-to-market + exit-realized review instead of waiting years.
 _PREREGISTERED_CHECKS = (
     # llm exemption + bounded live categories (2026-07-28, widened 07-29)
-    ("llm", "polymarket", "politics_us", "2026-07-28", 30, -50.0),
-    ("llm", "polymarket", "politics_intl", "2026-07-29", 25, -40.0),
-    ("llm", "polymarket", "crypto", "2026-07-29", 25, -40.0),
-    ("llm", "polymarket", "legal", "2026-07-29", 15, -25.0),
-    # llm_kalshi lane (split 2026-07-28, widened 2026-08-02)
-    ("llm_kalshi", "kalshi", "politics_us", "2026-07-28", 30, -50.0),
-    ("llm_kalshi", "kalshi", "politics_intl", "2026-08-02", 25, -40.0),
-    ("llm_kalshi", "kalshi", "science", "2026-08-02", 15, -25.0),
+    ("llm", "polymarket", "politics_us", "2026-07-28", 30, -50.0, None),
+    ("llm", "polymarket", "politics_intl", "2026-07-29", 25, -40.0, None),
+    ("llm", "polymarket", "crypto", "2026-07-29", 25, -40.0, None),
+    ("llm", "polymarket", "legal", "2026-07-29", 15, -25.0, None),
+    # llm_kalshi lane (split 2026-07-28, widened 2026-08-02); calendar
+    # checkpoint 90d after the widening that produced the first entries
+    ("llm_kalshi", "kalshi", "politics_us", "2026-07-28", 30, -50.0,
+     "2026-10-31"),
+    ("llm_kalshi", "kalshi", "politics_intl", "2026-08-02", 25, -40.0,
+     "2026-10-31"),
+    ("llm_kalshi", "kalshi", "science", "2026-08-02", 15, -25.0,
+     "2026-10-31"),
 )
 
 
 def preregistered_check_status(settled: int, realized: float,
-                               settle_bar: int, usd_floor: float) -> str:
-    """'' | 'NEAR' | 'FIRED'. FIRED means the pre-committed decision is due.
+                               settle_bar: int, usd_floor: float,
+                               review_due: bool = False) -> str:
+    """'' | 'NEAR' | 'REVIEW' | 'FIRED'.
 
-    NEAR (>= 80% of either trigger) exists so the re-examination can be
-    prepared before the bar is crossed, not discovered after.
+    FIRED means a pre-committed trigger crossed; REVIEW means the calendar
+    checkpoint arrived (judge the cell on marks + exit realizations — its
+    settlements are years out); NEAR (>= 80% of either numeric trigger)
+    exists so the re-examination can be prepared before the bar is crossed,
+    not discovered after. FIRED outranks REVIEW outranks NEAR.
     """
     if settled >= settle_bar or realized <= usd_floor:
         return "FIRED"
+    if review_due:
+        return "REVIEW"
     if settled >= 0.8 * settle_bar or realized <= 0.8 * usd_floor:
         return "NEAR"
     return ""
@@ -909,12 +923,16 @@ def preregistered_checks():
         db = ReadOnlyDatabase()
         await db.connect()
         try:
+            from datetime import date
+
+            today = date.today().isoformat()
             table = Table(title="pre-registered checks — live cells",
                           expand=False)
             for c in ("cell", "epoch", "settled", "bar", "realized $",
-                      "floor $", "status"):
+                      "floor $", "review by", "status"):
                 table.add_column(c, justify="right")
-            for src, venue, cat, epoch, bar, floor in _PREREGISTERED_CHECKS:
+            for (src, venue, cat, epoch, bar, floor,
+                 review_by) in _PREREGISTERED_CHECKS:
                 row = await db.fetchone(
                     """SELECT SUM(CASE WHEN kind='settlement' THEN 1 ELSE 0
                                   END) AS settled,
@@ -926,12 +944,13 @@ def preregistered_checks():
                 settled = int(row["settled"] or 0)
                 realized = float(row["realized"] or 0.0)
                 status = preregistered_check_status(
-                    settled, realized, bar, floor)
-                colour = {"FIRED": "red", "NEAR": "yellow"}.get(
-                    status, "green")
+                    settled, realized, bar, floor,
+                    review_due=bool(review_by) and today >= review_by)
+                colour = {"FIRED": "red", "REVIEW": "magenta",
+                          "NEAR": "yellow"}.get(status, "green")
                 table.add_row(
                     f"{src} × {cat}", epoch, str(settled), str(bar),
-                    f"{realized:+.2f}", f"{floor:+.0f}",
+                    f"{realized:+.2f}", f"{floor:+.0f}", review_by or "—",
                     f"[{colour}]{status or 'ok'}[/]")
             console.print(table)
             console.print(
@@ -939,9 +958,12 @@ def preregistered_checks():
                 "epoch; realized $ sums ALL live realized pnl (early exits "
                 "included — a loss counts however it was taken). FIRED = the "
                 "pre-committed re-examination is due, not an automatic "
-                "demotion. Triggers' source of truth: the dated comments in "
-                "runtime/config/defaults.local.yaml — update both when a "
-                "decision changes.[/]")
+                "demotion. REVIEW = the calendar checkpoint arrived: judge "
+                "the cell on mark-to-market + exit realizations (its entries "
+                "settle years out; marks on thin books are soft — treat as "
+                "direction, not verdict). Triggers' source of truth: the "
+                "dated comments in runtime/config/defaults.local.yaml — "
+                "update both when a decision changes.[/]")
         finally:
             await db.close()
     asyncio.run(_run())

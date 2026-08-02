@@ -223,6 +223,19 @@ class RiskConfig(BaseModel):
     category_exposure_cap_pct: float = 30.0
     time_to_resolution_min_hours: int = 24
     time_to_resolution_max_days: int = 0  # 0 = no ceiling
+    # Long-settlement bucket (2026-08-02). Far-dated inventory is where the
+    # book's measured edge is largest (kalshi far-tier divergences ran 8-13%
+    # the day this was added, vs 0.2-2% on near-dated economics) — but every
+    # cap-sized multi-year LIVE entry locks bankroll until settlement or
+    # exit, and at the time of writing 70% of the kalshi live book ($319 of
+    # $457 cost basis) was already parked beyond one year. This caps
+    # long-dated live cost basis at a share of the venue bankroll (venue
+    # cash + venue live cost basis) so conviction about far-dated edge can
+    # never again silence a venue by capital exhaustion. Restriction-only:
+    # near-dated and paper entries are untouched; exits drain the bucket.
+    # A missing end_date counts as long-dated. Either knob at 0 disables.
+    long_settlement_horizon_days: int = 365
+    long_settlement_bucket_pct: float = 50.0
     max_correlated_positions: int = 5
     second_opinion_divergence_max: float = 0.15
     # Divergence-aware filter (LLM signal). Edge-gap analysis found trades where

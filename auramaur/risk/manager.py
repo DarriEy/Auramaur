@@ -20,6 +20,7 @@ from auramaur.risk.checks import (
     check_drawdown_heat,
     check_implied_prob_bounds,
     check_kill_switch,
+    check_long_settlement_bucket,
     check_max_drawdown,
     check_max_positions,
     check_max_spread,
@@ -413,9 +414,47 @@ class RiskManager:
 
         # Run max_stake check on the actual computed position size
         stake_check = await check_max_stake(position_size, max_stake)
-        checks = pre_checks + [stake_check]
 
-        all_passed = pre_passed and stake_check.passed
+        # Long-settlement bucket, post-sizing (it needs the actual stake) and
+        # LIVE-only: a paper entry locks no real capital. The DB lookup runs
+        # only when the candidate itself is long-dated; a lookup failure
+        # fails OPEN with a warning — this is a concentration bound, not a
+        # safety gate, and a broken count must not silence the venue.
+        bucket_applies = (
+            not is_paper_entry and position_size > 0
+            and rc.long_settlement_bucket_pct > 0
+            and rc.long_settlement_horizon_days > 0
+            and hours_remaining > rc.long_settlement_horizon_days * 24.0
+        )
+        long_dated_cost = venue_bankroll = 0.0
+        if bucket_applies:
+            try:
+                venue = (market.exchange or "polymarket").lower()
+                row = await self.db.fetchone(
+                    """SELECT
+                           COALESCE(SUM(p.size * p.avg_price), 0) AS total_cost,
+                           COALESCE(SUM(CASE WHEN m.end_date IS NULL
+                                    OR m.end_date > datetime('now', ?)
+                                THEN p.size * p.avg_price ELSE 0 END), 0)
+                               AS long_cost
+                       FROM portfolio p
+                       LEFT JOIN markets m ON m.id = p.market_id
+                       WHERE p.is_paper = 0 AND p.size > 0 AND p.exchange = ?""",
+                    (f"+{int(rc.long_settlement_horizon_days)} days", venue),
+                )
+                long_dated_cost = float(row["long_cost"] or 0.0)
+                venue_bankroll = float(row["total_cost"] or 0.0) + max(cash, 0.0)
+            except Exception as e:
+                log.warning("risk.long_bucket_lookup_failed", error=str(e))
+                bucket_applies = False
+        bucket_check = await check_long_settlement_bucket(
+            hours_remaining, rc.long_settlement_horizon_days,
+            rc.long_settlement_bucket_pct, long_dated_cost, position_size,
+            venue_bankroll, applies=bucket_applies,
+        )
+        checks = pre_checks + [stake_check, bucket_check]
+
+        all_passed = pre_passed and stake_check.passed and bucket_check.passed
         failed = [c for c in checks if not c.passed]
 
         reason = (

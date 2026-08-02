@@ -25,14 +25,28 @@ def test_status_warns_near_either_trigger():
     assert st(0, +25.0, 30, -50.0) == ""        # profit never warns
 
 
+def test_calendar_checkpoint_outranks_near_but_not_fired():
+    """A cell whose entries settle years out is adjudicated by the calendar
+    checkpoint, not the settlement counter — but a crossed numeric trigger
+    still outranks the calendar."""
+    st = preregistered_check_status
+    assert st(0, 0.0, 30, -50.0, review_due=True) == "REVIEW"
+    assert st(24, 0.0, 30, -50.0, review_due=True) == "REVIEW"   # beats NEAR
+    assert st(0, -50.0, 30, -50.0, review_due=True) == "FIRED"   # loses to FIRED
+    assert st(0, 0.0, 30, -50.0, review_due=False) == ""
+
+
 def test_registry_rows_are_well_formed():
-    """Epochs must parse, bars must be positive counts, floors negative
-    dollars — a malformed row would make its check silently uncheckable."""
+    """Epochs and review dates must parse, bars must be positive counts,
+    floors negative dollars — a malformed row would make its check silently
+    uncheckable."""
     from datetime import date
 
     assert _PREREGISTERED_CHECKS
-    for src, venue, cat, epoch, bar, floor in _PREREGISTERED_CHECKS:
+    for src, venue, cat, epoch, bar, floor, review_by in _PREREGISTERED_CHECKS:
         assert src and venue and cat
         date.fromisoformat(epoch)
         assert bar > 0
         assert floor < 0
+        if review_by is not None:
+            assert date.fromisoformat(review_by) > date.fromisoformat(epoch)
