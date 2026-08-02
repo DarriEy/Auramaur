@@ -859,6 +859,94 @@ def _display_comparison(comparison: dict):
     ))
 
 
+# Pre-registered operator checks. SOURCE OF TRUTH is the dated comment on
+# each decision in runtime/config/defaults.local.yaml — update BOTH places
+# when a decision is made or retired. Each row:
+# (strategy_source, venue, category, epoch, settle_bar, usd_floor) —
+# the operator pre-committed to re-examine the cell when live settlements
+# since epoch reach settle_bar OR cumulative live realized PnL reaches
+# usd_floor, whichever comes first.
+_PREREGISTERED_CHECKS: tuple[tuple[str, str, str, str, int, float], ...] = (
+    # llm exemption + bounded live categories (2026-07-28, widened 07-29)
+    ("llm", "polymarket", "politics_us", "2026-07-28", 30, -50.0),
+    ("llm", "polymarket", "politics_intl", "2026-07-29", 25, -40.0),
+    ("llm", "polymarket", "crypto", "2026-07-29", 25, -40.0),
+    ("llm", "polymarket", "legal", "2026-07-29", 15, -25.0),
+    # llm_kalshi lane (split 2026-07-28, widened 2026-08-02)
+    ("llm_kalshi", "kalshi", "politics_us", "2026-07-28", 30, -50.0),
+    ("llm_kalshi", "kalshi", "politics_intl", "2026-08-02", 25, -40.0),
+    ("llm_kalshi", "kalshi", "science", "2026-08-02", 15, -25.0),
+)
+
+
+def preregistered_check_status(settled: int, realized: float,
+                               settle_bar: int, usd_floor: float) -> str:
+    """'' | 'NEAR' | 'FIRED'. FIRED means the pre-committed decision is due.
+
+    NEAR (>= 80% of either trigger) exists so the re-examination can be
+    prepared before the bar is crossed, not discovered after.
+    """
+    if settled >= settle_bar or realized <= usd_floor:
+        return "FIRED"
+    if settled >= 0.8 * settle_bar or realized <= 0.8 * usd_floor:
+        return "NEAR"
+    return ""
+
+
+@main.command("preregistered-checks")
+def preregistered_checks():
+    """Where does each open pre-registered operator check stand?
+
+    Every operator promotion or category widening carries a dated
+    re-examine trigger in the runtime override (N settled entries or -$X
+    cumulative, whichever first). A trigger only works if someone counts;
+    this report is the counter. FIRED demotes nothing by itself — it means
+    the operator owes the cell the decision they pre-committed to.
+    """
+    async def _run():
+        from auramaur.web.db import ReadOnlyDatabase
+
+        db = ReadOnlyDatabase()
+        await db.connect()
+        try:
+            table = Table(title="pre-registered checks — live cells",
+                          expand=False)
+            for c in ("cell", "epoch", "settled", "bar", "realized $",
+                      "floor $", "status"):
+                table.add_column(c, justify="right")
+            for src, venue, cat, epoch, bar, floor in _PREREGISTERED_CHECKS:
+                row = await db.fetchone(
+                    """SELECT SUM(CASE WHEN kind='settlement' THEN 1 ELSE 0
+                                  END) AS settled,
+                              COALESCE(SUM(pnl), 0.0) AS realized
+                         FROM pnl_ledger
+                        WHERE strategy_source=? AND venue=? AND category=?
+                          AND is_paper=0 AND realized_at >= ?""",
+                    (src, venue, cat, epoch))
+                settled = int(row["settled"] or 0)
+                realized = float(row["realized"] or 0.0)
+                status = preregistered_check_status(
+                    settled, realized, bar, floor)
+                colour = {"FIRED": "red", "NEAR": "yellow"}.get(
+                    status, "green")
+                table.add_row(
+                    f"{src} × {cat}", epoch, str(settled), str(bar),
+                    f"{realized:+.2f}", f"{floor:+.0f}",
+                    f"[{colour}]{status or 'ok'}[/]")
+            console.print(table)
+            console.print(
+                "  [dim]settled counts live kind='settlement' rows since the "
+                "epoch; realized $ sums ALL live realized pnl (early exits "
+                "included — a loss counts however it was taken). FIRED = the "
+                "pre-committed re-examination is due, not an automatic "
+                "demotion. Triggers' source of truth: the dated comments in "
+                "runtime/config/defaults.local.yaml — update both when a "
+                "decision changes.[/]")
+        finally:
+            await db.close()
+    asyncio.run(_run())
+
+
 @main.command("evidence-accrual")
 @click.option("--days", default=14, show_default=True,
               help="Window for the recent-accrual columns.")
