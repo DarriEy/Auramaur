@@ -34,6 +34,8 @@ from auramaur.strategy.classifier import blocked_category_hit, ensure_category
 from auramaur.strategy.signals import taker_fee_rate
 
 if TYPE_CHECKING:
+    from config.settings import RiskConfig
+
     from auramaur.strategy.protocols import TradeCandidate
 
 def select_rotating_ranked(
@@ -51,6 +53,30 @@ def select_rotating_ranked(
             f"{rotation_slot}|{item[0].id}".encode()
         ).digest(),
     )[:limit]
+
+
+def live_allowed_categories(risk: RiskConfig, strategy_source: str) -> set[str] | None:
+    """Effective live-entry category allowlist for *strategy_source*.
+
+    Mirrors the gateway's category allowlist check (risk/manager.py): the
+    global allowlist, widened by allowed_categories_live_extra for this
+    source, then narrowed by live_categories_only — narrowing applies LAST,
+    so an extension can never widen around a restriction. Returns None for a
+    category-gate-exempt source, meaning no category filter applies at all.
+
+    Any drift from the gateway's arithmetic is fail-safe in one direction
+    only: a category admitted here but rejected there burns an analysis; a
+    category dropped here that the gateway would accept silences the lane.
+    The gateway remains the enforcement point.
+    """
+    if strategy_source in set(risk.category_gate_exempt_strategies):
+        return None
+    allowed = set(risk.allowed_categories_live) | set(
+        (risk.allowed_categories_live_extra or {}).get(strategy_source, []))
+    only = (risk.live_categories_only or {}).get(strategy_source)
+    if only:
+        allowed &= set(only)
+    return allowed
 
 
 log = structlog.get_logger()
@@ -177,8 +203,20 @@ class CycleOrchestrationMixin:
         # so analyzing them only burns LLM calls. The gateway remains the
         # enforcement point (this is a pure efficiency filter, like
         # _held_market_ids).
-        allowed_live = (set(self.settings.risk.allowed_categories_live)
-                        if self.settings.is_live else None)
+        #
+        # The filter must apply the PER-STRATEGY narrowing, not just the
+        # global allowlist. This engine's Kalshi lane (llm_kalshi) is bounded
+        # to politics_us via live_categories_only, but the global allowlist
+        # admits economics — so ranking spent every analysis slot on markets
+        # whose signals the gateway then rejected on category: measured
+        # 2026-07-19..08-01, 14 days of kalshi cycles analyzed ZERO
+        # politics_us markets. The source is derived from the engine's
+        # exchange, mirroring the venue split in analyze_market.
+        engine_source = ("llm_kalshi" if self.exchange_name == "kalshi"
+                         else "llm")
+        allowed_live = (
+            live_allowed_categories(self.settings.risk, engine_source)
+            if self.settings.is_live else None)
 
         for m in candidates:
             # Classify-before-block like the gateway: a market stored 'other'
