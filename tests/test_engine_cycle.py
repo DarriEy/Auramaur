@@ -173,6 +173,30 @@ async def test_augment_is_a_noop_without_the_windowed_fetch_and_on_error():
     assert await TradingEngine._augment_with_close_window(broken, base) == base
 
 
+def test_strategic_signals_carry_the_venue_lane_source():
+    """The 2026-07-28 venue split retagged analyze_market but missed the
+    strategic path: its Signal(...) fell back to the model default "llm",
+    whose live_venues_only is polymarket-only, so the gateway emptied the
+    allowlist and rejected every strategic kalshi entry regardless of
+    category (observed 2026-08-02) — a lane that could never fire. The
+    strategic construction must stamp the per-venue source and persist
+    that same source, never a literal."""
+    import inspect
+
+    from auramaur.strategy.engine_cycle import CycleOrchestrationMixin
+
+    src = inspect.getsource(CycleOrchestrationMixin._run_cycle_strategic)
+    construction = src[src.index("signal = Signal("):]
+    assert "strategy_source=" in construction[:900]
+    assert '"llm_kalshi"' in construction[:900]
+    # The signals INSERT must persist the signal's own source — a hardcoded
+    # "llm" literal in its parameters is exactly the misattribution this
+    # test pins down.
+    insert_region = src[src.index("INSERT INTO signals"):][:900]
+    assert '"llm"' not in insert_region
+    assert "signal.strategy_source)," in insert_region
+
+
 def test_run_cycle_prefilters_on_the_venue_lanes_own_allowlist():
     """run_cycle derives the engine's per-venue source (llm / llm_kalshi,
     same split analyze_market applies) and feeds it to the helper, so the

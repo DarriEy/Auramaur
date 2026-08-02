@@ -825,6 +825,14 @@ class CycleOrchestrationMixin:
             proposal = assessment.proposal
             side = OrderSide(proposal.side)
 
+            # Attribute the venue lane, mirroring analyze_market's split. The
+            # 2026-07-28 venue split retagged the legacy path but missed this
+            # one: Signal defaults strategy_source to "llm", whose
+            # live_venues_only is polymarket-only, so the gateway emptied the
+            # allowlist and rejected every strategic kalshi entry regardless
+            # of category (observed 2026-08-02: "category 'politics_us' is
+            # not allowed" on politics_us markets) — and the signals table
+            # misattributed the rows to "llm" besides.
             signal = Signal(
                 market_id=market.id,
                 market_question=market.question,
@@ -836,6 +844,9 @@ class CycleOrchestrationMixin:
                 divergence=batch_result.divergence,
                 evidence_summary=proposal.evidence_summary,
                 recommended_side=side,
+                strategy_source=("llm_kalshi"
+                                 if (market.exchange or "").lower() == "kalshi"
+                                 else "llm"),
             )
 
             from auramaur.monitoring.display import show_analysis
@@ -868,7 +879,7 @@ class CycleOrchestrationMixin:
                  signal.market_prob, signal.edge, signal.second_opinion_prob,
                  signal.divergence, signal.evidence_summary,
                  signal.recommended_side.value if signal.recommended_side else None,
-                 "llm"),
+                 signal.strategy_source),
             )
             await self.db.commit()
 

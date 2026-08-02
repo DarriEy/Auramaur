@@ -866,7 +866,7 @@ def _display_comparison(comparison: dict):
 # the operator pre-committed to re-examine the cell when live settlements
 # since epoch reach settle_bar OR cumulative live realized PnL reaches
 # usd_floor, whichever comes first.
-_PREREGISTERED_CHECKS: tuple[tuple[str, str, str, str, int, float], ...] = (
+_PREREGISTERED_CHECKS = (
     # llm exemption + bounded live categories (2026-07-28, widened 07-29)
     ("llm", "polymarket", "politics_us", "2026-07-28", 30, -50.0),
     ("llm", "polymarket", "politics_intl", "2026-07-29", 25, -40.0),
