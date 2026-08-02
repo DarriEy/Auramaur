@@ -28,6 +28,39 @@ from auramaur.exchange.protocols import ExchangeClient, MarketDiscovery
 _CLAIM_DIR = os.path.join(tempfile.gettempdir(), "auramaur_claims")
 os.makedirs(_CLAIM_DIR, exist_ok=True)
 
+# Close-window discovery tiers: (min_offset_s, max_offset_s, fetch_limit).
+# Contiguous, and jointly spanning exactly _is_junk_market's tradeable band
+# (2h .. 10y) so every analyzable horizon is represented in discovery. The
+# venue's /markets endpoint pages in close-time-DESCENDING order (measured
+# 2026-08-02), so a page covers only the FARTHEST slice of its window —
+# limits are sized from measured band populations (3y..6y alone held 969
+# open markets; 1000 on the widest tier reaches ~2030, which includes the
+# multi-year political inventory the events scan never surfaces). Deliberately
+# module constants, not config: llm/llm_kalshi freeze the nlp section into
+# strategy_version, so a new config knob would restart their holdout clocks.
+_CLOSE_WINDOW_TIERS: tuple[tuple[int, int, int], ...] = (
+    (2 * 3600, 14 * 86400, 200),
+    (14 * 86400, 180 * 86400, 400),
+    (180 * 86400, 3 * 365 * 86400, 400),
+    (3 * 365 * 86400, 10 * 365 * 86400, 1000),
+)
+
+
+def merge_markets_by_id(base: list[Market], extra: list[Market]) -> list[Market]:
+    """Append markets from *extra* whose id is not already in *base*.
+
+    First occurrence wins: both feeds are freshly parsed from the venue, so
+    the copies are equivalent — dedup only prevents double rows in the
+    scan's write burst and double counts in the cycle funnel.
+    """
+    seen = {m.id for m in base}
+    out = list(base)
+    for m in extra:
+        if m.id not in seen:
+            seen.add(m.id)
+            out.append(m)
+    return out
+
 
 def _lock_claim_file(fh) -> None:
     """Acquire a non-blocking advisory lock on every supported OS."""
@@ -384,9 +417,50 @@ class TradingEngine(CycleOrchestrationMixin):
         except Exception:
             return set()
 
+    async def _augment_with_close_window(self, markets: list[Market]) -> list[Market]:
+        """Blend one horizon-tiered close-window slice into the generic scan.
+
+        Kalshi's generic /events discovery returns its default order, which
+        surfaces ultra-long-dated novelty markets (median ~18y) and
+        structurally excludes near-dated tradeable inventory — the same bias
+        that starved informed_flow and the resolution lens, each of which
+        already fetches its own close-window slice. Measured 2026-08-02: the
+        kalshi engine's entire analyzable politics_us live universe (the
+        three KXNEXTSPEAKER-31 markets) had not entered the 300-market scan
+        since June. One tier per cycle bounds the markets/price_history
+        write burst; a horizon that is weeks-to-years out tolerates hours of
+        discovery staleness. No-op for venues whose discovery lacks the
+        windowed fetch (Polymarket's Gamma scan orders by volume and has no
+        such bias).
+        """
+        fetch = getattr(self.discovery, "get_markets_by_close_window", None)
+        if fetch is None:
+            return markets
+        tier_idx = getattr(self, "_close_window_tier", 0)
+        self._close_window_tier = (tier_idx + 1) % len(_CLOSE_WINDOW_TIERS)
+        min_off, max_off, tier_limit = _CLOSE_WINDOW_TIERS[tier_idx]
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        try:
+            extra = await fetch(
+                now_ts + min_off, now_ts + max_off, limit=tier_limit)
+        except Exception as e:
+            log.debug("engine.close_window_error", tier=tier_idx, error=str(e))
+            return markets
+        merged = merge_markets_by_id(markets, extra or [])
+        if len(merged) > len(markets):
+            log.info(
+                "engine.close_window_slice",
+                tier=tier_idx, added=len(merged) - len(markets))
+        return merged
+
     async def scan_and_store_markets(self, limit: int = 300) -> list[Market]:
-        """Fetch markets from Gamma API and store in DB."""
+        """Fetch markets from Gamma API and store in DB.
+
+        May return more than *limit* rows: venues with a horizon-biased
+        generic feed get one close-window slice blended in per call.
+        """
         markets = await self.discovery.get_markets(limit=limit)
+        markets = await self._augment_with_close_window(markets)
 
         # Classify BEFORE opening the transaction — keeps the write burst
         # db-only so the write lock is held for ms, not the classify pass.

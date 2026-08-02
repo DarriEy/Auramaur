@@ -1,3 +1,4 @@
+import pytest
 
 
 def test_kalshi_markets_are_attributed_to_the_llm_kalshi_lane():
@@ -91,6 +92,85 @@ def test_live_allowlist_exempts_structural_strategies_entirely():
 
     risk = RiskConfig()
     assert live_allowed_categories(risk, "market_maker") is None
+
+
+def test_close_window_tiers_cover_exactly_the_junk_filters_tradeable_band():
+    """The tiers must be contiguous and jointly span the 2h..10y window
+    _is_junk_market accepts — a gap means a horizon whose markets can pass
+    every filter yet never enter discovery (the Speaker-ladder failure mode:
+    3 analyzable politics_us markets unscanned since June 2026)."""
+    from auramaur.strategy.engine import _CLOSE_WINDOW_TIERS
+
+    assert _CLOSE_WINDOW_TIERS[0][0] == 2 * 3600
+    assert _CLOSE_WINDOW_TIERS[-1][1] == 10 * 365 * 86400
+    for (_, hi, _), (lo, _, _) in zip(
+            _CLOSE_WINDOW_TIERS, _CLOSE_WINDOW_TIERS[1:]):
+        assert hi == lo
+    # The venue caps a page at 1000; a larger limit would silently truncate.
+    assert all(lim <= 1000 for _, _, lim in _CLOSE_WINDOW_TIERS)
+
+
+def test_merge_markets_by_id_dedupes_and_keeps_first():
+    from auramaur.exchange.models import Market
+
+    from auramaur.strategy.engine import merge_markets_by_id
+
+    base = [Market(id="a", question="A?"), Market(id="b", question="B?")]
+    extra = [Market(id="b", question="B-dup?"), Market(id="c", question="C?")]
+    merged = merge_markets_by_id(base, extra)
+    assert [m.id for m in merged] == ["a", "b", "c"]
+    assert merged[1].question == "B?"
+    assert [m.id for m in base] == ["a", "b"]  # input not mutated
+
+
+@pytest.mark.asyncio
+async def test_augment_rotates_tiers_and_dedupes_against_the_generic_scan():
+    from types import SimpleNamespace
+
+    from auramaur.exchange.models import Market
+
+    from auramaur.strategy.engine import _CLOSE_WINDOW_TIERS, TradingEngine
+
+    calls: list[tuple[int, int, int]] = []
+
+    class _Discovery:
+        async def get_markets_by_close_window(self, min_ts, max_ts, limit=200):
+            calls.append((min_ts, max_ts, limit))
+            return [Market(id="window-only", question="W?"),
+                    Market(id="generic", question="G-dup?")]
+
+    self = SimpleNamespace(discovery=_Discovery())
+    base = [Market(id="generic", question="G?")]
+
+    for expected_tier in list(_CLOSE_WINDOW_TIERS) + [_CLOSE_WINDOW_TIERS[0]]:
+        merged = await TradingEngine._augment_with_close_window(self, base)
+        assert [m.id for m in merged] == ["generic", "window-only"]
+        min_ts, max_ts, limit = calls[-1]
+        min_off, max_off, tier_limit = expected_tier
+        assert max_ts - min_ts == max_off - min_off
+        assert limit == tier_limit
+    assert len(calls) == len(_CLOSE_WINDOW_TIERS) + 1  # wrapped around
+
+
+@pytest.mark.asyncio
+async def test_augment_is_a_noop_without_the_windowed_fetch_and_on_error():
+    from types import SimpleNamespace
+
+    from auramaur.exchange.models import Market
+
+    from auramaur.strategy.engine import TradingEngine
+
+    base = [Market(id="a", question="A?")]
+
+    plain = SimpleNamespace(discovery=object())
+    assert await TradingEngine._augment_with_close_window(plain, base) is base
+
+    class _Broken:
+        async def get_markets_by_close_window(self, *a, **k):
+            raise RuntimeError("venue down")
+
+    broken = SimpleNamespace(discovery=_Broken())
+    assert await TradingEngine._augment_with_close_window(broken, base) == base
 
 
 def test_run_cycle_prefilters_on_the_venue_lanes_own_allowlist():
