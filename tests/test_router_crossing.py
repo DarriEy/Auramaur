@@ -115,12 +115,11 @@ async def test_skips_on_dead_book():
 # ---------------------------------------------------------------------------
 
 def _depth_settings(*, max_cross_cents=4, min_edge_pct=2.5,
-                    cap_frac=0.5, min_fill=0.5) -> MagicMock:
+                    cap_frac=0.5) -> MagicMock:
     s = MagicMock()
     s.execution.entry_max_cross_cents = max_cross_cents
     s.execution.depth_aware_routing = True
     s.execution.book_capacity_fraction = cap_frac
-    s.execution.min_fill_fraction = min_fill
     s.risk.min_edge_pct = min_edge_pct
     return s
 
@@ -143,7 +142,7 @@ async def test_depth_trims_size_to_capacity():
     book = OrderBook(bids=[OrderBookLevel(price=0.48, size=500.0)],
                      asks=[OrderBookLevel(price=0.50, size=40.0)])
     router = _depth_router(book, base_price=0.49, order_size=30.0,
-                           settings=_depth_settings(cap_frac=0.5, min_fill=0.5))
+                           settings=_depth_settings(cap_frac=0.5))
     order = await router.route(_signal(edge=10.0), Market(id="m1", question="Q?"), 30.0, False)
     assert order is not None
     assert order.size == 20.0          # depth 40 * 0.5 capacity
@@ -151,14 +150,31 @@ async def test_depth_trims_size_to_capacity():
 
 
 @pytest.mark.asyncio
-async def test_depth_skips_when_below_min_fill():
-    """In-budget capacity below min_fill_fraction of the requested size -> skip."""
+async def test_depth_downsizes_deep_partial_instead_of_skipping():
+    """In-budget capacity well under half the request still places, at the
+    absorbable size. The retired min_fill_fraction rule rejected this shape
+    outright (capacity 20 < 50% of 50) — costing llm 2 of its 8 approved
+    live candidates in 07-28..08-02. A 20-token fill clears the same
+    per-token edge floor a 50-token fill would."""
     book = OrderBook(bids=[OrderBookLevel(price=0.48, size=500.0)],
                      asks=[OrderBookLevel(price=0.50, size=40.0)])
     router = _depth_router(book, base_price=0.49, order_size=50.0,
-                           settings=_depth_settings(cap_frac=0.5, min_fill=0.5))
-    # capacity = 40*0.5 = 20 < min_fill(0.5)*50 = 25 -> skip
-    with pytest.raises(UnmarketableSignal, match="absorbs only"):
+                           settings=_depth_settings(cap_frac=0.5))
+    order = await router.route(_signal(edge=10.0), Market(id="m1", question="Q?"), 50.0, False)
+    assert order is not None
+    assert order.size == 20.0          # what the book absorbs, not zero
+    assert order.price == 0.50
+
+
+@pytest.mark.asyncio
+async def test_depth_skips_below_venue_minimum():
+    """A book too thin to fill even the 5-token venue minimum within the
+    slippage budget is the one remaining skip: capacity = 8 * 0.5 = 4 < 5."""
+    book = OrderBook(bids=[OrderBookLevel(price=0.48, size=500.0)],
+                     asks=[OrderBookLevel(price=0.50, size=8.0)])
+    router = _depth_router(book, base_price=0.49, order_size=50.0,
+                           settings=_depth_settings(cap_frac=0.5))
+    with pytest.raises(UnmarketableSignal, match="venue minimum"):
         await router.route(_signal(edge=10.0), Market(id="m1", question="Q?"), 50.0, False)
 
 
@@ -170,7 +186,7 @@ async def test_depth_sweep_prices_at_marginal_level():
                      asks=[OrderBookLevel(price=0.50, size=10.0),
                            OrderBookLevel(price=0.55, size=50.0)])
     router = _depth_router(book, base_price=0.49, order_size=40.0,
-                           settings=_depth_settings(max_cross_cents=10, cap_frac=1.0, min_fill=0.5))
+                           settings=_depth_settings(max_cross_cents=10, cap_frac=1.0))
     order = await router.route(_signal(edge=12.0), Market(id="m1", question="Q?"), 40.0, False)
     assert order is not None
     assert order.price == 0.55         # marginal sweep level, not the 0.50 ask

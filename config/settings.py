@@ -172,12 +172,13 @@ class ExecutionConfig(BaseModel):
     # by entry_max_cross_cents), and trims the order to the depth available
     # there. depth_aware_routing toggles the behavior; book_capacity_fraction
     # caps how much of that in-budget depth a single order may take (don't be
-    # the whole book); min_fill_fraction skips the entry when less than this
-    # share of the requested size fits within budget (a dust fill isn't worth
-    # the entry). Set depth_aware_routing False to restore top-of-book pricing.
+    # the whole book). Set depth_aware_routing False to restore top-of-book
+    # pricing. min_fill_fraction retired 2026-08-02: proportional "dust"
+    # rejected full-stake-scale partials whenever the allocator sized large
+    # (2 of llm's 8 approved live candidates in 07-28..08-02); the router now
+    # places whatever the book absorbs, floored only by the venue minimums.
     depth_aware_routing: bool = True
     book_capacity_fraction: float = 0.5
-    min_fill_fraction: float = 0.5
     stop_loss_pct: float = 30.0
     profit_target_pct: float = 50.0
     edge_erosion_min_pct: float = 2.0

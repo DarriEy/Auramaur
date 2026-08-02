@@ -216,15 +216,24 @@ class SmartOrderRouter:
             # budget — the price at which realizable edge would fall to the
             # min-edge floor, also bounded by the cents cap — and trim the order
             # to the in-budget depth (a fraction of it, so we're not the whole
-            # book). If too little of the requested size fits within budget, the
-            # rest would only fill by paying through the floor, so skip.
+            # book). The rest would only fill by paying through the floor, so
+            # the order shrinks to what the book actually absorbs; the only
+            # skip left is a book too thin to fill even the venue minimum.
+            #
+            # min_fill_fraction (skip when < 50% of the request fits) retired
+            # 2026-08-02: it defined "dust" proportionally, so the same $10
+            # partial that is a perfectly good entry against a $10 stake was
+            # rejected against a $35 allocator sizing — it cost llm 2 of its 8
+            # approved live candidates in the 07-28..08-02 window (80/205.9
+            # and 57.1/218.8 in-budget shares, both full-stake-scale fills).
+            # Every fill here clears the SAME per-token edge floor whatever
+            # its size; only the venue minimum is dust.
             try:
                 depth_aware = bool(self._settings.execution.depth_aware_routing)
             except Exception:
                 depth_aware = False
             if depth_aware and base_order.size > 0:
                 cap_frac = float(getattr(self._settings.execution, "book_capacity_fraction", 0.5))
-                min_fill = float(getattr(self._settings.execution, "min_fill_fraction", 0.5))
                 # Highest price that still leaves >= min_edge after slippage.
                 edge_budget_pts = max(0.0, edge_pct - min_edge_pct)
                 price_cap = base_order.price + edge_budget_pts / 100.0
@@ -237,11 +246,16 @@ class SmartOrderRouter:
                 in_budget_depth = book.depth_within(price_cap, is_buy=True)
                 capacity = in_budget_depth * cap_frac
                 executable = min(base_order.size, capacity)
-                if executable < min_fill * base_order.size - 1e-9:
+                # Venue minimums (5 tokens / $1 notional). Token count for the
+                # $1 leg is taken at price_cap, the highest price the sweep may
+                # pay; a cheaper actual fill can only under-shoot $1 by cents,
+                # and the client's dual-minimum bump covers that residue.
+                venue_min = max(5.0, math.ceil(100.0 / price_cap) / 100)
+                if executable < venue_min - 1e-9:
                     raise UnmarketableSignal(
                         f"book absorbs only {executable:.1f} of {base_order.size:.1f} "
-                        f"shares within slippage budget (cap {price_cap:.2f}, "
-                        f"min fill {min_fill:.0%}) for {market.id}"
+                        f"shares within slippage budget (cap {price_cap:.2f}) — "
+                        f"below the venue minimum {venue_min:.1f} for {market.id}"
                     )
                 _, vwap, sweep_price = book.fill_to_size(executable, is_buy=True)
                 if executable < base_order.size - 1e-9:
