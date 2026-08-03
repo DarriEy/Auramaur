@@ -8,27 +8,38 @@ months later.
 
 ## Per event family
 
-### FOMC (US) — GREEN
+### FOMC (US) — GREEN (dataset frozen 2026-08-03)
 
-**Bauer–Swanson Monetary Policy Surprises**, published and periodically
-updated by the San Francisco Fed
-(frbsf.org/research-and-insights/data-and-indicators/monetary-policy-surprises).
-High-frequency market-implied surprises around every FOMC announcement,
-raw and orthogonalized variants. Lookahead-clean *by construction* —
-derived from asset-price changes in tight windows, no survey consensus
-involved. The academic standard (Bauer & Swanson 2023). The related
-USMPD event-study database covers announcements, press conferences and
-minutes. Remaining work: download, validate coverage span, freeze a
-copy with a retrieval date.
+**Bauer–Swanson Monetary Policy Surprises**, published by the San
+Francisco Fed. High-frequency market-implied surprises around every FOMC
+announcement, raw and orthogonalized variants. Lookahead-clean *by
+construction* — derived from asset-price changes in tight windows, no
+survey consensus involved. The academic standard (Bauer & Swanson 2023).
 
-### ECB — GREEN
+Frozen: `data/events/bauer-swanson-mps-retrieved-2026-08-03.xlsx`
+(sha256 708606624de050cdaf6fd850a320b38d45099ab7c2398e01ba12dcece5743668)
+plus the page's chart CSV
+(`bauer-swanson-chart-retrieved-2026-08-03.csv`, sha256
+55aabf5b0742447614e6de91299822cc81de6be210475957fc3db7e4f4807508).
+Coverage measured on inspection: **361 FOMC events, 1988-02-04 →
+2023-12-13** ("update 2023" sheet; the chart CSV confirms the public
+series ends Dec 2023). The 2013–2023 overlap with the CPI vintages is
+the skeleton's natural macro window; extending 2024+ (USMPD or fed-funds
+futures construction) is optional Phase-2 work, not a G1 blocker — the
+forward paper phase covers the present by definition.
+
+### ECB — GREEN (dataset frozen 2026-08-03)
 
 **EA-MPD** (Altavilla, Brugnolini, Gürkaynak, Motto, Ragusa 2019),
-public and periodically updated: intraday price changes (OIS, sovereign
-yields, stocks, FX) around every Governing Council announcement, with
-the press-release vs press-conference windows separated. Same
-lookahead-clean-by-construction property as Bauer–Swanson. Relevant for
-the European names on the equity roster and any future EUR fx work.
+downloaded from the ECB (ecb.europa.eu/pub/pdf/annex/Dataset_EA-MPD.xlsx):
+intraday price changes (OIS, sovereign yields, stocks, FX) around every
+Governing Council announcement, press-release vs press-conference
+windows separated. Same lookahead-clean-by-construction property.
+
+Frozen: `data/events/ea-mpd-retrieved-2026-08-03.xlsx` (sha256
+f417fb861a305e3cbb871a7571c4899ba6bca003d9e087024d2f3f0744426cef).
+Coverage measured on inspection: **315 ECB events, 1999-01-07 →
+2025-10-30** — near-current.
 
 ### US CPI — GREEN (dataset frozen 2026-08-03)
 
@@ -63,14 +74,20 @@ which is the honest real-time series — do not "fix" old vintages with
 the current model.
 
 ### Earnings, 16-name international roster — GREEN with caveats
+### (dataset assembled and frozen 2026-08-03)
 
-Probed empirically 2026-08-03 via the ADR listings (yfinance):
-ASML/SAP/AZN return **25 quarterly events each spanning 2020→2026, all
-carrying EPS estimates**; HSBC is sparse (6 rows) and will need a
-secondary source for gaps (Alpha Vantage's EARNINGS endpoint, free key,
-is the candidate). Pooled across the roster this is ~300 events over
-~5 years — enough for a **pooled** skeleton replay, not per-name
-verdicts. Caveats that must be resolved before G1 sign-off:
+Pulled via the ADR listings (yfinance) for all 16 names: **347 events**,
+most names 24–25 estimated quarterly events spanning 2020→2026. Frozen:
+`data/events/earnings-yfinance-adr-retrieved-2026-08-03.csv` (sha256
+c054849f83f3306942aef902149b01087e2376b4be13cc9aefb7a9f5fe519e35),
+columns home_listing / adr_ticker / event_datetime_et / eps_estimate /
+eps_actual / surprise_pct. Coverage notes from the pull: BHP (14), RIO
+(12) and UL (24 over two decades) are **semi-annual reporters** — their
+low counts are complete histories, not gaps; HSBC (6) is genuinely thin
+and needs a secondary source (Alpha Vantage EARNINGS, free key, is the
+candidate); TCEHY/SIEGY/ALIZY came back healthier than feared (16–25
+estimated events each). Caveats that must be resolved before G1
+sign-off:
 
 1. **Estimate provenance.** Yahoo's historical "EPS Estimate" is
    believed to be the consensus frozen at report time; cross-validate a
@@ -97,9 +114,14 @@ The daily-horizon design needs nothing faster.
 
 ## Remaining Phase 1 work
 
-1. ~~Cleveland nowcast vintage archive~~ — DONE 2026-08-03, frozen in
-   `data/events/` (see above).
-2. Download + freeze Bauer–Swanson and EA-MPD files with retrieval dates.
-3. Cross-validate the Yahoo estimate sample; fill HSBC-class gaps.
-4. Assemble the frozen dataset + per-event timing column; then G1
-   sign-off and Phase 2 (replay harness) begins.
+1. ~~Cleveland nowcast vintage archive~~ — DONE 2026-08-03, frozen.
+2. ~~Download + freeze Bauer–Swanson and EA-MPD~~ — DONE 2026-08-03,
+   frozen with spans measured (FOMC 361 events 1988–2023; ECB 315 events
+   1999–2025).
+3. ~~Assemble the earnings dataset~~ — DONE 2026-08-03, 347 events
+   frozen.
+4. **OPEN — the two G1 sign-off gates:** (a) cross-validate a ~20-event
+   sample of Yahoo's historical EPS estimates against an independent
+   source (estimate-freeze provenance), and fill the HSBC gap; (b) build
+   the per-event report-timing column (before/after which market's
+   open). Then G1 signs off and Phase 2 (the replay harness) begins.
