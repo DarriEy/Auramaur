@@ -424,8 +424,12 @@ def ibkr_backtest(book: str, years: int, spread_bps):
 @click.option("--spread-bps", default=None, type=float,
               help="Sensitivity S4 override. Default = the deployed intl "
                    "book's max_spread_bps (errs pessimistic).")
+@click.option("--client-id", default=None, type=int,
+              help="IBKR API client id override — plumbing only (the "
+                   "default preflight slot can linger held by the live "
+                   "container; 88 is the established read-only probe id).")
 def ibkr_event_backtest(events_csv: str, timing_csv: str, years: int,
-                        hold, long_short: bool, spread_bps):
+                        hold, long_short: bool, spread_bps, client_id):
     """Stage-1 earnings-event replay (frozen spec, 2026-08-03).
 
     Sign-only, long-only, $2,000 per event, exit after 5 sessions — the
@@ -452,7 +456,8 @@ def ibkr_event_backtest(events_csv: str, timing_csv: str, years: int,
         events = load_events(events_csv, timing_csv)
         specs = BY_BOOK[IBKRBook("international_equity")]
         client = build_multiasset_market_data(
-            settings, client_id=settings.ibkr.multiasset_preflight_client_id)
+            settings, client_id=(client_id if client_id is not None
+                                 else settings.ibkr.multiasset_preflight_client_id))
         bars_by_key, currencies = {}, {}
         try:
             for spec in specs:

@@ -156,6 +156,42 @@ S1 symmetric long/short; S2 hold N=10; S3 hold N=21; S4 spread 25bps.
 Anything not in this list that looks interesting later is a NEW
 pre-registration, not a peek.
 
+## Stage-1 earnings leg: G2 FAIL (scored 2026-08-03) — leg CLOSED
+
+The primary ran the same day the spec froze, from the frozen datasets,
+with zero tuning passes. 329 events loaded, 199 eligible trips (102
+negative-surprise skipped per the long-only primary, 17 without bars —
+Toyota has no TSEJ data permission — 9 zero-surprise, 2 without a full
+hold window). Fifteen of sixteen instruments delivered 7-year bars.
+
+| run | TEST trips | net | mean/trip | win | LCB95 | verdict |
+|---|---|---|---|---|---|---|
+| PRIMARY (long-only, N=5, 50bps) | 83 | −$1,113 | −$13.41 | 47.0% | −$31.13 | **FAIL** |
+| S1 long/short | 105 | −$2,169 | −$20.66 | 42.9% | −$38.83 | FAIL |
+| S2 hold N=10 | 82 | −$1,155 | −$14.09 | 37.8% | −$37.54 | FAIL |
+| S3 hold N=21 | 81 | −$46 | −$0.57 | 50.6% | −$32.13 | FAIL |
+| S4 spread 25bps | 83 | −$703 | −$8.47 | 49.4% | −$26.26 | FAIL |
+
+**Interpretation, stated plainly.** Unlike momentum (flat gross, fees
+fatal), the primary's gross is itself negative: mid-to-mid, the
+post-earnings drift on these mega-cap names is worth roughly +15bps
+over 5 sessions — real-ish, and about a fifth of the ~65bps it costs to
+trade at $2,000 size. The sensitivities sharpen the picture without
+changing it: shorting negative surprises makes things worse (S1); a
+21-session hold turns gross positive and net near break-even (S3
+gross +$278, net −$46) but with month-scale variance the LCB is nowhere
+near zero. The "published anomaly, decayed in large caps" prior is
+confirmed on our instruments with our costs. Train and test agree
+throughout — this is not a split artifact.
+
+**Consequences.** No paper book is built on this rule set; the earnings
+leg is closed. Any successor idea — the S3 whisper at longer horizons,
+small-cap universes, the macro legs (Stage-1b, with their cleaner
+event-study surprises and an instrument-mapping design of their own) —
+is a NEW pre-registration with its own frozen spec, or it does not run.
+The gate consumed one day and ~nothing in costs, versus six months of
+forward paper: this is the process working, not failing.
+
 ## Open questions (for the design period, not blockers today)
 
 - Which venue hosts the cheapest test? FX has 100× lower costs and CPI/
