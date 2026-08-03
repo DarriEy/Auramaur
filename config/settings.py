@@ -1404,6 +1404,14 @@ class IBKRMultiAssetBookConfig(BaseModel):
     """Risk envelope for one isolated, locally simulated IBKR book."""
 
     enabled: bool = True
+    # Entries-off kill lever (2026-08-03). False stops NEW positions while
+    # the book keeps cycling — held positions stay marked and exit-managed,
+    # so a killed strategy DRAINS instead of stranding its open book the way
+    # enabled:false does (warn_stranded_positions). This is the lever whose
+    # absence let the demoted market_maker keep quoting for ~30h and forced
+    # every prior wind-down to choose between live risk and frozen books.
+    # Restriction-only: it can never add risk.
+    entries_enabled: bool = True
     budget_usd: float = 5_000.0
     max_positions: int = 4
     max_position_pct: float = 15.0

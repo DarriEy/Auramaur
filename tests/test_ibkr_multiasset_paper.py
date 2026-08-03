@@ -595,3 +595,35 @@ async def test_a_live_multiasset_fill_is_not_booked_to_the_ledger():
                             fill_ref="paper-ref", was_live=False)
     assert (await db.fetchone("SELECT COUNT(*) AS n FROM cost_basis"))["n"] == 1
     await db.close()
+
+
+@pytest.mark.asyncio
+async def test_entries_off_blocks_new_risk_but_keeps_managing_held():
+    """The kill lever (2026-08-03): entries_enabled=False must stop NEW
+    positions while held ones keep being marked and exit-managed, so a
+    killed book DRAINS instead of stranding — the failure mode
+    enabled:false has (warn_stranded_positions) and the lever the
+    market_maker demotion lacked."""
+    db = Database(":memory:")
+    await db.connect()
+    settings = Settings()
+    settings.ibkr.multiasset_paper_enabled = True
+    settings.ibkr.multiasset_registry_required = False
+    cfg = settings.ibkr.multiasset_books["global_etf"]
+    cfg.max_positions = 1
+    seed = IBKRMultiAssetPaperBook(
+        settings, FakeMarketData(), db, IBKRBook.GLOBAL_ETF)
+    seed.market_open = lambda now=None: True
+    assert await seed.run_once() == 1
+
+    cfg.entries_enabled = False
+    cfg.max_positions = 8  # room exists — the lever alone must block
+    pillar = IBKRMultiAssetPaperBook(
+        settings, FakeMarketData(), db, IBKRBook.GLOBAL_ETF)
+    pillar.market_open = lambda now=None: True
+    assert await pillar.run_once() == 0
+    rows = await db.fetchall(
+        "SELECT current_price FROM ibkr_paper_positions")
+    assert len(rows) == 1  # no new risk, held position not stranded
+    assert rows[0]["current_price"] is not None  # still being marked
+    await db.close()

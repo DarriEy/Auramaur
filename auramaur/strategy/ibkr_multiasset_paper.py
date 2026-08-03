@@ -397,6 +397,11 @@ class IBKRMultiAssetPaperBook:
         for spec in selected:
             try:
                 held = positions.get(spec.key)
+                # Entries-off: non-held instruments have nothing to manage,
+                # so skip their quote/bars work entirely — held positions
+                # below keep full marking and exit management (the drain).
+                if held is None and not cfg.entries_enabled:
+                    continue
                 held_con_id = int(held["con_id"]) if held else 0
                 if hasattr(self._client, "is_market_open") and not await self._client.is_market_open(
                         spec, con_id=held_con_id):
@@ -462,6 +467,10 @@ class IBKRMultiAssetPaperBook:
                             key=spec.key, error=error)
 
         candidates.sort(key=lambda item: -item[0])
+        # Belt on top of the collection skip above: a held instrument that
+        # qualifies again must not re-enter/scale while entries are off.
+        if not cfg.entries_enabled:
+            candidates = []
         for momentum, spec, quote, fx, annual_vol in candidates:
             try:
                 loss_exposure = await self._loss_exposure()
