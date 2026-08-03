@@ -112,16 +112,38 @@ Daily bars for the roster and macro-sensitive instruments already flow
 through the paths the momentum replay used (IBKR history + Alpaca IEX).
 The daily-horizon design needs nothing faster.
 
-## Remaining Phase 1 work
+## G1 sign-off gates — both closed 2026-08-03
 
-1. ~~Cleveland nowcast vintage archive~~ — DONE 2026-08-03, frozen.
-2. ~~Download + freeze Bauer–Swanson and EA-MPD~~ — DONE 2026-08-03,
-   frozen with spans measured (FOMC 361 events 1988–2023; ECB 315 events
-   1999–2025).
-3. ~~Assemble the earnings dataset~~ — DONE 2026-08-03, 347 events
-   frozen.
-4. **OPEN — the two G1 sign-off gates:** (a) cross-validate a ~20-event
-   sample of Yahoo's historical EPS estimates against an independent
-   source (estimate-freeze provenance), and fill the HSBC gap; (b) build
-   the per-event report-timing column (before/after which market's
-   open). Then G1 signs off and Phase 2 (the replay harness) begins.
+**(a) Estimate cross-validation (Yahoo vs Nasdaq/Zacks consensus).**
+33 joined events across the 10 Nasdaq-covered names. EPS *levels*
+disagree systematically — and the pattern explains itself: AZN differs by
+exactly 2× every quarter (ADR share basis), ASML by ~1.17× (EUR vs USD),
+RY by ~1.41× (CAD vs USD). Yahoo quotes home-currency / ordinary-share
+bases; Nasdaq quotes USD-per-ADS. The basis-invariant test is the
+*surprise percentage*, where each vendor pairs its own estimate with its
+own actual: **32/33 events agree on surprise SIGN** (one flip: BP
+2026-02-10), while magnitudes scatter (independent analyst panels
+genuinely disagree about what consensus was). Validation evidence
+frozen: `nasdaq-surprise-validation-2026-08-03.json.gz`.
+
+**DESIGN CONSTRAINT carried into Phase 2 (binding):** the earnings
+skeleton must be **sign-based, or rank-based within one vendor's own
+series**. A magnitude threshold like "|surprise| ≥ X%" imports vendor
+noise as if it were signal, and cross-vendor magnitude is not a real
+quantity. HSBC stays thin (Nasdaq adds only ~4 recent quarters);
+excluding it entirely would cost ~2% of pooled events — Phase 2's
+skeleton spec decides, either way is documented.
+
+**(b) Report-timing column.** Built from the pull's own ET timestamps
+and frozen as `earnings-events-timing-2026-08-03.csv`: 265 BMO (<09:30
+ET → enter at the same day's US close), 47 AMC (≥16:00 → next day's
+close), 10 MID and 25 UNKNOWN (both → next day's close, conservative).
+76% BMO matches the roster's European-morning reporting reality.
+
+## G1: SIGNED 2026-08-03
+
+All four data legs frozen with hashes; the one binding constraint above
+travels with the earnings leg. Phase 2 (the event replay harness and the
+frozen Stage-1 rule set) may begin. Per the design brief, Stage-1
+parameters must be fixed before scoring and the harness must never write
+to the forward-evidence tables.
