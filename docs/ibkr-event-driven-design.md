@@ -109,6 +109,53 @@ today "about" 2023 leaks hindsight. The design splits accordingly:
   lever ships enabled:false until G2 passes), LLM layer design doc as a
   separate Phase-4 artifact.
 
+## Stage-1 FROZEN specification (2026-08-03, fixed before first scoring run)
+
+Scope: the **earnings leg only**. The macro legs (CPI/FOMC/ECB) need an
+instrument-mapping design of their own (which instruments express a CPI
+surprise?) — that is a separate Stage-1b spec, deliberately not rushed
+into this one.
+
+**Primary rule (the only one G2 judges):**
+
+- Universe: the international-equity roster; events from the frozen
+  `earnings-yfinance-adr-retrieved-2026-08-03.csv` joined to the frozen
+  timing file. An event is usable iff estimate and actual are both
+  present; surprise := actual − estimate (Yahoo-internal basis, honoring
+  the G1 sign-only constraint); zero surprise → skipped.
+- Direction: **long-only on positive surprise**. Negative-surprise
+  events are skipped in the primary (shorting European names adds borrow
+  costs the book does not model).
+- Entry: at the home listing's close on the report date when
+  timing_class = BMO, else at the next available session's close for
+  that instrument; buy at close × (1 + half-spread) with the book's
+  `adverse_fill` slippage.
+- Exit: at the close of the **5th session after entry**, sell at
+  close × (1 − half-spread) with `adverse_fill`; commission charged both
+  ways via the book's own equity schedule.
+- Size: **fixed $2,000 notional per event** (fractional), the
+  cost-floor design input; no volatility sizing in the skeleton.
+- Costs: assumed spread = the deployed intl book's `max_spread_bps`
+  (the worst the live book would accept — errs pessimistic), plus the
+  book's `slippage_bps` per leg, plus commissions.
+- Currency: home-listing closes convert at **static FX rates frozen
+  here** (GBX 0.0127, EUR 1.17, USD 1.0, CAD 0.71, JPY 0.0068,
+  HKD 0.128, AUD 0.65 per unit → USD). A documented approximation: it
+  keeps notional and commission arithmetic realistic; it does not model
+  FX P&L over the 5-session hold.
+- Split and gate: **G2 verdict = `evaluate_ibkr_evidence` on TEST-split
+  trips (entry ≥ 2024-01-01), min 30 observations, LCB > 0 and drawdown
+  within the book budget.** Train (pre-2024) and full-period results
+  reported for context, never for the verdict.
+- Coverage honesty: instruments whose 5-year bars cannot be fetched are
+  skipped and their event counts REPORTED as coverage loss, not silently
+  dropped.
+
+**Pre-registered sensitivities (informational only, never the gate):**
+S1 symmetric long/short; S2 hold N=10; S3 hold N=21; S4 spread 25bps.
+Anything not in this list that looks interesting later is a NEW
+pre-registration, not a peek.
+
 ## Open questions (for the design period, not blockers today)
 
 - Which venue hosts the cheapest test? FX has 100× lower costs and CPI/

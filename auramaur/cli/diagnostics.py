@@ -406,6 +406,134 @@ def ibkr_backtest(book: str, years: int, spread_bps):
     asyncio.run(_run())
 
 
+@main.command("ibkr-event-backtest")
+@click.option("--events-csv",
+              default="data/events/earnings-yfinance-adr-retrieved-2026-08-03.csv",
+              show_default=True)
+@click.option("--timing-csv",
+              default="data/events/earnings-events-timing-2026-08-03.csv",
+              show_default=True)
+@click.option("--years", default=7, show_default=True,
+              help="Years of daily bars fetched per instrument.")
+@click.option("--hold", default=None, type=int,
+              help="Sessions held. Default = the frozen primary (5); other "
+                   "values are the pre-registered sensitivities S2/S3 only.")
+@click.option("--long-short", is_flag=True, default=False,
+              help="Sensitivity S1: symmetric long/short instead of the "
+                   "frozen long-only primary.")
+@click.option("--spread-bps", default=None, type=float,
+              help="Sensitivity S4 override. Default = the deployed intl "
+                   "book's max_spread_bps (errs pessimistic).")
+def ibkr_event_backtest(events_csv: str, timing_csv: str, years: int,
+                        hold, long_short: bool, spread_bps):
+    """Stage-1 earnings-event replay (frozen spec, 2026-08-03).
+
+    Sign-only, long-only, $2,000 per event, exit after 5 sessions — the
+    exact rule set frozen in docs/ibkr-event-driven-design.md BEFORE this
+    command first ran. The G2 verdict is computed on the post-2024 test
+    split only. Writes nothing; the forward tables stay untouched.
+    """
+    async def _run():
+        from auramaur.backtest.event_replay import (
+            HOLD_SESSIONS, build_event_trips, load_events,
+        )
+        from auramaur.backtest.ibkr_replay import mean_lcb, split_by_entry
+        from auramaur.exchange.alpaca_multiasset import build_multiasset_market_data
+        from auramaur.exchange.ibkr_instruments import BY_BOOK, IBKRBook
+        from auramaur.risk.ibkr_evidence import evaluate_ibkr_evidence
+
+        settings = Settings()
+        cfg = settings.ibkr.multiasset_books["international_equity"]
+        spread = cfg.max_spread_bps if spread_bps is None else spread_bps
+        hold_n = HOLD_SESSIONS if hold is None else hold
+        primary = (hold_n == HOLD_SESSIONS and not long_short
+                   and spread_bps is None)
+
+        events = load_events(events_csv, timing_csv)
+        specs = BY_BOOK[IBKRBook("international_equity")]
+        client = build_multiasset_market_data(
+            settings, client_id=settings.ibkr.multiasset_preflight_client_id)
+        bars_by_key, currencies = {}, {}
+        try:
+            for spec in specs:
+                try:
+                    bars = await client.get_daily_bars(
+                        spec, duration=f"{years} Y")
+                except Exception as exc:  # noqa: BLE001
+                    console.print(f"  [yellow]{spec.key}: {str(exc)[:70]}[/]")
+                    continue
+                rows = [(str(d)[:10], float(c))
+                        for d, c in (bars or []) if c and c > 0]
+                if len(rows) < 150:
+                    console.print(
+                        f"  [dim]{spec.key}: only {len(rows)} bars, skipped[/]")
+                    continue
+                bars_by_key[spec.key] = sorted(rows)
+                currencies[spec.key] = spec.currency or "USD"
+        finally:
+            await client.close()
+        if not bars_by_key:
+            console.print("[red]No usable history fetched.[/]")
+            return
+
+        trips, coverage = build_event_trips(
+            events, bars_by_key, currencies,
+            assumed_spread_bps=spread, slippage_bps=cfg.slippage_bps,
+            hold_sessions=hold_n, long_only=not long_short)
+
+        mode = "PRIMARY (frozen)" if primary else "SENSITIVITY"
+        console.print(Panel(
+            f"[bold]earnings-event skeleton — {mode}[/]\n"
+            f"{len(bars_by_key)} instruments with bars, "
+            f"{len(events)} events loaded, hold {hold_n} sessions, "
+            f"{'long/short' if long_short else 'long-only'}, spread "
+            f"{spread:.0f}bps + {cfg.slippage_bps:.0f}bps slippage per leg",
+            expand=False))
+        console.print(f"  coverage: {coverage}")
+        if not trips:
+            console.print("[yellow]No trips constructed.[/]")
+            return
+
+        train, test = split_by_entry(trips, "2024-01-01")
+        table = Table(title="replayed event trips", expand=False)
+        for c in ("split", "trips", "gross", "commission", "net", "mean",
+                  "win rate", "LCB95"):
+            table.add_column(c, justify="right")
+        for name, subset in (("train <2024", train), ("TEST >=2024", test),
+                             ("full", trips)):
+            if not subset:
+                table.add_row(name, "0", "—", "—", "—", "—", "—", "—")
+                continue
+            net = [t.net_usd for t in subset]
+            gross = sum(t.gross_usd for t in subset)
+            fees = sum(t.commission_usd for t in subset)
+            wins = sum(1 for p in net if p > 0)
+            table.add_row(
+                name, str(len(net)), f"${gross:,.2f}", f"${-fees:,.2f}",
+                f"${sum(net):,.2f}", f"${sum(net) / len(net):,.2f}",
+                f"{wins / len(net):.1%}", f"${mean_lcb(net):,.2f}")
+        console.print(table)
+
+        # G2 verdict: TEST split only, per the frozen spec.
+        if test:
+            from datetime import date
+            span = (date.fromisoformat(max(t.exit_date for t in test))
+                    - date.fromisoformat(min(t.entry_date for t in test))).days
+            verdict = evaluate_ibkr_evidence(
+                [t.net_usd for t in test], elapsed_days=span,
+                budget_usd=cfg.budget_usd, min_observations=30)
+            state = ("[green]G2 PASS[/]" if verdict.ready
+                     else "[yellow]G2 FAIL[/]")
+            label = "" if primary else " [dim](sensitivity run — not the gate)[/]"
+            console.print(f"  Verdict on TEST split: {state}{label}")
+            for reason in getattr(verdict, "reasons", ()) or ():
+                console.print(f"    [dim]- {reason}[/]")
+        console.print("\n[dim]Backtest evidence only. Nothing was written: "
+                      "the gate's tables hold forward paper record, and "
+                      "replayed history must never be mistaken for it.[/]")
+    asyncio.run(_run())
+
+
 @main.command("ibkr-exit-study")
 @click.option("--book", default="global_etf",
               type=click.Choice(("global_etf", "international_equity")))
