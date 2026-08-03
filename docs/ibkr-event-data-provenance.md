@@ -30,18 +30,37 @@ the press-release vs press-conference windows separated. Same
 lookahead-clean-by-construction property as Bauer–Swanson. Relevant for
 the European names on the equity roster and any future EUR fx work.
 
-### US CPI — PROBABLE (one manual verification)
+### US CPI — GREEN (dataset frozen 2026-08-03)
 
 No free historical *survey consensus* exists without scraping someone's
 calendar. The clean proxy: **Cleveland Fed daily inflation nowcasts** —
 produced before each release, archived, and per the Fed's own 2023
 Economic Commentary often *more* accurate than professional survey
-consensus. Surprise := actual − final pre-release nowcast. This is a
-documented, public, reproducible surprise series. OPEN: the site blocks
-automated fetching (403), so the vintage archive's depth needs one
-manual browser download to confirm (operator task, minutes). If the
-vintage archive disappoints, fallback is restricting the macro leg to
-FOMC/ECB where the event-study databases already suffice.
+consensus. Surprise := actual − final pre-release nowcast.
+
+RESOLVED same day the spike started. The chart's own data feed is a
+plain JSON behind the page (the CSV button is a client-side slice, which
+is why it exposes no URL):
+
+    https://www.clevelandfed.org/-/media/files/webcharts/inflationnowcasting/nowcast_month.json?sc_lang=en
+    (siblings: nowcast_quarter.json, nowcast_year.json)
+
+The page 403s generic fetchers but serves a normal browser user-agent.
+`nowcast_month.json` holds **157 monthly vintage panels, 2013-07 →
+2026-07**: daily nowcast values for CPI / Core CPI / PCE / Core PCE plus
+the ACTUAL releases as separate series, with each panel's date axis
+running past month-end to the release date. Surprise construction —
+release date, final pre-release nowcast, actual — needs nothing outside
+this one file. 13 years ≈ 156 monthly CPI events, 2.5× the design's
+five-year requirement.
+
+**Frozen copy:** `data/events/cleveland-nowcast-month-retrieved-2026-08-03.json.gz`
+(sha256 of uncompressed:
+409d0f2121c5292217a780d7934ce5adbdf1ef5e5b8ed18d6de13b435e61740d).
+Caveat to carry into Phase 2: the nowcasting model itself was revised
+over the years (the Fed documents this); vintages are as-published,
+which is the honest real-time series — do not "fix" old vintages with
+the current model.
 
 ### Earnings, 16-name international roster — GREEN with caveats
 
@@ -78,7 +97,8 @@ The daily-horizon design needs nothing faster.
 
 ## Remaining Phase 1 work
 
-1. Manual download: Cleveland nowcast vintage archive (operator, browser).
+1. ~~Cleveland nowcast vintage archive~~ — DONE 2026-08-03, frozen in
+   `data/events/` (see above).
 2. Download + freeze Bauer–Swanson and EA-MPD files with retrieval dates.
 3. Cross-validate the Yahoo estimate sample; fill HSBC-class gaps.
 4. Assemble the frozen dataset + per-event timing column; then G1
