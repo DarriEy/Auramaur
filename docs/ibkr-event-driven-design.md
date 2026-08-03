@@ -192,6 +192,57 @@ is a NEW pre-registration with its own frozen spec, or it does not run.
 The gate consumed one day and ~nothing in costs, versus six months of
 forward paper: this is the process working, not failing.
 
+## Stage-1c + Stage-2 shadow: PRE-REGISTERED 2026-08-03, scored 2027-04-30
+
+Registered the same day the Stage-1 earnings leg closed, on prospective
+events only — the 347 historical events are burned as a scoring set (we
+looked at them five times) and are never scored again. Justification for
+Stage-1c is EXTERNAL (the PEAD literature's ~60-trading-day completion
+window; cost amortization at one round trip per quarter), explicitly NOT
+our S3 numbers — S3 motivated the registration's existence, and may not
+motivate its parameters.
+
+**Stage-1c — the literature-standard rule (frozen):**
+
+- Identical to the Stage-1 primary except hold = **60 sessions**.
+  Long-only, sign-only, $2,000 notional, timing-ruled entries; costs
+  frozen NUMERICALLY as scored today (50bps assumed spread, 2bps
+  slippage per leg, the book's commission schedule) so later config
+  drift cannot move the bar.
+- Event window: roster earnings with report date in
+  **[2026-08-04, 2026-12-31]** — strictly future as of registration.
+- Scoring: one replay run on **2027-04-30** (every event's 60-session
+  window complete). Gate: `evaluate_ibkr_evidence` LCB > 0 with
+  **min 20 trips** (the prospective window is smaller than 30 supports);
+  if fewer than 20 trips accrue, the window extends through 2027-03-31
+  and scores 2027-07-31 — that extension is pre-registered here and is
+  the only one.
+- **No interim peeks.** Until the scoring date the only permitted query
+  is a coverage count (how many events accrued). A peeked replay voids
+  the registration.
+
+**Stage-2 shadow — the early-winner filter (frozen protocol):**
+
+- For every roster earnings event from runner deployment onward, an LLM
+  produces a same-day verdict: **pick / pass**, direction, one named
+  mechanism, confidence — logged append-only with the log timestamp.
+- Inputs allowed: the release's numbers, the consensus, pre-release
+  context and news. Inputs FORBIDDEN: any post-release price path. A
+  verdict logged after the event's Stage-1c entry close is marked LATE
+  and excluded from scoring — lateness is measured, never fudged.
+- Scoring, same date (2027-04-30): Stage-1c trips partitioned by the
+  shadow's pick/pass. The filter shows value iff picked-subset mean net
+  exceeds passed-subset mean net AND picked mean net > 0. Sample will be
+  small; this is evidence-gathering for the Stage-2 layer, not
+  graduation, and it touches no money by construction.
+- The runner (detection + prompt + log) is a separate small build; its
+  exact prompt is frozen in code at deploy and referenced here by
+  commit. Coverage begins at deploy — events before it are simply
+  uncovered, never backfilled. NOTE: nine roster names report between
+  Aug 4 and Aug 27; a runner deployed this week captures the August
+  wave, a later one starts with the autumn wave. Either is valid; the
+  log shows which.
+
 ## Open questions (for the design period, not blockers today)
 
 - Which venue hosts the cheapest test? FX has 100× lower costs and CPI/

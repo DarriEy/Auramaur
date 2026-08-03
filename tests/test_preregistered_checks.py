@@ -3,9 +3,21 @@ pre-committed triggers say — a counter that under-fires quietly voids the
 whole pre-registration discipline."""
 
 from auramaur.cli.reporting import (
+    _CALENDAR_REVIEWS,
     _PREREGISTERED_CHECKS,
     preregistered_check_status,
 )
+
+
+def test_calendar_reviews_are_well_formed():
+    """A malformed review date would make its judgment day silently
+    unreachable — the exact slippage the calendar exists to prevent."""
+    from datetime import date
+
+    assert _CALENDAR_REVIEWS
+    for due, what in _CALENDAR_REVIEWS:
+        assert date.fromisoformat(due) > date(2026, 8, 1)
+        assert what
 
 
 def test_status_fires_on_either_trigger():

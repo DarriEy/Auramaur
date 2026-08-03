@@ -887,6 +887,16 @@ _PREREGISTERED_CHECKS = (
 )
 
 
+# Standalone calendar reviews that fit no cell-shaped trigger above. Same
+# contract: the date arriving means the operator owes the pre-committed
+# look, in the document named — never an automatic action.
+_CALENDAR_REVIEWS = (
+    ("2027-04-30", "Stage-1c 60-session PEAD replay + Stage-2 shadow scoring "
+                   "(docs/ibkr-event-driven-design.md; no interim peeks — "
+                   "coverage counts only)"),
+)
+
+
 def preregistered_check_status(settled: int, realized: float,
                                settle_bar: int, usd_floor: float,
                                review_due: bool = False) -> str:
@@ -953,6 +963,10 @@ def preregistered_checks():
                     f"{realized:+.2f}", f"{floor:+.0f}", review_by or "—",
                     f"[{colour}]{status or 'ok'}[/]")
             console.print(table)
+            for due, what in _CALENDAR_REVIEWS:
+                colour = "magenta" if today >= due else "dim"
+                flag = "REVIEW DUE" if today >= due else "scheduled"
+                console.print(f"  [{colour}]{flag} {due}[/] — {what}")
             console.print(
                 "  [dim]settled counts live kind='settlement' rows since the "
                 "epoch; realized $ sums ALL live realized pnl (early exits "
