@@ -162,6 +162,22 @@ INTERNATIONAL_EQUITIES = (
     _stk("7203.T", IBKRBook.INTERNATIONAL_EQUITY, "7203", "TSEJ", "JPY", "japan", "Toyota Motor", calendar="TOKYO"),
     _stk("0700.HK", IBKRBook.INTERNATIONAL_EQUITY, "700", "SEHK", "HKD", "hong_kong", "Tencent", calendar="HONG_KONG"),
     _stk("BHP.AX", IBKRBook.INTERNATIONAL_EQUITY, "BHP", "ASX", "AUD", "australia", "BHP Group", calendar="SYDNEY"),
+    # BREADTH ON PROVEN VENUES (2026-08-03, user: "we need more breadth on
+    # the equity man"). The contract registry showed the effective universe
+    # was 4 names: only LSE/IBIS/AEB deliver market data on this account —
+    # HK/ASX/Toronto sit 'qualified_no_live_data' (subscriptions needed) and
+    # 7203.T is quarantined. These seven are mega-cap liquid names on the
+    # three venues that already stream, spreading sectors the eligible four
+    # lack (banking, insurance, mining, consumer staples, industrials).
+    # Module constant, not config: nothing here enters strategy_version, so
+    # the book's holdout clock is untouched.
+    _stk("HSBA.L", IBKRBook.INTERNATIONAL_EQUITY, "HSBA", "SMART", "GBP", "uk", "HSBC Holdings", primary="LSE", calendar="LONDON"),
+    _stk("BP.L", IBKRBook.INTERNATIONAL_EQUITY, "BP.", "SMART", "GBP", "uk", "BP", primary="LSE", calendar="LONDON"),
+    _stk("RIO.L", IBKRBook.INTERNATIONAL_EQUITY, "RIO", "SMART", "GBP", "uk", "Rio Tinto", primary="LSE", calendar="LONDON"),
+    _stk("ULVR.L", IBKRBook.INTERNATIONAL_EQUITY, "ULVR", "SMART", "GBP", "uk", "Unilever", primary="LSE", calendar="LONDON"),
+    _stk("SIE.DE", IBKRBook.INTERNATIONAL_EQUITY, "SIE", "SMART", "EUR", "europe", "Siemens", primary="IBIS", calendar="XETRA"),
+    _stk("ALV.DE", IBKRBook.INTERNATIONAL_EQUITY, "ALV", "SMART", "EUR", "europe", "Allianz", primary="IBIS", calendar="XETRA"),
+    _stk("INGA.AS", IBKRBook.INTERNATIONAL_EQUITY, "INGA", "SMART", "EUR", "europe", "ING Groep", primary="AEB", calendar="AMSTERDAM"),
 )
 
 OPTIONS = tuple(
