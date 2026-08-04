@@ -44,7 +44,7 @@ jobs:
       # refreshes continuously, so a newly published HIGH in a base-image lib
       # would fail release builds with no repo change.
       - name: Scan published image
-        uses: aquasecurity/trivy-action@v0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ghcr.io/${{ github.repository_owner }}/auramaur@${{ steps.build.outputs.digest }}
           format: table
