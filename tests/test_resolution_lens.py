@@ -252,15 +252,18 @@ def test_eligible_loosens_thresholds_in_paper_mode():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        # ~2h to resolution, $400 liquidity: fails live (12h / $1000),
-        # passes paper (1h / $250).
-        m = _market(days_out=2.0 / 24.0, liquidity=400.0)
+        try:
+            # ~2h to resolution, $400 liquidity: fails live (12h / $1000),
+            # passes paper (1h / $250).
+            m = _market(days_out=2.0 / 24.0, liquidity=400.0)
 
-        paper = _pillar(db, _settings(paper=True), [m])
-        assert paper._eligible(m) is True
+            paper = _pillar(db, _settings(paper=True), [m])
+            assert paper._eligible(m) is True
 
-        live = _pillar(db, _settings(paper=False), [m])
-        assert live._eligible(m) is False
+            live = _pillar(db, _settings(paper=False), [m])
+            assert live._eligible(m) is False
+        finally:
+            await db.close()
 
     asyncio.run(run())
 
@@ -687,34 +690,37 @@ def test_kalshi_spike_instance_is_parametrized_and_isolated():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        settings = _settings()
+        try:
+            settings = _settings()
 
-        # Kalshi-bound instance.
-        kalshi = _pillar(db, settings, [])
-        # rebuild with explicit kalshi params (the _pillar helper defaults Poly)
-        from auramaur.strategy.resolution_lens import ResolutionLensPillar
-        kalshi = ResolutionLensPillar(
-            db=db, settings=settings, discovery=MagicMock(),
-            exchange=_exchange(), risk_manager=_risk(),
-            pnl_tracker=PnLTracker(db, settings), calibration=MagicMock(),
-            analyzer=_analyzer(), exchange_name="kalshi",
-            source_tag="resolution_lens_kalshi",
-        )
-        assert kalshi._exchange_name == "kalshi"
-        assert kalshi._source_tag == "resolution_lens_kalshi"
+            # Kalshi-bound instance.
+            kalshi = _pillar(db, settings, [])
+            # rebuild with explicit kalshi params (the _pillar helper defaults Poly)
+            from auramaur.strategy.resolution_lens import ResolutionLensPillar
+            kalshi = ResolutionLensPillar(
+                db=db, settings=settings, discovery=MagicMock(),
+                exchange=_exchange(), risk_manager=_risk(),
+                pnl_tracker=PnLTracker(db, settings), calibration=MagicMock(),
+                analyzer=_analyzer(), exchange_name="kalshi",
+                source_tag="resolution_lens_kalshi",
+            )
+            assert kalshi._exchange_name == "kalshi"
+            assert kalshi._source_tag == "resolution_lens_kalshi"
 
-        # A Kalshi market passes the exchange filter; a Poly one is rejected.
-        k_mkt = _market(mid="k1", liquidity=350.0)
-        k_mkt.exchange = "kalshi"
-        assert kalshi._eligible(k_mkt) is True          # thin book OK on Kalshi floor
-        poly_mkt = _market(mid="p1", liquidity=5000.0)  # wrong venue for this instance
-        assert kalshi._eligible(poly_mkt) is False
+            # A Kalshi market passes the exchange filter; a Poly one is rejected.
+            k_mkt = _market(mid="k1", liquidity=350.0)
+            k_mkt.exchange = "kalshi"
+            assert kalshi._eligible(k_mkt) is True          # thin book OK on Kalshi floor
+            poly_mkt = _market(mid="p1", liquidity=5000.0)  # wrong venue for this instance
+            assert kalshi._eligible(poly_mkt) is False
 
-        # The default Poly instance still rejects Kalshi markets (isolation).
-        poly = _pillar(db, settings, [])
-        assert poly._exchange_name == "polymarket"
-        assert poly._source_tag == "resolution_lens"
-        assert poly._eligible(k_mkt) is False
+            # The default Poly instance still rejects Kalshi markets (isolation).
+            poly = _pillar(db, settings, [])
+            assert poly._exchange_name == "polymarket"
+            assert poly._source_tag == "resolution_lens"
+            assert poly._eligible(k_mkt) is False
+        finally:
+            await db.close()
 
     asyncio.run(run())
 
@@ -730,24 +736,27 @@ def test_verdict_error_not_cached_then_gives_up_after_three():
     confusing market can't eat the per-cycle budget forever."""
     async def run():
         db = Database(":memory:"); await db.connect()
-        m = _market()
-        a = MagicMock()
-        a._call_llm = AsyncMock(side_effect=RuntimeError("boom"))
-        p = _pillar(db, _settings(), [m], analyzer=a)
-        await p._ensure_schema()
+        try:
+            m = _market()
+            a = MagicMock()
+            a._call_llm = AsyncMock(side_effect=RuntimeError("boom"))
+            p = _pillar(db, _settings(), [m], analyzer=a)
+            await p._ensure_schema()
 
-        assert await p._verdict(m) is None
-        assert await p._verdict(m) is None
-        row = await db.fetchone(
-            "SELECT 1 FROM lens_verdicts WHERE market_id = ?", (m.id,))
-        assert row is None  # nothing persisted while retrying
+            assert await p._verdict(m) is None
+            assert await p._verdict(m) is None
+            row = await db.fetchone(
+                "SELECT 1 FROM lens_verdicts WHERE market_id = ?", (m.id,))
+            assert row is None  # nothing persisted while retrying
 
-        v = await p._verdict(m)  # third strike -> neutral row, permanent
-        assert v == (m.outcome_yes_price, 0.0, "none", -1)
-        row = await db.fetchone(
-            "SELECT gap_score, mechanism FROM lens_verdicts WHERE market_id = ?",
-            (m.id,))
-        assert row["gap_score"] == 0.0 and row["mechanism"] == "none"
+            v = await p._verdict(m)  # third strike -> neutral row, permanent
+            assert v == (m.outcome_yes_price, 0.0, "none", -1)
+            row = await db.fetchone(
+                "SELECT gap_score, mechanism FROM lens_verdicts WHERE market_id = ?",
+                (m.id,))
+            assert row["gap_score"] == 0.0 and row["mechanism"] == "none"
+        finally:
+            await db.close()
 
     asyncio.run(run())
 
@@ -757,18 +766,21 @@ def test_verify_infra_error_leaves_verdict_unverified():
     next cycle), not be persisted as 0 (permanent kill of a real gap)."""
     async def run():
         db = Database(":memory:"); await db.connect()
-        m = _market()
-        good = _analyzer()
-        p = _pillar(db, _settings(), [m], analyzer=good)
-        await p._ensure_schema()
-        await p._verdict(m)  # seed a cached gap (verified=-1)
+        try:
+            m = _market()
+            good = _analyzer()
+            p = _pillar(db, _settings(), [m], analyzer=good)
+            await p._ensure_schema()
+            await p._verdict(m)  # seed a cached gap (verified=-1)
 
-        p._analyzer = MagicMock()
-        p._analyzer._call_llm = AsyncMock(side_effect=RuntimeError("budget"))
-        assert await p._verify_mechanism(m, 0.10, "mech") is False
-        row = await db.fetchone(
-            "SELECT verified FROM lens_verdicts WHERE market_id = ?", (m.id,))
-        assert row["verified"] == -1  # NOT 0
+            p._analyzer = MagicMock()
+            p._analyzer._call_llm = AsyncMock(side_effect=RuntimeError("budget"))
+            assert await p._verify_mechanism(m, 0.10, "mech") is False
+            row = await db.fetchone(
+                "SELECT verified FROM lens_verdicts WHERE market_id = ?", (m.id,))
+            assert row["verified"] == -1  # NOT 0
+        finally:
+            await db.close()
 
     asyncio.run(run())
 
@@ -779,17 +791,20 @@ def test_lens_calls_pin_to_claude():
     (2026-06-25 -> 07-02)."""
     async def run():
         db = Database(":memory:"); await db.connect()
-        m = _market()
-        a = _analyzer3()
-        p = _pillar3(db, _settings(), [m], analyzer=a,
-                     aggregator=_aggregator_mock())
-        await p._ensure_schema()
-        await p._verdict(m)
-        await p._verify_mechanism(m, 0.10, "mech")
-        await p._ground(m, 0.10, "mech")
-        assert a._call_llm.await_count == 3
-        for call in a._call_llm.await_args_list:
-            assert call.kwargs.get("pin_claude") is True
+        try:
+            m = _market()
+            a = _analyzer3()
+            p = _pillar3(db, _settings(), [m], analyzer=a,
+                         aggregator=_aggregator_mock())
+            await p._ensure_schema()
+            await p._verdict(m)
+            await p._verify_mechanism(m, 0.10, "mech")
+            await p._ground(m, 0.10, "mech")
+            assert a._call_llm.await_count == 3
+            for call in a._call_llm.await_args_list:
+                assert call.kwargs.get("pin_claude") is True
+        finally:
+            await db.close()
 
     asyncio.run(run())
 
@@ -842,23 +857,26 @@ def test_budget_exhaustion_never_strikes_or_caches():
         from auramaur.nlp.errors import BudgetExhausted
 
         db = Database(":memory:"); await db.connect()
-        m = _market()
-        a = MagicMock()
-        a._call_llm = AsyncMock(side_effect=BudgetExhausted("daily cap"))
-        p = _pillar(db, _settings(), [m], analyzer=a)
-        await p._ensure_schema()
+        try:
+            m = _market()
+            a = MagicMock()
+            a._call_llm = AsyncMock(side_effect=BudgetExhausted("daily cap"))
+            p = _pillar(db, _settings(), [m], analyzer=a)
+            await p._ensure_schema()
 
-        for _ in range(10):  # many cycles of exhaustion
-            assert await p._verdict(m) is None
-        row = await db.fetchone(
-            "SELECT 1 FROM lens_verdicts WHERE market_id = ?", (m.id,))
-        assert row is None                       # nothing cached, ever
-        assert p._verdict_failures.get(m.id, 0) == 0  # no strikes accrued
+            for _ in range(10):  # many cycles of exhaustion
+                assert await p._verdict(m) is None
+            row = await db.fetchone(
+                "SELECT 1 FROM lens_verdicts WHERE market_id = ?", (m.id,))
+            assert row is None                       # nothing cached, ever
+            assert p._verdict_failures.get(m.id, 0) == 0  # no strikes accrued
 
-        # Budget returns -> the very next call succeeds normally.
-        p._analyzer = _analyzer()
-        v = await p._verdict(m)
-        assert v is not None and v[1] == 0.8
+            # Budget returns -> the very next call succeeds normally.
+            p._analyzer = _analyzer()
+            v = await p._verdict(m)
+            assert v is not None and v[1] == 0.8
+        finally:
+            await db.close()
 
     asyncio.run(run())
 
@@ -875,55 +893,58 @@ def test_kalshi_instance_merges_close_window_slice():
 
         db = Database(":memory:")
         await db.connect()
-        settings = _settings()
-        calibration = MagicMock(); calibration.record_prediction = AsyncMock()
+        try:
+            settings = _settings()
+            calibration = MagicMock(); calibration.record_prediction = AsyncMock()
 
-        in_window = _market(
-            mid="KXTEST-26AUG-T5", liquidity=350.0, days_out=20.0,
-            question="Will the BLS officially confirm CPI above 5 percent?")
-        in_window.exchange = "kalshi"
-        no_trigger = _market(mid="KXNOPE", liquidity=350.0, days_out=20.0,
-                             question="Higher temperature in NYC?")
-        no_trigger.exchange = "kalshi"
+            in_window = _market(
+                mid="KXTEST-26AUG-T5", liquidity=350.0, days_out=20.0,
+                question="Will the BLS officially confirm CPI above 5 percent?")
+            in_window.exchange = "kalshi"
+            no_trigger = _market(mid="KXNOPE", liquidity=350.0, days_out=20.0,
+                                 question="Higher temperature in NYC?")
+            no_trigger.exchange = "kalshi"
 
-        discovery = MagicMock()
-        discovery.get_markets = AsyncMock(return_value=[])
-        discovery.get_markets_by_close_window = AsyncMock(
-            return_value=[in_window, no_trigger])
+            discovery = MagicMock()
+            discovery.get_markets = AsyncMock(return_value=[])
+            discovery.get_markets_by_close_window = AsyncMock(
+                return_value=[in_window, no_trigger])
 
-        pillar = ResolutionLensPillar(
-            db=db, settings=settings, discovery=discovery,
-            exchange=_exchange(), risk_manager=_risk(),
-            pnl_tracker=PnLTracker(db, settings), calibration=calibration,
-            analyzer=_analyzer(), exchange_name="kalshi",
-            source_tag="resolution_lens_kalshi",
-        )
-        entered = await pillar.run_once()
+            pillar = ResolutionLensPillar(
+                db=db, settings=settings, discovery=discovery,
+                exchange=_exchange(), risk_manager=_risk(),
+                pnl_tracker=PnLTracker(db, settings), calibration=calibration,
+                analyzer=_analyzer(), exchange_name="kalshi",
+                source_tag="resolution_lens_kalshi",
+            )
+            entered = await pillar.run_once()
 
-        # The close-window fetch was used with the lens's resolution window...
-        assert discovery.get_markets_by_close_window.await_count == 1
-        args = discovery.get_markets_by_close_window.await_args
-        assert args.args[1] > args.args[0] > 0  # (min_ts, max_ts) sane
-        # ...the trigger-bearing in-window market traded; the no-trigger one
-        # was filtered before any LLM call.
-        assert entered == 1
-        sig = await db.fetchone(
-            "SELECT market_id FROM signals WHERE strategy_source='resolution_lens_kalshi'")
-        assert sig is not None and sig["market_id"] == "KXTEST-26AUG-T5"
-        row = await db.fetchone(
-            "SELECT 1 FROM lens_verdicts WHERE market_id='KXNOPE'")
-        assert row is None
+            # The close-window fetch was used with the lens's resolution window...
+            assert discovery.get_markets_by_close_window.await_count == 1
+            args = discovery.get_markets_by_close_window.await_args
+            assert args.args[1] > args.args[0] > 0  # (min_ts, max_ts) sane
+            # ...the trigger-bearing in-window market traded; the no-trigger one
+            # was filtered before any LLM call.
+            assert entered == 1
+            sig = await db.fetchone(
+                "SELECT market_id FROM signals WHERE strategy_source='resolution_lens_kalshi'")
+            assert sig is not None and sig["market_id"] == "KXTEST-26AUG-T5"
+            row = await db.fetchone(
+                "SELECT 1 FROM lens_verdicts WHERE market_id='KXNOPE'")
+            assert row is None
 
-        # A discovery WITHOUT the method degrades to the plain scan (no-op).
-        class _NoWindow:
-            async def get_markets(self, limit=300):
-                return []
-        poly = ResolutionLensPillar(
-            db=db, settings=settings, discovery=_NoWindow(),
-            exchange=_exchange(), risk_manager=_risk(),
-            pnl_tracker=PnLTracker(db, settings), calibration=calibration,
-            analyzer=_analyzer(),
-        )
-        assert await poly._close_window_candidates() == []
+            # A discovery WITHOUT the method degrades to the plain scan (no-op).
+            class _NoWindow:
+                async def get_markets(self, limit=300):
+                    return []
+            poly = ResolutionLensPillar(
+                db=db, settings=settings, discovery=_NoWindow(),
+                exchange=_exchange(), risk_manager=_risk(),
+                pnl_tracker=PnLTracker(db, settings), calibration=calibration,
+                analyzer=_analyzer(),
+            )
+            assert await poly._close_window_candidates() == []
+        finally:
+            await db.close()
 
     asyncio.run(run())

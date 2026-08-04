@@ -12,31 +12,34 @@ def test_llm_costs_daily_unifies_all_four_sources():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        await db.execute(
-            "INSERT INTO agent_trader_costs (day, model_alias, calls, usd) "
-            "VALUES ('2026-07-24', 'gpro', 5, 0.10)")
-        await db.execute(
-            "INSERT INTO ibkr_etf_openai_attempts (model_alias, model, status, cost_usd, started_at) "
-            "VALUES ('luna', 'gpt-5.6-luna', 'ok', 0.02, '2026-07-24T10:00:00')")
-        await db.execute(
-            "INSERT INTO llm_call_counter (day, claude_calls) VALUES ('2026-07-24', 150)")
-        await db.execute(
-            "INSERT INTO local_llm_calls (purpose, model, status, created_at) "
-            "VALUES ('distill', 'qwen3:8b', 'ok', '2026-07-24T10:00:00')")
-        await db.commit()
+        try:
+            await db.execute(
+                "INSERT INTO agent_trader_costs (day, model_alias, calls, usd) "
+                "VALUES ('2026-07-24', 'gpro', 5, 0.10)")
+            await db.execute(
+                "INSERT INTO ibkr_etf_openai_attempts (model_alias, model, status, cost_usd, started_at) "
+                "VALUES ('luna', 'gpt-5.6-luna', 'ok', 0.02, '2026-07-24T10:00:00')")
+            await db.execute(
+                "INSERT INTO llm_call_counter (day, claude_calls) VALUES ('2026-07-24', 150)")
+            await db.execute(
+                "INSERT INTO local_llm_calls (purpose, model, status, created_at) "
+                "VALUES ('distill', 'qwen3:8b', 'ok', '2026-07-24T10:00:00')")
+            await db.commit()
 
-        rows = await db.fetchall(
-            "SELECT source, calls, cost_usd FROM llm_costs_daily "
-            "WHERE day = '2026-07-24' ORDER BY source")
-        by_source = {r["source"]: (r["calls"], round(r["cost_usd"], 4)) for r in rows}
-        assert by_source["gemini:gpro"] == (5, 0.10)
-        assert by_source["openai:luna"] == (1, 0.02)
-        assert by_source["claude_cli(quota)"] == (150, 0.0)
-        assert by_source["local:qwen3:8b"] == (1, 0.0)
+            rows = await db.fetchall(
+                "SELECT source, calls, cost_usd FROM llm_costs_daily "
+                "WHERE day = '2026-07-24' ORDER BY source")
+            by_source = {r["source"]: (r["calls"], round(r["cost_usd"], 4)) for r in rows}
+            assert by_source["gemini:gpro"] == (5, 0.10)
+            assert by_source["openai:luna"] == (1, 0.02)
+            assert by_source["claude_cli(quota)"] == (150, 0.0)
+            assert by_source["local:qwen3:8b"] == (1, 0.0)
 
-        total = await db.fetchone(
-            "SELECT ROUND(SUM(cost_usd), 4) AS usd FROM llm_costs_daily WHERE day='2026-07-24'")
-        assert total["usd"] == 0.12
+            total = await db.fetchone(
+                "SELECT ROUND(SUM(cost_usd), 4) AS usd FROM llm_costs_daily WHERE day='2026-07-24'")
+            assert total["usd"] == 0.12
+        finally:
+            await db.close()
     asyncio.run(run())
 
 

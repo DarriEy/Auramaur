@@ -535,17 +535,20 @@ async def test_control_arm_records_a_scoreable_forecast():
     """
     db = Database(":memory:")
     await db.connect()
-    pillar = await _pillar(db, analyzer=DeterministicAnalyzer())
-    pillar._alias = "momentum_control"
-    await pillar.run_once()
+    try:
+        pillar = await _pillar(db, analyzer=DeterministicAnalyzer())
+        pillar._alias = "momentum_control"
+        await pillar.run_once()
 
-    rows = await db.fetchall(
-        "SELECT model_alias, probability, confidence, horizon_sessions "
-        "FROM ibkr_etf_forecasts WHERE model_alias='momentum_control'")
-    assert rows, "control arm recorded no forecast"
-    assert rows[0]["probability"] == pytest.approx(0.70)
-    assert rows[0]["confidence"] == "HIGH"
-    assert rows[0]["horizon_sessions"] > 0
+        rows = await db.fetchall(
+            "SELECT model_alias, probability, confidence, horizon_sessions "
+            "FROM ibkr_etf_forecasts WHERE model_alias='momentum_control'")
+        assert rows, "control arm recorded no forecast"
+        assert rows[0]["probability"] == pytest.approx(0.70)
+        assert rows[0]["confidence"] == "HIGH"
+        assert rows[0]["horizon_sessions"] > 0
+    finally:
+        await db.close()
 
 
 @pytest.mark.asyncio

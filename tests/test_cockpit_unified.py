@@ -65,14 +65,17 @@ def test_cockpit_pnl_is_authoritative_not_trades_mirror():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        await _seed(db)
-        state = await ck.gather_state(db, _fake_settings(), cache=None)
+        try:
+            await _seed(db)
+            state = await ck.gather_state(db, _fake_settings(), cache=None)
 
-        # realized 2.00 + unrealized (0.50 - 0.30) * 10 = 4.00 — NOT 999.
-        assert state["total_pnl"] == pytest.approx(4.0)
-        assert state["position_count"] == 1
-        # Balance = paper float + authoritative P&L.
-        assert state["balance"] == pytest.approx(104.0)
+            # realized 2.00 + unrealized (0.50 - 0.30) * 10 = 4.00 — NOT 999.
+            assert state["total_pnl"] == pytest.approx(4.0)
+            assert state["position_count"] == 1
+            # Balance = paper float + authoritative P&L.
+            assert state["balance"] == pytest.approx(104.0)
+        finally:
+            await db.close()
 
     asyncio.run(run())
 
@@ -81,14 +84,17 @@ def test_both_render_paths_build():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        await _seed(db)
-        state = await ck.gather_state(db, _fake_settings(), cache=None)
+        try:
+            await _seed(db)
+            state = await ck.gather_state(db, _fake_settings(), cache=None)
 
-        # Live full-screen Layout and one-shot compact Group must both build.
-        from rich.layout import Layout
-        from rich.console import Group
+            # Live full-screen Layout and one-shot compact Group must both build.
+            from rich.layout import Layout
+            from rich.console import Group
 
-        assert isinstance(ck.make_layout(state), Layout)
-        assert isinstance(ck.make_layout(state, compact=True), Group)
+            assert isinstance(ck.make_layout(state), Layout)
+            assert isinstance(ck.make_layout(state, compact=True), Group)
+        finally:
+            await db.close()
 
     asyncio.run(run())

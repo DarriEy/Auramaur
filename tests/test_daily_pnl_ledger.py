@@ -29,16 +29,19 @@ def test_get_daily_pnl_is_live_only_and_today_only():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        # Today, LIVE: -5 and +2  -> net -3 (the only rows that should count)
-        await _ledger_row(db, -5.0, 0, "live-a")
-        await _ledger_row(db, 2.0, 0, "live-b")
-        # Today, PAPER: -100 (the by-design paper loss that used to leak in)
-        await _ledger_row(db, -100.0, 1, "paper-today")
-        # Old day, LIVE: -50 (different day, must not count toward "today")
-        await _ledger_row(db, -50.0, 0, "live-old", today=False)
+        try:
+            # Today, LIVE: -5 and +2  -> net -3 (the only rows that should count)
+            await _ledger_row(db, -5.0, 0, "live-a")
+            await _ledger_row(db, 2.0, 0, "live-b")
+            # Today, PAPER: -100 (the by-design paper loss that used to leak in)
+            await _ledger_row(db, -100.0, 1, "paper-today")
+            # Old day, LIVE: -50 (different day, must not count toward "today")
+            await _ledger_row(db, -50.0, 0, "live-old", today=False)
 
-        pnl = await PortfolioTracker(db).get_daily_pnl()
-        assert abs(pnl - (-3.0)) < 1e-9, f"expected -3.0 (today live only), got {pnl}"
+            pnl = await PortfolioTracker(db).get_daily_pnl()
+            assert abs(pnl - (-3.0)) < 1e-9, f"expected -3.0 (today live only), got {pnl}"
+        finally:
+            await db.close()
 
     asyncio.run(run())
 
@@ -47,9 +50,12 @@ def test_get_daily_pnl_zero_when_no_live_realizations():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        # Only a paper realization today — the live gate must read 0.
-        await _ledger_row(db, -250.0, 1, "paper-only")
-        pnl = await PortfolioTracker(db).get_daily_pnl()
-        assert pnl == 0.0
+        try:
+            # Only a paper realization today — the live gate must read 0.
+            await _ledger_row(db, -250.0, 1, "paper-only")
+            pnl = await PortfolioTracker(db).get_daily_pnl()
+            assert pnl == 0.0
+        finally:
+            await db.close()
 
     asyncio.run(run())

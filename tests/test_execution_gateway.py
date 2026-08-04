@@ -47,38 +47,41 @@ def test_submit_records_fill_cost_basis_and_trade():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        await db.execute(
-            "INSERT INTO markets (id, exchange, question, category, active, last_updated)"
-            " VALUES ('m1', 'polymarket', 'Q?', 'tech', 1, datetime('now'))"
-        )
-        await db.commit()
+        try:
+            await db.execute(
+                "INSERT INTO markets (id, exchange, question, category, active, last_updated)"
+                " VALUES ('m1', 'polymarket', 'Q?', 'tech', 1, datetime('now'))"
+            )
+            await db.commit()
 
-        order = Order(market_id="m1", exchange="polymarket", token_id="tok",
-                      side=OrderSide.BUY, token=TokenType.YES, size=20.0, price=0.50)
-        result = OrderResult(order_id="p1", market_id="m1", status="paper",
-                             filled_size=20.0, filled_price=0.50, is_paper=True)
-        gw = _gateway(db, _paper_exchange(order, result))
+            order = Order(market_id="m1", exchange="polymarket", token_id="tok",
+                          side=OrderSide.BUY, token=TokenType.YES, size=20.0, price=0.50)
+            result = OrderResult(order_id="p1", market_id="m1", status="paper",
+                                 filled_size=20.0, filled_price=0.50, is_paper=True)
+            gw = _gateway(db, _paper_exchange(order, result))
 
-        res = await gw.submit(TradeIntent(signal=_signal(), market=Market(id="m1", question="Q?"),
-                                          size_dollars=10.0))
+            res = await gw.submit(TradeIntent(signal=_signal(), market=Market(id="m1", question="Q?"),
+                                              size_dollars=10.0))
 
-        # Outcome surfaced
-        assert res.status == "paper"
-        assert res.result is result
-        assert res.fill is not None and res.fill.size == 20.0
+            # Outcome surfaced
+            assert res.status == "paper"
+            assert res.result is result
+            assert res.fill is not None and res.fill.size == 20.0
 
-        # Fill + cost basis recorded by the real PnLTracker
-        fills = await db.fetchall("SELECT * FROM fills WHERE market_id='m1'")
-        assert len(fills) == 1
-        cb = await db.fetchall("SELECT token, size FROM cost_basis WHERE market_id='m1'")
-        assert len(cb) == 1
-        assert dict(cb[0])["token"] == "YES" and dict(cb[0])["size"] == 20.0
+            # Fill + cost basis recorded by the real PnLTracker
+            fills = await db.fetchall("SELECT * FROM fills WHERE market_id='m1'")
+            assert len(fills) == 1
+            cb = await db.fetchall("SELECT token, size FROM cost_basis WHERE market_id='m1'")
+            assert len(cb) == 1
+            assert dict(cb[0])["token"] == "YES" and dict(cb[0])["size"] == 20.0
 
-        # Mirrored to legacy trades with the strategy attribution
-        trades = await db.fetchall("SELECT side, status, strategy_source FROM trades WHERE market_id='m1'")
-        assert len(trades) == 1
-        assert dict(trades[0])["status"] == "filled"  # 'paper' maps to 'filled' in trades
-        assert dict(trades[0])["strategy_source"] == "llm"
+            # Mirrored to legacy trades with the strategy attribution
+            trades = await db.fetchall("SELECT side, status, strategy_source FROM trades WHERE market_id='m1'")
+            assert len(trades) == 1
+            assert dict(trades[0])["status"] == "filled"  # 'paper' maps to 'filled' in trades
+            assert dict(trades[0])["strategy_source"] == "llm"
+        finally:
+            await db.close()
 
     asyncio.run(run())
 
@@ -87,17 +90,20 @@ def test_record_fill_is_idempotent_by_order_id():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        tracker = PnLTracker(db, Settings())
-        from auramaur.exchange.models import Fill
-        fill = Fill(order_id="same-order", market_id="m1", token_id="tok",
-                    side=OrderSide.BUY, token=TokenType.YES,
-                    size=10, price=0.5, is_paper=True)
-        await tracker.record_fill(fill)
-        await tracker.record_fill(fill)
-        assert len(await db.fetchall("SELECT 1 FROM fills")) == 1
-        row = await db.fetchone(
-            "SELECT size FROM cost_basis WHERE market_id='m1' AND token='YES'")
-        assert float(row["size"]) == 10
+        try:
+            tracker = PnLTracker(db, Settings())
+            from auramaur.exchange.models import Fill
+            fill = Fill(order_id="same-order", market_id="m1", token_id="tok",
+                        side=OrderSide.BUY, token=TokenType.YES,
+                        size=10, price=0.5, is_paper=True)
+            await tracker.record_fill(fill)
+            await tracker.record_fill(fill)
+            assert len(await db.fetchall("SELECT 1 FROM fills")) == 1
+            row = await db.fetchone(
+                "SELECT size FROM cost_basis WHERE market_id='m1' AND token='YES'")
+            assert float(row["size"]) == 10
+        finally:
+            await db.close()
     asyncio.run(run())
 
 
@@ -108,36 +114,39 @@ def test_submit_blocks_buy_that_exceeds_aggregate_market_cap():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        # Seed the mode the gateway will actually query (is_live depends on the
-        # ambient .env; CI has none -> paper). Keeps the test deterministic.
-        flag = 0 if Settings().is_live else 1
-        await db.execute(
-            "INSERT INTO cost_basis (market_id, token, size, avg_cost, total_cost, is_paper)"
-            " VALUES ('m1', 'YES', 48.0, 0.50, 24.0, ?)", (flag,)
-        )
-        await db.commit()
+        try:
+            # Seed the mode the gateway will actually query (is_live depends on the
+            # ambient .env; CI has none -> paper). Keeps the test deterministic.
+            flag = 0 if Settings().is_live else 1
+            await db.execute(
+                "INSERT INTO cost_basis (market_id, token, size, avg_cost, total_cost, is_paper)"
+                " VALUES ('m1', 'YES', 48.0, 0.50, 24.0, ?)", (flag,)
+            )
+            await db.commit()
 
-        order = Order(market_id="m1", exchange="polymarket", token_id="tok",
-                      side=OrderSide.BUY, token=TokenType.YES, size=20.0, price=0.50)
-        result = OrderResult(order_id="p1", market_id="m1", status="paper",
-                             filled_size=20.0, filled_price=0.50, is_paper=True)
-        ex = _paper_exchange(order, result)
-        gw = _gateway(db, ex)
+            order = Order(market_id="m1", exchange="polymarket", token_id="tok",
+                          side=OrderSide.BUY, token=TokenType.YES, size=20.0, price=0.50)
+            result = OrderResult(order_id="p1", market_id="m1", status="paper",
+                                 filled_size=20.0, filled_price=0.50, is_paper=True)
+            ex = _paper_exchange(order, result)
+            gw = _gateway(db, ex)
 
-        # 24 held + 10 new = 34 > 25 -> skipped.
-        res = await gw.submit(TradeIntent(signal=_signal(), market=Market(id="m1", question="Q?"),
-                                          size_dollars=10.0))
+            # 24 held + 10 new = 34 > 25 -> skipped.
+            res = await gw.submit(TradeIntent(signal=_signal(), market=Market(id="m1", question="Q?"),
+                                              size_dollars=10.0))
 
-        assert res.status == "skipped"
-        assert "market_cap" in (res.reason or "")
-        ex.place_order.assert_not_awaited()             # never placed
-        fills = await db.fetchall("SELECT * FROM fills WHERE market_id='m1'")
-        assert fills == []                              # nothing recorded
-        # The block benches the market so cycles stop re-analyzing it.
-        drop = await db.fetchone(
-            "SELECT reason FROM order_build_drops WHERE market_id='m1' "
-            "AND blocked_until > datetime('now')")
-        assert drop is not None and "market_cap" in drop["reason"]
+            assert res.status == "skipped"
+            assert "market_cap" in (res.reason or "")
+            ex.place_order.assert_not_awaited()             # never placed
+            fills = await db.fetchall("SELECT * FROM fills WHERE market_id='m1'")
+            assert fills == []                              # nothing recorded
+            # The block benches the market so cycles stop re-analyzing it.
+            drop = await db.fetchone(
+                "SELECT reason FROM order_build_drops WHERE market_id='m1' "
+                "AND blocked_until > datetime('now')")
+            assert drop is not None and "market_cap" in drop["reason"]
+        finally:
+            await db.close()
 
     asyncio.run(run())
 
@@ -148,31 +157,34 @@ def test_submit_market_cap_does_not_block_opposite_token_leg():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        await db.execute(
-            "INSERT INTO markets (id, exchange, question, category, active, last_updated)"
-            " VALUES ('m1', 'polymarket', 'Q?', 'tech', 1, datetime('now'))"
-        )
-        # $24 of YES held; the NO leg should still be allowed.
-        flag = 0 if Settings().is_live else 1
-        await db.execute(
-            "INSERT INTO cost_basis (market_id, token, size, avg_cost, total_cost, is_paper)"
-            " VALUES ('m1', 'YES', 48.0, 0.50, 24.0, ?)", (flag,)
-        )
-        await db.commit()
+        try:
+            await db.execute(
+                "INSERT INTO markets (id, exchange, question, category, active, last_updated)"
+                " VALUES ('m1', 'polymarket', 'Q?', 'tech', 1, datetime('now'))"
+            )
+            # $24 of YES held; the NO leg should still be allowed.
+            flag = 0 if Settings().is_live else 1
+            await db.execute(
+                "INSERT INTO cost_basis (market_id, token, size, avg_cost, total_cost, is_paper)"
+                " VALUES ('m1', 'YES', 48.0, 0.50, 24.0, ?)", (flag,)
+            )
+            await db.commit()
 
-        order = Order(market_id="m1", exchange="polymarket", token_id="tok_no",
-                      side=OrderSide.BUY, token=TokenType.NO, size=20.0, price=0.50)
-        result = OrderResult(order_id="p1", market_id="m1", status="paper",
-                             filled_size=20.0, filled_price=0.50, is_paper=True)
-        gw = _gateway(db, _paper_exchange(order, result))
+            order = Order(market_id="m1", exchange="polymarket", token_id="tok_no",
+                          side=OrderSide.BUY, token=TokenType.NO, size=20.0, price=0.50)
+            result = OrderResult(order_id="p1", market_id="m1", status="paper",
+                                 filled_size=20.0, filled_price=0.50, is_paper=True)
+            gw = _gateway(db, _paper_exchange(order, result))
 
-        res = await gw.submit(TradeIntent(signal=_signal(), market=Market(id="m1", question="Q?"),
-                                          size_dollars=10.0))
+            res = await gw.submit(TradeIntent(signal=_signal(), market=Market(id="m1", question="Q?"),
+                                              size_dollars=10.0))
 
-        assert res.status == "paper"          # NO leg placed normally
-        no_cb = await db.fetchall(
-            "SELECT size FROM cost_basis WHERE market_id='m1' AND token='NO'")
-        assert len(no_cb) == 1
+            assert res.status == "paper"          # NO leg placed normally
+            no_cb = await db.fetchall(
+                "SELECT size FROM cost_basis WHERE market_id='m1' AND token='NO'")
+            assert len(no_cb) == 1
+        finally:
+            await db.close()
 
     asyncio.run(run())
 
@@ -199,22 +211,25 @@ def test_submit_skips_on_build_failure_without_recording():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        ex = MagicMock()
-        ex.prepare_order = MagicMock(return_value=None)  # build failure
-        ex.place_order = AsyncMock()
-        gw = ExecutionGateway(router=None, exchange=ex, exchange_name="polymarket",
-                              settings=Settings(), db=db, pnl_tracker=PnLTracker(db, Settings()))
+        try:
+            ex = MagicMock()
+            ex.prepare_order = MagicMock(return_value=None)  # build failure
+            ex.place_order = AsyncMock()
+            gw = ExecutionGateway(router=None, exchange=ex, exchange_name="polymarket",
+                                  settings=Settings(), db=db, pnl_tracker=PnLTracker(db, Settings()))
 
-        res = await gw.submit(TradeIntent(signal=_signal(), market=Market(id="m1", question="Q?"),
-                                          size_dollars=10.0))
+            res = await gw.submit(TradeIntent(signal=_signal(), market=Market(id="m1", question="Q?"),
+                                              size_dollars=10.0))
 
-        assert res.status == "skipped"
-        assert res.result is None
-        ex.place_order.assert_not_awaited()
-        # Nothing recorded, and the market is blocked from immediate retry.
-        assert await db.fetchall("SELECT * FROM fills") == []
-        drops = await db.fetchall("SELECT market_id FROM order_build_drops WHERE market_id='m1'")
-        assert len(drops) == 1
+            assert res.status == "skipped"
+            assert res.result is None
+            ex.place_order.assert_not_awaited()
+            # Nothing recorded, and the market is blocked from immediate retry.
+            assert await db.fetchall("SELECT * FROM fills") == []
+            drops = await db.fetchall("SELECT market_id FROM order_build_drops WHERE market_id='m1'")
+            assert len(drops) == 1
+        finally:
+            await db.close()
 
     asyncio.run(run())
 
@@ -225,17 +240,20 @@ def test_rejected_order_returns_result_not_none():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        order = Order(market_id="m1", exchange="polymarket", token_id="tok",
-                      side=OrderSide.BUY, token=TokenType.YES, size=20.0, price=0.50)
-        rejected = OrderResult(order_id="ERROR", market_id="m1", status="rejected")
-        gw = _gateway(db, _paper_exchange(order, rejected))
+        try:
+            order = Order(market_id="m1", exchange="polymarket", token_id="tok",
+                          side=OrderSide.BUY, token=TokenType.YES, size=20.0, price=0.50)
+            rejected = OrderResult(order_id="ERROR", market_id="m1", status="rejected")
+            gw = _gateway(db, _paper_exchange(order, rejected))
 
-        res = await gw.submit(TradeIntent(signal=_signal(), market=Market(id="m1", question="Q?"),
-                                          size_dollars=10.0))
-        assert res.status == "rejected"
-        assert res.result is rejected           # not None
-        assert res.fill is None                 # nothing filled
-        assert await db.fetchall("SELECT * FROM fills") == []
+            res = await gw.submit(TradeIntent(signal=_signal(), market=Market(id="m1", question="Q?"),
+                                              size_dollars=10.0))
+            assert res.status == "rejected"
+            assert res.result is rejected           # not None
+            assert res.fill is None                 # nothing filled
+            assert await db.fetchall("SELECT * FROM fills") == []
+        finally:
+            await db.close()
 
     asyncio.run(run())
 
@@ -260,9 +278,13 @@ def test_gateway_lazy_rebuild_tracks_late_bound_collaborators():
         # Same collaborators -> same instance.
         assert TE._gateway.fget(holder) is gw1
         # Late-bound pnl changes -> rebuild.
-        holder._components_pnl = PnLTracker(Database(":memory:"), Settings())
-        gw2 = TE._gateway.fget(holder)
-        assert gw2 is not gw1
+        db = Database(":memory:")
+        try:
+            holder._components_pnl = PnLTracker(db, Settings())
+            gw2 = TE._gateway.fget(holder)
+            assert gw2 is not gw1
+        finally:
+            await db.close()
 
     asyncio.run(run())
 
@@ -295,18 +317,21 @@ def test_submit_paired_records_both_legs():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        ex_a = _leg("a", place=OrderResult(order_id="pa", market_id="a", status="paper",
-                                           filled_size=20.0, filled_price=0.40, is_paper=True))
-        ex_b = _leg("b", place=OrderResult(order_id="pb", market_id="b", status="paper",
-                                           filled_size=20.0, filled_price=0.40, is_paper=True))
-        gw = _paired_gateway(db)
-        res_a, res_b = await gw.submit_paired(
-            _intent("a"), _intent("b"),
-            exchange_a=ex_a, exchange_name_a="polymarket",
-            exchange_b=ex_b, exchange_name_b="kalshi")
-        assert res_a.status == "paper" and res_b.status == "paper"
-        fills = await db.fetchall("SELECT market_id FROM fills")
-        assert {dict(f)["market_id"] for f in fills} == {"a", "b"}
+        try:
+            ex_a = _leg("a", place=OrderResult(order_id="pa", market_id="a", status="paper",
+                                               filled_size=20.0, filled_price=0.40, is_paper=True))
+            ex_b = _leg("b", place=OrderResult(order_id="pb", market_id="b", status="paper",
+                                               filled_size=20.0, filled_price=0.40, is_paper=True))
+            gw = _paired_gateway(db)
+            res_a, res_b = await gw.submit_paired(
+                _intent("a"), _intent("b"),
+                exchange_a=ex_a, exchange_name_a="polymarket",
+                exchange_b=ex_b, exchange_name_b="kalshi")
+            assert res_a.status == "paper" and res_b.status == "paper"
+            fills = await db.fetchall("SELECT market_id FROM fills")
+            assert {dict(f)["market_id"] for f in fills} == {"a", "b"}
+        finally:
+            await db.close()
 
     asyncio.run(run())
 
@@ -315,22 +340,25 @@ def test_submit_paired_checks_caps_before_placing_either_leg():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        flag = 0 if Settings().is_live else 1
-        await db.execute(
-            "INSERT INTO cost_basis (market_id, token, size, avg_cost, total_cost, is_paper)"
-            " VALUES ('a', 'YES', 60, 0.4, 24, ?)", (flag,))
-        await db.commit()
-        ex_a = _leg("a", place=OrderResult(order_id="pa", market_id="a", status="paper",
-                                            filled_size=20, filled_price=0.4, is_paper=True))
-        ex_b = _leg("b", place=OrderResult(order_id="pb", market_id="b", status="paper",
-                                            filled_size=20, filled_price=0.4, is_paper=True))
-        res_a, res_b = await _paired_gateway(db).submit_paired(
-            _intent("a"), _intent("b"), exchange_a=ex_a,
-            exchange_name_a="polymarket", exchange_b=ex_b,
-            exchange_name_b="polymarket")
-        assert res_a.status == "skipped" and res_b.status == "skipped"
-        ex_a.place_order.assert_not_awaited()
-        ex_b.place_order.assert_not_awaited()
+        try:
+            flag = 0 if Settings().is_live else 1
+            await db.execute(
+                "INSERT INTO cost_basis (market_id, token, size, avg_cost, total_cost, is_paper)"
+                " VALUES ('a', 'YES', 60, 0.4, 24, ?)", (flag,))
+            await db.commit()
+            ex_a = _leg("a", place=OrderResult(order_id="pa", market_id="a", status="paper",
+                                                filled_size=20, filled_price=0.4, is_paper=True))
+            ex_b = _leg("b", place=OrderResult(order_id="pb", market_id="b", status="paper",
+                                                filled_size=20, filled_price=0.4, is_paper=True))
+            res_a, res_b = await _paired_gateway(db).submit_paired(
+                _intent("a"), _intent("b"), exchange_a=ex_a,
+                exchange_name_a="polymarket", exchange_b=ex_b,
+                exchange_name_b="polymarket")
+            assert res_a.status == "skipped" and res_b.status == "skipped"
+            ex_a.place_order.assert_not_awaited()
+            ex_b.place_order.assert_not_awaited()
+        finally:
+            await db.close()
     asyncio.run(run())
 
 
@@ -338,18 +366,21 @@ def test_submit_paired_leg_a_rejected_never_places_b():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        ex_a = _leg("a", place=OrderResult(order_id="ERROR", market_id="a", status="rejected"))
-        ex_b = _leg("b", place=OrderResult(order_id="pb", market_id="b", status="paper",
-                                           filled_size=20.0, filled_price=0.40, is_paper=True))
-        gw = _paired_gateway(db)
-        res_a, res_b = await gw.submit_paired(
-            _intent("a"), _intent("b"),
-            exchange_a=ex_a, exchange_name_a="polymarket",
-            exchange_b=ex_b, exchange_name_b="polymarket")
-        assert res_a.status == "rejected"
-        assert res_b.status == "skipped"
-        ex_b.place_order.assert_not_awaited()  # both-or-nothing: B never attempted
-        assert await db.fetchall("SELECT * FROM fills") == []
+        try:
+            ex_a = _leg("a", place=OrderResult(order_id="ERROR", market_id="a", status="rejected"))
+            ex_b = _leg("b", place=OrderResult(order_id="pb", market_id="b", status="paper",
+                                               filled_size=20.0, filled_price=0.40, is_paper=True))
+            gw = _paired_gateway(db)
+            res_a, res_b = await gw.submit_paired(
+                _intent("a"), _intent("b"),
+                exchange_a=ex_a, exchange_name_a="polymarket",
+                exchange_b=ex_b, exchange_name_b="polymarket")
+            assert res_a.status == "rejected"
+            assert res_b.status == "skipped"
+            ex_b.place_order.assert_not_awaited()  # both-or-nothing: B never attempted
+            assert await db.fetchall("SELECT * FROM fills") == []
+        finally:
+            await db.close()
 
     asyncio.run(run())
 
@@ -358,17 +389,20 @@ def test_submit_paired_leg_b_fail_unwinds_pending_a():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        # A is a LIVE pending order; B rejects -> A must be cancelled.
-        ex_a = _leg("a", place=OrderResult(order_id="live-a", market_id="a", status="pending",
-                                           filled_size=0.0, is_paper=False), cancel=True)
-        ex_b = _leg("b", place=OrderResult(order_id="ERROR", market_id="b", status="rejected"))
-        gw = _paired_gateway(db)
-        res_a, res_b = await gw.submit_paired(
-            _intent("a"), _intent("b"),
-            exchange_a=ex_a, exchange_name_a="polymarket",
-            exchange_b=ex_b, exchange_name_b="polymarket")
-        assert res_a.status == "pending" and res_b.status == "rejected"
-        ex_a.cancel_order.assert_awaited_once_with("live-a")
+        try:
+            # A is a LIVE pending order; B rejects -> A must be cancelled.
+            ex_a = _leg("a", place=OrderResult(order_id="live-a", market_id="a", status="pending",
+                                               filled_size=0.0, is_paper=False), cancel=True)
+            ex_b = _leg("b", place=OrderResult(order_id="ERROR", market_id="b", status="rejected"))
+            gw = _paired_gateway(db)
+            res_a, res_b = await gw.submit_paired(
+                _intent("a"), _intent("b"),
+                exchange_a=ex_a, exchange_name_a="polymarket",
+                exchange_b=ex_b, exchange_name_b="polymarket")
+            assert res_a.status == "pending" and res_b.status == "rejected"
+            ex_a.cancel_order.assert_awaited_once_with("live-a")
+        finally:
+            await db.close()
 
     asyncio.run(run())
 
@@ -380,17 +414,20 @@ def test_record_external_fill_paper_records_fill_and_trade():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        order = Order(market_id="arb1", exchange="polymarket", token_id="tok",
-                      side=OrderSide.BUY, token=TokenType.YES, size=20.0, price=0.40)
-        result = OrderResult(order_id="ax", market_id="arb1", status="paper",
-                             filled_size=20.0, filled_price=0.40, is_paper=True)
-        gw = _gateway(db, MagicMock())  # exchange unused — order already placed
-        res = await gw.record_external_fill(
-            order, result, strategy_source="cross_exchange_arb", exchange_name="polymarket")
-        assert res.status == "paper" and res.fill is not None
-        assert len(await db.fetchall("SELECT 1 FROM fills WHERE market_id='arb1'")) == 1
-        t = await db.fetchall("SELECT strategy_source FROM trades WHERE market_id='arb1'")
-        assert len(t) == 1 and dict(t[0])["strategy_source"] == "cross_exchange_arb"
+        try:
+            order = Order(market_id="arb1", exchange="polymarket", token_id="tok",
+                          side=OrderSide.BUY, token=TokenType.YES, size=20.0, price=0.40)
+            result = OrderResult(order_id="ax", market_id="arb1", status="paper",
+                                 filled_size=20.0, filled_price=0.40, is_paper=True)
+            gw = _gateway(db, MagicMock())  # exchange unused — order already placed
+            res = await gw.record_external_fill(
+                order, result, strategy_source="cross_exchange_arb", exchange_name="polymarket")
+            assert res.status == "paper" and res.fill is not None
+            assert len(await db.fetchall("SELECT 1 FROM fills WHERE market_id='arb1'")) == 1
+            t = await db.fetchall("SELECT strategy_source FROM trades WHERE market_id='arb1'")
+            assert len(t) == 1 and dict(t[0])["strategy_source"] == "cross_exchange_arb"
+        finally:
+            await db.close()
 
     asyncio.run(run())
 
@@ -399,17 +436,20 @@ def test_record_external_fill_live_pending_defers_to_monitor():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        order = Order(market_id="arb2", exchange="polymarket", token_id="tok",
-                      side=OrderSide.BUY, token=TokenType.YES, size=20.0, price=0.40)
-        result = OrderResult(order_id="live-ax", market_id="arb2", status="pending",
-                             filled_size=0.0, is_paper=False)
-        gw = _gateway(db, MagicMock())
-        res = await gw.record_external_fill(
-            order, result, strategy_source="cross_exchange_arb", exchange_name="polymarket")
-        assert res.status == "pending"
-        assert await db.fetchall("SELECT 1 FROM fills") == []  # monitor records it
-        t = await db.fetchall("SELECT status FROM trades WHERE order_id='live-ax'")
-        assert len(t) == 1 and dict(t[0])["status"] == "pending"
+        try:
+            order = Order(market_id="arb2", exchange="polymarket", token_id="tok",
+                          side=OrderSide.BUY, token=TokenType.YES, size=20.0, price=0.40)
+            result = OrderResult(order_id="live-ax", market_id="arb2", status="pending",
+                                 filled_size=0.0, is_paper=False)
+            gw = _gateway(db, MagicMock())
+            res = await gw.record_external_fill(
+                order, result, strategy_source="cross_exchange_arb", exchange_name="polymarket")
+            assert res.status == "pending"
+            assert await db.fetchall("SELECT 1 FROM fills") == []  # monitor records it
+            t = await db.fetchall("SELECT status FROM trades WHERE order_id='live-ax'")
+            assert len(t) == 1 and dict(t[0])["status"] == "pending"
+        finally:
+            await db.close()
 
     asyncio.run(run())
 
@@ -418,19 +458,22 @@ def test_submit_exit_paper_records_fill_and_trade():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        sell = Order(market_id="x", exchange="polymarket", token_id="tok",
-                     side=OrderSide.SELL, token=TokenType.YES, size=20.0, price=0.60)
-        place = OrderResult(order_id="px", market_id="x", status="paper",
-                            filled_size=20.0, filled_price=0.60, is_paper=True)
-        ex = MagicMock(); ex.place_order = AsyncMock(return_value=place)
-        gw = ExecutionGateway(router=None, exchange=MagicMock(), exchange_name="polymarket",
-                              settings=Settings(), db=db, pnl_tracker=PnLTracker(db, Settings()))
-        res = await gw.submit_exit(sell, exchange=ex, exchange_name="polymarket")
-        assert res.status == "paper"
-        assert len(await db.fetchall("SELECT 1 FROM fills WHERE market_id='x'")) == 1
-        t = await db.fetchall("SELECT strategy_source, side FROM trades WHERE market_id='x'")
-        assert len(t) == 1
-        assert dict(t[0])["strategy_source"] == "exit" and dict(t[0])["side"] == "SELL"
+        try:
+            sell = Order(market_id="x", exchange="polymarket", token_id="tok",
+                         side=OrderSide.SELL, token=TokenType.YES, size=20.0, price=0.60)
+            place = OrderResult(order_id="px", market_id="x", status="paper",
+                                filled_size=20.0, filled_price=0.60, is_paper=True)
+            ex = MagicMock(); ex.place_order = AsyncMock(return_value=place)
+            gw = ExecutionGateway(router=None, exchange=MagicMock(), exchange_name="polymarket",
+                                  settings=Settings(), db=db, pnl_tracker=PnLTracker(db, Settings()))
+            res = await gw.submit_exit(sell, exchange=ex, exchange_name="polymarket")
+            assert res.status == "paper"
+            assert len(await db.fetchall("SELECT 1 FROM fills WHERE market_id='x'")) == 1
+            t = await db.fetchall("SELECT strategy_source, side FROM trades WHERE market_id='x'")
+            assert len(t) == 1
+            assert dict(t[0])["strategy_source"] == "exit" and dict(t[0])["side"] == "SELL"
+        finally:
+            await db.close()
 
     asyncio.run(run())
 
@@ -442,22 +485,25 @@ def test_submit_exit_live_pending_writes_trades_but_defers_fill_to_monitor():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        sell = Order(market_id="x", exchange="polymarket", token_id="tok",
-                     side=OrderSide.SELL, token=TokenType.YES, size=20.0, price=0.60)
-        place = OrderResult(order_id="live-x", market_id="x", status="pending",
-                            filled_size=0.0, is_paper=False)
-        ex = MagicMock(); ex.place_order = AsyncMock(return_value=place)
-        gw = ExecutionGateway(router=None, exchange=MagicMock(), exchange_name="polymarket",
-                              settings=Settings(), db=db, pnl_tracker=PnLTracker(db, Settings()))
-        res = await gw.submit_exit(sell, exchange=ex, exchange_name="polymarket")
-        assert res.status == "pending"
-        # No fill recorded yet (the monitor will, once).
-        assert await db.fetchall("SELECT 1 FROM fills") == []
-        # A pending trades row exists keyed by order_id, so the monitor's
-        # UPDATE ... WHERE order_id finds it (no 'order_monitor' duplicate).
-        t = await db.fetchall("SELECT status, order_id, strategy_source FROM trades WHERE order_id='live-x'")
-        assert len(t) == 1
-        assert dict(t[0])["status"] == "pending" and dict(t[0])["strategy_source"] == "exit"
+        try:
+            sell = Order(market_id="x", exchange="polymarket", token_id="tok",
+                         side=OrderSide.SELL, token=TokenType.YES, size=20.0, price=0.60)
+            place = OrderResult(order_id="live-x", market_id="x", status="pending",
+                                filled_size=0.0, is_paper=False)
+            ex = MagicMock(); ex.place_order = AsyncMock(return_value=place)
+            gw = ExecutionGateway(router=None, exchange=MagicMock(), exchange_name="polymarket",
+                                  settings=Settings(), db=db, pnl_tracker=PnLTracker(db, Settings()))
+            res = await gw.submit_exit(sell, exchange=ex, exchange_name="polymarket")
+            assert res.status == "pending"
+            # No fill recorded yet (the monitor will, once).
+            assert await db.fetchall("SELECT 1 FROM fills") == []
+            # A pending trades row exists keyed by order_id, so the monitor's
+            # UPDATE ... WHERE order_id finds it (no 'order_monitor' duplicate).
+            t = await db.fetchall("SELECT status, order_id, strategy_source FROM trades WHERE order_id='live-x'")
+            assert len(t) == 1
+            assert dict(t[0])["status"] == "pending" and dict(t[0])["strategy_source"] == "exit"
+        finally:
+            await db.close()
 
     asyncio.run(run())
 
@@ -466,19 +512,22 @@ def test_submit_paired_build_failure_places_neither():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        ex_a = _leg("a", place=OrderResult(order_id="pa", market_id="a", status="paper",
-                                           filled_size=20.0, filled_price=0.40, is_paper=True))
-        ex_a.prepare_order = MagicMock(return_value=None)  # A can't be built
-        ex_b = _leg("b", place=OrderResult(order_id="pb", market_id="b", status="paper",
-                                           filled_size=20.0, filled_price=0.40, is_paper=True))
-        gw = _paired_gateway(db)
-        res_a, res_b = await gw.submit_paired(
-            _intent("a"), _intent("b"),
-            exchange_a=ex_a, exchange_name_a="polymarket",
-            exchange_b=ex_b, exchange_name_b="polymarket")
-        assert res_a.status == "skipped" and res_b.status == "skipped"
-        ex_a.place_order.assert_not_awaited()
-        ex_b.place_order.assert_not_awaited()  # neither leg placed
+        try:
+            ex_a = _leg("a", place=OrderResult(order_id="pa", market_id="a", status="paper",
+                                               filled_size=20.0, filled_price=0.40, is_paper=True))
+            ex_a.prepare_order = MagicMock(return_value=None)  # A can't be built
+            ex_b = _leg("b", place=OrderResult(order_id="pb", market_id="b", status="paper",
+                                               filled_size=20.0, filled_price=0.40, is_paper=True))
+            gw = _paired_gateway(db)
+            res_a, res_b = await gw.submit_paired(
+                _intent("a"), _intent("b"),
+                exchange_a=ex_a, exchange_name_a="polymarket",
+                exchange_b=ex_b, exchange_name_b="polymarket")
+            assert res_a.status == "skipped" and res_b.status == "skipped"
+            ex_a.place_order.assert_not_awaited()
+            ex_b.place_order.assert_not_awaited()  # neither leg placed
+        finally:
+            await db.close()
 
     asyncio.run(run())
 
@@ -489,26 +538,29 @@ def test_place_legs_concurrent_places_all_and_records_each():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        legs = []
-        clients = []
-        for i in range(3):
-            order = Order(market_id=f"m{i}", exchange="polymarket", token_id="tok",
-                          side=OrderSide.BUY, token=TokenType.YES, size=10.0, price=0.30)
-            result = OrderResult(order_id=f"o{i}", market_id=f"m{i}", status="paper",
-                                 filled_size=10.0, filled_price=0.30, is_paper=True)
-            client = MagicMock(); client.place_order = AsyncMock(return_value=result)
-            clients.append(client)
-            legs.append((order, client, "polymarket"))
-        gw = _gateway(db, MagicMock())
-        out = await gw.place_legs(legs, strategy_source="negrisk_arb", concurrent=True)
-        # raw results returned in order
-        assert [r.order_id for r, _ in out] == ["o0", "o1", "o2"]
-        for c in clients:
-            c.place_order.assert_awaited_once()
-        # each leg recorded with the strategy attribution
-        rows = await db.fetchall("SELECT strategy_source FROM trades")
-        assert len(rows) == 3 and all(dict(r)["strategy_source"] == "negrisk_arb" for r in rows)
-        assert len(await db.fetchall("SELECT 1 FROM fills")) == 3
+        try:
+            legs = []
+            clients = []
+            for i in range(3):
+                order = Order(market_id=f"m{i}", exchange="polymarket", token_id="tok",
+                              side=OrderSide.BUY, token=TokenType.YES, size=10.0, price=0.30)
+                result = OrderResult(order_id=f"o{i}", market_id=f"m{i}", status="paper",
+                                     filled_size=10.0, filled_price=0.30, is_paper=True)
+                client = MagicMock(); client.place_order = AsyncMock(return_value=result)
+                clients.append(client)
+                legs.append((order, client, "polymarket"))
+            gw = _gateway(db, MagicMock())
+            out = await gw.place_legs(legs, strategy_source="negrisk_arb", concurrent=True)
+            # raw results returned in order
+            assert [r.order_id for r, _ in out] == ["o0", "o1", "o2"]
+            for c in clients:
+                c.place_order.assert_awaited_once()
+            # each leg recorded with the strategy attribution
+            rows = await db.fetchall("SELECT strategy_source FROM trades")
+            assert len(rows) == 3 and all(dict(r)["strategy_source"] == "negrisk_arb" for r in rows)
+            assert len(await db.fetchall("SELECT 1 FROM fills")) == 3
+        finally:
+            await db.close()
     asyncio.run(run())
 
 
@@ -516,21 +568,24 @@ def test_place_legs_batch_reservation_blocks_collective_over_cap():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        clients = []
-        legs = []
-        for _ in range(2):
-            order = Order(market_id="same", exchange="polymarket", token_id="tok",
-                          side=OrderSide.BUY, token=TokenType.YES,
-                          size=30, price=0.5, dry_run=True)
-            client = MagicMock(); client.place_order = AsyncMock()
-            clients.append(client)
-            legs.append((order, client, "polymarket"))
-        out = await _gateway(db, MagicMock()).place_legs(
-            legs, strategy_source="arb", concurrent=True)
-        assert all(result.status == "rejected" for result, _ in out)
-        assert all(exec_result.status == "skipped" for _, exec_result in out)
-        for client in clients:
-            client.place_order.assert_not_awaited()
+        try:
+            clients = []
+            legs = []
+            for _ in range(2):
+                order = Order(market_id="same", exchange="polymarket", token_id="tok",
+                              side=OrderSide.BUY, token=TokenType.YES,
+                              size=30, price=0.5, dry_run=True)
+                client = MagicMock(); client.place_order = AsyncMock()
+                clients.append(client)
+                legs.append((order, client, "polymarket"))
+            out = await _gateway(db, MagicMock()).place_legs(
+                legs, strategy_source="arb", concurrent=True)
+            assert all(result.status == "rejected" for result, _ in out)
+            assert all(exec_result.status == "skipped" for _, exec_result in out)
+            for client in clients:
+                client.place_order.assert_not_awaited()
+        finally:
+            await db.close()
     asyncio.run(run())
 
 
@@ -538,18 +593,21 @@ def test_fill_record_failure_does_not_turn_execution_into_submission_failure():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        order = Order(market_id="m1", exchange="polymarket", token_id="tok",
-                      side=OrderSide.BUY, token=TokenType.YES, size=10, price=0.5)
-        result = OrderResult(order_id="p1", market_id="m1", status="paper",
-                             filled_size=10, filled_price=0.5, is_paper=True)
-        pnl = MagicMock(); pnl.record_fill = AsyncMock(side_effect=RuntimeError("disk full"))
-        gw = ExecutionGateway(router=None, exchange=_paper_exchange(order, result),
-                              exchange_name="polymarket", settings=Settings(), db=db,
-                              pnl_tracker=pnl)
-        res = await gw.submit(_intent("m1"))
-        assert res.status == "paper"
-        assert res.result is result
-        assert res.fill is None
+        try:
+            order = Order(market_id="m1", exchange="polymarket", token_id="tok",
+                          side=OrderSide.BUY, token=TokenType.YES, size=10, price=0.5)
+            result = OrderResult(order_id="p1", market_id="m1", status="paper",
+                                 filled_size=10, filled_price=0.5, is_paper=True)
+            pnl = MagicMock(); pnl.record_fill = AsyncMock(side_effect=RuntimeError("disk full"))
+            gw = ExecutionGateway(router=None, exchange=_paper_exchange(order, result),
+                                  exchange_name="polymarket", settings=Settings(), db=db,
+                                  pnl_tracker=pnl)
+            res = await gw.submit(_intent("m1"))
+            assert res.status == "paper"
+            assert res.result is result
+            assert res.fill is None
+        finally:
+            await db.close()
     asyncio.run(run())
 
 
@@ -557,20 +615,23 @@ def test_place_legs_sequential_preserves_order():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        seen = []
-        legs = []
-        for i in range(2):
-            order = Order(market_id="m", exchange="polymarket", token_id=f"t{i}",
-                          side=OrderSide.BUY, token=TokenType.YES, size=5.0, price=0.4)
-            async def _place(o, _i=i):
-                seen.append(_i)
-                return OrderResult(order_id=f"o{_i}", market_id="m", status="paper",
-                                   filled_size=5.0, filled_price=0.4, is_paper=True)
-            client = MagicMock(); client.place_order = _place
-            legs.append((order, client, "polymarket"))
-        gw = _gateway(db, MagicMock())
-        await gw.place_legs(legs, strategy_source="internal_arb", concurrent=False)
-        assert seen == [0, 1]  # sequential, in order
+        try:
+            seen = []
+            legs = []
+            for i in range(2):
+                order = Order(market_id="m", exchange="polymarket", token_id=f"t{i}",
+                              side=OrderSide.BUY, token=TokenType.YES, size=5.0, price=0.4)
+                async def _place(o, _i=i):
+                    seen.append(_i)
+                    return OrderResult(order_id=f"o{_i}", market_id="m", status="paper",
+                                       filled_size=5.0, filled_price=0.4, is_paper=True)
+                client = MagicMock(); client.place_order = _place
+                legs.append((order, client, "polymarket"))
+            gw = _gateway(db, MagicMock())
+            await gw.place_legs(legs, strategy_source="internal_arb", concurrent=False)
+            assert seen == [0, 1]  # sequential, in order
+        finally:
+            await db.close()
     asyncio.run(run())
 
 
@@ -580,22 +641,25 @@ def test_place_quote_pair_places_bid_then_ask_and_returns_both():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        order_seen = []
-        bid = Order(market_id="mm", exchange="polymarket", token_id="yes",
-                    side=OrderSide.BUY, token=TokenType.YES, size=20.0, price=0.40,
-                    post_only=True, source="market_maker", dry_run=False)
-        ask = Order(market_id="mm", exchange="polymarket", token_id="no",
-                    side=OrderSide.BUY, token=TokenType.NO, size=20.0, price=0.55,
-                    post_only=True, source="market_maker", dry_run=False)
-        async def _place(o):
-            order_seen.append(o.token_id)
-            return OrderResult(order_id=f"oid-{o.token_id}", market_id="mm",
-                               status="pending", is_paper=False)
-        ex = MagicMock(); ex.place_order = _place
-        gw = _gateway(db, ex)
-        bid_res, ask_res = await gw.place_quote_pair(bid, ask, exchange=ex)
-        assert order_seen == ["yes", "no"]  # bid then ask
-        assert bid_res.order_id == "oid-yes" and ask_res.order_id == "oid-no"
+        try:
+            order_seen = []
+            bid = Order(market_id="mm", exchange="polymarket", token_id="yes",
+                        side=OrderSide.BUY, token=TokenType.YES, size=20.0, price=0.40,
+                        post_only=True, source="market_maker", dry_run=False)
+            ask = Order(market_id="mm", exchange="polymarket", token_id="no",
+                        side=OrderSide.BUY, token=TokenType.NO, size=20.0, price=0.55,
+                        post_only=True, source="market_maker", dry_run=False)
+            async def _place(o):
+                order_seen.append(o.token_id)
+                return OrderResult(order_id=f"oid-{o.token_id}", market_id="mm",
+                                   status="pending", is_paper=False)
+            ex = MagicMock(); ex.place_order = _place
+            gw = _gateway(db, ex)
+            bid_res, ask_res = await gw.place_quote_pair(bid, ask, exchange=ex)
+            assert order_seen == ["yes", "no"]  # bid then ask
+            assert bid_res.order_id == "oid-yes" and ask_res.order_id == "oid-no"
+        finally:
+            await db.close()
     asyncio.run(run())
 
 
@@ -610,23 +674,26 @@ def test_place_quote_pair_paper_quotes_rest_and_never_reach_the_client():
     async def run():
         db = Database(":memory:")
         await db.connect()
-        bid = Order(market_id="mm", exchange="polymarket", token_id="yes",
-                    side=OrderSide.BUY, token=TokenType.YES, size=20.0, price=0.49,
-                    post_only=True, source="market_maker", dry_run=True)
-        ask = Order(market_id="mm", exchange="polymarket", token_id="no",
-                    side=OrderSide.BUY, token=TokenType.NO, size=20.0, price=0.53,
-                    post_only=True, source="market_maker", dry_run=True)
-        ex = MagicMock()
-        async def _place(o):
-            raise AssertionError("paper quote must never reach place_order")
-        ex.place_order = _place
-        gw = _gateway(db, ex)
-        bid_res, ask_res = await gw.place_quote_pair(bid, ask, exchange=ex)
-        for res in (bid_res, ask_res):
-            assert res.status == "pending"
-            assert res.is_paper is True
-            assert res.order_id.startswith("PAPER")
-        assert bid_res.order_id != ask_res.order_id
+        try:
+            bid = Order(market_id="mm", exchange="polymarket", token_id="yes",
+                        side=OrderSide.BUY, token=TokenType.YES, size=20.0, price=0.49,
+                        post_only=True, source="market_maker", dry_run=True)
+            ask = Order(market_id="mm", exchange="polymarket", token_id="no",
+                        side=OrderSide.BUY, token=TokenType.NO, size=20.0, price=0.53,
+                        post_only=True, source="market_maker", dry_run=True)
+            ex = MagicMock()
+            async def _place(o):
+                raise AssertionError("paper quote must never reach place_order")
+            ex.place_order = _place
+            gw = _gateway(db, ex)
+            bid_res, ask_res = await gw.place_quote_pair(bid, ask, exchange=ex)
+            for res in (bid_res, ask_res):
+                assert res.status == "pending"
+                assert res.is_paper is True
+                assert res.order_id.startswith("PAPER")
+            assert bid_res.order_id != ask_res.order_id
+        finally:
+            await db.close()
     asyncio.run(run())
 
 
