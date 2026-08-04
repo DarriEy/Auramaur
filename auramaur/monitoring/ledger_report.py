@@ -78,16 +78,28 @@ def risk_free_benchmark(*, net_pnl: float, first_at, last_at,
     return out
 
 
+# Win/loss EVENTS are realizations. Cost rows (commission — written by
+# book_instrument_fill for the instrument books — and any future cost
+# kind) are always-negative bookkeeping, not trading outcomes: counting
+# them in n/wins reads every commission as a lost trade and depresses
+# win% (issue #299 item 6). Their P&L still belongs in the totals — a
+# cost is real money — so only the event counts filter on kind.
+_REALIZATION_KINDS = "('sell', 'settlement')"
+_N_EVENTS = f"SUM(CASE WHEN kind IN {_REALIZATION_KINDS} THEN 1 ELSE 0 END)"
+_N_WINS = (f"SUM(CASE WHEN kind IN {_REALIZATION_KINDS} AND pnl > 0 "
+           "THEN 1 ELSE 0 END)")
+
+
 async def gather_ledger_report(db, *, is_paper: bool, settings=None) -> dict:
     flag = 1 if is_paper else 0
 
     async def _group(dim: str) -> list[dict]:
         rows = await db.fetchall(
             f"""SELECT COALESCE(NULLIF({dim}, ''), '(none)') AS k,
-                       COUNT(*) AS n,
+                       {_N_EVENTS} AS n,
                        SUM(pnl) AS pnl,
                        SUM(fees) AS fees,
-                       SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins
+                       {_N_WINS} AS wins
                 FROM pnl_ledger WHERE is_paper = ?
                 GROUP BY 1 ORDER BY pnl DESC""",
             (flag,),
@@ -95,18 +107,18 @@ async def gather_ledger_report(db, *, is_paper: bool, settings=None) -> dict:
         return [dict(r) for r in (rows or [])]
 
     months = await db.fetchall(
-        """SELECT substr(realized_at, 1, 7) AS k,
-                  COUNT(*) AS n, SUM(pnl) AS pnl, SUM(fees) AS fees,
-                  SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins
+        f"""SELECT substr(realized_at, 1, 7) AS k,
+                  {_N_EVENTS} AS n, SUM(pnl) AS pnl, SUM(fees) AS fees,
+                  {_N_WINS} AS wins
            FROM pnl_ledger WHERE is_paper = ?
            GROUP BY 1 ORDER BY 1""",
         (flag,),
     )
 
     total = await db.fetchone(
-        """SELECT COUNT(*) AS n, COALESCE(SUM(pnl), 0) AS pnl,
+        f"""SELECT {_N_EVENTS} AS n, COALESCE(SUM(pnl), 0) AS pnl,
                   COALESCE(SUM(fees), 0) AS fees,
-                  SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins
+                  {_N_WINS} AS wins
            FROM pnl_ledger WHERE is_paper = ?""",
         (flag,),
     )
