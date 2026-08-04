@@ -15,8 +15,7 @@ from auramaur.experiments.strategies.ibkr_multiasset import (
     MultiAssetEntryInputs, MultiAssetEntryRules, propose_multiasset_entry,
 )
 
-from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
-from auramaur.broker.ledger import record_ledger_event
+from auramaur.broker.execution_gateway import ExecutionGateway
 from auramaur.broker.pnl import PnLTracker
 from auramaur.exchange.ibkr_instruments import (
     BY_BOOK, BY_KEY, ContractKind, IBKRBook, InstrumentSpec,

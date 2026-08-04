@@ -66,8 +66,13 @@ jobs:
       # from pyproject, which is the signal we want.
       # --extra agent installs the Hermes-bridge dep (fastmcp) so the
       # agentmcp bridge test runs for real here instead of importorskip-ing.
+      # --extra ibkr installs ib_async: directed_orders imports it lazily
+      # inside _send, and the TIF-validation tests (c862060) reach that
+      # import even with a mocked IB — without the extra every such test
+      # fails with "No module named 'ib_async'" (2026-08-04, first seen
+      # when the 82-commit push met CI).
       - name: Install from locked dependencies
-        run: uv sync --frozen --extra dev --extra agent
+        run: uv sync --frozen --extra dev --extra agent --extra ibkr
 
       # Safety gates first, fail-fast, so a triple-gate/settings regression is
       # the headline even if something else also breaks.

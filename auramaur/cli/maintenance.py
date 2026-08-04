@@ -401,10 +401,10 @@ def ibkr_backfill_basis(apply_changes: bool):
                               f"${row.total_cost:,.2f}")
             console.print(table)
             console.print(
-                f"[dim]Basis is USD per unit (avg_cost x multiplier x fx): "
-                f"record_fill realizes (price - avg_cost) * size and knows "
-                f"neither, so a local-currency basis books ~1000x wrong for "
-                f"FX.[/]")
+                "[dim]Basis is USD per unit (avg_cost x multiplier x fx): "
+                "record_fill realizes (price - avg_cost) * size and knows "
+                "neither, so a local-currency basis books ~1000x wrong for "
+                "FX.[/]")
             if not apply_changes:
                 console.print(
                     f"\n[yellow]Dry run[/] — {len(planned)} row(s) would be "

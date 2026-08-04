@@ -104,7 +104,7 @@ async def ingest_fills(db, ib, *, probe_label: str = "",
         # — and with IGNORE it would stay NULL forever, since re-ingesting
         # would skip the row. Backfill it when it arrives, but never
         # overwrite a known commission with NULL.
-        cur = await db.execute(
+        await db.execute(
             """INSERT INTO cost_observations
                  (exec_id, account, symbol, sec_type, exchange, currency,
                   venue_class, side, shares, price, notional, commission,

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 import math
-from statistics import fmean, median, pstdev
+from statistics import median, pstdev
 
 # Hourly candles: 24 * 365.
 HOURS_PER_YEAR = 8_760

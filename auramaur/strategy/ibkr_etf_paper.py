@@ -11,15 +11,14 @@ from zoneinfo import ZoneInfo
 
 import structlog
 
-from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
-from auramaur.broker.ledger import record_ledger_event
+from auramaur.broker.execution_gateway import ExecutionGateway
 from auramaur.broker.pnl import PnLTracker
 from auramaur.exchange.ibkr_instruments import BY_KEY
 from auramaur.broker.instrument_booking import (
     InstrumentFill, book_instrument_fill,
 )
 from auramaur.exchange.ibkr_intent import (
-    SimulatedInstrumentExchange, instrument_event_family, instrument_market_id,
+    SimulatedInstrumentExchange, instrument_event_family,
 )
 from auramaur.exchange.models import Market, OrderSide
 from auramaur.experiments.strategies.ibkr_etf_paper import (
@@ -31,7 +30,7 @@ from auramaur.risk.ibkr_math import (
     annualized_volatility, horizon_up_rate, normalized_momentum,
 )
 from auramaur.strategy.ibkr_edge_economics import (
-    clears_costs, required_conviction, round_trip_cost_bps,
+    clears_costs, round_trip_cost_bps,
 )
 from auramaur.strategy.ibkr_etf_controls import completed_closes
 
@@ -614,8 +613,6 @@ class IBKRETFPaperPillar:
                 symbol, allow_refresh=symbol in refresh_set, reference_price=mid)
             prob = view[0] if view else None
             confidence = view[1] if view else ""
-            conf_ok = bool(view) and self._CONF.get(
-                confidence.upper(), 0) >= self._min_conf_rank
             if held:
                 qty, entry = held
                 gain = (quote.bid - entry) / entry * 100

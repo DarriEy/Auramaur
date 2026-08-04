@@ -12,7 +12,7 @@ import pytest
 from auramaur.strategy.kraken_spot_features import (
     book_imbalance, breakeven_move_pct, build_features, desk_prompt,
     drawdown_from_high, edge_needed_prob, expected_move_pct,
-    normalized_momentum_sigma, range_position, realized_vol_annual, vol_regime,
+    normalized_momentum_sigma, range_position, vol_regime,
 )
 
 
