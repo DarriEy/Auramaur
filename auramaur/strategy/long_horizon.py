@@ -494,26 +494,30 @@ class LongHorizonPillar:
     # ------------------------------------------------------------------
 
     async def _persist_signal(self, signal: Signal, market: Market) -> None:
-        await self._db.execute(
-            """INSERT OR IGNORE INTO markets (id, exchange, condition_id, question,
-               description, category, active, outcome_yes_price, outcome_no_price,
-               volume, liquidity, last_updated)
-               VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))""",
-            (market.id, market.exchange or "polymarket", market.condition_id,
-             market.question, (market.description or "")[:500],
-             ensure_category(market.question, market.description, market.category),
-             market.outcome_yes_price, market.outcome_no_price,
-             market.volume, market.liquidity),
-        )
-        await self._db.execute(
-            """INSERT INTO signals (market_id, claude_prob, claude_confidence,
-               market_prob, edge, evidence_summary, action, strategy_source)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (signal.market_id, signal.claude_prob, signal.claude_confidence.value,
-             signal.market_prob, signal.edge, signal.evidence_summary,
-             signal.recommended_side.value, self._tag),
-        )
-        await self._db.commit()
+        # 2026-08-04 (#353 phase 3): markets stub + signals row land in one
+        # span. The trailing commit() this replaced was dead under the
+        # autocommit connection (no-op since eed51b8) — the span provides
+        # the atomicity it implied.
+        async with self._db.transaction(owner="long_horizon.signal"):
+            await self._db.execute(
+                """INSERT OR IGNORE INTO markets (id, exchange, condition_id, question,
+                   description, category, active, outcome_yes_price, outcome_no_price,
+                   volume, liquidity, last_updated)
+                   VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))""",
+                (market.id, market.exchange or "polymarket", market.condition_id,
+                 market.question, (market.description or "")[:500],
+                 ensure_category(market.question, market.description, market.category),
+                 market.outcome_yes_price, market.outcome_no_price,
+                 market.volume, market.liquidity),
+            )
+            await self._db.execute(
+                """INSERT INTO signals (market_id, claude_prob, claude_confidence,
+                   market_prob, edge, evidence_summary, action, strategy_source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (signal.market_id, signal.claude_prob, signal.claude_confidence.value,
+                 signal.market_prob, signal.edge, signal.evidence_summary,
+                 signal.recommended_side.value, self._tag),
+            )
 
     async def _record_position(self, signal: Signal, market: Market,
                                order, result) -> None:

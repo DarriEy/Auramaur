@@ -34,6 +34,7 @@ settlement-based, like bias_harvest/long_horizon.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import tempfile
 from datetime import datetime, timedelta, timezone
 
@@ -177,16 +178,25 @@ class AgentTraderPillar:
             # Venue scope. The table was keyed by model_alias alone, so a second
             # venue instance counted the FIRST venue's open book and skipped
             # every arm as book_full — the Kalshi lane could never trade.
-            # Existing rows predate any second venue, so they are Polymarket.
             await self._db.execute(
                 "ALTER TABLE agent_trader_theses ADD COLUMN cell TEXT "
                 "NOT NULL DEFAULT ''")
-            await self._db.execute(
-                "UPDATE agent_trader_theses SET cell = 'agent_trader_' || "
-                "model_alias WHERE cell = ''")
-        except Exception:
-            pass  # column already exists
-        await self._db.commit()
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
+        # 2026-08-04 (#353 phase 3): the backfill runs UNCONDITIONALLY, outside
+        # the ALTER's except. When it shared the ALTER's try, a crash between
+        # the two statements (each individually durable under autocommit) left
+        # the column added but empty, and every LATER run's ALTER raised
+        # duplicate-column into the except — so the backfill was skipped
+        # forever and those rows stayed at cell=''. The UPDATE is idempotent
+        # (WHERE cell = ''); existing pre-`cell` rows predate any second
+        # venue, so they are Polymarket.
+        await self._db.execute(
+            "UPDATE agent_trader_theses SET cell = 'agent_trader_' || "
+            "model_alias WHERE cell = ''")
+        # 2026-08-04 (#353 phase 3): trailing commit() removed — dead under
+        # the autocommit connection (no-op since eed51b8).
         self._schema_ready = True
 
     # ------------------------------------------------------------------
@@ -663,26 +673,30 @@ class AgentTraderPillar:
     # ------------------------------------------------------------------
 
     async def _persist_signal(self, signal: Signal, market: Market) -> None:
-        await self._db.execute(
-            """INSERT OR IGNORE INTO markets (id, exchange, condition_id, question,
-               description, category, active, outcome_yes_price, outcome_no_price,
-               volume, liquidity, last_updated)
-               VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))""",
-            (market.id, market.exchange or self._exchange_name, market.condition_id,
-             market.question, (market.description or "")[:500],
-             ensure_category(market.question, market.description, market.category),
-             market.outcome_yes_price, market.outcome_no_price,
-             market.volume, market.liquidity),
-        )
-        await self._db.execute(
-            """INSERT INTO signals (market_id, claude_prob, claude_confidence,
-               market_prob, edge, evidence_summary, action, strategy_source)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (signal.market_id, signal.claude_prob, signal.claude_confidence.value,
-             signal.market_prob, signal.edge, signal.evidence_summary,
-             signal.recommended_side.value, signal.strategy_source),
-        )
-        await self._db.commit()
+        # 2026-08-04 (#353 phase 3): markets stub + signals row land in one
+        # span. The trailing commit() this replaced was dead under the
+        # autocommit connection (no-op since eed51b8) — the span provides
+        # the atomicity it implied.
+        async with self._db.transaction(owner="agent_trader.signal"):
+            await self._db.execute(
+                """INSERT OR IGNORE INTO markets (id, exchange, condition_id, question,
+                   description, category, active, outcome_yes_price, outcome_no_price,
+                   volume, liquidity, last_updated)
+                   VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))""",
+                (market.id, market.exchange or self._exchange_name, market.condition_id,
+                 market.question, (market.description or "")[:500],
+                 ensure_category(market.question, market.description, market.category),
+                 market.outcome_yes_price, market.outcome_no_price,
+                 market.volume, market.liquidity),
+            )
+            await self._db.execute(
+                """INSERT INTO signals (market_id, claude_prob, claude_confidence,
+                   market_prob, edge, evidence_summary, action, strategy_source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (signal.market_id, signal.claude_prob, signal.claude_confidence.value,
+                 signal.market_prob, signal.edge, signal.evidence_summary,
+                 signal.recommended_side.value, signal.strategy_source),
+            )
 
     async def _record_position(self, signal: Signal, market: Market,
                                order, result) -> None:

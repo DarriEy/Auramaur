@@ -501,18 +501,24 @@ class TermStructurePillar:
             log.info("term_structure.unparseable_curve", family=fam)
             return None
         provider, model = self._last_reader
-        for m in strikes:
-            if m.id in probs:
-                d = parse_deadline(m.question)
-                await self._db.execute(
-                    """INSERT INTO term_structure_curves
-                       (family, market_id, deadline, model_prob, market_prob,
-                        thesis, provider, model)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (fam, m.id, d.strftime("%Y-%m-%d"), probs[m.id],
-                     m.outcome_yes_price, thesis[:400], provider, model),
-                )
-        await self._db.commit()
+        # 2026-08-04 (#353 phase 3): one LLM read yields N strike rows; a
+        # partial curve poisons _cached_curve's strike-set comparison, so all
+        # N land atomically. The model call completed above — nothing inside
+        # the span awaits anything but the writes (parse_deadline is pure).
+        # The trailing commit() this replaced was dead under the autocommit
+        # connection (no-op since eed51b8).
+        async with self._db.transaction(owner="term_structure.curve"):
+            for m in strikes:
+                if m.id in probs:
+                    d = parse_deadline(m.question)
+                    await self._db.execute(
+                        """INSERT INTO term_structure_curves
+                           (family, market_id, deadline, model_prob, market_prob,
+                            thesis, provider, model)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (fam, m.id, d.strftime("%Y-%m-%d"), probs[m.id],
+                         m.outcome_yes_price, thesis[:400], provider, model),
+                    )
         log.info("term_structure.curve_read", family=fam, strikes=len(probs),
                  provider=provider, model=model)
         return thesis, probs
@@ -785,6 +791,13 @@ class TermStructurePillar:
         entered = 0
         candidates = []
         markets_by_id = {market.id: market for market in strikes}
+        # 2026-08-04 (#353 phase 3): the observation rows below stay as
+        # independent autocommit singles, NOT one span/executemany — each
+        # row's claimed/disposition is computed per-iteration via an awaited
+        # DB read (_market_claimed), so batching would either hold a span
+        # across awaits (the held-long class) or force a non-mechanical
+        # restructure. The rows are independent telemetry (classification B);
+        # a partial set strands no state.
         for m in strikes:
             if m.id not in probs:
                 continue
@@ -845,7 +858,9 @@ class TermStructurePillar:
                     liquidity=m.liquidity,
                     claimed=claimed,
                 ))
-        await self._db.commit()
+        # 2026-08-04 (#353 phase 3): trailing commit() removed — dead under
+        # the autocommit connection (no-op since eed51b8); each observation
+        # row above is individually durable.
         proposals = select_term_structure_proposals(candidates, TermStructureRules(
             min_edge_percent=cfg.min_edge_pts,
             min_liquidity=cfg.min_liquidity,
@@ -965,26 +980,30 @@ class TermStructurePillar:
     # ------------------------------------------------------------------
 
     async def _persist_signal(self, signal: Signal, market: Market) -> None:
-        await self._db.execute(
-            """INSERT OR IGNORE INTO markets (id, exchange, condition_id, question,
-               description, category, active, outcome_yes_price, outcome_no_price,
-               volume, liquidity, last_updated)
-               VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))""",
-            (market.id, market.exchange or "polymarket", market.condition_id,
-             market.question, (market.description or "")[:500],
-             ensure_category(market.question, market.description, market.category),
-             market.outcome_yes_price, market.outcome_no_price,
-             market.volume, market.liquidity),
-        )
-        await self._db.execute(
-            """INSERT INTO signals (market_id, claude_prob, claude_confidence,
-               market_prob, edge, evidence_summary, action, strategy_source)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'term_structure')""",
-            (signal.market_id, signal.claude_prob, signal.claude_confidence.value,
-             signal.market_prob, signal.edge, signal.evidence_summary,
-             signal.recommended_side.value),
-        )
-        await self._db.commit()
+        # 2026-08-04 (#353 phase 3): markets stub + signals row land in one
+        # span. The trailing commit() this replaced was dead under the
+        # autocommit connection (no-op since eed51b8) — the span provides
+        # the atomicity it implied.
+        async with self._db.transaction(owner="term_structure.signal"):
+            await self._db.execute(
+                """INSERT OR IGNORE INTO markets (id, exchange, condition_id, question,
+                   description, category, active, outcome_yes_price, outcome_no_price,
+                   volume, liquidity, last_updated)
+                   VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))""",
+                (market.id, market.exchange or "polymarket", market.condition_id,
+                 market.question, (market.description or "")[:500],
+                 ensure_category(market.question, market.description, market.category),
+                 market.outcome_yes_price, market.outcome_no_price,
+                 market.volume, market.liquidity),
+            )
+            await self._db.execute(
+                """INSERT INTO signals (market_id, claude_prob, claude_confidence,
+                   market_prob, edge, evidence_summary, action, strategy_source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'term_structure')""",
+                (signal.market_id, signal.claude_prob, signal.claude_confidence.value,
+                 signal.market_prob, signal.edge, signal.evidence_summary,
+                 signal.recommended_side.value),
+            )
 
     async def _record_position(self, signal: Signal, market: Market,
                                order, result) -> None:

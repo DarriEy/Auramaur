@@ -517,30 +517,34 @@ class CycleOrchestrationMixin:
         for tc in trade_candidates:
             # Ensure market exists in DB (FK requirement)
             m = tc.market
-            await self.db.execute(
-                """INSERT OR IGNORE INTO markets (id, exchange, condition_id, question, description,
-                   category, active, outcome_yes_price, outcome_no_price,
-                   volume, liquidity, last_updated)
-                   VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))""",
-                (m.id, m.exchange or self.exchange_name or "polymarket",
-                 m.condition_id, m.question, m.description[:500],
-                 ensure_category(m.question, m.description, m.category),
-                 m.outcome_yes_price, m.outcome_no_price,
-                 m.volume, m.liquidity),
-            )
-            # Store signal
-            await self.db.execute(
-                """INSERT INTO signals (market_id, claude_prob, claude_confidence, market_prob,
-                                         edge, second_opinion_prob, divergence,
-                                         evidence_summary, action, strategy_source)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (tc.signal.market_id, tc.signal.claude_prob, tc.signal.claude_confidence.value,
-                 tc.signal.market_prob, tc.signal.edge, tc.signal.second_opinion_prob,
-                 tc.signal.divergence, tc.signal.evidence_summary,
-                 tc.signal.recommended_side.value if tc.signal.recommended_side else None,
-                 tc.signal.strategy_source),
-            )
-            await self.db.commit()
+            # 2026-08-04 (#353 phase 3): markets stub + signals row land in
+            # one span; only this pair — risk evaluation and execution below
+            # stay outside. The trailing commit() this replaced was dead
+            # under the autocommit connection (no-op since eed51b8).
+            async with self.db.transaction(owner="engine_cycle.signal"):
+                await self.db.execute(
+                    """INSERT OR IGNORE INTO markets (id, exchange, condition_id, question, description,
+                       category, active, outcome_yes_price, outcome_no_price,
+                       volume, liquidity, last_updated)
+                       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))""",
+                    (m.id, m.exchange or self.exchange_name or "polymarket",
+                     m.condition_id, m.question, m.description[:500],
+                     ensure_category(m.question, m.description, m.category),
+                     m.outcome_yes_price, m.outcome_no_price,
+                     m.volume, m.liquidity),
+                )
+                # Store signal
+                await self.db.execute(
+                    """INSERT INTO signals (market_id, claude_prob, claude_confidence, market_prob,
+                                             edge, second_opinion_prob, divergence,
+                                             evidence_summary, action, strategy_source)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (tc.signal.market_id, tc.signal.claude_prob, tc.signal.claude_confidence.value,
+                     tc.signal.market_prob, tc.signal.edge, tc.signal.second_opinion_prob,
+                     tc.signal.divergence, tc.signal.evidence_summary,
+                     tc.signal.recommended_side.value if tc.signal.recommended_side else None,
+                     tc.signal.strategy_source),
+                )
 
             # Risk evaluation (pass actual cash for correct Kelly sizing)
             decision = await self.risk_manager.evaluate(
@@ -857,31 +861,35 @@ class CycleOrchestrationMixin:
             )
 
             # Ensure market exists in DB (FK requirement for signals table)
-            await self.db.execute(
-                """INSERT OR IGNORE INTO markets (id, condition_id, question, description,
-                   category, active, outcome_yes_price, outcome_no_price,
-                   volume, liquidity, last_updated)
-                   VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))""",
-                (market.id, market.condition_id, market.question,
-                 market.description[:500],
-             ensure_category(market.question, market.description, market.category),
-                 market.outcome_yes_price, market.outcome_no_price,
-                 market.volume, market.liquidity),
-            )
+            # 2026-08-04 (#353 phase 3): markets stub + signals row land in
+            # one span; only this pair — risk evaluation and execution below
+            # stay outside. The trailing commit() this replaced was dead
+            # under the autocommit connection (no-op since eed51b8).
+            async with self.db.transaction(owner="engine_cycle.signal"):
+                await self.db.execute(
+                    """INSERT OR IGNORE INTO markets (id, condition_id, question, description,
+                       category, active, outcome_yes_price, outcome_no_price,
+                       volume, liquidity, last_updated)
+                       VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))""",
+                    (market.id, market.condition_id, market.question,
+                     market.description[:500],
+                     ensure_category(market.question, market.description, market.category),
+                     market.outcome_yes_price, market.outcome_no_price,
+                     market.volume, market.liquidity),
+                )
 
-            # Store signal
-            await self.db.execute(
-                """INSERT INTO signals (market_id, claude_prob, claude_confidence, market_prob,
-                                         edge, second_opinion_prob, divergence,
-                                         evidence_summary, action, strategy_source)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (signal.market_id, signal.claude_prob, signal.claude_confidence.value,
-                 signal.market_prob, signal.edge, signal.second_opinion_prob,
-                 signal.divergence, signal.evidence_summary,
-                 signal.recommended_side.value if signal.recommended_side else None,
-                 signal.strategy_source),
-            )
-            await self.db.commit()
+                # Store signal
+                await self.db.execute(
+                    """INSERT INTO signals (market_id, claude_prob, claude_confidence, market_prob,
+                                             edge, second_opinion_prob, divergence,
+                                             evidence_summary, action, strategy_source)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (signal.market_id, signal.claude_prob, signal.claude_confidence.value,
+                     signal.market_prob, signal.edge, signal.second_opinion_prob,
+                     signal.divergence, signal.evidence_summary,
+                     signal.recommended_side.value if signal.recommended_side else None,
+                     signal.strategy_source),
+                )
 
             # Risk evaluation (pass actual cash for correct Kelly sizing)
             decision = await self.risk_manager.evaluate(signal, market, price_history=price_history, available_cash=cycle_cash)
