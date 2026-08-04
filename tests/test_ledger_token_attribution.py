@@ -105,3 +105,50 @@ async def test_falls_back_to_market_level_without_paired_fill(tmp_path):
         assert row["strategy_source"] == "long_horizon"
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_instrument_book_id_encodes_the_owner_as_fallback(tmp_path):
+    """The 2026-08-04 drain-exit shape: an instrument-book position entered
+    before the shared booking path has no entry trade, and the sell's own
+    trade row can commit milliseconds after attribution runs — the sell
+    realized as strategy_source=''. The synthetic id encodes the owning
+    book, so the fallback resolves it; anything the entry lookups already
+    resolve stays untouched."""
+    db = Database(str(tmp_path / "t.db"))
+    await db.connect()
+    try:
+        # No trades/fills exist at all for this synthetic instrument market.
+        await record_ledger_event(
+            db, market_id="ibkr:global_etf:XLV", kind="sell", token="YES",
+            qty=3.35, pnl=-23.68, fees=0, is_paper=True, source_ref="f:1")
+        # A non-ibkr unresolvable id must still book empty, not guess.
+        await record_ledger_event(
+            db, market_id="mystery-market", kind="sell", token="YES",
+            qty=1, pnl=1.0, fees=0, is_paper=True, source_ref="f:2")
+        rows = {r["source_ref"]: r["strategy_source"] for r in await db.fetchall(
+            "SELECT source_ref, strategy_source FROM pnl_ledger")}
+        assert rows["f:1"] == "ibkr_global_etf_paper"
+        assert rows["f:2"] == ""
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_encoded_fallback_never_overrides_a_real_entry(tmp_path):
+    """A resolvable entry keeps winning: the encoded-id fallback fires only
+    when both entry lookups come back empty."""
+    db = Database(str(tmp_path / "t.db"))
+    await db.connect()
+    try:
+        await _seed_trade_and_fill(
+            db, market_id="ibkr:fx:USDCAD", order_id="o-1", token="YES",
+            strategy="ibkr_fx_paper_custom", ts="2026-08-01 10:00:00")
+        await record_ledger_event(
+            db, market_id="ibkr:fx:USDCAD", kind="sell", token="YES",
+            qty=1, pnl=2.0, fees=0, is_paper=True, source_ref="f:3")
+        row = await db.fetchone(
+            "SELECT strategy_source FROM pnl_ledger WHERE source_ref='f:3'")
+        assert row["strategy_source"] == "ibkr_fx_paper_custom"
+    finally:
+        await db.close()

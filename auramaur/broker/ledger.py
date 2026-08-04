@@ -165,6 +165,18 @@ async def _market_context(
             (market_id, market_id, market_id),
         )
         strategy = (srow["src"] if srow else "") or ""
+    if not strategy:
+        # Instrument-book synthetic ids ENCODE their owner:
+        # instrument_market_id() builds "ibkr:<book>:<key>" and the pillar's
+        # name is "ibkr_<book>_paper". Fallback only — a position entered
+        # before the shared booking path has no entry trade to derive from,
+        # and the sell's own trade row can land milliseconds after this
+        # lookup (observed 2026-08-04: the XLV/VNQ drain exits realized as
+        # strategy_source='' 0.2s before their trade rows committed).
+        # Anything the entry lookups already resolve is untouched.
+        parts = market_id.split(":")
+        if len(parts) == 3 and parts[0] == "ibkr" and parts[1]:
+            strategy = f"ibkr_{parts[1]}_paper"
     return venue, category, strategy
 
 
