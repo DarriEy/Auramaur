@@ -2141,6 +2141,15 @@ class Settings(BaseSettings):
     reddit_client_secret: str = Field(default="", repr=False, exclude=True)
     reddit_user_agent: str = "auramaur/0.1"
     twitter_bearer_token: str = Field(default="", repr=False, exclude=True)
+    # Bluesky authenticated reads (2026-08-04): the public appview began
+    # 403-ing unauthenticated/datacenter search — 29,743 fetches over 14
+    # days yielded ZERO items while reporting ok/empty. Unset = the source
+    # stays constructed but every non-200 now surfaces as a fetch ERROR
+    # instead of a silent empty. identifier is the handle or email;
+    # app_password from bsky.app Settings -> App Passwords (never the main
+    # account password).
+    bluesky_identifier: str = ""
+    bluesky_app_password: str = Field(default="", repr=False, exclude=True)
     fred_api_key: str = Field(default="", repr=False, exclude=True)
     bls_api_key: str = Field(default="", repr=False, exclude=True)
     bea_api_key: str = Field(default="", repr=False, exclude=True)

@@ -350,7 +350,8 @@ async def assemble_components(
     sources.append(GoogleTrendsSource())
     source_names.append("Trends")
     from auramaur.data_sources.bluesky import BlueskySource
-    sources.append(BlueskySource())
+    sources.append(BlueskySource(identifier=s.bluesky_identifier,
+                                 app_password=s.bluesky_app_password))
     source_names.append("Bluesky")
 
     ig = s.information_graduation

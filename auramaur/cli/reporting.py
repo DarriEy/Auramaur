@@ -983,6 +983,124 @@ def preregistered_checks():
     asyncio.run(_run())
 
 
+def source_presence_stats(snapshots, sources_by_run):
+    """Per-source Brier split: forecasts where the source supplied ranked
+    evidence vs forecasts where it did not.
+
+    OBSERVATIONAL by construction — presence is confounded with category,
+    market type and news volume, so a delta here is a lead for the paired
+    ablation (information_trials), never a verdict. ``snapshots`` rows need
+    (calibrated_probability, actual_outcome, evidence_run_ids as list);
+    ``sources_by_run`` maps run_id -> set of sources with ranked items.
+    """
+    per_source: dict[str, dict[str, list[float]]] = {}
+    all_sources: set[str] = set()
+    for s in sources_by_run.values():
+        all_sources |= s
+    for snap in snapshots:
+        p = min(1 - 1e-9, max(1e-9, float(snap["calibrated_probability"])))
+        brier = (p - int(snap["actual_outcome"])) ** 2
+        present: set[str] = set()
+        for run_id in snap["evidence_run_ids"]:
+            present |= sources_by_run.get(run_id, set())
+        for source in all_sources:
+            bucket = "with" if source in present else "without"
+            per_source.setdefault(
+                source, {"with": [], "without": []})[bucket].append(brier)
+    out = []
+    for source, buckets in per_source.items():
+        w, wo = buckets["with"], buckets["without"]
+        if not w:
+            continue
+        mean_w = sum(w) / len(w)
+        mean_wo = (sum(wo) / len(wo)) if wo else None
+        delta = (mean_w - mean_wo) if mean_wo is not None else None
+        out.append((source, len(w), mean_w, len(wo), mean_wo, delta))
+    out.sort(key=lambda r: (r[5] if r[5] is not None else 0.0))
+    return out
+
+
+@main.command("source-evidence-report")
+def source_evidence_report():
+    """Which evidence sources are PRESENT when forecasts turn out well?
+
+    Observational only: the causal instrument (information_trials paired
+    ablation) exists but its middle stage — record_forecast, the
+    control/treatment pair — has no production caller yet, so
+    source_contributions has never populated. Until that is built, this
+    report reads months of resolved forecast_snapshots against the
+    evidence_observations that fed them. Negative delta = forecasts were
+    BETTER (lower Brier) when the source was present. Confounded by
+    category and news volume; treat as a lead, not a verdict.
+    """
+    async def _run():
+        import json as _json
+
+        from auramaur.web.db import ReadOnlyDatabase
+
+        db = ReadOnlyDatabase()
+        await db.connect()
+        try:
+            rows = await db.fetchall(
+                """SELECT calibrated_probability, actual_outcome,
+                          evidence_run_ids
+                     FROM forecast_snapshots
+                    WHERE actual_outcome IS NOT NULL
+                      AND evidence_run_ids IS NOT NULL
+                      AND evidence_run_ids != '[]'""")
+            snapshots, run_ids = [], set()
+            for r in rows:
+                ids = _json.loads(r["evidence_run_ids"])
+                if not ids:
+                    continue
+                snapshots.append({
+                    "calibrated_probability": r["calibrated_probability"],
+                    "actual_outcome": r["actual_outcome"],
+                    "evidence_run_ids": ids})
+                run_ids |= set(ids)
+            sources_by_run: dict[str, set] = {}
+            if run_ids:
+                marks = ",".join("?" * len(run_ids))
+                for r in await db.fetchall(
+                        f"""SELECT run_id, source FROM evidence_observations
+                             WHERE run_id IN ({marks})
+                               AND rank_position IS NOT NULL""",
+                        tuple(run_ids)):
+                    sources_by_run.setdefault(r["run_id"], set()).add(
+                        r["source"])
+            stats = source_presence_stats(snapshots, sources_by_run)
+            if not stats:
+                console.print("[yellow]No resolved forecasts with linked "
+                              "evidence runs yet.[/]")
+                return
+            table = Table(
+                title=f"evidence-source presence vs Brier — "
+                      f"{len(snapshots)} resolved forecasts (OBSERVATIONAL)",
+                expand=False)
+            for c in ("source", "n with", "brier with", "n without",
+                      "brier without", "delta"):
+                table.add_column(c, justify="right")
+            for source, nw, bw, nwo, bwo, delta in stats:
+                colour = ("green" if delta is not None and delta < -0.01
+                          else "red" if delta is not None and delta > 0.01
+                          else "dim")
+                table.add_row(
+                    source, str(nw), f"{bw:.3f}", str(nwo),
+                    "—" if bwo is None else f"{bwo:.3f}",
+                    "—" if delta is None else f"[{colour}]{delta:+.3f}[/]")
+            console.print(table)
+            console.print(
+                "  [dim]delta < 0: forecasts were better when the source "
+                "was present. Observational — presence is confounded with "
+                "category and news volume; a promising delta earns the "
+                "source a place in the PAIRED ablation "
+                "(information_trials), whose record_forecast stage is not "
+                "yet wired. Small n makes single rows noise.[/]")
+        finally:
+            await db.close()
+    asyncio.run(_run())
+
+
 @main.command("evidence-accrual")
 @click.option("--days", default=14, show_default=True,
               help="Window for the recent-accrual columns.")
