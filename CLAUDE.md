@@ -30,6 +30,11 @@ When making git commits, use `Assisted-by: Claude (Anthropic)` in the commit mes
   see `auramaur/strategy/protocols.py` and `tests/test_strategy_protocol.py`.
 - The web dashboard (`auramaur/web/` + `web/` SPA) is read-only by construction: it opens the DB with SQLite `mode=ro` and must never gain venue credentials or order paths. Keep it that way.
 - Out-of-process DB consumers (web, MCP, scripts) open the trading DB via transient `mode=ro` URIs with `busy_timeout>=5000` and never run `Database.connect()`'s DDL against the live file; CLI tooling connects with `ensure_schema=False`.
+- Multi-statement writes on the shared `Database` use
+  `async with db.transaction(owner="<module>.<helper>")` — never raw
+  BEGIN/COMMIT through `execute()`, never a network/LLM await inside a
+  span, never wrapping gateway/PnL/calibration calls (re-entrancy JOINS
+  the outer span). See `docs/plans/txn-migration-plan.md` (#353).
 
 ## Code Style
 - Python 3.11+, async-first (asyncio)
