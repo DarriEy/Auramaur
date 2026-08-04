@@ -29,6 +29,13 @@ updates:
     groups:
       web-dependencies:
         patterns: ["*"]
+    ignore:
+      # 2026-08-04: the group bumped typescript to 7.x while
+      # typescript-eslint@8 refuses TS 7 as a peer — every grouped PR
+      # opened un-installable (npm ERESOLVE, #393). Hold typescript majors
+      # until the eslint toolchain declares TS 7 support, then remove.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
