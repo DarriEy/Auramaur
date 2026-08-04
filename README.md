@@ -110,7 +110,7 @@ reference.
 
 ## About
 
-Auramaur is a research artifact by Darri Eythorsson. I write about AI
+Auramaur is a research artifact by me, Darri Eythorsson. I write about AI
 monoculture risk in markets and consult on frontier-AI adoption in energy,
 water, and risk. If you're building on this or want to talk:
 [darri@symfluence.org](mailto:darri@symfluence.org).
