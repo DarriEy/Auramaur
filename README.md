@@ -3,6 +3,11 @@
 An autonomous trading bot for prediction markets (Polymarket and Kalshi),
 built in six days by a hydrologist using Claude Code.
 
+This is the bot from the Bloomberg Opinion piece
+["I Built an AI Trading Platform in Six Days. That's Terrifying"](https://www.bloomberg.com/opinion/articles/2026-04-28/ai-trading-bots-are-creating-a-major-financial-risk)
+(April 2026) — though a great deal of tinkering has happened since those first
+six days.
+
 It is an experiment, not a money machine — paper-trading is the default, live
 capital is gated behind a graduation ladder, and most strategies stay on
 probation. Treat realized performance as a research result, not a promise.
@@ -99,4 +104,13 @@ VM—including a first-class, GUI-authenticated IB Gateway service—see
 
 ## License
 
-MIT.
+MIT. If you build on Auramaur, a link back is appreciated — GitHub's "Cite this
+repository" button (backed by [`CITATION.cff`](CITATION.cff)) has a ready-made
+reference.
+
+## About
+
+Auramaur is a research artifact by Darri Eythorsson. I write about AI
+monoculture risk in markets and consult on frontier-AI adoption in energy,
+water, and risk. If you're building on this or want to talk:
+[darri@symfluence.org](mailto:darri@symfluence.org).

@@ -1,0 +1,30 @@
+cff-version: 1.2.0
+message: "If you use or build on Auramaur, please cite it as below — a link back is appreciated."
+title: "Auramaur"
+type: software
+authors:
+  - family-names: "Eythorsson"
+    given-names: "Darri"
+    email: "darri@symfluence.org"
+abstract: "An autonomous trading bot for prediction markets (Polymarket and Kalshi), built with Claude Code. Paper-trading by default, with a graduation ladder gating live capital."
+repository-code: "https://github.com/DarriEy/Auramaur"
+license: MIT
+version: "0.1.0"
+date-released: "2026-04-28"
+keywords:
+  - prediction-markets
+  - polymarket
+  - kalshi
+  - trading-bot
+  - llm-agents
+  - claude
+references:
+  - type: article
+    title: "I Built an AI Trading Platform in Six Days. That's Terrifying"
+    authors:
+      - family-names: "Eythorsson"
+        given-names: "Darri"
+    journal: "Bloomberg Opinion"
+    year: 2026
+    month: 4
+    url: "https://www.bloomberg.com/opinion/articles/2026-04-28/ai-trading-bots-are-creating-a-major-financial-risk"
