@@ -923,8 +923,23 @@ agent_trader:
     # Revert: restore the alias/model pair.
     - alias: sonnet
       model: claude-sonnet-5
+    # OPUS ARM -> OPUS 5 AT HIGH EFFORT (2026-08-04, user: "do the batch").
+    # The premium arm ran a superseded model at medium effort while sonnet
+    # ran generation 5 since birth — the experiment's "is premium
+    # intelligence worth it" question was being asked of the wrong opus.
+    # Record at change: best mean in the family (+$88.54/21, no large
+    # losers, ~600 declines/14d — a good judge that rarely rules; the
+    # selectivity is deliberately untouched). Timed inside the CHEAP
+    # window: agent arms freeze the whole agent_trader section, so this
+    # re-versions sonnet too — but both holdout clocks are still CLOSED
+    # (opus 08-13, sonnet 08-15) and pre-clock evidence is permanently
+    # uncountable, so the cost is both clocks sliding to deploy+14d
+    # (~08-18). Waiting past 08-13 would instead discard countable
+    # evidence. Revert: model claude-opus-4-8, effort medium — itself a
+    # re-version; do not flip-flop.
     - alias: opus
-      model: claude-opus-4-8
+      model: claude-opus-5
+      effort: high
     # Gemini arms — cross-provider tier comparison. PAID API (unlike the
     # Claude arms on the plan): own daily ceiling below, and every call's
     # token usage is metered into agent_trader_costs so each arm's record
