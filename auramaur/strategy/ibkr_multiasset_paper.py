@@ -248,67 +248,77 @@ class IBKRMultiAssetPaperBook:
         capital = quantity * self._capital_per_unit(spec, price, fx)
         fee = self._commission(spec, quantity, capital)
         fill_ref = execution_ref or f"ibkr-{self.book.value}-paper-{uuid4().hex}"
-        await self._db.execute(
-            """INSERT INTO ibkr_paper_fills
-               (book, instrument_key, con_id, side, quantity, multiplier, price,
-                currency, fx_to_usd, commission_usd, price_source, fill_ref)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (self.book.value, spec.key, quote.con_id, side, quantity,
-             quote.multiplier, price, spec.currency, fx, fee, quote.source, fill_ref))
-        await self._db.execute(
-            "INSERT INTO ibkr_paper_ledger (book, kind, pnl_usd, source_ref) VALUES (?, 'commission', ?, ?)",
-            (self.book.value, -fee, f"{fill_ref}:commission"))
-        if side == "BUY":
+        # One logical batch (txn-migration plan, #353 phase 2): fill +
+        # commission + position/round-trip rows land together or not at
+        # all. Everything the batch needs — the executor's network call,
+        # the held-position read, price/fee arithmetic — completed above;
+        # nothing inside the span awaits anything but the writes. The
+        # gateway booking (_book_fill) stays OUTSIDE: transaction()
+        # re-entrancy would join it into this span across network I/O.
+        async with self._db.transaction(owner="ibkr_multiasset.fill"):
             await self._db.execute(
-                """INSERT INTO ibkr_paper_positions
-                   (book, instrument_key, con_id, currency, quantity, multiplier,
-                    fx_to_usd, avg_cost, current_price, price_source,
-                    instrument_spec_json, stop_price, initial_risk_usd,
-                    entry_commission_usd, entry_fill_ref)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (self.book.value, spec.key, quote.con_id, spec.currency, quantity,
-                 quote.multiplier, fx, price, price, quote.source,
-                 self._serialize_spec(spec), stop_price, initial_risk_usd, fee,
-                 fill_ref))
-        else:
-            pnl = (price - float(entry_price)) * quantity * quote.multiplier * fx
+                """INSERT INTO ibkr_paper_fills
+                   (book, instrument_key, con_id, side, quantity, multiplier, price,
+                    currency, fx_to_usd, commission_usd, price_source, fill_ref)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (self.book.value, spec.key, quote.con_id, side, quantity,
+                 quote.multiplier, price, spec.currency, fx, fee, quote.source, fill_ref))
             await self._db.execute(
-                "INSERT INTO ibkr_paper_ledger (book, kind, pnl_usd, source_ref) VALUES (?, 'trade', ?, ?)",
-                (self.book.value, pnl, f"{fill_ref}:trade"))
-            entry_fee = float(position["entry_commission_usd"] or 0) if position else 0.0
-            allocated_entry_fee = (entry_fee * quantity / held_quantity
-                                   if held_quantity > 0 else entry_fee)
-            entry_fill_ref = str(position["entry_fill_ref"] or "") if position else ""
-            if position is None:
-                # Understates elapsed_days for the evidence contract; loud so a
-                # recurring miss is investigated rather than absorbed.
-                log.warning("ibkr_multiasset.round_trip_missing_entry",
-                            book=self.book.value, instrument=spec.key)
-            opened_at = position["opened_at"] if position else datetime.now(timezone.utc).isoformat()
-            # OR IGNORE: exit_fill_ref is UNIQUE, so a crash-replayed exit books
-            # the round trip once instead of failing the cycle.
-            await self._db.execute(
-                """INSERT OR IGNORE INTO ibkr_paper_round_trips
-                   (book, instrument_key, entry_fill_ref, exit_fill_ref, gross_pnl_usd,
-                    entry_commission_usd, exit_commission_usd, net_pnl_usd,
-                    opened_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (self.book.value, spec.key, entry_fill_ref, fill_ref, pnl,
-                 allocated_entry_fee, fee, pnl - allocated_entry_fee - fee, opened_at))
-            remaining = max(0.0, held_quantity - quantity)
-            if remaining > 1e-9:
+                "INSERT INTO ibkr_paper_ledger (book, kind, pnl_usd, source_ref) VALUES (?, 'commission', ?, ?)",
+                (self.book.value, -fee, f"{fill_ref}:commission"))
+            if side == "BUY":
                 await self._db.execute(
-                    """UPDATE ibkr_paper_positions
-                          SET quantity=?, entry_commission_usd=?, current_price=?,
-                              updated_at=datetime('now')
-                        WHERE book=? AND instrument_key=?""",
-                    (remaining, max(0.0, entry_fee - allocated_entry_fee), price,
-                     self.book.value, spec.key))
+                    """INSERT INTO ibkr_paper_positions
+                       (book, instrument_key, con_id, currency, quantity, multiplier,
+                        fx_to_usd, avg_cost, current_price, price_source,
+                        instrument_spec_json, stop_price, initial_risk_usd,
+                        entry_commission_usd, entry_fill_ref)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (self.book.value, spec.key, quote.con_id, spec.currency, quantity,
+                     quote.multiplier, fx, price, price, quote.source,
+                     self._serialize_spec(spec), stop_price, initial_risk_usd, fee,
+                     fill_ref))
             else:
+                pnl = (price - float(entry_price)) * quantity * quote.multiplier * fx
                 await self._db.execute(
-                    "DELETE FROM ibkr_paper_positions WHERE book=? AND instrument_key=?",
-                    (self.book.value, spec.key))
-        await self._db.commit()
+                    "INSERT INTO ibkr_paper_ledger (book, kind, pnl_usd, source_ref) VALUES (?, 'trade', ?, ?)",
+                    (self.book.value, pnl, f"{fill_ref}:trade"))
+                entry_fee = float(position["entry_commission_usd"] or 0) if position else 0.0
+                allocated_entry_fee = (entry_fee * quantity / held_quantity
+                                       if held_quantity > 0 else entry_fee)
+                entry_fill_ref = str(position["entry_fill_ref"] or "") if position else ""
+                if position is None:
+                    # Understates elapsed_days for the evidence contract; loud so a
+                    # recurring miss is investigated rather than absorbed.
+                    log.warning("ibkr_multiasset.round_trip_missing_entry",
+                                book=self.book.value, instrument=spec.key)
+                opened_at = position["opened_at"] if position else datetime.now(timezone.utc).isoformat()
+                # OR IGNORE: exit_fill_ref is UNIQUE, so a crash-replayed exit books
+                # the round trip once instead of failing the cycle.
+                await self._db.execute(
+                    """INSERT OR IGNORE INTO ibkr_paper_round_trips
+                       (book, instrument_key, entry_fill_ref, exit_fill_ref, gross_pnl_usd,
+                        entry_commission_usd, exit_commission_usd, net_pnl_usd,
+                        opened_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (self.book.value, spec.key, entry_fill_ref, fill_ref, pnl,
+                     allocated_entry_fee, fee, pnl - allocated_entry_fee - fee, opened_at))
+                remaining = max(0.0, held_quantity - quantity)
+                if remaining > 1e-9:
+                    await self._db.execute(
+                        """UPDATE ibkr_paper_positions
+                              SET quantity=?, entry_commission_usd=?, current_price=?,
+                                  updated_at=datetime('now')
+                            WHERE book=? AND instrument_key=?""",
+                        (remaining, max(0.0, entry_fee - allocated_entry_fee), price,
+                         self.book.value, spec.key))
+                else:
+                    await self._db.execute(
+                        "DELETE FROM ibkr_paper_positions WHERE book=? AND instrument_key=?",
+                        (self.book.value, spec.key))
+        # The trailing commit() this span replaced was dead code under the
+        # autocommit connection (no-op since eed51b8) — the span above is
+        # what actually provides the batch atomicity it once implied.
         await self._book_fill(
             spec, side=side, quantity=quantity, price=price, fx=fx,
             multiplier=float(quote.multiplier or 1.0), fee=fee,

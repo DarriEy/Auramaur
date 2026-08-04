@@ -393,36 +393,47 @@ class IBKRETFPaperPillar:
                     bid: float = 0.0, ask: float = 0.0) -> None:
         fee = self._s.ibkr.etf_fee_per_order_usd
         fill_ref = f"ibkr-etf-paper-{self._alias}-{symbol}-{uuid4().hex}"
-        await self._db.execute(
-            """INSERT INTO ibkr_etf_fills
-               (model_alias, symbol, side, quantity, price, commission_usd, fill_ref)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (self._alias, symbol, side.value, qty, price, fee, fill_ref))
-        await self._db.execute(
-            """INSERT INTO ibkr_etf_ledger (model_alias, kind, pnl, source_ref)
-               VALUES (?, 'commission', ?, ?)""",
-            (self._alias, -fee, f"{fill_ref}:commission"))
-        if side == OrderSide.BUY:
-            await self._db.execute(
-                """INSERT INTO ibkr_etf_positions
-                    (model_alias, symbol, quantity, avg_cost, current_price,
-                     stop_price, initial_risk_usd)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (self._alias, symbol, qty, price, price, stop_price, initial_risk_usd))
-        else:
+        # Reads and validation BEFORE the span (txn-migration plan, #353):
+        # the old sequence wrote the fill + commission rows and only then
+        # discovered an absent position, stranding orphan rows on a bad
+        # sell. Nothing below may await anything but the batch itself.
+        position = None
+        realized = 0.0
+        if side != OrderSide.BUY:
             position = await self._db.fetchone(
                 """SELECT quantity, avg_cost FROM ibkr_etf_positions
                    WHERE model_alias = ? AND symbol = ?""", (self._alias, symbol))
             if position is None:
                 raise ValueError(f"cannot sell absent ETF paper position: {symbol}")
             realized = (price - float(position["avg_cost"])) * qty
+        # One logical batch: fill + commission + position row must land
+        # together or not at all — a fill without its position row is the
+        # orphan genus this migration exists to close (#353, phase 2).
+        async with self._db.transaction(owner="ibkr_etf_paper.fill"):
+            await self._db.execute(
+                """INSERT INTO ibkr_etf_fills
+                   (model_alias, symbol, side, quantity, price, commission_usd, fill_ref)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (self._alias, symbol, side.value, qty, price, fee, fill_ref))
             await self._db.execute(
                 """INSERT INTO ibkr_etf_ledger (model_alias, kind, pnl, source_ref)
-                   VALUES (?, 'trade', ?, ?)""",
-                (self._alias, realized, f"{fill_ref}:trade"))
-            await self._db.execute(
-                "DELETE FROM ibkr_etf_positions WHERE model_alias = ? AND symbol = ?",
-                (self._alias, symbol))
+                   VALUES (?, 'commission', ?, ?)""",
+                (self._alias, -fee, f"{fill_ref}:commission"))
+            if side == OrderSide.BUY:
+                await self._db.execute(
+                    """INSERT INTO ibkr_etf_positions
+                        (model_alias, symbol, quantity, avg_cost, current_price,
+                         stop_price, initial_risk_usd)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (self._alias, symbol, qty, price, price, stop_price, initial_risk_usd))
+            else:
+                await self._db.execute(
+                    """INSERT INTO ibkr_etf_ledger (model_alias, kind, pnl, source_ref)
+                       VALUES (?, 'trade', ?, ?)""",
+                    (self._alias, realized, f"{fill_ref}:trade"))
+                await self._db.execute(
+                    "DELETE FROM ibkr_etf_positions WHERE model_alias = ? AND symbol = ?",
+                    (self._alias, symbol))
         await self._book_fill(symbol, side, qty, price, fee, fill_ref,
                               bid=bid, ask=ask)
 
