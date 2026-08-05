@@ -15,6 +15,84 @@ from config.settings import Settings
 from auramaur.cli._base import console, main
 
 
+@main.command("maker-observatory")
+@click.option("--days", default=21, type=click.IntRange(1, 365), show_default=True)
+def maker_observatory_report(days: int):
+    """Show shadow maker fill toxicity at each configured markout horizon."""
+    async def _run():
+        from auramaur.monitoring.maker_observatory import (
+            maker_observatory_feature_report,
+            maker_promotion_blockers,
+            maker_observatory_summary,
+            maker_quote_coverage,
+        )
+        from auramaur.web.db import ReadOnlyDatabase
+
+        db = ReadOnlyDatabase()
+        await db.connect()
+        try:
+            rows = await maker_observatory_summary(db, days=days)
+            features = await maker_observatory_feature_report(db, days=days)
+            coverage = await maker_quote_coverage(db, days=days)
+        finally:
+            await db.close()
+        table = Table(title=f"Maker observatory — last {days}d")
+        for column in ("Mode", "Horizon", "Fills", "Due", "Valid", "Credible holdout",
+                       "Markets", "Mean", "Size-wtd", "95% CI", "Toxic"):
+            table.add_column(column)
+        for row in rows:
+            mean = row["mean_markout"]
+            weighted = row["size_weighted_markout"]
+            toxic = row["toxic_rate"]
+            table.add_row(
+                "paper" if row["is_paper"] else "live",
+                f"{row['horizon_seconds']}s", str(row["fills"]),
+                str(row["due_marks"]),
+                f"{row['valid_marks']} ({row['completeness']:.0%})",
+                str(row["credible_holdout_marks"]), str(row["markets"]),
+                "—" if mean is None else f"{mean:+.4f}",
+                "—" if weighted is None else f"{weighted:+.4f}",
+                ("—" if row["ci_low"] is None else
+                 f"[{row['ci_low']:+.4f}, {row['ci_high']:+.4f}]"),
+                "—" if toxic is None else f"{toxic:.1%}",
+            )
+        console.print(table)
+        console.print("[dim]Promotion evidence = valid, credible, post-warmup "
+                      "holdout marks. Synthetic paper fills never count.[/]")
+        scorecard = Table(title="Frozen-threshold holdout scorecard")
+        for column in ("Horizon", "Feature", "Warmup", "Holdout", "Markets",
+                       "High-low markout"):
+            scorecard.add_column(column)
+        for row in features:
+            scorecard.add_row(
+                f"{row['horizon_seconds']}s", row["feature"],
+                str(row["warmup_n"]), str(row["holdout_n"]), str(row["markets"]),
+                "—" if row["effect"] is None else f"{row['effect']:+.4f}",
+            )
+        console.print(scorecard)
+        sampled = coverage["sampled_quote_coverage"]
+        console.print(
+            f"[dim]Cadence samples={coverage['samples']}; active quote present="
+            f"{'—' if sampled is None else f'{sampled:.1%}'}; "
+            f"holdout samples={coverage['holdout_samples']}. This is sampled "
+            "coverage, not venue-certified uptime.[/]")
+        settings = Settings()
+        blockers = maker_promotion_blockers(
+            rows,
+            min_fills=settings.market_maker.observatory_min_fills,
+            min_markets=settings.market_maker.observatory_min_markets,
+            min_completeness=settings.market_maker.observatory_min_completeness,
+        )
+        if blockers:
+            console.print("[yellow]Not promotable:[/]")
+            for blocker in blockers:
+                console.print(f"  [dim]• {blocker}[/]")
+        else:
+            console.print("[green]Evidence gate passed.[/] Any quote-policy "
+                          "change still requires a separately versioned experiment.")
+    asyncio.run(_run())
+
+
 @main.command("intelligence-eval")
 @click.option("--all-streams", is_flag=True,
               help="Compare production, intelligence, and information-trial streams.")

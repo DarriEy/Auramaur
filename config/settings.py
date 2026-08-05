@@ -555,6 +555,26 @@ class MarketMakerConfig(BaseModel):
     # min on a stuck request). Bound each per-market quote op and the stale-cancel
     # with this timeout so a stuck call is abandoned and the cycle continues.
     op_timeout_seconds: float = 15.0
+    # Shadow-only observatory. These fields may record and report; they are
+    # never read by quote formation or execution.
+    observatory_enabled: bool = True
+    observatory_horizons_seconds: tuple[int, ...] = (30, 60, 300)
+    observatory_retention_days: int = Field(default=45, ge=7, le=365)
+    observatory_review_days: int = Field(default=21, ge=7, le=90)
+    observatory_min_fills: int = Field(default=100, ge=20)
+    observatory_min_markets: int = Field(default=5, ge=2)
+    observatory_min_completeness: float = Field(default=0.95, ge=0.8, le=1.0)
+    observatory_max_mark_lateness_seconds: int = Field(default=45, ge=1, le=600)
+    observatory_holdout_days: int = Field(default=7, ge=1, le=30)
+
+    @model_validator(mode="after")
+    def validate_observatory(self):
+        horizons = self.observatory_horizons_seconds
+        if not horizons or any(value <= 0 for value in horizons):
+            raise ValueError("maker observatory horizons must be positive")
+        if len(set(horizons)) != len(horizons):
+            raise ValueError("maker observatory horizons must be unique")
+        return self
 
 
 class TechnicalConfig(BaseModel):

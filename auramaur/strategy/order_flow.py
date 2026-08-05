@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from datetime import datetime, timezone
+import math
 
 import structlog
 
@@ -39,6 +40,20 @@ class OrderFlowTracker:
     def record_book_snapshot(self, market_id: str, book: OrderBook) -> None:
         """Record an order book snapshot for imbalance analysis."""
         self._last_books[market_id] = book
+
+    def signed_flow(self, market_ids, *, now: datetime | None = None,
+                    half_life_seconds: float = 60.0,
+                    window_seconds: float = 300.0) -> float:
+        """Time-decayed signed aggressor volume across equivalent feed keys."""
+        instant = now or datetime.now(timezone.utc)
+        total = 0.0
+        for market_id in market_ids:
+            for timestamp, side, size in self._recent_trades.get(market_id, ()):
+                age = max(0.0, (instant - timestamp).total_seconds())
+                if age <= window_seconds:
+                    sign = 1.0 if side is OrderSide.BUY else -1.0
+                    total += sign * size * math.exp(-math.log(2) * age / half_life_seconds)
+        return total
 
     def get_flow_signal(self, market_id: str) -> FlowSignal:
         """Compute order flow signals for a market.

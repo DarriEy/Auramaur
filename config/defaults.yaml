@@ -751,6 +751,17 @@ market_maker:
   # twice on 2026-06-30 (silent 12-24 min). Bound each quote op so a stuck call is
   # abandoned and the cycle continues.
   op_timeout_seconds: 15.0
+  # Shadow-only 21-day measurement contract. No feature below changes quotes.
+  # Review after 100 marked fills; retain 45d so the review is reproducible.
+  observatory_enabled: true
+  observatory_horizons_seconds: [30, 60, 300]
+  observatory_retention_days: 45
+  observatory_review_days: 21
+  observatory_min_fills: 100
+  observatory_min_markets: 5
+  observatory_min_completeness: 0.95
+  observatory_max_mark_lateness_seconds: 45
+  observatory_holdout_days: 7
 
 arbitrage:
   enabled: true

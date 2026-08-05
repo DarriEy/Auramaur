@@ -96,6 +96,7 @@ class MarketMaker:
         exchange: PolymarketClient,
         db,
         gateway=None,
+        flow_tracker=None,
     ):
         self._settings = settings
         self._exchange = exchange
@@ -103,6 +104,23 @@ class MarketMaker:
         # Placement runs through the ExecutionGateway (the single choke point);
         # lazily built if not injected so existing callers/tests keep working.
         self._gateway = gateway
+        self._observatory = None
+        if getattr(settings.market_maker, "observatory_enabled", False) and db is not None:
+            from auramaur.monitoring.maker_observatory import MakerObservatory
+            self._observatory = MakerObservatory(
+                db, flow_tracker=flow_tracker,
+                horizons=getattr(settings.market_maker,
+                                 "observatory_horizons_seconds", (30, 60, 300)),
+                retention_days=getattr(settings.market_maker,
+                                       "observatory_retention_days", 45),
+                max_mark_lateness_seconds=getattr(
+                    settings.market_maker,
+                    "observatory_max_mark_lateness_seconds", 45),
+                holdout_days=getattr(
+                    settings.market_maker, "observatory_holdout_days", 7),
+            )
+        self._last_observation: dict[str, int] = {}
+        self._observatory_cycles = 0
 
         # MM configuration from settings
         mm_cfg = settings.market_maker
@@ -136,6 +154,13 @@ class MarketMaker:
             return []
 
         results: list[dict] = []
+        self._observatory_cycles += 1
+        prune_every = max(1, int(86400 / max(self._refresh_seconds, 1)))
+        if self._observatory and self._observatory_cycles % prune_every == 0:
+            try:
+                await self._observatory.prune()
+            except Exception as exc:
+                log.warning("market_maker.observatory_prune_error", error=str(exc))
 
         # Step 1: Select suitable markets
         candidates = self._select_mm_markets(markets)
@@ -324,6 +349,17 @@ class MarketMaker:
 
         # Compute our quote
         quote, skip_reason = self._compute_quotes(market, book)
+        if self._observatory is not None:
+            try:
+                observation_id = await self._observatory.observe(
+                    market, book, quote=quote,
+                    active_quote=self._active_quotes.get(market.id),
+                )
+                self._last_observation[market.id] = observation_id
+            except Exception as exc:
+                # Measurement must never interrupt quoting.
+                log.warning("market_maker.observatory_error",
+                            market_id=market.id, error=str(exc))
         if quote is None:
             return None, skip_reason
 
@@ -495,19 +531,38 @@ class MarketMaker:
                 "market_id": quote.market_id,
                 "side": "bid",
                 "size": quote.size,
+                "price": quote.bid_price,
+                "observation_id": self._last_observation.get(quote.market_id),
             }
         if ask_result.status in ("pending", "paper", "filled"):
             self._pending_orders[ask_result.order_id] = {
                 "market_id": quote.market_id,
                 "side": "ask",
                 "size": quote.size,
+                "price": quote.ask_price,
+                "observation_id": self._last_observation.get(quote.market_id),
             }
 
         # If paper trading, fills are instant — update inventory
         if bid_result.status in ("paper", "filled"):
             self._update_inventory(quote.market_id, "bid", bid_result.filled_size)
+            await self._record_observatory_fill(
+                bid_result.order_id, quote.market_id, "bid",
+                bid_result.filled_price or quote.bid_price,
+                bid_result.filled_size, bid_result.status == "paper",
+                fill_evidence=("synthetic" if bid_result.status == "paper"
+                               else "venue_fill"),
+                observation_id=self._last_observation.get(quote.market_id))
         if ask_result.status in ("paper", "filled"):
             self._update_inventory(quote.market_id, "ask", ask_result.filled_size)
+            await self._record_observatory_fill(
+                ask_result.order_id, quote.market_id, "ask",
+                (1.0 - ask_result.filled_price
+                if ask_result.filled_price else quote.ask_price),
+                ask_result.filled_size, ask_result.status == "paper",
+                fill_evidence=("synthetic" if ask_result.status == "paper"
+                               else "venue_fill"),
+                observation_id=self._last_observation.get(quote.market_id))
 
         bid_live = bid_result.status not in ("rejected",)
         ask_live = ask_result.status not in ("rejected",)
@@ -654,6 +709,24 @@ class MarketMaker:
             net_inventory=self._inventory[market_id],
         )
 
+    async def _record_observatory_fill(self, order_id: str, market_id: str,
+                                       side: str, price: float, size: float,
+                                       is_paper: bool, *,
+                                       fill_evidence: str,
+                                       observation_id: int | None = None) -> None:
+        if self._observatory is None:
+            return
+        try:
+            await self._observatory.record_fill(
+                observation_id=observation_id,
+                order_id=order_id, market_id=market_id, side=side,
+                price=price, size=size, is_paper=is_paper,
+                fill_evidence=fill_evidence,
+            )
+        except Exception as exc:
+            log.warning("market_maker.observatory_fill_error",
+                        market_id=market_id, order_id=order_id, error=str(exc))
+
     async def check_fills(self) -> list[dict]:
         """Check pending live orders for fills and update inventory.
 
@@ -672,6 +745,14 @@ class MarketMaker:
                 result = await self._exchange.get_order_status(order_id)
                 if result.status == "filled":
                     self._update_inventory(info["market_id"], info["side"], result.filled_size)
+                    await self._record_observatory_fill(
+                        order_id, info["market_id"], info["side"],
+                        ((1.0 - result.filled_price) if (
+                            info["side"] == "ask" and result.filled_price)
+                        else (result.filled_price or info["price"])),
+                        result.filled_size, False,
+                        fill_evidence="venue_fill",
+                        observation_id=info.get("observation_id"))
                     completed_ids.append(order_id)
                     filled.append({
                         "order_id": order_id,

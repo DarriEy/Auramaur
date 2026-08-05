@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 49
+SCHEMA_VERSION = 50
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -449,6 +449,44 @@ CREATE TABLE IF NOT EXISTS orderbook_snapshots (
     recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_orderbook_market_time ON orderbook_snapshots(market_id, recorded_at);
+
+CREATE TABLE IF NOT EXISTS maker_observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id TEXT NOT NULL, condition_id TEXT NOT NULL DEFAULT '',
+    token_id TEXT NOT NULL, strategy_version TEXT NOT NULL,
+    is_holdout INTEGER NOT NULL DEFAULT 0,
+    observed_at TEXT NOT NULL, best_bid REAL NOT NULL, best_ask REAL NOT NULL,
+    midpoint REAL NOT NULL, microprice REAL NOT NULL, spread REAL NOT NULL,
+    bid_depth REAL NOT NULL, ask_depth REAL NOT NULL,
+    depth_imbalance REAL NOT NULL, signed_flow REAL NOT NULL DEFAULT 0,
+    short_vol REAL NOT NULL DEFAULT 0, long_vol REAL NOT NULL DEFAULT 0,
+    quote_bid REAL, quote_ask REAL, quote_changed INTEGER,
+    quote_age_seconds REAL, quote_active INTEGER NOT NULL DEFAULT 0,
+    reward_eligible INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_maker_obs_market_time
+    ON maker_observations(market_id, observed_at);
+CREATE TABLE IF NOT EXISTS maker_observatory_horizons (
+    strategy_version TEXT NOT NULL, horizon_seconds INTEGER NOT NULL,
+    PRIMARY KEY (strategy_version, horizon_seconds)
+);
+CREATE TABLE IF NOT EXISTS maker_observatory_fills (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, order_id TEXT NOT NULL UNIQUE,
+    observation_id INTEGER, market_id TEXT NOT NULL,
+    side TEXT NOT NULL CHECK(side IN ('bid','ask')),
+    fill_price REAL NOT NULL, fill_size REAL NOT NULL,
+    is_paper INTEGER NOT NULL, fill_evidence TEXT NOT NULL,
+    filled_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_maker_fills_market_time
+    ON maker_observatory_fills(market_id, filled_at);
+CREATE TABLE IF NOT EXISTS maker_observatory_markouts (
+    fill_id INTEGER NOT NULL, horizon_seconds INTEGER NOT NULL,
+    target_at TEXT NOT NULL, midpoint REAL NOT NULL, markout REAL NOT NULL,
+    marked_at TEXT NOT NULL, lateness_seconds REAL NOT NULL,
+    is_valid INTEGER NOT NULL,
+    PRIMARY KEY (fill_id, horizon_seconds)
+);
 
 -- Immutable decision-time observations used for executable-price and
 -- closing-line-value evaluation.  These are separate from mutable signals so
