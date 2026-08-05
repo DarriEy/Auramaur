@@ -291,6 +291,10 @@ broker:
   limit_edge_threshold: 20.0
   limit_price_improvement_ticks: 1
   max_slippage_bps: 100
+  # Book off-bot Polymarket exits (operator sells at the venue) into
+  # pnl_ledger each position-sync cycle. Outside every strategy_version
+  # hash — toggling never resets a graduation clock.
+  manual_trade_sweep_enabled: true
 
 kalshi:
   enabled: true

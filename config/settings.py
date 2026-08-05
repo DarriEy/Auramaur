@@ -1368,6 +1368,14 @@ class BrokerConfig(BaseModel):
     limit_edge_threshold: float = 20.0    # Use market orders when edge > 20%
     limit_price_improvement_ticks: int = 1  # Improve on BBO by 1 tick
     max_slippage_bps: int = 100
+    # Manual-trade sweep (auramaur/broker/manual_trades.py): poll the venue's
+    # per-wallet trade history each position-sync cycle and book off-bot SELLs
+    # of bot-held Polymarket positions into pnl_ledger (2026-08-05 incident:
+    # two operator sells reconciled holdings-only and +$37.70 of realized P&L
+    # vanished from attribution). Lives here — NOT in a strategy section and
+    # not in risk.min_edge_pct/max_spread_pct/confidence_floor — so it is
+    # outside every frozen strategy_version hash (graduation-clock safe).
+    manual_trade_sweep_enabled: bool = True
 
 
 class KalshiConfig(BaseModel):

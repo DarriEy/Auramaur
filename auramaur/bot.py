@@ -1381,6 +1381,7 @@ class AuramaurBot(
 
     async def _task_position_sync(self) -> None:
         """Periodically sync net current positions from Polymarket."""
+        from auramaur.broker.manual_trades import sweep_manual_trades
         from auramaur.broker.reconciler import PositionReconciler, reconciled_token
         from auramaur.broker.sync import PositionSyncer
 
@@ -1391,6 +1392,25 @@ class AuramaurBot(
         while self._running:
             try:
                 if self.settings.is_live:
+                    # Manual-trade sweep BEFORE the reconcile/mirror: the
+                    # mirror below deletes a manually-exited position's
+                    # cost_basis row the moment the venue stops reporting the
+                    # token, and the sweep prefers that row as the P&L basis
+                    # (2026-08-05 incident: two off-bot sells reconciled
+                    # holdings-only and +$37.70 vanished from attribution).
+                    # A sweep failure must never break position sync.
+                    if (self.settings.broker.manual_trade_sweep_enabled
+                            and self.settings.polymarket_proxy_address):
+                        try:
+                            swept = await sweep_manual_trades(
+                                self._components.db,
+                                self.settings.polymarket_proxy_address)
+                            if swept:
+                                log.info("manual_trades.booked", count=swept)
+                        except Exception as exc:
+                            log.warning("manual_trades.sweep_error",
+                                        error=str(exc))
+
                     # The Data API's net current positions are venue truth.
                     reconciled = await reconciler.reconcile()
                     positions = reconciler.to_live_positions(reconciled)

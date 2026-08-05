@@ -380,6 +380,21 @@ class Database:
             await self._migrate_v45_to_v46()
         if from_version < 47:
             await self._migrate_v46_to_v47()
+        if from_version < 48:
+            await self._migrate_v47_to_v48()
+
+    async def _migrate_v47_to_v48(self) -> None:
+        """Cursor state for the manual-trade sweep (off-bot venue exits)."""
+        await self._db.executescript("""
+            CREATE TABLE IF NOT EXISTS manual_trade_state (
+                venue TEXT PRIMARY KEY,
+                cursor_ts REAL NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            UPDATE schema_version SET version = 48;
+        """)
+        await self._db.commit()
+        log.info("database.migrated", from_version=47, to_version=48)
 
     async def _migrate_v46_to_v47(self) -> None:
         """Audit trail for operator-directed orders."""

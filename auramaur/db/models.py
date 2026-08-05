@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 47
+SCHEMA_VERSION = 48
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -942,6 +942,16 @@ CREATE TABLE IF NOT EXISTS venue_positions (
 );
 CREATE INDEX IF NOT EXISTS idx_venue_positions_market
     ON venue_positions(venue, market_id);
+-- v48: cursor for the manual-trade sweep (auramaur/broker/manual_trades.py).
+-- One row per venue: unix timestamp of the newest venue trade the sweep has
+-- processed. Initialized to NOW on first run — deliberately no historical
+-- backfill (pre-existing off-bot exits were hand-booked under manual-sell:*
+-- refs; a backfill would double-book them under venue-trade:* refs).
+CREATE TABLE IF NOT EXISTS manual_trade_state (
+    venue TEXT PRIMARY KEY,
+    cursor_ts REAL NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 -- v35: local Ollama LLM tier (evidence-side only, never trades).
 -- Distilled claims are keyed by the SHA-256 of title, a newline, and content,
 -- the same formula the aggregator stamps into evidence_observations, so claims

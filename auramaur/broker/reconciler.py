@@ -60,11 +60,23 @@ def reconciled_token(p: ReconciledPosition) -> TokenType:
     snapshots, the CLOB-history reconstruction path) do we fall back to the
     shared label normalizer — never the ad-hoc ternary.
     """
-    if p.outcome_index == 0:
+    return token_for_outcome(p.outcome_index, p.outcome)
+
+
+def token_for_outcome(outcome_index: int, outcome: str) -> TokenType:
+    """Map a venue (outcomeIndex, outcome-label) pair to the held side.
+
+    The bare-values form of :func:`reconciled_token`, for callers that hold a
+    venue record rather than a ReconciledPosition (the manual-trade sweep maps
+    data-api trade rows). Same contract: outcomeIndex is the per-asset truth
+    (slot 0 = YES, slot 1 = NO); only when it is absent (-1) fall back to the
+    shared label normalizer.
+    """
+    if outcome_index == 0:
         return TokenType.YES
-    if p.outcome_index == 1:
+    if outcome_index == 1:
         return TokenType.NO
-    return TokenType.from_str(p.outcome)
+    return TokenType.from_str(outcome)
 
 
 class PositionReconciler:
