@@ -626,15 +626,23 @@ class EntailmentArbPillar:
             await self._record_leg(implier, res_a.order, res_a.result, why, gap)
             return False
 
-        for market, res in ((implier, res_a), (implied, res_b)):
-            await self._record_leg(market, res.order, res.result, why, gap)
+        # 2026-08-05 (#353 phase 5): ONE entry span covers both legs'
+        # markets/signals/portfolio rows AND the verdict's traded_at update,
+        # opened only after submit_paired has returned (never wrap a gateway
+        # call). _record_leg opens its own span with the same owner; same-
+        # task re-entrancy JOINS this outer one (database.py), which is what
+        # folds traded_at into the same atomic unit — a crash anywhere here
+        # leaves no partial entry record. The trailing commit() this
+        # replaced was dead (no-op since eed51b8).
+        async with self._db.transaction(owner="entailment_arb.entry"):
+            for market, res in ((implier, res_a), (implied, res_b)):
+                await self._record_leg(market, res.order, res.result, why, gap)
 
-        await self._db.execute(
-            "UPDATE entailment_verdicts SET traded_at = datetime('now') "
-            "WHERE market_id_a = ? AND market_id_b = ?",
-            tuple(sorted((implier.id, implied.id))),
-        )
-        await self._db.commit()
+            await self._db.execute(
+                "UPDATE entailment_verdicts SET traded_at = datetime('now') "
+                "WHERE market_id_a = ? AND market_id_b = ?",
+                tuple(sorted((implier.id, implied.id))),
+            )
         log.info("entailment.entered", a=implier.id, b=implied.id,
                  gap=round(gap, 3), why=why, confidence=conf,
                  paper=res_a.result.is_paper)
@@ -649,37 +657,44 @@ class EntailmentArbPillar:
         fill_price = result.filled_price if result.filled_price > 0 else order.price
         is_paper = bool(result.is_paper)
         exchange_name = market.exchange or order.exchange or "polymarket"
-        await self._db.execute(
-            """INSERT OR IGNORE INTO markets (id, exchange, question, category,
-               active, outcome_yes_price, outcome_no_price, volume, liquidity,
-               last_updated)
-               VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))""",
-            (market.id, exchange_name, market.question,
-             ensure_category(market.question, market.description, market.category),
-             market.outcome_yes_price, market.outcome_no_price,
-             market.volume, market.liquidity),
-        )
-        await self._db.execute(
-            """INSERT INTO signals (market_id, claude_prob, claude_confidence,
-               market_prob, edge, evidence_summary, action, strategy_source)
-               VALUES (?, ?, 'HIGH', ?, ?, ?, ?, 'entailment_arb')""",
-            (market.id, market.outcome_yes_price, market.outcome_yes_price,
-             gap * 100.0, f"entailment ({why})",
-             order.side.value),
-        )
-        await self._db.execute(
-            """INSERT INTO portfolio (market_id, exchange, side, size, avg_price,
-               current_price, unrealized_pnl, category, token, token_id,
-               is_paper, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, datetime('now'))
-               ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
-                   exchange = excluded.exchange,
-                   size = excluded.size, avg_price = excluded.avg_price,
-                   current_price = excluded.current_price,
-                   updated_at = excluded.updated_at""",
-            (order.market_id, exchange_name, order.side.value, fill_size,
-             fill_price, fill_price,
-             market.category or "", order.token.value, order.token_id,
-             1 if is_paper else 0),
-        )
-        await self._db.commit()
+        # 2026-08-05 (#353 phase 5): markets stub + signals row + portfolio
+        # row land in ONE span. Under autocommit a crash mid-helper could
+        # leave markets+signals without the portfolio row — an unmirrored
+        # position after a real fill. On the paired path the caller's
+        # entailment_arb.entry span is already open and this one JOINS it;
+        # on the single-leg failure path this span stands alone. The
+        # trailing commit() this replaced was dead (no-op since eed51b8).
+        async with self._db.transaction(owner="entailment_arb.entry"):
+            await self._db.execute(
+                """INSERT OR IGNORE INTO markets (id, exchange, question, category,
+                   active, outcome_yes_price, outcome_no_price, volume, liquidity,
+                   last_updated)
+                   VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))""",
+                (market.id, exchange_name, market.question,
+                 ensure_category(market.question, market.description, market.category),
+                 market.outcome_yes_price, market.outcome_no_price,
+                 market.volume, market.liquidity),
+            )
+            await self._db.execute(
+                """INSERT INTO signals (market_id, claude_prob, claude_confidence,
+                   market_prob, edge, evidence_summary, action, strategy_source)
+                   VALUES (?, ?, 'HIGH', ?, ?, ?, ?, 'entailment_arb')""",
+                (market.id, market.outcome_yes_price, market.outcome_yes_price,
+                 gap * 100.0, f"entailment ({why})",
+                 order.side.value),
+            )
+            await self._db.execute(
+                """INSERT INTO portfolio (market_id, exchange, side, size, avg_price,
+                   current_price, unrealized_pnl, category, token, token_id,
+                   is_paper, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, datetime('now'))
+                   ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
+                       exchange = excluded.exchange,
+                       size = excluded.size, avg_price = excluded.avg_price,
+                       current_price = excluded.current_price,
+                       updated_at = excluded.updated_at""",
+                (order.market_id, exchange_name, order.side.value, fill_size,
+                 fill_price, fill_price,
+                 market.category or "", order.token.value, order.token_id,
+                 1 if is_paper else 0),
+            )

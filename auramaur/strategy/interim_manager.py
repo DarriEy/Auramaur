@@ -169,6 +169,11 @@ class InterimManagerPillar:
         )
         if assessment.proposal is None:
             if assessment.robust_edge is not None:
+                # 2026-08-05 (#353 phase 5 survey): classification B — a
+                # single UPDATE, already atomic and durable under the
+                # autocommit connection; the trailing commit() is dead
+                # (no-op since eed51b8) but stays untouched: this live-money
+                # file ships zero behavior change (classification-only).
                 await self._db.execute(
                     "UPDATE manager_proposals SET robust_edge = ?, decision_price = ? "
                     "WHERE id = ?",
@@ -185,6 +190,8 @@ class InterimManagerPillar:
             await self._resolve(pid, "expired" if expired else "skipped", assessment.reason)
             return False
         proposal = assessment.proposal
+        # 2026-08-05 (#353 phase 5 survey): classification B — single
+        # UPDATE + dead commit (no-op since eed51b8); no span needed.
         await self._db.execute(
             "UPDATE manager_proposals SET robust_edge = ?, decision_price = ? "
             "WHERE id = ?", (round(proposal.robust_edge, 4), proposal.entry_price, pid))
@@ -256,6 +263,9 @@ class InterimManagerPillar:
         return int(row["n"] or 0) if row else 0
 
     async def _expire_pending(self, reason: str) -> None:
+        # 2026-08-05 (#353 phase 5 survey): classification B — one UPDATE
+        # covering all pending rows in a single statement, atomic under
+        # autocommit; the trailing commit() is dead (no-op since eed51b8).
         await self._db.execute(
             """UPDATE manager_proposals SET status = 'expired', reason = ?,
                decided_at = datetime('now') WHERE status = 'pending'""",
@@ -263,6 +273,8 @@ class InterimManagerPillar:
         await self._db.commit()
 
     async def _resolve(self, proposal_id: int, status: str, reason: str) -> None:
+        # 2026-08-05 (#353 phase 5 survey): classification B — single
+        # UPDATE + dead commit (no-op since eed51b8); no span needed.
         await self._db.execute(
             """UPDATE manager_proposals SET status = ?, reason = ?,
                decided_at = datetime('now') WHERE id = ?""",
@@ -292,6 +304,10 @@ class InterimManagerPillar:
         cfg = self._settings.interim_manager
         if not cfg.auto_propose or self._calibration is None:
             return
+        # 2026-08-05 (#353 phase 5 survey): classification B — a loop of
+        # INDEPENDENT proposal INSERTs; partial completion just means fewer
+        # auto-proposals this cycle, so there is no batch to protect. The
+        # trailing commit() is dead (no-op since eed51b8).
         try:
             row = await self._db.fetchone(
                 """SELECT COUNT(*) AS n FROM manager_proposals

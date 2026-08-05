@@ -103,6 +103,13 @@ class KrakenPillar:
         return "llm" if getattr(self._s.kraken, "directional_llm_enabled", False) else "momentum"
 
     async def _save_paper_position(self, pair: str, quantity: float, entry: float) -> None:
+        # 2026-08-05 (#353 phase 5 survey): this file's DB writers are all
+        # singles/upserts/deletes — classification B (atomic under the
+        # autocommit connection; the trailing commit() calls are dead,
+        # no-ops since eed51b8, left as-is: comments only here). The one
+        # loop, _mirror_to_portfolio, is C — see its own comment.
+        # Directional FILLS are not booked here at all: they route through
+        # pnl.record_fill, which already owns the "pnl_fill" span.
         db = self._db()
         if db is None:
             return
@@ -119,6 +126,7 @@ class KrakenPillar:
         await db.commit()
 
     async def _delete_paper_position(self, pair: str) -> None:
+        # 2026-08-05 (#353 phase 5 survey): classification B — single DELETE.
         db = self._db()
         if db is not None:
             await db.execute(
@@ -164,6 +172,8 @@ class KrakenPillar:
         """Record the running high-water-mark gain% for a held pair (reusing
         position_peaks) and return it, so a trailing stop can fire on give-back.
         Survives restarts because the peak is persisted."""
+        # 2026-08-05 (#353 phase 5 survey): classification B — each branch
+        # is one self-contained MAX() upsert (plus a read-back); no batch.
         db = self._db()
         if db is None:
             return gain_pct
@@ -201,6 +211,7 @@ class KrakenPillar:
             return gain_pct
 
     async def _clear_peak(self, pair: str) -> None:
+        # 2026-08-05 (#353 phase 5 survey): classification B — single DELETE.
         db = self._db()
         if db is None:
             return
@@ -650,6 +661,10 @@ class KrakenPillar:
         self, held_prices: dict[str, tuple[float, float, float]], closed: list[str],
         is_paper: bool | None = None,
     ) -> None:
+        # 2026-08-05 (#353 phase 5 survey): classification C — a self-healing
+        # per-cycle rebuild wrapped in a visibility-only try/except: a partial
+        # mirror is corrected by the NEXT cycle's full pass, so a span buys
+        # nothing (optionally batchable, low value — plan's verdict).
         db = self._bot._components.get("db") if self._bot else None
         if db is None:
             return
@@ -1241,6 +1256,8 @@ class KrakenPillar:
                     await calibration.record_resolution(f"kraken-dir:{pair}", went_up)
                 except Exception as e:
                     log.warning("kraken.dir_signal.resolve_error", pair=pair, error=str(e))
+            # 2026-08-05 (#353 phase 5 survey): classification B — single
+            # DELETE per resolved row + dead commit (no-op since eed51b8).
             await db.execute("DELETE FROM kraken_dir_signals WHERE pair = ?", (pair,))
             await db.commit()
             log.info("kraken.dir_signal.resolved", pair=pair,
@@ -1263,6 +1280,9 @@ class KrakenPillar:
             price = await self._safe_price(pair)
             if price is None:
                 continue
+            # 2026-08-05 (#353 phase 5 survey): classification B/C — a
+            # single idempotent INSERT OR REPLACE upsert per pair; the
+            # trailing commit() below is dead (no-op since eed51b8).
             await db.execute(
                 "INSERT OR REPLACE INTO kraken_dir_signals "
                 "(pair, prob, ref_price, opened_at, due_at) "

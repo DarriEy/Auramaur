@@ -76,6 +76,12 @@ class TransferManager:
     # ------------------------------------------------------------------
     # Daily ledger (persisted so the daily cap survives restarts)
     # ------------------------------------------------------------------
+    # 2026-08-05 (#353 phase 5 survey): audited, OUT OF SCOPE for the
+    # transaction() migration entirely — this is a separate ledger file
+    # (transfer_ledger.sqlite3) on its own synchronous sqlite3 connection
+    # (_connect_ledger below), and the one batch that matters (_reserve:
+    # cap-check + insert) already uses explicit BEGIN IMMEDIATE.
+    # Database.transaction() does not apply here; nothing to adopt.
 
     def _today(self) -> str:
         return datetime.now(timezone.utc).date().isoformat()

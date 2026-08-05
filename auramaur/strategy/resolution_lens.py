@@ -740,38 +740,46 @@ class ResolutionLensPillar:
         fill_size = result.filled_size if result.filled_size > 0 else order.size
         fill_price = result.filled_price if result.filled_price > 0 else order.price
         is_paper = bool(result.is_paper)
-        await self._db.execute(
-            """INSERT OR IGNORE INTO markets (id, exchange, question, description,
-               category, active, outcome_yes_price, outcome_no_price, volume,
-               liquidity, last_updated)
-               VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))""",
-            (market.id, self._exchange_name, market.question, (market.description or "")[:500],
-             ensure_category(market.question, market.description, market.category),
-             market.outcome_yes_price,
-             market.outcome_no_price, market.volume, market.liquidity),
-        )
-        await self._db.execute(
-            """INSERT INTO signals (market_id, claude_prob, claude_confidence,
-               market_prob, edge, evidence_summary, action, strategy_source)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (signal.market_id, signal.claude_prob, signal.claude_confidence.value,
-             signal.market_prob, signal.edge, signal.evidence_summary,
-             signal.recommended_side.value, self._source_tag),
-        )
-        await self._db.execute(
-            """INSERT INTO portfolio (market_id, exchange, side, size, avg_price,
-               current_price, unrealized_pnl, category, token, token_id,
-               is_paper, updated_at)
-               VALUES (?, ?, 'BUY', ?, ?, ?, 0, ?, ?, ?, ?, datetime('now'))
-               ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
-                   size = excluded.size, avg_price = excluded.avg_price,
-                   current_price = excluded.current_price,
-                   updated_at = excluded.updated_at""",
-            (order.market_id, self._exchange_name, fill_size, fill_price, fill_price,
-             market.category or "", order.token.value, order.token_id,
-             1 if is_paper else 0),
-        )
-        await self._db.commit()
+        # 2026-08-05 (#353 phase 5): markets stub + signals row + portfolio
+        # row land in ONE span, opened only after gateway.submit has returned
+        # (sole caller: _enter). Under autocommit each statement was
+        # individually durable, so a crash after markets+signals but before
+        # the portfolio row left an unmirrored position after a real fill —
+        # one the resolution tracker never settles. The trailing commit()
+        # this replaced was dead (no-op since eed51b8). Calibration stays
+        # outside the span, below (never wrap gateway/PnL/calibration).
+        async with self._db.transaction(owner="resolution_lens.entry"):
+            await self._db.execute(
+                """INSERT OR IGNORE INTO markets (id, exchange, question, description,
+                   category, active, outcome_yes_price, outcome_no_price, volume,
+                   liquidity, last_updated)
+                   VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, datetime('now'))""",
+                (market.id, self._exchange_name, market.question, (market.description or "")[:500],
+                 ensure_category(market.question, market.description, market.category),
+                 market.outcome_yes_price,
+                 market.outcome_no_price, market.volume, market.liquidity),
+            )
+            await self._db.execute(
+                """INSERT INTO signals (market_id, claude_prob, claude_confidence,
+                   market_prob, edge, evidence_summary, action, strategy_source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (signal.market_id, signal.claude_prob, signal.claude_confidence.value,
+                 signal.market_prob, signal.edge, signal.evidence_summary,
+                 signal.recommended_side.value, self._source_tag),
+            )
+            await self._db.execute(
+                """INSERT INTO portfolio (market_id, exchange, side, size, avg_price,
+                   current_price, unrealized_pnl, category, token, token_id,
+                   is_paper, updated_at)
+                   VALUES (?, ?, 'BUY', ?, ?, ?, 0, ?, ?, ?, ?, datetime('now'))
+                   ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
+                       size = excluded.size, avg_price = excluded.avg_price,
+                       current_price = excluded.current_price,
+                       updated_at = excluded.updated_at""",
+                (order.market_id, self._exchange_name, fill_size, fill_price, fill_price,
+                 market.category or "", order.token.value, order.token_id,
+                 1 if is_paper else 0),
+            )
         try:
             await self._calibration.record_prediction(
                 signal.market_id, signal.claude_prob, market.category or "")

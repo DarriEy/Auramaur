@@ -346,6 +346,10 @@ class OnChainRedeemer:
         error: str = "",
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
+        # 2026-08-05 (#353 phase 5 survey): classification B — a single
+        # upsert, atomic under the autocommit connection; the trailing
+        # commit() is dead (no-op since eed51b8) and left as-is (this file
+        # ships classification comments only).
         await self._db.execute(
             """INSERT INTO redemptions
                (condition_id, asset_id, title, neg_risk, size, expected_payout,
@@ -374,6 +378,8 @@ class OnChainRedeemer:
         await self._db.commit()
 
     async def _mark_confirmed(self, condition_id: str) -> None:
+        # 2026-08-05 (#353 phase 5 survey): classification B — single
+        # UPDATE + dead commit (no-op since eed51b8); no span needed.
         now = datetime.now(timezone.utc).isoformat()
         await self._db.execute(
             "UPDATE redemptions SET status = 'confirmed', confirmed_at = ? WHERE condition_id = ?",
@@ -532,6 +538,8 @@ class OnChainRedeemer:
                         gas_used=receipt.gasUsed,
                     )
                 else:
+                    # 2026-08-05 (#353 phase 5 survey): classification B —
+                    # single UPDATE + dead commit (no-op since eed51b8).
                     await self._db.execute(
                         "UPDATE redemptions SET status='rejected', error='tx reverted' WHERE condition_id=?",
                         (position.condition_id,),

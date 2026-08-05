@@ -615,7 +615,9 @@ class AgentTraderPillar:
                  "YES" if side == OrderSide.BUY else "NO",
                  prob_yes, market_yes, proposal.thesis),
             )
-            await self._db.commit()
+            # 2026-08-05 (#353 phase 5): trailing commit() removed — dead
+            # under the autocommit connection (no-op since eed51b8); a
+            # single INSERT is already atomic (classification B).
             log.info("agent_trader.market_claimed", alias=alias,
                      market_id=market.id, prob=round(prob_yes, 2))
             return False
@@ -651,17 +653,31 @@ class AgentTraderPillar:
                      market_id=market.id, status=res.status, error=res.reason)
             return False
 
-        await self._record_position(signal, market, res.order, res.result)
-        await self._db.execute(
-            """INSERT INTO agent_trader_theses
-               (model_alias, cell, market_id, question, token, prob,
-                market_prob, thesis, stake)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (alias, self.cell(alias), market.id, market.question,
-             res.order.token.value,
-             prob_yes, market_yes, proposal.thesis, size),
-        )
-        await self._db.commit()
+        # 2026-08-05 (#353 phase 5): the portfolio upsert and this thesis
+        # INSERT land in ONE span, opened only after gateway.submit has
+        # returned (never wrap a gateway call — re-entrancy would JOIN the
+        # span across network I/O). Under autocommit each statement was
+        # individually durable, so a crash between them left a position row
+        # without its thesis row — a held position no arm settles in its own
+        # book (_open_theses joins the two). The trailing commit() this
+        # replaced was dead (no-op since eed51b8). Calibration stays outside
+        # the span, below.
+        async with self._db.transaction(owner="agent_trader.entry"):
+            await self._record_position(signal, market, res.order, res.result)
+            await self._db.execute(
+                """INSERT INTO agent_trader_theses
+                   (model_alias, cell, market_id, question, token, prob,
+                    market_prob, thesis, stake)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (alias, self.cell(alias), market.id, market.question,
+                 res.order.token.value,
+                 prob_yes, market_yes, proposal.thesis, size),
+            )
+        try:
+            await self._calibration.record_prediction(
+                res.order.market_id, signal.claude_prob, market.category or "")
+        except Exception as e:
+            log.debug("agent_trader.calibration_error", error=str(e))
         log.info("agent_trader.entered", alias=alias, market_id=market.id,
                  token=res.order.token.value, price=res.order.price,
                  size=res.order.size, edge=round(edge_pts, 1),
@@ -700,9 +716,16 @@ class AgentTraderPillar:
 
     async def _record_position(self, signal: Signal, market: Market,
                                order, result) -> None:
-        """Portfolio row (resolution tracker settles it) + calibration
-        prediction. The fill (-> cost_basis -> pnl_ledger) and the
-        trades-mirror are owned by ExecutionGateway."""
+        """Portfolio row (resolution tracker settles it). The fill
+        (-> cost_basis -> pnl_ledger) and the trades-mirror are owned by
+        ExecutionGateway.
+
+        2026-08-05 (#353 phase 5): runs INSIDE the caller's
+        agent_trader.entry span (sole caller: _try_enter), so this upsert
+        and the thesis INSERT commit together. The trailing commit() this
+        carried was dead (no-op since eed51b8); the calibration call moved
+        to the caller, after the span, per the never-wrap-calibration rule.
+        """
         fill_size = result.filled_size if result.filled_size > 0 else order.size
         fill_price = result.filled_price if result.filled_price > 0 else order.price
         is_paper = bool(result.is_paper)
@@ -721,9 +744,3 @@ class AgentTraderPillar:
              market.category or "", order.token.value, order.token_id,
              1 if is_paper else 0),
         )
-        await self._db.commit()
-        try:
-            await self._calibration.record_prediction(
-                order.market_id, signal.claude_prob, market.category or "")
-        except Exception as e:
-            log.debug("agent_trader.calibration_error", error=str(e))

@@ -364,12 +364,22 @@ class CrossVenueArbPillar:
                 a.id, b.id, res_b.reason or f"leg_b_{res_b.status}")
             return False
 
-        for market, res in ((a, res_a), (b, res_b)):
-            await self._record_leg(market, res.order, res.result, why)
-        await self._db.execute(
-            "UPDATE cross_venue_verdicts SET traded_at = datetime('now') "
-            "WHERE poly_id = ? AND kalshi_id = ?", (a.id, b.id))
-        await self._db.commit()
+        # 2026-08-05 (#353 phase 5): both legs' signals rows and the
+        # verdict's traded_at marker land in ONE span, opened only after
+        # submit_paired has returned (never wrap a gateway call —
+        # re-entrancy would JOIN the span across network I/O). Under
+        # autocommit each statement was individually durable, so a crash
+        # after the legs but before traded_at left _already_traded false —
+        # the next cycle could RE-ENTER the pair and duplicate exposure.
+        # Now a crash anywhere in the batch leaves no trace, so a retry
+        # re-enters the pair as a WHOLE. The trailing commit() this
+        # replaced was dead (no-op since eed51b8).
+        async with self._db.transaction(owner="cross_venue_arb.entry"):
+            for market, res in ((a, res_a), (b, res_b)):
+                await self._record_leg(market, res.order, res.result, why)
+            await self._db.execute(
+                "UPDATE cross_venue_verdicts SET traded_at = datetime('now') "
+                "WHERE poly_id = ? AND kalshi_id = ?", (a.id, b.id))
         log.info("cross_venue.entered", a=a.id, b=b.id, orientation=orientation,
                  edge=round(edge, 3), confidence=conf, paper=res_a.result.is_paper)
         return True
@@ -379,6 +389,11 @@ class CrossVenueArbPillar:
         # by the ExecutionGateway; the pillar keeps the per-leg signals row (the
         # arb-leg convention stores the market price as claude_prob — there is no
         # LLM estimate for an arb leg).
+        # 2026-08-05 (#353 phase 5): a single INSERT — atomic on its own on
+        # the single-leg failure path (classification B); on the paired path
+        # the caller's cross_venue_arb.entry span makes both legs plus the
+        # traded_at update one unit. Trailing commit() removed — dead under
+        # the autocommit connection (no-op since eed51b8).
         await self._db.execute(
             """INSERT INTO signals (market_id, claude_prob, claude_confidence,
                market_prob, edge, evidence_summary, action, strategy_source)
@@ -386,7 +401,6 @@ class CrossVenueArbPillar:
             (market.id, market.outcome_yes_price, "HIGH", market.outcome_yes_price,
              0.0, f"Cross-venue arb leg ({why})",
              "BUY" if order.side == OrderSide.BUY else "SELL"))
-        await self._db.commit()
 
     # -- main cycle ------------------------------------------------------
 
