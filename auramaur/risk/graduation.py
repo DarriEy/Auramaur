@@ -158,6 +158,7 @@ class GraduationLadder:
                     GROUP BY market_id, is_paper
                 )
                 SELECT d.market_id, d.is_paper, d.observed_at,
+                       o.resolved_at, d.requested_size,
                        COALESCE(NULLIF(d.event_family, ''), d.market_id) AS family,
                        ((d.reference_price-o.outcome)*(d.reference_price-o.outcome)
                         -(d.fair_probability-o.outcome)*(d.fair_probability-o.outcome)) AS brier_edge,
@@ -179,7 +180,23 @@ class GraduationLadder:
         z = max(cfg.confidence_z, NormalDist().inv_cdf(1.0-alpha))
 
         def summarize(items: list[dict]) -> dict:
-            pnl = [float(r["net_pnl"] or 0) for r in items]
+            pnl = []
+            for row in items:
+                net_pnl = float(row["net_pnl"] or 0)
+                if cfg.require_cash_benchmark:
+                    opened = datetime.fromisoformat(
+                        str(row["observed_at"]).replace("Z", "+00:00"))
+                    resolved = datetime.fromisoformat(
+                        str(row["resolved_at"]).replace("Z", "+00:00"))
+                    hold_years = max(
+                        0.0, (resolved - opened).total_seconds()
+                    ) / (365.25 * 86400)
+                    net_pnl -= (
+                        max(0.0, float(row["requested_size"] or 0))
+                        * self._settings.benchmark.risk_free_annual_rate
+                        * hold_years
+                    )
+                pnl.append(net_pnl)
             brier = [float(r["brier_edge"] or 0) for r in items]
             def lcb(values: list[float]) -> float:
                 if len(values) < 2:

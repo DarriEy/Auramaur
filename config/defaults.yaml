@@ -190,6 +190,9 @@ graduation:
   # Prospective proof contract: old/backfilled rows remain reportable but cannot
   # graduate a strategy whose parameters and execution provenance were not frozen.
   prospective_only: true
+  # Positive dollars are not enough: charge the committed stake the return it
+  # could have earned at benchmark.risk_free_annual_rate over the actual hold.
+  require_cash_benchmark: true
   require_market_brier_edge: true
   require_executable_fills: true
   min_calendar_days: 30

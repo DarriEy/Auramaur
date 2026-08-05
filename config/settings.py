@@ -1339,6 +1339,10 @@ class GraduationConfig(BaseModel):
     window_days: int = 90
     confidence_z: float = 1.645
     min_mean_pnl_lower_bound: float = 0.0
+    # Require realized returns to clear the configured cash benchmark after
+    # charging opportunity cost for the capital and time committed. Applied to
+    # prospective evidence, where stake and holding-period provenance exist.
+    require_cash_benchmark: bool = False
     probation_multiplier: float = 0.5
     cache_seconds: int = 300
     exempt_strategies: list[str] = ["arbitrage", "market_maker", "order_monitor"]

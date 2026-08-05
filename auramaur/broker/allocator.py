@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import structlog
 
@@ -99,6 +100,19 @@ class CapitalAllocator:
             market_id = candidate.market.id
             category = candidate.market.category
 
+            # Capital has a real alternative return. A candidate whose
+            # confidence-discounted EV does not clear that cash hurdle should
+            # receive no allocation, even if it is the best of a weak batch.
+            if candidate.expected_value <= 0:
+                show_order_dropped(
+                    market_id, "expected value does not clear cash benchmark")
+                log.info(
+                    "allocator.below_cash_benchmark",
+                    market_id=market_id,
+                    excess_ev=round(candidate.expected_value, 4),
+                )
+                continue
+
             # Skip if already holding this market (no averaging into an open
             # position). Surface it — this is the single most common reason an
             # APPROVED candidate produces no trade, and it used to be invisible
@@ -194,14 +208,36 @@ class CapitalAllocator:
 
         return allocated
 
-    @staticmethod
-    def compute_expected_value(signal: Signal, kelly_size: float) -> float:
+    def compute_expected_value(
+        self,
+        signal: Signal,
+        kelly_size: float,
+        market: Market | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> float:
         """Compute expected value for ranking.
 
         EV = (edge_pct / 100) * confidence_weight * kelly_size
+             - cash opportunity cost through resolution
 
         Where confidence_weight is HIGH=1.0, MEDIUM=0.75, LOW=0.5.
         """
         confidence_weight = _CONFIDENCE_WEIGHTS.get(signal.claude_confidence, 0.5)
         edge_frac = abs(signal.edge) / 100.0
-        return edge_frac * confidence_weight * kelly_size
+        forecast_ev = edge_frac * confidence_weight * kelly_size
+        if market is None or market.end_date is None:
+            return forecast_ev
+        end = market.end_date
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        as_of = now or datetime.now(timezone.utc)
+        if as_of.tzinfo is None:
+            as_of = as_of.replace(tzinfo=timezone.utc)
+        hold_years = max(0.0, (end - as_of).total_seconds()) / (365.25 * 86400)
+        cash_hurdle = (
+            kelly_size
+            * self._settings.benchmark.risk_free_annual_rate
+            * hold_years
+        )
+        return forecast_ev - cash_hurdle

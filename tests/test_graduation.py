@@ -17,12 +17,13 @@ from unittest.mock import MagicMock, patch
 
 from auramaur.db.database import Database
 from auramaur.risk.graduation import GraduationLadder
-from config.settings import GraduationConfig
+from config.settings import BenchmarkConfig, GraduationConfig
 
 
 def _settings(mode="enforce", min_markets=5, **kw):
     s = MagicMock()
     s.graduation = GraduationConfig(mode=mode, min_markets=min_markets, **kw)
+    s.benchmark = BenchmarkConfig(risk_free_annual_rate=0.045)
     return s
 
 
@@ -379,6 +380,72 @@ def test_graduation_uses_pnl_net_of_fees():
             )
         ladder = GraduationLadder(db, _settings(min_markets=5))
         decision = await ladder.decide("fee_test", "crypto")
+        assert decision.status == "paper_negative"
+        assert decision.force_paper is True
+        await db.close()
+
+    asyncio.run(run())
+
+
+def test_prospective_graduation_charges_cash_opportunity_cost():
+    """A nominally profitable strategy must not graduate when its committed
+    capital would have earned more at the configured cash benchmark."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        await db.execute(
+            """INSERT INTO strategy_experiments
+               (strategy_version, strategy_source, config_json, holdout_starts_at)
+               VALUES ('cash-v1', 'cash_test', '{}', datetime('now', '-60 days'))"""
+        )
+        for i in range(2):
+            market_id = f"cash-{i}"
+            await db.execute(
+                """INSERT INTO markets
+                   (id, question, category, last_updated)
+                   VALUES (?, 'Cash hurdle?', 'tech', datetime('now'))""",
+                (market_id,),
+            )
+            await db.execute(
+                """INSERT INTO decision_snapshots
+                   (market_id, strategy_source, side, fair_probability,
+                    reference_price, requested_size, venue, event_family,
+                    strategy_version, is_holdout, fill_evidence, is_paper,
+                    filled, observed_at)
+                   VALUES (?, 'cash_test', 'BUY', 0.7, 0.5, 100,
+                           'polymarket', ?, 'cash-v1', 1, 'venue_fill', 1, 1,
+                           datetime('now', '-40 days'))""",
+                (market_id, f"family-{i}"),
+            )
+            await db.execute(
+                """INSERT INTO market_outcomes
+                   (event_key, venue, market_id, outcome, resolved_at, source)
+                   VALUES (?, 'polymarket', ?, 1, datetime('now'), 'test')""",
+                (f"polymarket:{market_id}", market_id),
+            )
+            await db.execute(
+                """INSERT INTO pnl_ledger
+                   (market_id, venue, category, strategy_source, kind, token,
+                    qty, pnl, fees, is_paper, source_ref)
+                   VALUES (?, 'polymarket', 'tech', 'cash_test', 'sell', 'YES',
+                           1, 0.20, 0, 1, ?)""",
+                (market_id, f"cash-ref-{i}"),
+            )
+        await db.commit()
+
+        base = dict(
+            prospective_only=True,
+            min_markets=2,
+            confidence_z=0,
+            require_executable_fills=True,
+        )
+        nominal = GraduationLadder(
+            db, _settings(require_cash_benchmark=False, **base))
+        assert (await nominal.decide("cash_test", "tech")).status == "probation"
+
+        benchmarked = GraduationLadder(
+            db, _settings(require_cash_benchmark=True, **base))
+        decision = await benchmarked.decide("cash_test", "tech")
         assert decision.status == "paper_negative"
         assert decision.force_paper is True
         await db.close()
