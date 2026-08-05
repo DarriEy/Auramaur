@@ -59,6 +59,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -145,6 +146,28 @@ def _attr_name(node: ast.AST) -> str:
     return ""
 
 
+def _scrubbed_locals(tree: ast.AST) -> set[str]:
+    """Local names bound to a scrubber's return value, anywhere in the module.
+
+    Without this, `evidence_text = format_evidence(...)` followed by
+    `PROMPT.format(evidence=evidence_text)` reads as raw — 20+ false positives
+    on code that is already correct. Module-wide rather than per-scope: this is
+    a lint heuristic, and over-trusting a name is far cheaper than a checker
+    nobody believes.
+    """
+    safe: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and _is_scrubbed(node.value):
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name):
+                    safe.add(tgt.id)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None \
+                and _is_scrubbed(node.value):
+            if isinstance(node.target, ast.Name):
+                safe.add(node.target.id)
+    return safe
+
+
 def _collect(tree: ast.AST) -> tuple[set[str], set[int]]:
     """Async function names defined here, and ids of Call nodes that are awaited.
 
@@ -169,9 +192,49 @@ def _collect(tree: ast.AST) -> tuple[set[str], set[int]]:
     return async_names, awaited
 
 
+# Names that constitute a data boundary. A prompt argument is accepted only if
+# it is produced by one of these (possibly nested, e.g. inside a join or a
+# conditional); everything else is treated as raw third-party text.
+_SCRUBBERS = ("format_untrusted_text", "format_evidence", "format_market_context",
+              "format_market_list", "_scrub", "scrub", "redact_error")
+
+# Placeholders that carry NUMBERS, not third-party text. A float has no
+# delimiters to forge, so demanding a scrubber here would be pure noise — and a
+# checker that cries wolf gets ignored, which is how the original blind spot
+# survived. Matched on the keyword name, not the value.
+_NUMERIC_ARG = re.compile(
+    r"(prob|price|pct|percent|size|count|^n_|_n$|num|amount|usd|threshold|"
+    r"limit|max|min|estimate|edge|gap|score|ts$|_at$|date|id$|_id$|index|idx)",
+    re.IGNORECASE,
+)
+
+
+def _is_scrubbed(node: ast.AST) -> bool:
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call):
+            fn = _attr_name(sub.func)
+            if fn in _SCRUBBERS or fn.startswith("format_"):
+                return True
+    return False
+
+
+def _describe(node: ast.AST) -> str:
+    if isinstance(node, ast.JoinedStr):
+        return "an f-string"
+    if isinstance(node, ast.Call):
+        return f"{_attr_name(node.func)}()"
+    if isinstance(node, ast.Attribute):
+        return f"a bare attribute ({_attr_name(node)})"
+    if isinstance(node, ast.Name):
+        return f"a bare name ({node.id})"
+    return "an unscrubbed expression"
+
+
 class _Sweeper(ast.NodeVisitor):
-    def __init__(self, relpath: str, async_names: set[str], awaited: set[int]) -> None:
+    def __init__(self, relpath: str, async_names: set[str], awaited: set[int],
+                 scrubbed_locals: set[str] | None = None) -> None:
         self.rel = relpath
+        self._scrubbed_locals = scrubbed_locals or set()
         self.findings: list[Finding] = []
         self._async_depth = 0
         self._offload_depth = 0
@@ -335,16 +398,25 @@ class _Sweeper(ast.NodeVisitor):
         if "PROMPT" not in name.upper():
             return
         for kw in node.keywords:
-            for sub in ast.walk(kw.value):
-                if isinstance(sub, ast.JoinedStr):
-                    self._add(node, "untrusted-repr",
-                              f"{name}.format({kw.arg}=) interpolates an f-string")
-                    break
-                if isinstance(sub, ast.Call) and _attr_name(sub.func) in {"str", "repr"}:
-                    self._add(node, "untrusted-repr",
-                              f"{name}.format({kw.arg}=) passes a bare "
-                              f"{_attr_name(sub.func)}() instead of a format_* scrubber")
-                    break
+            # A value is safe only if it came out of a scrubber. Anything else
+            # — a bare attribute, a subscript, an f-string, a str()/repr() — is
+            # raw. The original check tested only for str()/repr()/f-strings,
+            # so `question=market.question` was invisible: that blind spot hid
+            # three live injection sites (gap_audit, strategic,
+            # tool_use_analyzer) including the primary trading path. Invert it:
+            # require evidence of scrubbing rather than enumerating the ways
+            # text can be unsafe.
+            if _is_scrubbed(kw.value):
+                continue
+            if isinstance(kw.value, ast.Constant):
+                continue  # a literal in the caller is ours, not third-party
+            if kw.arg and _NUMERIC_ARG.search(kw.arg):
+                continue  # a number cannot forge a delimiter
+            if isinstance(kw.value, ast.Name) and kw.value.id in self._scrubbed_locals:
+                continue  # scrubbed on an earlier line
+            self._add(node, "untrusted-repr",
+                      f"{name}.format({kw.arg}=) passes {_describe(kw.value)} "
+                      "with no format_*/scrub call")
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
         if any(self.rel.replace("\\", "/").find(p) >= 0 for p in _MONEY_PATHS):
@@ -371,7 +443,7 @@ def sweep(root: Path) -> list[Finding]:
             print(f"skip {path}: {e}", file=sys.stderr)
             continue
         async_names, awaited = _collect(tree)
-        sweeper = _Sweeper(str(path), async_names, awaited)
+        sweeper = _Sweeper(str(path), async_names, awaited, _scrubbed_locals(tree))
         sweeper.visit(tree)
         findings.extend(sweeper.findings)
     return sorted(findings)
