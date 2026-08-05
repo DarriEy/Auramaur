@@ -324,8 +324,14 @@ class ResolutionTracker:
             # value-matching prior here was the resurrection bug: the cost_basis
             # leg never zeroed, so the position reappeared every cycle. Only the
             # corrective re-book is conditional on the booked value disagreeing.
-            prior = await self._db.fetchone(
-                "SELECT pnl FROM pnl_ledger WHERE source_ref = ?", (ref,))
+            # 2026-08-05: condition-aware — a settlement booked under a stub
+            # market id (condition_id[:16]) whose position rows later migrated
+            # to the real gamma id was invisible to the exact-ref lookup and
+            # settled AGAIN; _prior_settlement falls back to any settlement of
+            # the same side/mode under a market sharing this condition_id.
+            prior = await self._prior_settlement(
+                row["market_id"], canon, 0,
+                condition_id=getattr(vp, "condition_id", "") or "")
             needs_correction = (
                 prior is not None and abs(prior["pnl"] - venue_pnl) > 0.01
             )
@@ -354,10 +360,12 @@ class ResolutionTracker:
                 delta = venue_pnl - prior["pnl"]
                 # Ledger correction + stats delta land atomically (contention
                 # plan, Phase 2) — both statements are db-only.
+                # 2026-08-05: correct the row where it actually lives — the
+                # prior may sit under an alias (stub) market id's ref.
                 async with self._db.transaction():
                     await self._db.execute(
                         "UPDATE pnl_ledger SET pnl = ?, qty = ? WHERE source_ref = ?",
-                        (venue_pnl, row["size"], ref))
+                        (venue_pnl, row["size"], prior.get("source_ref") or ref))
                     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
                     await self._db.execute(
                         """INSERT INTO daily_stats (date, total_pnl, trades_count, wins, losses)
@@ -390,6 +398,47 @@ class ResolutionTracker:
                     title=vp.title[:60],
                 )
         return settlements
+
+    async def _prior_settlement(
+        self, market_id: str, canon_token: str, is_paper_flag: int,
+        condition_id: str = "",
+    ) -> dict | None:
+        """Find an existing settlement booking for this side, id-migration-safe.
+
+        2026-08-05: the exact source_ref lookup misses a settlement that was
+        booked while the market still carried its stub id (condition_id[:16])
+        — repair_orphaned_ids historically renamed cost_basis/portfolio/fills
+        to the real gamma id but never the ledger, so after the migration the
+        sweep saw no prior and booked the SAME tokens a second time (~9
+        historical duplicates). When the exact ref misses, ONE extra query
+        checks for a settlement of the same side/mode under ANY market id
+        sharing this market's condition_id (markets join). ``condition_id``
+        can be passed by callers that already know it (the venue sweep);
+        otherwise it is read off the market row.
+        """
+        ref = f"settle:{market_id}:{canon_token}:{is_paper_flag}"
+        row = await self._db.fetchone(
+            "SELECT pnl, source_ref FROM pnl_ledger WHERE source_ref = ?",
+            (ref,))
+        if row is not None:
+            return dict(row)
+        cond = condition_id
+        if not cond:
+            crow = await self._db.fetchone(
+                "SELECT condition_id FROM markets WHERE id = ?", (market_id,))
+            cond = (crow["condition_id"] if crow else "") or ""
+        if not cond:
+            return None
+        row = await self._db.fetchone(
+            """SELECT l.pnl, l.source_ref FROM pnl_ledger l
+               WHERE l.kind = 'settlement'
+                 AND l.source_ref =
+                     'settle:' || l.market_id || ':' || ? || ':' || ?
+                 AND l.market_id != ?
+                 AND l.market_id IN
+                     (SELECT id FROM markets WHERE condition_id = ?)""",
+            (canon_token, is_paper_flag, market_id, cond))
+        return dict(row) if row is not None else None
 
     # ------------------------------------------------------------------
     # Resolution detection
@@ -600,11 +649,19 @@ class ResolutionTracker:
         # Keying the ref on the side (not the label) makes the dedup hold; the
         # ledger row, cost_basis match and portfolio delete still use the real
         # label so the right rows are zeroed/removed.
+        # 2026-08-05: this canonicalization deduped labels WITHIN one mapper
+        # but left a cross-mapper hole — the reconciler's portfolio projection
+        # and bot.py's cost_basis mirror disagreed on which SIDE a team-name
+        # outcome was (NO vs YES), so one venue asset still produced two
+        # "canonical" refs and double-booked; the mappers are now unified in
+        # reconciler.reconciled_token, so one asset maps to one side
+        # everywhere. The prior lookup is also condition-aware (see
+        # _prior_settlement) so a leg booked under a stub market id cannot
+        # re-book under the real id after the id migration.
         canon_token = "NO" if token == "NO" else "YES"
         source_ref = f"settle:{market_id}:{canon_token}:{is_paper_flag}"
-        already_booked = await self._db.fetchone(
-            "SELECT 1 FROM pnl_ledger WHERE source_ref = ?", (source_ref,)
-        )
+        already_booked = await self._prior_settlement(
+            market_id, canon_token, is_paper_flag)
 
         if already_booked is None:
             # Unified realized-P&L ledger: settlement of the residual position.

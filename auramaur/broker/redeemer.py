@@ -41,6 +41,14 @@ class VenuePosition:
     slug: str
     neg_risk: bool = False
     mergeable: bool = False
+    # 2026-08-05: the data-api's outcomeIndex — per-asset identity of WHICH
+    # slot this token is (0 = the market's first outcome = our YES-side
+    # clob_token_yes slot, 1 = the second = NO). The outcome LABEL alone is
+    # ambiguous for non-binary (team-name) markets and the two label
+    # normalizers disagreed on it, double-booking settlements. -1 = absent
+    # (older snapshots / paths that never carried it) — callers fall back to
+    # TokenType.from_str on the label.
+    outcome_index: int = -1
 
 
 async def fetch_current_positions(
@@ -102,6 +110,13 @@ async def fetch_current_positions(
         size = float(item.get("size", 0) or 0)
         if size <= size_threshold:
             continue
+        # 2026-08-05: tolerate a missing/garbled outcomeIndex (-1 = absent);
+        # downstream falls back to the shared label normalizer.
+        try:
+            raw_index = item.get("outcomeIndex")
+            outcome_index = int(raw_index) if raw_index is not None else -1
+        except (TypeError, ValueError):
+            outcome_index = -1
         positions.append(VenuePosition(
             condition_id=condition_id, asset_id=asset_id,
             title=str(item.get("title", "")), outcome=str(item.get("outcome", "")),
@@ -114,6 +129,7 @@ async def fetch_current_positions(
             neg_risk=bool(item.get("negativeRisk") or item.get("negRisk")),
             mergeable=bool(item.get("mergeable")),
             end_date=str(item.get("endDate", "")), slug=str(item.get("slug", "")),
+            outcome_index=outcome_index,
         ))
     return positions
 

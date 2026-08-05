@@ -19,7 +19,7 @@ logging.getLogger("py_clob_client_v2.http_helpers.helpers").setLevel(logging.CRI
 from config.settings import Settings
 from auramaur.components import Components
 from auramaur.db.database import Database
-from auramaur.exchange.models import OrderSide, TokenType
+from auramaur.exchange.models import OrderSide
 
 if TYPE_CHECKING:
     pass
@@ -1381,7 +1381,7 @@ class AuramaurBot(
 
     async def _task_position_sync(self) -> None:
         """Periodically sync net current positions from Polymarket."""
-        from auramaur.broker.reconciler import PositionReconciler
+        from auramaur.broker.reconciler import PositionReconciler, reconciled_token
         from auramaur.broker.sync import PositionSyncer
 
         reconciler: PositionReconciler = self._components.reconciler
@@ -1415,7 +1415,10 @@ class AuramaurBot(
                             settled = set()
                         unsettled = [
                             rp for rp in reconciled
-                            if (rp.market_id, TokenType.from_str(rp.outcome).value)
+                            # 2026-08-05: unified mapper — the settled-key
+                            # skip must test the SAME side label the mirror
+                            # below writes, or a settled leg re-enters.
+                            if (rp.market_id, reconciled_token(rp).value)
                             not in settled
                         ]
                         positions = reconciler.to_live_positions(unsettled)
@@ -1441,7 +1444,17 @@ class AuramaurBot(
                                     # title-case outcome here was the one site that diverged
                                     # from the fill/Kalshi paths, splitting a single position
                                     # into duplicate (market, "No") + (market, "NO") rows.
-                                    (rp.market_id, TokenType.from_str(rp.outcome).value,
+                                    # 2026-08-05: normalize via reconciled_token — the SAME
+                                    # per-asset mapper to_live_positions uses (outcomeIndex
+                                    # first, from_str fallback). Using from_str here while
+                                    # the portfolio projection used an ad-hoc ternary gave
+                                    # one venue asset a YES cost_basis row and a NO
+                                    # portfolio row on team-name outcomes → two settlement
+                                    # source_refs → the sweep booked the SAME tokens twice
+                                    # (market 0x7557f7ac41736a, live money). It also keeps a
+                                    # both-sides holding as two rows instead of collapsing
+                                    # onto one (market_id, is_paper, token) PK.
+                                    (rp.market_id, reconciled_token(rp).value,
                                      rp.token_id, rp.size,
                                      rp.avg_cost, rp.size * rp.avg_cost),
                                 )
