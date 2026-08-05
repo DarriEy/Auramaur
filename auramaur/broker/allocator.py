@@ -219,14 +219,28 @@ class CapitalAllocator:
         """Compute expected value for ranking.
 
         EV = (edge_pct / 100) * confidence_weight * kelly_size
-             - cash opportunity cost through resolution
+             - cash opportunity cost through resolution (when armed)
 
         Where confidence_weight is HIGH=1.0, MEDIUM=0.75, LOW=0.5.
+
+        The cash-hurdle term is gated by
+        ``benchmark.allocator_cash_hurdle_enabled`` (tracked default OFF,
+        2026-08-05). Two reasons, both pre-registered rather than vibes:
+        (1) the hurdle charges the hold-to-RESOLUTION cost, but this book
+        demonstrably realizes long-dated edges early on repricing (the
+        2026-08-05 Gemini exits: entered 9-12c, exited 21-41c inside a
+        day), so hold-to-end systematically overstates the true cost; and
+        (2) replayed against the prior 14 days of live entries the hurdle
+        would have refused 7 of 13 (~$185 of ~$265) — effectively
+        adjudicating the llm_kalshi long-dated experiment that the
+        2026-10-31 pre-registered cell review exists to decide on
+        evidence. Flip the flag if that review kills the long book.
         """
         confidence_weight = _CONFIDENCE_WEIGHTS.get(signal.claude_confidence, 0.5)
         edge_frac = abs(signal.edge) / 100.0
         forecast_ev = edge_frac * confidence_weight * kelly_size
-        if market is None or market.end_date is None:
+        if (market is None or market.end_date is None
+                or not self._settings.benchmark.allocator_cash_hurdle_enabled):
             return forecast_ev
         end = market.end_date
         if end.tzinfo is None:

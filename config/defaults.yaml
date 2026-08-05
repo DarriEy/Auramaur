@@ -1359,6 +1359,14 @@ cross_venue_arb:
 # judgement in the system was scored against zero.
 benchmark:
   risk_free_annual_rate: 0.045
+  # Allocator ENTRY veto stays disarmed (2026-08-05): the hurdle prices a
+  # hold-to-resolution the book does not practice (long-dated edges get
+  # exited on repricing), and a 14-day live replay showed it refusing 7 of
+  # 13 real entries — the llm_kalshi long-dated cells the 2026-10-31
+  # pre-registered review adjudicates. Flip AFTER that review, on its
+  # evidence. Graduation measurement (require_cash_benchmark) is on
+  # regardless of this flag.
+  allocator_cash_hurdle_enabled: false
   # Total deployable capital across ALL venues, USD. Operator-maintained:
   # only Polymarket reports capital numerically, and the venues are
   # mixed-currency, so this cannot be derived. Measured 2026-08-01:
