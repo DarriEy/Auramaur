@@ -268,30 +268,51 @@ class ArbTradeExecutionMixin:
 
         exchange_client = engine.exchange
 
+        yes_px = market.outcome_yes_price
+        no_px = market.outcome_no_price
+        if yes_px <= 0 or no_px <= 0:
+            return
+
+        # Size BOTH legs to a common SHARE quantity, matching
+        # _execute_negrisk_arb above. YES+NO of one market pays exactly $1 per
+        # SHARE held on the winning side, so the hedge exists only at equal
+        # share counts. Sizing each leg to the same DOLLARS bought unequal
+        # shares: at yes=0.60 / no=0.35 with $10 a leg that is 16.67 vs 28.57
+        # shares — $20 out, worst case 16.67 x $1 back, a guaranteed -$3.33 on
+        # a trade booked and alerted as risk-free. Profit existed only when
+        # BOTH legs priced under 0.50; above that the "arb" was a losing bet.
+        qty = min(position_size / yes_px, position_size / no_px)
+        if qty < 1:
+            return
+
         # YES leg
         yes_order = Order(
             market_id=market.id,
             exchange=exchange_name,
             token_id=market.clob_token_yes or market.id,
             side=OrderSide.BUY,
-            size=position_size / market.outcome_yes_price if market.outcome_yes_price > 0 else 0,
-            price=market.outcome_yes_price,
+            token=TokenType.YES,
+            size=qty,
+            price=yes_px,
             dry_run=not self.settings.is_live,
         )
 
-        # NO leg
+        # NO leg. token= is REQUIRED, not decorative: Order.token defaults to
+        # YES, Kalshi derives both the book side and the price inversion from
+        # order.token (not token_id), so omitting it posted two YES bids
+        # instead of a hedge — and the gateway writes token=order.token into
+        # cost_basis/fills, so a NO holding was booked under 'YES' and its cap
+        # accounting attributed to the opposite side.
         no_order = Order(
             market_id=market.id,
             exchange=exchange_name,
             token_id=market.clob_token_no or market.id,
             side=OrderSide.BUY,
-            size=position_size / market.outcome_no_price if market.outcome_no_price > 0 else 0,
-            price=market.outcome_no_price,
+            token=TokenType.NO,
+            size=qty,
+            price=no_px,
             dry_run=not self.settings.is_live,
         )
-
-        if yes_order.size < 1 or no_order.size < 1:
-            return
 
         try:
             (yes_result, _), (no_result, _) = await self._exit_gateway.place_legs(
@@ -312,13 +333,32 @@ class ArbTradeExecutionMixin:
             )
 
             mode = "PAPER" if yes_order.dry_run else "LIVE"
-            await alerts.send(
-                f"[{mode}] Internal arb executed: {market.question[:50]} | "
-                f"YES@{opp.price_a:.2f} + NO@{opp.price_b:.2f} = "
-                f"{opp.price_a + opp.price_b:.3f} | "
-                f"profit: {opp.expected_profit_pct:.1f}%",
-                level="warning",
-            )
+            # Inspect the legs before claiming success. place_legs runs these
+            # sequentially and each leg can independently come back
+            # INSUFFICIENT_BALANCE / POST_ONLY_REJECTED / SKIP_DUP — leaving a
+            # one-sided directional position on a market nobody analysed while
+            # the operator is told the arb executed. Both sibling paths
+            # (_execute_negrisk_arb, _execute_cross_exchange_arb) already raise
+            # critical on a half-leg; this one reported unconditionally.
+            ok = ("filled", "paper", "partial", "pending")
+            legs_ok = sum(1 for r in (yes_result, no_result) if r.status in ok)
+            if legs_ok < 2:
+                await alerts.send(
+                    f"[{mode}] INTERNAL ARB PARTIAL FILL: {legs_ok}/2 legs for "
+                    f"{market.question[:40]}. Hedge is incomplete — the filled "
+                    f"leg is an unhedged directional position. Manual review "
+                    f"required. (YES: {yes_result.status}, NO: {no_result.status})",
+                    level="critical",
+                )
+            else:
+                await alerts.send(
+                    f"[{mode}] Internal arb executed: {market.question[:50]} | "
+                    f"YES@{opp.price_a:.2f} + NO@{opp.price_b:.2f} = "
+                    f"{opp.price_a + opp.price_b:.3f} | "
+                    f"{qty:.1f} shares/leg | "
+                    f"profit: {opp.expected_profit_pct:.1f}%",
+                    level="warning",
+                )
         except Exception as e:
             log.error(
                 "arb_scanner.internal_execution_error",
