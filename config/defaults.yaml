@@ -1147,8 +1147,12 @@ settlement_arb:
   # is ALREADY PUBLISHED and deterministically satisfies/fails the criterion, and
   # the market hasn't repriced (the lag is the edge). No forecasting; the LLM only
   # extracts the predicate (adversarially verified, cached). PAPER-FORCED, own
-  # graduation cell. DEFAULT OFF — flip enabled:true to start the 2-week spike.
-  enabled: true      # spike STARTED 2026-06-26 — 2wk paper measurement
+  # graduation cell. The spike ran 2026-06-26 through its preregistered
+  # 2-week endpoint (2026-07-10). WOUND DOWN 2026-08-05 pending adjudication:
+  # historical evidence remains intact, but an expired clock cannot keep
+  # consuming candidates and operator attention indefinitely. Re-enable only
+  # as a new, dated trial after recording the prior verdict.
+  enabled: false
   paper: true
   stake_usd: 10.0
   min_edge: 0.05
@@ -1235,7 +1239,9 @@ resolution_lens:
   # now (empty descriptions -> rules-text fix; long-dated-only discovery ->
   # close-window merge; 300 floor vs underreporting bulk liquidity field ->
   # 50, matching cross_venue). Don't judge the pre-07-03 silence.
-  kalshi_enabled: true
+  # WOUND DOWN 2026-08-05: the restarted two-week clock ended 2026-07-17.
+  # Keep the Polymarket family running; this only stops the expired Kalshi arm.
+  kalshi_enabled: false
   kalshi_min_liquidity: 50.0
   min_gap_score: 0.4       # lens-judged headline/criteria divergence floor
   high_conf_gap_score: 0.7 # >= this -> HIGH confidence (clears divergence filter)
@@ -1377,3 +1383,12 @@ benchmark:
   # Polymarket $1,180 equity + IBKR ~$795 + Kalshi $221 + Kraken ~$145.
   # Set to 0 to suppress the percentage comparison rather than guess.
   book_capital_usd: 2340.0
+
+# An experiment is not free because its orders are paper: every active family
+# consumes candidate flow, API budget, monitoring surface, and an eventual
+# human adjudication. Families (not model arms) consume one slot because arms
+# share a hypothesis, runtime, and review. Current tracked defaults use 11/12;
+# starting a trial beyond the one free slot fails Settings validation until an
+# existing trial is wound down. See docs/experiment-capacity.md.
+experiment_capacity:
+  max_concurrent_paper_trials: 12
