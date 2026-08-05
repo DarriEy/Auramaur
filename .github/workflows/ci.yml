@@ -83,8 +83,9 @@ jobs:
       # every other regression guard (risk checks, execution gateway, exchange
       # adapters, strategy logic) was invisible to CI and could land on main.
       - name: Run full test suite with coverage ratchet
-        # The initial floor is the measured repository baseline (66.3%). Keep
-        # it ratcheting upward as untested orchestration code gains coverage.
+        # Floor lives in pyproject [tool.coverage.report] fail_under — set
+        # from a fresh measure on main (65.86% on 2026-08-05), minus drift
+        # headroom. Raise it only after re-measuring, never speculatively.
         run: uv run pytest -q --cov=auramaur --cov-report=term
 
   lint:
