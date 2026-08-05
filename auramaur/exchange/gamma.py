@@ -289,7 +289,17 @@ class GammaClient:
                 for e in events if isinstance(e, dict)
                 for t in (e.get("tags") or []) if isinstance(t, dict)
             ]
+            # 2026-08-05: bare /markets objects carry no events/tags at all —
+            # taxonomy only rides on the parent-event expansion. Sports
+            # markets still self-identify in the bare shape via
+            # sportsMarketType ("moneyline", ...). Without this, "The
+            # Hundred, Women: ... vs Welsh Fire" fell through to the keyword
+            # fallback, which read "Welsh" as Wales and filed live cricket
+            # under politics_intl (siblings landed as 'legal'). Curated tags
+            # still outrank it — they can say esports where this field only
+            # says sports.
             category = (classify_tags(tag_labels)
+                        or ("sports" if data.get("sportsMarketType") else "")
                         or data.get("category", data.get("groupSlug", "")))
 
             # UMA optimistic-oracle resolution state. `umaResolutionStatuses`
