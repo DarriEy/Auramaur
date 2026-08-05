@@ -629,11 +629,11 @@ class EntailmentArbPillar:
         # 2026-08-05 (#353 phase 5): ONE entry span covers both legs'
         # markets/signals/portfolio rows AND the verdict's traded_at update,
         # opened only after submit_paired has returned (never wrap a gateway
-        # call). _record_leg opens its own span with the same owner; same-
-        # task re-entrancy JOINS this outer one (database.py), which is what
-        # folds traded_at into the same atomic unit — a crash anywhere here
-        # leaves no partial entry record. The trailing commit() this
-        # replaced was dead (no-op since eed51b8).
+        # call). _record_leg opens its own entailment_arb.leg span; same-
+        # task re-entrancy JOINS this outer one regardless of owner
+        # (database.py), which is what folds traded_at into the same atomic
+        # unit — a crash anywhere here leaves no partial entry record. The
+        # trailing commit() this replaced was dead (no-op since eed51b8).
         async with self._db.transaction(owner="entailment_arb.entry"):
             for market, res in ((implier, res_a), (implied, res_b)):
                 await self._record_leg(market, res.order, res.result, why, gap)
@@ -661,10 +661,13 @@ class EntailmentArbPillar:
         # row land in ONE span. Under autocommit a crash mid-helper could
         # leave markets+signals without the portfolio row — an unmirrored
         # position after a real fill. On the paired path the caller's
-        # entailment_arb.entry span is already open and this one JOINS it;
-        # on the single-leg failure path this span stands alone. The
-        # trailing commit() this replaced was dead (no-op since eed51b8).
-        async with self._db.transaction(owner="entailment_arb.entry"):
+        # entailment_arb.entry span is already open and this one JOINS it
+        # (the join is task-keyed, not owner-keyed); on the single-leg
+        # failure path this span stands alone under its own owner, so
+        # held-long telemetry can tell the two writers apart (second-review
+        # finding, ground rule 3). The trailing commit() this replaced was
+        # dead (no-op since eed51b8).
+        async with self._db.transaction(owner="entailment_arb.leg"):
             await self._db.execute(
                 """INSERT OR IGNORE INTO markets (id, exchange, question, category,
                    active, outcome_yes_price, outcome_no_price, volume, liquidity,

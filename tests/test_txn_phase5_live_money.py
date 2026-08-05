@@ -290,7 +290,8 @@ async def test_cross_venue_entry_owner_and_post_submit_ordering():
 
 
 # ---------------------------------------------------------------------------
-# entailment_arb — _record_leg x2 + traded_at (owner entailment_arb.entry)
+# entailment_arb — _record_leg x2 + traded_at (owners: entailment_arb.entry
+# for the paired batch, entailment_arb.leg for the standalone helper)
 # ---------------------------------------------------------------------------
 
 
@@ -337,8 +338,8 @@ async def test_entailment_record_leg_is_atomic_and_carries_its_owner():
             await pillar._record_leg(
                 _market(mid), _order(mid), _submit_result(mid).result,
                 "above 71000 => above 70200", 0.3)
-        assert span_owners(events) == ["entailment_arb.entry"]
-        assert events.count(("entailment_arb.entry", "end")) == 1
+        assert span_owners(events) == ["entailment_arb.leg"]
+        assert events.count(("entailment_arb.leg", "end")) == 1
         for table in ("signals", "portfolio"):
             row = await db.fetchone(f"SELECT COUNT(*) AS n FROM {table}")
             assert row["n"] == 1, table
@@ -386,6 +387,9 @@ async def test_entailment_traded_at_folds_into_the_entry_span():
             assert await pillar._enter_pair(
                 implier, implied, 0.3, "ladder", 1.0, False) is True
         assert "entailment_arb.entry" in span_owners(events)
+        # The joined helper spans surface under their own owner but commit
+        # nothing themselves — the fold is proven by the crash above.
+        assert "entailment_arb.leg" in span_owners(events)
         assert (events.index(("gateway", "submit_paired"))
                 < events.index(("entailment_arb.entry", "begin")))
         row = await db.fetchone("SELECT COUNT(*) AS n FROM signals")

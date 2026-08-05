@@ -44,8 +44,12 @@ def failing_on(db, needle: str):
 def transaction_spy(db, events: list):
     """Append ``(owner, "begin")`` / ``(owner, "end")`` around each span.
 
-    Joined (re-entrant) spans are invisible here by design — they never
-    reach the patched entry point's BEGIN, exactly as in production.
+    Joined (re-entrant) spans DO surface here — the spy wraps the
+    ``transaction`` entry point, and re-entrancy is detected inside the
+    original, past the patch — but they BEGIN/COMMIT nothing themselves.
+    Assert on ``span_owners`` / the FIRST begin rather than event counts
+    when a joined span may be present (2026-08-05, second-review finding;
+    the original docstring claimed the opposite).
     """
     original = db.transaction
 
