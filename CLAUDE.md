@@ -51,7 +51,10 @@ When making git commits, use `Assisted-by: Claude (Anthropic)` in the commit mes
   two always applies — check the effective value, not this line.
 - Daily loss limit: $200
 - Max open positions: 500
-- Minimum edge: 5% after fees
+- Minimum edge (neutral tracked baseline): 2.5% after fees. The risk-tolerance
+  lever scales this gateway floor at runtime; individual strategies may impose
+  higher entry bars. `RiskConfig` retains a conservative 5% class fallback for
+  callers that construct it without the tracked YAML.
 - Kelly fraction: 30%
 - Confidence floor: LOW
 - Category exposure cap: 60%

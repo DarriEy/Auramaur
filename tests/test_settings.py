@@ -57,10 +57,27 @@ def test_default_risk_params():
     assert s.risk.max_stake_per_market == 0.02
     assert s.risk.daily_loss_limit == 200.0
     assert s.risk.max_open_positions == 500
+    assert s.risk.min_edge_pct == 2.5
     # Kalshi gets a lower candidate liquidity floor than Polymarket (thinner book)
     assert s.risk.min_liquidity == 1000.0
     assert s.risk.kalshi_min_liquidity == 300.0
     assert s.kelly.fraction == 0.30
+
+
+def test_documented_minimum_edge_matches_tracked_baseline():
+    """The operator safety contract must describe the effective tracked YAML,
+    not RiskConfig's conservative no-YAML fallback."""
+    from pathlib import Path
+
+    settings = Settings()
+    safety_contract = (
+        Path(__file__).resolve().parent.parent / "CLAUDE.md"
+    ).read_text(encoding="utf-8")
+    documented = (
+        f"Minimum edge (neutral tracked baseline): "
+        f"{settings.risk.min_edge_pct:g}% after fees"
+    )
+    assert documented in safety_contract
 
 
 # ---------------------------------------------------------------------------
