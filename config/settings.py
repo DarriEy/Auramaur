@@ -2144,6 +2144,30 @@ class BenchmarkConfig(BaseModel):
     book_capital_usd: float = 0.0
 
 
+class ExperimentCapacityConfig(BaseModel):
+    """Operator-attention budget for concurrent paper strategy families."""
+
+    max_concurrent_paper_trials: int = Field(default=12, ge=1, le=20)
+
+
+_PAPER_TRIAL_SECTIONS = (
+    "entailment_arb",
+    "cross_venue_arb",
+    "econ_indicator",
+    "long_horizon",
+    "agent_trader",
+    "term_structure",
+    "vol_anchor",
+    "informed_flow",
+    "settlement_arb",
+    "weather_temp",
+    "oddlot_tender",
+    "resolution_lens",
+    "bias_harvest",
+    "platform_consensus",
+)
+
+
 class Settings(BaseSettings):
     # API Keys
     anthropic_api_key_primary: str = Field(default="", repr=False, exclude=True)
@@ -2280,6 +2304,28 @@ class Settings(BaseSettings):
     logging: LoggingConfig = Field(default_factory=lambda: LoggingConfig(**_DEFAULTS.get("logging", {})))
     monitoring: MonitoringConfig = Field(default_factory=lambda: MonitoringConfig(**_DEFAULTS.get("monitoring", {})))
     benchmark: BenchmarkConfig = Field(default_factory=lambda: BenchmarkConfig(**_DEFAULTS.get("benchmark", {})))
+    experiment_capacity: ExperimentCapacityConfig = Field(
+        default_factory=lambda: ExperimentCapacityConfig(
+            **_DEFAULTS.get("experiment_capacity", {})))
+
+    @property
+    def active_paper_trials(self) -> tuple[str, ...]:
+        """Enabled paper strategy families consuming operator review capacity."""
+        return tuple(
+            name for name in _PAPER_TRIAL_SECTIONS
+            if getattr(self, name).enabled and getattr(self, name).paper
+        )
+
+    @model_validator(mode="after")
+    def enforce_experiment_capacity(self):
+        active = self.active_paper_trials
+        limit = self.experiment_capacity.max_concurrent_paper_trials
+        if len(active) > limit:
+            raise ValueError(
+                f"{len(active)} concurrent paper trials exceed capacity {limit}: "
+                + ", ".join(active)
+            )
+        return self
 
     # Resolve .env to an absolute path anchored at the repo root so Settings
     # loads the same secrets regardless of the caller's CWD. A bare ".env"
