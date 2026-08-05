@@ -82,8 +82,10 @@ jobs:
       # Then the FULL suite — CI previously ran only the two files above, so
       # every other regression guard (risk checks, execution gateway, exchange
       # adapters, strategy logic) was invisible to CI and could land on main.
-      - name: Run full test suite
-        run: uv run pytest -q
+      - name: Run full test suite with coverage ratchet
+        # The initial floor is the measured repository baseline (66.3%). Keep
+        # it ratcheting upward as untested orchestration code gains coverage.
+        run: uv run pytest -q --cov=auramaur --cov-report=term
 
   lint:
     name: Lint (ruff)

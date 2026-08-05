@@ -84,7 +84,10 @@ class KellySizer:
         fraction = self.fraction if fraction_override is None else fraction_override
         size = kelly * fraction * bankroll
 
-        size = min(size, max_stake)
+        # Defence in depth: callers normally pass ``max_stake <= bankroll``,
+        # but the sizing primitive must never be able to commit more cash than
+        # it was given if a new call site forgets that convention.
+        size = min(size, max_stake, bankroll)
         if 0 < size < 1.0:
             return 0.0
         return size

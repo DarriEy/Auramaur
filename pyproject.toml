@@ -50,6 +50,7 @@ web = [
     "uvicorn>=0.52.1",
 ]
 dev = [
+    "hypothesis>=6.138.0",
     "pytest>=9.0.3",
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
@@ -80,3 +81,8 @@ line-length = 100
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.coverage.report]
+precision = 1
+skip_covered = true
+fail_under = 66
