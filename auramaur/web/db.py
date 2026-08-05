@@ -10,6 +10,8 @@ needs, so ``monitoring.cockpit.gather_state`` runs unchanged on top of it.
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 from pathlib import Path
 
 import aiosqlite
@@ -35,14 +37,28 @@ class ReadOnlyDatabase:
         # Linux — both forms SQLite accepts; string-built URIs with
         # backslashes are not portable.
         uri = f"{Path(self.db_path).resolve().as_uri()}?mode=ro"
-        self._db = await aiosqlite.connect(uri, uri=True)
-        self._db.row_factory = aiosqlite.Row
-        # WAL readers can hit a writer's checkpoint lock; wait briefly instead
-        # of erroring (the bot holds busy_timeout=30000 on its side).
-        await self._db.execute("PRAGMA busy_timeout=5000")
-        # Belt on top of mode=ro: even a coding mistake in this process cannot
-        # turn a query into a write.
-        await self._db.execute("PRAGMA query_only=ON")
+        # Keep the handle before awaiting it. Cancellation can land after
+        # aiosqlite starts its worker thread but before __await__ returns; if
+        # assignment happened only after await, shutdown would have no handle
+        # to close and the non-daemon worker would survive pytest/process exit.
+        connection = aiosqlite.connect(uri, uri=True)
+        try:
+            await connection
+            connection.row_factory = aiosqlite.Row
+            # WAL readers can hit a writer's checkpoint lock; wait briefly instead
+            # of erroring (the bot holds busy_timeout=30000 on its side).
+            await connection.execute("PRAGMA busy_timeout=5000")
+            # Belt on top of mode=ro: even a coding mistake in this process cannot
+            # turn a query into a write.
+            await connection.execute("PRAGMA query_only=ON")
+        except (asyncio.CancelledError, Exception):
+            # Preserve the original open/initialization error. Some aiosqlite
+            # releases raise ValueError when close() is called before the
+            # underlying sqlite handle became active.
+            with suppress(Exception):
+                await connection.close()
+            raise
+        self._db = connection
 
     async def close(self) -> None:
         if self._db:
