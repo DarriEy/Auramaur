@@ -366,18 +366,20 @@ class ArbitrageScanner:
         # Strategy A: LLM Batch Pairing (Preferred)
         if self._analyzer:
             try:
-                from auramaur.nlp.prompts import BATCH_ARBITRAGE_MATCHING_PROMPT
+                from auramaur.nlp.prompts import (
+                    BATCH_ARBITRAGE_MATCHING_PROMPT,
+                    format_market_list,
+                )
                 from auramaur.nlp.analyzer import _parse_claude_json
 
-                # Format minimal market lists for the prompt to save tokens
-                list_a = [{"id": m.id, "question": m.question} for m in markets_a]
-                list_b = [{"id": m.id, "question": m.question} for m in markets_b]
-
+                # Market question text is exchange-supplied and untrusted, so it
+                # crosses into the prompt through the same data boundary as
+                # evidence — never a bare repr.
                 prompt = BATCH_ARBITRAGE_MATCHING_PROMPT.format(
                     exchange_a=name_a or "Exchange A",
                     exchange_b=name_b or "Exchange B",
-                    markets_a_json=re.sub(r"\s+", " ", str(list_a)),
-                    markets_b_json=re.sub(r"\s+", " ", str(list_b)),
+                    markets_a_json=format_market_list(markets_a),
+                    markets_b_json=format_market_list(markets_b),
                 )
 
                 raw = await self._analyzer._call_claude_cli(prompt)
