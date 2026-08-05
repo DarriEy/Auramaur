@@ -1339,6 +1339,10 @@ class GraduationConfig(BaseModel):
     window_days: int = 90
     confidence_z: float = 1.645
     min_mean_pnl_lower_bound: float = 0.0
+    # Require realized returns to clear the configured cash benchmark after
+    # charging opportunity cost for the capital and time committed. Applied to
+    # prospective evidence, where stake and holding-period provenance exist.
+    require_cash_benchmark: bool = False
     probation_multiplier: float = 0.5
     cache_seconds: int = 300
     exempt_strategies: list[str] = ["arbitrage", "market_maker", "order_monitor"]
@@ -2122,6 +2126,16 @@ class BenchmarkConfig(BaseModel):
     # Annualised risk-free rate the book is measured against. Roughly the
     # T-bill / money-market rate available on idle balances.
     risk_free_annual_rate: float = 0.045
+    # Arm the allocator's per-candidate cash hurdle (EV minus
+    # stake x rate x years-to-END-DATE, refusing non-positive excess).
+    # Default OFF: the charge models hold-to-resolution, which overstates
+    # cost for a book that exits long-dated positions on repricing, and a
+    # 14-day live replay showed it refusing 7 of 13 real entries — the
+    # llm_kalshi long-dated cells whose worth the 2026-10-31 pre-registered
+    # review adjudicates on evidence. Measurement (graduation's
+    # require_cash_benchmark) stays on regardless; this flag only gates the
+    # ENTRY veto. Outside every strategy_version hash — clock-safe to flip.
+    allocator_cash_hurdle_enabled: bool = False
     # Total deployable capital across ALL venues, in USD. Operator-maintained:
     # only Polymarket reports capital numerically in venue_balances, and the
     # rest are mixed-currency, so this cannot be derived reliably. 0 disables
