@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 import aiohttp
 import structlog
 
-from auramaur.data_sources.base import NewsItem
+from auramaur.data_sources.base import NewsItem, redact_error
 
 logger = structlog.get_logger(__name__)
 
@@ -43,7 +43,7 @@ class USGSSource:
                         return []
                     data = await resp.json()
         except Exception as e:
-            logger.warning("usgs.fetch_exception", error=str(e)[:120])
+            logger.warning("usgs.fetch_exception", error=redact_error(e, 120))
             return []
 
         features = data.get("features", []) or []

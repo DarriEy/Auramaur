@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 import aiohttp
 import structlog
 
-from auramaur.data_sources.base import NewsItem
+from auramaur.data_sources.base import NewsItem, redact_error
 
 logger = structlog.get_logger(__name__)
 
@@ -70,7 +70,7 @@ class ESPNSource:
                             relevance_score=1.5,
                         ))
         except Exception as e:
-            logger.debug("espn.scoreboard_error", league=league_path, error=str(e)[:120])
+            logger.debug("espn.scoreboard_error", league=league_path, error=redact_error(e, 120))
 
         # News headlines
         try:
@@ -102,7 +102,7 @@ class ESPNSource:
                             relevance_score=1.2,
                         ))
         except Exception as e:
-            logger.debug("espn.news_error", league=league_path, error=str(e)[:120])
+            logger.debug("espn.news_error", league=league_path, error=redact_error(e, 120))
 
         return items
 

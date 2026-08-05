@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 import structlog
 
-from auramaur.data_sources.base import NewsItem
+from auramaur.data_sources.base import NewsItem, redact_error
 
 logger = structlog.get_logger(__name__)
 
@@ -155,7 +155,7 @@ class MarketDataSource:
                 )
 
             except Exception as e:
-                logger.debug("market_data_ticker_failed", ticker=ticker_symbol, error=str(e)[:60])
+                logger.debug("market_data_ticker_failed", ticker=ticker_symbol, error=redact_error(e, 60))
 
         logger.info("market_data_fetched", count=len(items), tickers=tickers[:8])
         return items[:limit]

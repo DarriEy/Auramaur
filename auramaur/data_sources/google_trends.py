@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 import aiohttp
 import structlog
 
-from auramaur.data_sources.base import NewsItem
+from auramaur.data_sources.base import NewsItem, redact_error
 
 logger = structlog.get_logger(__name__)
 
@@ -48,13 +48,13 @@ class GoogleTrendsSource:
                         return []
                     text = await resp.text()
         except Exception as e:
-            logger.debug("trends.fetch_error", error=str(e)[:120])
+            logger.debug("trends.fetch_error", error=redact_error(e, 120))
             return []
 
         try:
             root = ET.fromstring(text)
         except ET.ParseError as e:
-            logger.debug("trends.parse_error", error=str(e)[:120])
+            logger.debug("trends.parse_error", error=redact_error(e, 120))
             return []
 
         # Trends RSS schema: each <item> contains <title>, <ht:approx_traffic>,

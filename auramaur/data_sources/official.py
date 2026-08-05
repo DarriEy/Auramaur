@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import aiohttp
 import structlog
 
-from auramaur.data_sources.base import NewsItem
+from auramaur.data_sources.base import NewsItem, redact_error
 
 log = structlog.get_logger()
 _TIMEOUT = aiohttp.ClientTimeout(total=15)
@@ -74,7 +74,7 @@ class NWSSource(_HTTPSource):
                 headers={"User-Agent": "Auramaur/0.1 (research bot)"},
             )
         except Exception as exc:
-            log.warning("nws.fetch_failed", error=str(exc)[:120])
+            log.warning("nws.fetch_failed", error=redact_error(exc, 120))
             return []
         words = {w.lower() for w in query.split() if len(w) > 3}
         items = []
@@ -120,7 +120,7 @@ class BLSSource(_HTTPSource):
         try:
             data = await self._post("https://api.bls.gov/publicAPI/v2/timeseries/data/", json=payload)
         except Exception as exc:
-            log.warning("bls.fetch_failed", error=str(exc)[:120])
+            log.warning("bls.fetch_failed", error=redact_error(exc, 120))
             return []
         items = []
         for series in data.get("Results", {}).get("series", []):
@@ -157,7 +157,7 @@ class BEASource(_HTTPSource):
             data = await self._get("https://apps.bea.gov/api/data", params=params)
             rows = data["BEAAPI"]["Results"]["Data"]
         except Exception as exc:
-            log.warning("bea.fetch_failed", error=str(exc)[:120])
+            log.warning("bea.fetch_failed", error=redact_error(exc, 120))
             return []
         return [NewsItem(
             id=_id("bea", f"{table}:{r.get('TimePeriod')}:{r.get('LineNumber')}:{r.get('DataValue')}"),
@@ -182,7 +182,7 @@ class CongressSource(_HTTPSource):
             data = await self._get("https://api.congress.gov/v3/bill",
                                    params={"api_key": self._api_key, "format": "json", "limit": min(limit, 20)})
         except Exception as exc:
-            log.warning("congress.fetch_failed", error=str(exc)[:120])
+            log.warning("congress.fetch_failed", error=redact_error(exc, 120))
             return []
         words = {w.lower() for w in query.split() if len(w) > 3}
         items = []
@@ -221,7 +221,7 @@ class EIASource(_HTTPSource):
             })
             rows = data.get("response", {}).get("data", [])
         except Exception as exc:
-            log.warning("eia.fetch_failed", error=str(exc)[:120])
+            log.warning("eia.fetch_failed", error=redact_error(exc, 120))
             return []
         items = []
         for row in rows:

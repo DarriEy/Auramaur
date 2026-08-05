@@ -2,10 +2,38 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field, field_validator
+
+# aiohttp's ClientResponseError stringifies to include the full request URL,
+# query string and all. Sources that pass a credential as a query parameter
+# therefore leak it the moment the venue returns 4xx/5xx — which for a metered
+# API is the *normal* failure (403 over-quota, 401 after rotation). Truncating
+# the message does not help: the key is early in the URL when it is the first
+# parameter. Redact by name, then by shape for names we do not know.
+_SECRET_PARAM_RE = re.compile(
+    r"([?&](?:api[_-]?key|apikey|key|token|access[_-]?token|auth|"
+    r"user[_-]?id|userid|secret|password|passwd|pwd|sig|signature)=)"
+    r"[^&\s'\"]*",
+    re.IGNORECASE,
+)
+# Backstop for parameters we have not enumerated: any value that is long and
+# opaque is treated as a credential regardless of its name.
+_OPAQUE_VALUE_RE = re.compile(r"([?&][A-Za-z0-9_.-]+=)([A-Za-z0-9_-]{20,})")
+
+
+def redact_error(exc: BaseException | str, limit: int = 120) -> str:
+    """Stringify an exception for logging with credential-bearing params removed.
+
+    Redaction happens *before* truncation so a slice can never expose the tail
+    of a key that the redactor would otherwise have covered.
+    """
+    text = _SECRET_PARAM_RE.sub(r"\1<redacted>", str(exc))
+    text = _OPAQUE_VALUE_RE.sub(r"\1<redacted>", text)
+    return text[:limit]
 
 
 class NewsItem(BaseModel):
