@@ -25,9 +25,14 @@ def _fake_settings() -> SimpleNamespace:
     """
     return SimpleNamespace(
         is_live=False,
+        # The book is now selected from the CONFIGURED live intent rather than
+        # is_live, so that arming the kill switch cannot swap which book the
+        # operator is looking at. Real Settings always carries both; this
+        # fixture was under-specifying it.
+        auramaur_live=False,
         transfers_armed=False,
         kill_switch_active=False,
-        execution=SimpleNamespace(paper_initial_balance=100.0),
+        execution=SimpleNamespace(paper_initial_balance=100.0, live=False),
         logging=SimpleNamespace(file="/nonexistent/auramaur.log"),
         kalshi=SimpleNamespace(enabled=False),
         kraken=SimpleNamespace(enabled=False),
