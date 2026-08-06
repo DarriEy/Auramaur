@@ -2110,6 +2110,17 @@ class MonitoringConfig(BaseModel):
     pillar_stale_seconds: int = 900
     candidate_retention_days: int = 30
     candidate_summary_retention_days: int = 90
+    # readiness.check_exit_liveness — "entries continue but exits stopped".
+    # Lookback over which a (venue, book, mode) cell must show at least one
+    # realization (SELL fill or settlement) if it took entries. Calibrated by
+    # replaying the criterion over the full trade history: 7d is the shortest
+    # window whose historical false-alarm count bottoms out, and a window as
+    # long as the outage it is meant to catch never fires at all, because the
+    # pre-outage exits stay inside it. See docs/exit-liveness-criterion.md.
+    # These are health-check thresholds, outside every strategy_version hash,
+    # so tuning them cannot reset a graduation clock.
+    exit_liveness_window_days: int = 7
+    exit_liveness_min_entries: int = 3
 
 
 class BenchmarkConfig(BaseModel):

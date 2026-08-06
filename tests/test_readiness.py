@@ -14,6 +14,7 @@ from auramaur.monitoring.readiness import (
     check_cycle_health,
     check_data_sources,
     check_divergence,
+    check_exit_liveness,
     check_pass_rate,
     check_pnl_after_fees,
     check_win_rate,
@@ -496,16 +497,288 @@ async def test_divergence_fail_when_median_high(db: Database):
 
 
 # ---------------------------------------------------------------------------
+# Exit liveness — "entries continue but exits stopped"
+# ---------------------------------------------------------------------------
+
+
+async def _seed_entries(
+    db: Database,
+    *,
+    n: int,
+    venue: str = "polymarket",
+    book: str = "llm",
+    is_paper: int = 0,
+    days_ago: float = 1.0,
+    status: str = "filled",
+) -> None:
+    """BUY rows on the gateway's trades mirror — the entry side of a cell."""
+    for i in range(n):
+        ts = (
+            datetime.now(timezone.utc) - timedelta(days=days_ago, minutes=i)
+        ).isoformat()
+        await db.execute(
+            "INSERT INTO trades (market_id, exchange, timestamp, side, size, "
+            "price, is_paper, status, strategy_source) "
+            "VALUES (?, ?, ?, 'BUY', 10.0, 0.50, ?, ?, ?)",
+            (f"{book}-{is_paper}-{days_ago}-{i}", venue, ts, is_paper, status, book),
+        )
+    await db.commit()
+
+
+async def _seed_exits(
+    db: Database,
+    *,
+    n: int,
+    venue: str = "polymarket",
+    book: str = "llm",
+    is_paper: int = 0,
+    days_ago: float = 1.0,
+    kind: str = "sell",
+) -> None:
+    """Realization rows — the exit side. The ledger attributes a realization
+    to the strategy that OPENED the position, which is why exits are counted
+    from here and not from the trades mirror (whose SELL rows are attributed
+    to the exit path itself)."""
+    for i in range(n):
+        ts = (
+            datetime.now(timezone.utc) - timedelta(days=days_ago, minutes=i)
+        ).isoformat()
+        await db.execute(
+            "INSERT INTO pnl_ledger (market_id, venue, strategy_source, kind, "
+            "token, qty, pnl, fees, is_paper, source_ref, realized_at) "
+            "VALUES (?, ?, ?, ?, 'YES', 10.0, 1.0, 0.0, ?, ?, ?)",
+            (f"{book}-{is_paper}-{i}", venue, book, kind, is_paper,
+             f"exit:{venue}:{book}:{is_paper}:{kind}:{days_ago}:{i}", ts),
+        )
+    await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_exit_liveness_fail_when_entries_continue_and_exits_are_absent(
+    db: Database,
+):
+    """The core contract: a book with entries above the floor and ZERO exit
+    events fails, and the failure names the cell and both counts."""
+    await _seed_exits(db, n=4, days_ago=20.0)          # established cadence
+    await _seed_entries(db, n=6, days_ago=2.0)         # entries kept coming
+    now = datetime.now(timezone.utc)
+    result = await check_exit_liveness(
+        db, since=now - timedelta(days=7), exchange=None)
+    assert result.status == "FAIL"
+    assert "polymarket/llm [live]" in result.detail
+    assert "6 entries" in result.detail
+    assert "0 exits" in result.detail
+    assert result.n_samples == 1
+
+
+@pytest.mark.asyncio
+async def test_exit_liveness_pass_when_a_book_enters_and_exits(db: Database):
+    await _seed_exits(db, n=4, days_ago=20.0)
+    await _seed_entries(db, n=6, days_ago=2.0)
+    await _seed_exits(db, n=2, days_ago=1.0)
+    now = datetime.now(timezone.utc)
+    result = await check_exit_liveness(
+        db, since=now - timedelta(days=7), exchange=None)
+    assert result.status == "PASS"
+    assert "polymarket/llm [live]" in result.detail
+    assert result.n_samples == 1
+
+
+@pytest.mark.asyncio
+async def test_exit_liveness_dormant_book_with_no_entries_never_fails(db: Database):
+    """A strategy that stopped trading is not a broken one. Exits present in
+    history, none in the window, and no entries in the window either."""
+    await _seed_exits(db, n=10, days_ago=20.0)
+    now = datetime.now(timezone.utc)
+    result = await check_exit_liveness(
+        db, since=now - timedelta(days=7), exchange=None)
+    assert result.status != "FAIL"
+    assert result.status == "INSUFFICIENT_DATA"
+    assert result.n_samples == 0
+
+
+@pytest.mark.asyncio
+async def test_exit_liveness_settlements_alone_count_as_exits(db: Database):
+    """A long-dated book can go a long time with no SELL while positions
+    resolve. Settlements are exits; without this the criterion fires forever
+    on long_horizon."""
+    await _seed_exits(db, n=2, book="long_horizon", days_ago=20.0,
+                      kind="settlement")
+    await _seed_entries(db, n=8, book="long_horizon", days_ago=3.0)
+    await _seed_exits(db, n=3, book="long_horizon", days_ago=1.0,
+                      kind="settlement")
+    now = datetime.now(timezone.utc)
+    result = await check_exit_liveness(
+        db, since=now - timedelta(days=7), exchange=None)
+    assert result.status == "PASS"
+    assert "3 exits" in result.detail
+
+
+@pytest.mark.asyncio
+async def test_exit_liveness_commissions_are_not_exits(db: Database):
+    """A commission is booked against a still-open position. Money moving is
+    not a position leaving, so it must not mask a stalled exit path."""
+    await _seed_exits(db, n=3, days_ago=20.0)
+    await _seed_entries(db, n=5, days_ago=2.0)
+    await _seed_exits(db, n=9, days_ago=1.0, kind="commission")
+    now = datetime.now(timezone.utc)
+    result = await check_exit_liveness(
+        db, since=now - timedelta(days=7), exchange=None)
+    assert result.status == "FAIL"
+    assert "0 exits" in result.detail
+
+
+@pytest.mark.asyncio
+async def test_exit_liveness_judges_paper_and_live_independently(db: Database):
+    """Paper exits kept working throughout the incident, which is exactly why
+    nothing looked wrong in aggregate. The same book, same venue, healthy in
+    paper and stalled in live: the paper half must not vouch for the live
+    half. Collapse the two modes into one cell and this FAIL becomes a PASS.
+    """
+    await _seed_exits(db, n=3, is_paper=1, days_ago=20.0)
+    await _seed_exits(db, n=3, is_paper=0, days_ago=20.0)
+    await _seed_entries(db, n=6, is_paper=1, days_ago=2.0)
+    await _seed_entries(db, n=6, is_paper=0, days_ago=2.0)
+    await _seed_exits(db, n=4, is_paper=1, days_ago=1.0)   # paper still exiting
+    now = datetime.now(timezone.utc)
+    result = await check_exit_liveness(
+        db, since=now - timedelta(days=7), exchange=None)
+    assert result.status == "FAIL"
+    assert result.detail == "polymarket/llm [live]: 6 entries, 0 exits"
+    assert result.n_samples == 2                           # both cells judged
+
+
+@pytest.mark.asyncio
+async def test_exit_liveness_entry_floor_keeps_a_single_entry_from_failing(
+    db: Database,
+):
+    """One entry proves nothing — a single position can legitimately be held."""
+    await _seed_exits(db, n=3, days_ago=20.0)
+    await _seed_entries(db, n=2, days_ago=2.0)
+    now = datetime.now(timezone.utc)
+    below = await check_exit_liveness(
+        db, since=now - timedelta(days=7), exchange=None, min_entries=3)
+    assert below.status == "INSUFFICIENT_DATA"
+    at_floor = await check_exit_liveness(
+        db, since=now - timedelta(days=7), exchange=None, min_entries=2)
+    assert at_floor.status == "FAIL"
+
+
+@pytest.mark.asyncio
+async def test_exit_liveness_book_that_never_exited_is_not_judged(db: Database):
+    """"Stopped" presupposes it was running. A brand-new book's first
+    realization is genuinely weeks away, so it is reported as not-yet-
+    judgeable instead of failed."""
+    await _seed_entries(db, n=9, book="term_structure", days_ago=2.0)
+    now = datetime.now(timezone.utc)
+    result = await check_exit_liveness(
+        db, since=now - timedelta(days=7), exchange=None)
+    assert result.status == "INSUFFICIENT_DATA"
+    assert "no exit ever recorded" in result.detail
+    assert "polymarket/term_structure [live]" in result.detail
+
+
+@pytest.mark.asyncio
+async def test_exit_liveness_ignores_unattributed_entry_buckets(db: Database):
+    """order_monitor / exit / legacy_unattributed are attribution buckets, not
+    books. The ledger refuses to credit them as the entrant, so a realization
+    can never be booked back to them — judging them is a permanent false
+    alarm. Each bucket is given a realistic exit history and then entries with
+    no exits in the window, which is exactly the shape that would fail a real
+    book."""
+    for bucket in ("order_monitor", "exit", "legacy_unattributed"):
+        await _seed_exits(db, n=3, book=bucket, days_ago=20.0)
+        await _seed_entries(db, n=8, book=bucket, days_ago=2.0)
+    await _seed_exits(db, n=2, days_ago=20.0)              # one genuine book
+    await _seed_entries(db, n=5, days_ago=2.0)
+    await _seed_exits(db, n=2, days_ago=1.0)
+    now = datetime.now(timezone.utc)
+    result = await check_exit_liveness(
+        db, since=now - timedelta(days=7), exchange=None)
+    assert result.status == "PASS"
+    assert result.detail == "polymarket/llm [live]: 5 entries, 2 exits"
+    assert result.n_samples == 1
+
+
+@pytest.mark.asyncio
+async def test_exit_liveness_respects_the_exchange_filter(db: Database):
+    """Scoping to one venue must not let another venue's cells leak into the
+    verdict — in either direction."""
+    await _seed_exits(db, n=3, venue="kalshi", days_ago=20.0)
+    await _seed_entries(db, n=6, venue="kalshi", days_ago=2.0)   # kalshi stalled
+    await _seed_exits(db, n=3, venue="polymarket", days_ago=20.0)
+    await _seed_entries(db, n=6, venue="polymarket", days_ago=2.0)
+    await _seed_exits(db, n=2, venue="polymarket", days_ago=1.0)  # poly healthy
+    now = datetime.now(timezone.utc)
+
+    poly = await check_exit_liveness(
+        db, since=now - timedelta(days=7), exchange="polymarket")
+    assert poly.status == "PASS"
+    assert "kalshi" not in poly.detail
+
+    kalshi = await check_exit_liveness(
+        db, since=now - timedelta(days=7), exchange="kalshi")
+    assert kalshi.status == "FAIL"
+    assert kalshi.detail == "kalshi/llm [live]: 6 entries, 0 exits"
+
+    both = await check_exit_liveness(
+        db, since=now - timedelta(days=7), exchange=None)
+    assert both.status == "FAIL"
+    assert both.n_samples == 2
+
+
+@pytest.mark.asyncio
+async def test_exit_liveness_detects_the_prediction_market_exit_outage(db: Database):
+    """Reconstruction of the incident this criterion exists to catch.
+
+    The live prediction-market exit loop raised on every tick for an extended
+    period. Entries kept being taken, live SELL fills went to zero, and the
+    only live realizations left were settlements on OTHER books' positions.
+    Paper exits were unaffected. Readiness reported clean the whole time
+    because cycle_health scores log level and the raise was logged at debug.
+    """
+    now = datetime.now(timezone.utc)
+    # Before the outage: the live book was entering AND exiting normally.
+    for day in (14.0, 12.0, 10.0):
+        await _seed_entries(db, n=2, days_ago=day)
+        await _seed_exits(db, n=2, days_ago=day)
+    # The outage: entries accrue every day, not one live realization lands.
+    for day in (6.0, 5.0, 4.0, 3.0, 2.0, 1.0):
+        await _seed_entries(db, n=2, days_ago=day)
+    # Paper kept entering and exiting throughout — the reason it looked fine.
+    await _seed_exits(db, n=2, is_paper=1, days_ago=10.0)
+    for day in (6.0, 4.0, 2.0):
+        await _seed_entries(db, n=2, is_paper=1, days_ago=day)
+        await _seed_exits(db, n=2, is_paper=1, days_ago=day)
+    # A different live book still settled, so venue-level activity was not zero.
+    await _seed_exits(db, n=3, book="market_maker", days_ago=3.0,
+                      kind="settlement")
+
+    result = await check_exit_liveness(
+        db, since=now - timedelta(days=7), exchange=None)
+    assert result.status == "FAIL"
+    assert "polymarket/llm [live]: 12 entries, 0 exits" in result.detail
+    assert "[paper]" not in result.detail
+
+    # And the same window BEFORE the outage began must be clean, so the
+    # failure is attributable to the outage and not to the fixture shape.
+    healthy = await check_exit_liveness(
+        db, since=now - timedelta(days=15), exchange=None,
+        min_entries=100)
+    assert healthy.status == "INSUFFICIENT_DATA"
+
+
+# ---------------------------------------------------------------------------
 # Top-level evaluator
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_evaluate_readiness_aggregates_all_nine_criteria(db: Database, tmp_path):
+async def test_evaluate_readiness_aggregates_all_ten_criteria(db: Database, tmp_path):
     log_file = tmp_path / "auramaur.log"
     log_file.write_text("")
     report = await evaluate_readiness(db, log_file=log_file, exchange="kalshi", days=7)
-    assert len(report.criteria) == 9
+    assert len(report.criteria) == 10
     assert not report.overall_pass
     names = [c.name for c in report.criteria]
     assert names == [
@@ -518,7 +791,26 @@ async def test_evaluate_readiness_aggregates_all_nine_criteria(db: Database, tmp
         "win_rate",
         "pnl_after_fees",
         "divergence",
+        "exit_liveness",
     ]
+
+
+@pytest.mark.asyncio
+async def test_evaluate_readiness_surfaces_a_stalled_exit_path(
+    db: Database, tmp_path,
+):
+    """The criterion must reach the report, not just exist. A live book that
+    keeps entering while its exits are absent has to show up as a FAIL in the
+    aggregate the operator actually reads."""
+    log_file = tmp_path / "auramaur.log"
+    log_file.write_text("")
+    await _seed_exits(db, n=4, venue="kalshi", days_ago=20.0)
+    await _seed_entries(db, n=6, venue="kalshi", days_ago=2.0)
+    report = await evaluate_readiness(db, log_file=log_file, exchange="kalshi", days=7)
+    criterion = next(c for c in report.criteria if c.name == "exit_liveness")
+    assert criterion.status == "FAIL"
+    assert "kalshi/llm [live]" in criterion.detail
+    assert not report.overall_pass
 
 
 @pytest.mark.asyncio
