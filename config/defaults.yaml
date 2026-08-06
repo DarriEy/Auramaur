@@ -1344,6 +1344,12 @@ monitoring:
   pillar_stale_seconds: 900
   candidate_retention_days: 30
   candidate_summary_retention_days: 90
+  # readiness.check_exit_liveness: every book that took >= min_entries entries
+  # in the lookback must show at least one exit (SELL fill or settlement), per
+  # venue and per paper/live mode. Health-check thresholds only — outside every
+  # strategy_version hash, so changing them is graduation-clock safe.
+  exit_liveness_window_days: 7
+  exit_liveness_min_entries: 3
 
 cross_venue_arb:
   # Cross-venue semantic-equivalence arb (Poly x Kalshi): logically equivalent

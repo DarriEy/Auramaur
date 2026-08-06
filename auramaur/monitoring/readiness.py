@@ -1,6 +1,6 @@
 """Readiness checks — gate live trading until all criteria pass.
 
-Eight criteria produce a CriterionResult with one of three statuses:
+Each criterion produces a CriterionResult with one of three statuses:
   PASS              — measurable and within threshold
   FAIL              — measurable and outside threshold
   INSUFFICIENT_DATA — not enough samples to evaluate honestly
@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
+from auramaur.broker.ledger import PHANTOM_STRATEGY, VENUE_STRATEGY
 from auramaur.db.database import Database
 
 Status = Literal["PASS", "FAIL", "INSUFFICIENT_DATA"]
@@ -752,8 +753,219 @@ async def check_divergence(
 
 
 # ---------------------------------------------------------------------------
+# Criterion 9 — exit liveness (entries continue while exits are absent)
+# ---------------------------------------------------------------------------
+
+# Calibrated by replaying the criterion over the full trade history; see
+# docs/exit-liveness-criterion.md for the measurement and the evidence.
+_EXIT_LIVENESS_WINDOW_DAYS = 7
+_EXIT_LIVENESS_MIN_ENTRIES = 3
+
+# A realization event. `commission` rows are cash adjustments booked against a
+# still-open position — money moving is not a position leaving.
+_EXIT_KINDS = ("sell", "settlement")
+
+# Attribution buckets, not strategy books. The ledger's entry-strategy
+# resolution refuses to credit any of these as the entrant
+# (broker/ledger.py::_market_context), so a realization can never be booked
+# back to them and their exit count is zero *by construction*. Judging them
+# would be a permanent structural false alarm rather than a signal. `exit` is
+# the exit path's own attribution on the trades mirror, which is exactly why
+# exits are counted from the ledger (entry-attributed) and not from trades.
+_UNJUDGEABLE_BOOKS = frozenset({
+    "", "exit", "order_monitor", "legacy_unattributed", "adopted_unknown",
+    PHANTOM_STRATEGY, VENUE_STRATEGY,
+})
+
+
+def _exit_cell_label(venue: str, book: str, is_paper: int) -> str:
+    return f"{venue or '?'}/{book} [{'paper' if is_paper else 'live'}]"
+
+
+async def _exit_events_by_cell(
+    db: Database, *, since: datetime, exchange: str | None, before: bool,
+) -> dict[tuple[str, str, int], int]:
+    """Realization counts per (venue, book, mode), either side of ``since``.
+
+    ``datetime(col)`` rather than a raw string compare: realized_at is written
+    both as ``YYYY-MM-DD HH:MM:SS`` (settlements) and as an offset-aware ISO
+    string with a ``T`` (sell fills), and lexical ordering disagrees with
+    chronological ordering across those two forms inside a single day.
+    """
+    comparison = "<" if before else ">="
+    kinds = ", ".join("?" for _ in _EXIT_KINDS)
+    params: list = [*_EXIT_KINDS, since.astimezone(timezone.utc).isoformat()]
+    clause = ""
+    if exchange:
+        clause = " AND venue = ?"
+        params.append(exchange)
+    rows = await db.fetchall(
+        f"""SELECT venue, strategy_source AS book, is_paper, COUNT(*) AS n
+              FROM pnl_ledger
+             WHERE kind IN ({kinds})
+               AND datetime(realized_at) {comparison} datetime(?){clause}
+             GROUP BY 1, 2, 3""",
+        tuple(params),
+    )
+    return {
+        ((r["venue"] or ""), (r["book"] or "").strip(), int(r["is_paper"] or 0)):
+            int(r["n"] or 0)
+        for r in rows
+    }
+
+
+async def check_exit_liveness(
+    db: Database,
+    *,
+    since: datetime,
+    exchange: str | None,
+    min_entries: int = _EXIT_LIVENESS_MIN_ENTRIES,
+) -> CriterionResult:
+    """FAIL when a book keeps taking entries while its exits have stopped.
+
+    Watches OUTCOMES, not mechanisms. The live prediction-market exit loop
+    once raised on every tick, and the raise landed in a ``debug``-level
+    handler — so cycle_health, which scores cycles by log level, reported
+    clean while entries continued and exits were absent for an extended
+    period. Any cause with that shape (an exception, a config mistake, a stuck
+    lock, an adapter silently refusing sells) produces the same observable,
+    and this criterion reads only the observable.
+
+    Cells are ``(venue, book, mode)``. Paper and live are judged separately on
+    purpose: paper exits kept working throughout that incident, which is
+    precisely why nothing looked wrong in aggregate.
+
+    Entries are BUY rows on ``trades`` (the gateway's mirror carries the
+    exchange and the deciding strategy). Exits are ``pnl_ledger`` rows of kind
+    ``sell`` or ``settlement``, because the ledger attributes a realization to
+    the strategy that OPENED the position while the trades mirror attributes
+    the SELL to the exit path itself. Settlements count: a long-dated book can
+    legitimately hold for weeks with no sell while positions resolve, and
+    excluding them fires constantly on ``long_horizon``.
+
+    Three ways out of a FAIL, each deliberate:
+      * fewer than ``min_entries`` entries — one entry proves nothing;
+      * no exit event ever recorded for the cell — "stopped" presupposes it
+        was running, and a brand-new book's first realization is genuinely
+        weeks away. Reported as not-yet-judgeable rather than silently
+        dropped;
+      * a dormant book (no entries at all) is never a FAIL.
+    """
+    now = datetime.now(timezone.utc)
+    window_days = max((now - since).total_seconds(), 0.0) / 86400.0
+    threshold = (
+        f"every book with ≥{min_entries} entries in {window_days:.0f}d "
+        f"shows ≥1 exit"
+    )
+
+    params: list = [since.astimezone(timezone.utc).isoformat()]
+    clause = ""
+    if exchange:
+        clause = " AND exchange = ?"
+        params.append(exchange)
+    entry_rows = await db.fetchall(
+        f"""SELECT exchange AS venue, strategy_source AS book, is_paper,
+                   COUNT(*) AS n
+              FROM trades
+             WHERE side = 'BUY'
+               AND COALESCE(status, '') NOT IN ('cancelled', 'rejected')
+               AND datetime(timestamp) >= datetime(?){clause}
+             GROUP BY 1, 2, 3""",
+        tuple(params),
+    )
+
+    in_window = await _exit_events_by_cell(
+        db, since=since, exchange=exchange, before=False)
+    earlier = await _exit_events_by_cell(
+        db, since=since, exchange=exchange, before=True)
+
+    stalled: list[str] = []
+    unproven: list[str] = []
+    active: list[str] = []
+    for row in entry_rows:
+        book = (row["book"] or "").strip()
+        if book in _UNJUDGEABLE_BOOKS:
+            continue
+        entries = int(row["n"] or 0)
+        if entries < min_entries:
+            continue
+        venue = row["venue"] or ""
+        is_paper = int(row["is_paper"] or 0)
+        cell = (venue, book, is_paper)
+        label = _exit_cell_label(venue, book, is_paper)
+        exits = in_window.get(cell, 0)
+        if exits > 0:
+            active.append(f"{label}: {entries} entries, {exits} exits")
+        elif earlier.get(cell, 0) == 0:
+            unproven.append(f"{label}: {entries} entries, no exit ever recorded")
+        else:
+            stalled.append(f"{label}: {entries} entries, 0 exits")
+
+    judged = len(active) + len(stalled)
+    if stalled:
+        return CriterionResult(
+            name="exit_liveness",
+            status="FAIL",
+            value=f"{len(stalled)} book(s) entering with no exits",
+            threshold=threshold,
+            detail="; ".join(sorted(stalled)),
+            n_samples=judged,
+        )
+    if judged == 0:
+        detail = (
+            "; ".join(sorted(unproven)) if unproven
+            else f"no book took ≥{min_entries} entries in the window"
+        )
+        return CriterionResult(
+            name="exit_liveness",
+            status="INSUFFICIENT_DATA",
+            value="0 books judgeable",
+            threshold=threshold,
+            detail=detail,
+            n_samples=0,
+        )
+    detail = "; ".join(sorted(active))
+    if unproven:
+        detail += " | not yet judgeable: " + "; ".join(sorted(unproven))
+    return CriterionResult(
+        name="exit_liveness",
+        status="PASS",
+        value=f"{judged} book(s) exiting",
+        threshold=threshold,
+        detail=detail,
+        n_samples=judged,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Top-level evaluator
 # ---------------------------------------------------------------------------
+
+
+def _exit_liveness_settings() -> tuple[int, int]:
+    """Operator overrides for the exit-liveness window and entry floor.
+
+    They live under `monitoring:` — the operator-declared health-check
+    contract — and NOT in any strategy's section. strategy_version hashes
+    exactly {strategy_source, that strategy's own config section, and
+    risk.min_edge_pct / max_spread_pct / confidence_floor}
+    (broker/execution_gateway.py::_capture_decision), and `monitoring` is
+    never resolved as a strategy section, so retuning these cannot reset a
+    14-day graduation clock.
+
+    Never raises: a config fault must degrade to the calibrated defaults
+    rather than take down the whole readiness report.
+    """
+    try:
+        from config.settings import Settings
+
+        monitoring = Settings().monitoring
+        return (
+            max(1, int(monitoring.exit_liveness_window_days)),
+            max(1, int(monitoring.exit_liveness_min_entries)),
+        )
+    except Exception:  # noqa: BLE001 - config must never break the report
+        return _EXIT_LIVENESS_WINDOW_DAYS, _EXIT_LIVENESS_MIN_ENTRIES
 
 
 async def evaluate_readiness(
@@ -767,6 +979,12 @@ async def evaluate_readiness(
     now = datetime.now(timezone.utc)
     since_window = now - timedelta(days=days)
     since_24h = now - timedelta(hours=24)
+    # exit_liveness keeps its own calibrated window rather than following
+    # `days`: the entry floor is only meaningful against the window it was
+    # measured for, and widening the report must not quietly change what the
+    # criterion means. Its threshold string states the window it used.
+    exit_window_days, exit_min_entries = _exit_liveness_settings()
+    since_exits = now - timedelta(days=exit_window_days)
     if log_file is None:
         # Follow the configured logging path (LOGGING__FILE / logging.file) so
         # cycle_health reads the file the bot actually writes — in a container
@@ -789,6 +1007,10 @@ async def evaluate_readiness(
             db, since=since_window, exchange=exchange, fee_rate=fee_rate
         ),
         await check_divergence(db, since=since_window, exchange=exchange),
+        await check_exit_liveness(
+            db, since=since_exits, exchange=exchange,
+            min_entries=exit_min_entries,
+        ),
     ]
     return ReadinessReport(
         timestamp=now,
