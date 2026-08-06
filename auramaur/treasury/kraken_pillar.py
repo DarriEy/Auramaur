@@ -38,6 +38,18 @@ from auramaur.experiments.strategies.kraken import (
 
 log = structlog.get_logger()
 
+# Consecutive empty-balance cycles before a skipped cycle stops being routine
+# and becomes an outage. Measured on the live deployment (2026-08-06, 4 log
+# rotations): 5 empty responses against 865 successes — 0.58%, roughly once a
+# day — so a single skip must NOT alarm, but three in a row cannot be that
+# transient. At treasury_interval_seconds=300 that is a 15-minute blackout of
+# the ENTIRE exit ladder (stop-loss, take-profit, trailing stop, orphan
+# liquidation), which is what a revoked or expired API key looks like: an
+# unchanging {} that skips forever behind a log.warning readiness ignores
+# (_ERROR_LEVELS is {"error", "critical"}). Deliberately a module constant, not
+# a config knob — the graduation holdout clocks reset on any config change.
+_BALANCE_OUTAGE_ESCALATE_CYCLES = 3
+
 
 class KrakenPillar:
     name = "kraken"
@@ -64,6 +76,10 @@ class KrakenPillar:
         self._base_to_pair: dict[str, str] = {}        # base asset -> liquidation pair (altname)
         self._base_pair_meta: dict[str, tuple] = {}    # pair -> (base, ordermin, lot_decimals)
         self._pnl = None                               # lazy PnLTracker (needs db)
+        # Consecutive cycles get_free_balance came back empty. Counted and reset
+        # independently of paper/live so a mode flip can never suppress a real
+        # alert: only a genuinely non-empty wallet read clears it.
+        self._empty_balance_cycles = 0
         self._cooldown_until: dict[str, float] = {}    # pair -> monotonic re-entry gate
         # LLM directional view cache: pair -> (monotonic_ts, prob, confidence).
         # Throttles LLM calls to directional_llm_refresh_hours per pair (cost).
@@ -708,6 +724,49 @@ class KrakenPillar:
         # Sizing exits/entries off the free amount avoids requesting more than is
         # actually sellable/spendable (which Kraken rejects as insufficient funds).
         bal = await self._k.get_free_balance()
+        # An empty dict is an API FAILURE, not a flat book. get_free_balance
+        # falls back to get_balance, which returns {} on any error (kraken.py
+        # :121-123 logs and returns the empty result rather than raising) — so
+        # one 5xx, rate-limit or invalid-nonce response made every tracked
+        # position look closed. _reconcile_positions then cleared _dir_long,
+        # _clear_peak() DELETED the position_peaks row — the trailing-stop
+        # high-water mark, which is NOT recoverable from cost_basis — and
+        # _mirror_to_portfolio removed every live kraken portfolio row. A
+        # position that peaked +40% and sat at +30% re-anchored at +30% and
+        # the give-back was never banked.
+        #
+        # _treasury guards this exact case at line 419 (`if not bal: return`).
+        # Skipping the cycle costs one iteration; the next healthy poll
+        # re-reads the wallet, which is the source of truth anyway.
+        #
+        # But "skip the cycle" is only safe while the outage is transient. A
+        # revoked or expired API key returns {} forever, and the live branch
+        # below then skips the ENTIRE exit ladder — stop-loss, take-profit,
+        # trailing stop, orphan liquidation — indefinitely and silently, because
+        # readiness's _ERROR_LEVELS does not include "warning". So count
+        # consecutive empties and escalate to error once the outage is no longer
+        # explainable as the ~0.58% transient. The counter is mode-independent
+        # (incremented on every empty read, cleared only by a non-empty one), so
+        # a paper/live flip cannot reset it part-way and mute the escalation.
+        if not bal:
+            self._empty_balance_cycles += 1
+            cycles = self._empty_balance_cycles
+            if cycles >= _BALANCE_OUTAGE_ESCALATE_CYCLES:
+                log.error("kraken.directional.balance_unavailable_sustained",
+                          cycles=cycles, paper=effective_paper,
+                          detail="get_free_balance has returned empty for "
+                                 f"{cycles} consecutive cycles; the exit ladder "
+                                 "(stop-loss/take-profit/trailing/orphan) is not "
+                                 "running — check the Kraken API credentials")
+            else:
+                log.warning("kraken.directional.balance_unavailable",
+                            cycles=cycles, paper=effective_paper,
+                            detail="empty balance response; skipping cycle rather "
+                                   "than treating the book as flat")
+            if not effective_paper:
+                return
+        else:
+            self._empty_balance_cycles = 0
         if self._pair_base is None:
             await self._resolve_pairs(kcfg.directional_pairs)
         # Evaluate the UNION of configured pairs and everything we actually hold,

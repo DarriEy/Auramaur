@@ -11,6 +11,7 @@ Overall readiness passes only if every criterion is PASS.
 from __future__ import annotations
 
 import json
+import re
 import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -50,50 +51,119 @@ class ReadinessReport:
 
 _REQUIRED_KEYS = ("level", "timestamp", "event")
 _ERROR_LEVELS = {"error", "critical"}
+_ROTATION_SUFFIX = re.compile(r"\.(\d+)$")
+
+
+def log_files_for(log_file: Path) -> list[Path]:
+    """The active log plus its rotated backups, oldest first.
+
+    ``_RotatingWriter`` renames the active file to ``<path>.1`` and shifts older
+    backups up to ``<path>.<backups>`` (monitoring/logger.py), so a parser that
+    opens exactly one path sees only what currently fits in ``rotate_max_mb``.
+    Measured against the live deployment on 2026-08-06 that was 0.7 of the 7
+    days the criterion advertises — 10% coverage, rotating every ~21-30 hours —
+    and 1,487 error events sat in ``.1``/``.2``/``.3`` where nothing looked.
+    Reading the backups is what makes a 7-day criterion actually score 7 days.
+
+    A higher suffix is an OLDER file, so backups are walked in descending suffix
+    order with the active file last. That keeps the fold chronological, which is
+    what makes both the sampled error events (the first N in time, as before)
+    and the earliest-timestamp coverage figure mean what they say.
+    """
+    backups: list[tuple[int, Path]] = []
+    try:
+        candidates = list(log_file.parent.glob(log_file.name + ".*"))
+    except OSError:
+        candidates = []
+    for candidate in candidates:
+        match = _ROTATION_SUFFIX.search(candidate.name)
+        if match and candidate.is_file():
+            backups.append((int(match.group(1)), candidate))
+    ordered = [path for _suffix, path in sorted(backups, key=lambda item: -item[0])]
+    if log_file.exists():
+        ordered.append(log_file)
+    return ordered
 
 
 def _parse_log_for_errors(
-    log_file: Path,
+    log_files: list[Path],
     since: datetime,
     sample_events_to_keep: int,
-) -> tuple[int, int, int, int, list[str]]:
+) -> tuple[int, int, int, int, list[str], datetime | None]:
+    """Fold the error/entry counts across every log file, oldest first.
+
+    Semantics per line are unchanged: unparseable and schema-drifted lines are
+    tolerated (counted in ``total`` but not ``well_formed``, which is what feeds
+    the drift canary), and only well-formed entries at or after ``since`` are
+    scored. ``earliest`` is the earliest well-formed timestamp seen anywhere in
+    the corpus — the parser already computed it implicitly and threw it away, and
+    it is the only honest measure of how much of the window was actually read.
+    """
     total = 0
     well_formed = 0
     in_window = 0
     errors = 0
     error_events: list[str] = []
+    earliest: datetime | None = None
 
-    with log_file.open() as f:
-        for line in f:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            total += 1
-            try:
-                entry = json.loads(stripped)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(entry, dict):
-                continue
-            if not all(k in entry for k in _REQUIRED_KEYS):
-                continue
-            try:
-                ts = datetime.fromisoformat(entry["timestamp"].replace("Z", "+00:00"))
-            except (ValueError, AttributeError):
-                continue
-            well_formed += 1
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            if ts < since:
-                continue
-            in_window += 1
-            level = str(entry.get("level", "")).lower()
-            if level in _ERROR_LEVELS or "exception" in entry:
-                errors += 1
-                if len(error_events) < sample_events_to_keep:
-                    event = entry.get("event", "")
-                    error_events.append(f"{level}:{event}")
-    return total, well_formed, in_window, errors, error_events
+    for log_file in log_files:
+        try:
+            handle = log_file.open()
+        except OSError:
+            # Rotation is a sequence of os.replace calls, so a backup can be
+            # renamed out from under the walk. Skipping it keeps the criterion
+            # honest — the coverage figure below reports on what was read.
+            continue
+        with handle as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                total += 1
+                try:
+                    entry = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                if not all(k in entry for k in _REQUIRED_KEYS):
+                    continue
+                try:
+                    ts = datetime.fromisoformat(
+                        entry["timestamp"].replace("Z", "+00:00"))
+                except (ValueError, AttributeError):
+                    continue
+                well_formed += 1
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if earliest is None or ts < earliest:
+                    earliest = ts
+                if ts < since:
+                    continue
+                in_window += 1
+                level = str(entry.get("level", "")).lower()
+                if level in _ERROR_LEVELS or "exception" in entry:
+                    errors += 1
+                    if len(error_events) < sample_events_to_keep:
+                        event = entry.get("event", "")
+                        error_events.append(f"{level}:{event}")
+    return total, well_formed, in_window, errors, error_events, earliest
+
+
+def _coverage_note(earliest: datetime | None, since: datetime) -> str:
+    """Say so when the logs do not reach back as far as the window claims.
+
+    Empty when the corpus predates ``since`` — the criterion really did score
+    the window it advertises. Otherwise it scored a shorter one, and reporting
+    "0 errors" without that caveat is the same class of laundering as reporting
+    an unreadable database as zero.
+    """
+    if earliest is None or earliest <= since:
+        return ""
+    now = datetime.now(timezone.utc)
+    requested_days = max((now - since).total_seconds(), 0.0) / 86400.0
+    covered_days = max((now - earliest).total_seconds(), 0.0) / 86400.0
+    return f"; log covers {covered_days:.1f}d of {requested_days:.1f}d"
 
 
 async def check_cycle_health(
@@ -103,7 +173,8 @@ async def check_cycle_health(
     drift_threshold_pct: float = 5.0,
     sample_events_to_keep: int = 5,
 ) -> CriterionResult:
-    if not log_file.exists():
+    log_files = log_files_for(log_file)
+    if not log_files:
         return CriterionResult(
             name="cycle_health",
             status="INSUFFICIENT_DATA",
@@ -114,9 +185,11 @@ async def check_cycle_health(
 
     import asyncio
 
-    total, well_formed, in_window, errors, error_events = await asyncio.to_thread(
-        _parse_log_for_errors, log_file, since, sample_events_to_keep
+    (total, well_formed, in_window, errors, error_events,
+     earliest) = await asyncio.to_thread(
+        _parse_log_for_errors, log_files, since, sample_events_to_keep
     )
+    coverage = _coverage_note(earliest, since)
 
     if total == 0:
         return CriterionResult(
@@ -137,19 +210,34 @@ async def check_cycle_health(
             detail="log format has drifted; readiness parser may be unreliable",
         )
 
+    if in_window == 0:
+        # Zero entries is not zero errors. Nothing in the window means the bot
+        # is stopped (or was, for the whole window) — every log file we could
+        # find predates it. This is the residual case now that the rotated
+        # backups are read; before that it also stood in for rotation
+        # blindness, which log_files_for() addresses at the source.
+        return CriterionResult(
+            name="cycle_health",
+            status="INSUFFICIENT_DATA",
+            value="no log entries in window",
+            threshold="0 errors",
+            detail=(f"window is empty across {len(log_files)} log file(s) — "
+                    "the bot may be stopped"),
+        )
+
     if errors == 0:
         return CriterionResult(
             name="cycle_health",
             status="PASS",
-            value="0 errors",
+            value=f"0 errors{coverage}",
             threshold="0 errors",
-            detail=f"{in_window} entries in window",
+            detail=f"{in_window} entries in window across {len(log_files)} log file(s)",
         )
 
     return CriterionResult(
         name="cycle_health",
         status="FAIL",
-        value=f"{errors} error/critical events",
+        value=f"{errors} error/critical events{coverage}",
         threshold="0 errors",
         detail="; ".join(error_events),
     )

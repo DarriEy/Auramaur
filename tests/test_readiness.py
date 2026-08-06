@@ -542,7 +542,9 @@ async def test_evaluate_readiness_defaults_to_configured_log_file(
     cycle = report.criteria[0]
     assert cycle.name == "cycle_health"
     assert cycle.status == "PASS"
-    assert cycle.detail == "1 entries in window"
+    # The count of files folded in is part of the detail now that cycle_health
+    # also reads the rotated backups (log_files_for) — here there are none.
+    assert cycle.detail == "1 entries in window across 1 log file(s)"
 
 
 @pytest.mark.asyncio
