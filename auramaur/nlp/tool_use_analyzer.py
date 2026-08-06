@@ -198,14 +198,32 @@ class ToolUseAnalyzer:
                 reasoning=str(parsed.get("reasoning", ""))[:1000],
                 key_factors=list(parsed.get("key_factors", []) or [])[:6],
                 cross_market_notes=batch_result.cross_market_notes,
-                # Carry the adversarial second opinion through. Dropping these
-                # silently reset them to None, and check_second_opinion_divergence
-                # returns passed=True on None ("No second opinion") — so
-                # refinement disabled the divergence gate for exactly the
-                # highest-|edge| markets it is selected to run on. A 0.85 vs
-                # 0.35 disagreement (double the 0.25 ceiling) traded anyway.
+                # Carry the adversarial second opinion through. Dropping it
+                # silently reset both fields to None, and
+                # check_second_opinion_divergence returns passed=True on None
+                # ("No second opinion") — so refinement disabled the divergence
+                # gate for exactly the highest-|edge| markets it is selected to
+                # run on. A 0.85 vs 0.35 disagreement (double the 0.25 ceiling)
+                # traded anyway.
                 second_opinion_prob=batch_result.second_opinion_prob,
-                divergence=batch_result.divergence,
+                # RECOMPUTE against the refined probability. batch_result.
+                # divergence was measured as |batch_prob - second_opinion_prob|;
+                # carrying that number forward would describe an estimate this
+                # result no longer holds. Nothing downstream re-derives it:
+                # check_second_opinion_divergence consumes the stored float as
+                # given, and engine_cycle builds the Signal from the REFINED
+                # probability alongside this field. So a refinement that moves
+                # probability AWAY from the red team — the fetch-capable step
+                # most able to do so — would otherwise shrink the measured
+                # disagreement and pass an entry the ceiling should block.
+                # None stays None: it means "no second opinion" (the check
+                # passes and readiness skips the row), never "zero
+                # disagreement", which 0.0 would assert.
+                divergence=(
+                    abs(prob - batch_result.second_opinion_prob)
+                    if batch_result.second_opinion_prob is not None
+                    else None
+                ),
             )
         except Exception as e:
             log.warning(

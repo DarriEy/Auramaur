@@ -429,10 +429,13 @@ class StrategicAnalyzer:
                 f"resolved YES {hit_rate:.0%} (n={len(bucket)}) — {bias}"
             )
 
-        # Largest errors as concrete cautionary examples.
+        # Largest errors as concrete cautionary examples. The question is
+        # venue-authored text and this region sits ABOVE the untrusted
+        # boundary, where the prompt frames everything as ours — a bare
+        # [:60] slice strips neither newlines nor BiDi, so scrub it.
         worst = sorted(samples, key=lambda s: abs(s[0] - s[1]), reverse=True)[:3]
         miss_lines = [
-            f"- \"{q[:60]}\": said {p:.0%}, resolved {'YES' if a > 0.5 else 'NO'}"
+            f"- \"{_scrub(q, 60)}\": said {p:.0%}, resolved {'YES' if a > 0.5 else 'NO'}"
             for p, a, q in worst
         ]
 
@@ -445,7 +448,11 @@ class StrategicAnalyzer:
 
     @staticmethod
     def _calibration_rows(rows: list) -> str:
-        """Legacy per-row calibration dump (used when buckets are disabled)."""
+        """Legacy per-row calibration dump (used when buckets are disabled).
+
+        Same trust argument as ``_calibration_curve``: the question is venue
+        text landing above the untrusted boundary, so it gets the scrubber.
+        """
         lines = []
         correct = 0
         total = 0
@@ -460,7 +467,7 @@ class StrategicAnalyzer:
             total += 1
             icon = "correct" if was_right else "WRONG"
             lines.append(
-                f"- [{icon}] \"{question[:60]}\" — you said {predicted:.0%}, resolved {actual}"
+                f"- [{icon}] \"{_scrub(question, 60)}\" — you said {predicted:.0%}, resolved {actual}"
             )
         accuracy = correct / total if total > 0 else 0
         header = f"Track record: {correct}/{total} ({accuracy:.0%} accuracy)\n"
