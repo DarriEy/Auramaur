@@ -496,12 +496,6 @@ REGISTERED_CALLSITES = Counter(
             "prediction_quoting",
         ): 1,
         (
-            "auramaur/strategy/market_maker.py",
-            "_record_observatory_fill",
-            "record_fill",
-            "prediction_quoting",
-        ): 1,
-        (
             "auramaur/strategy/momentum_coupling.py",
             "_execute",
             "submit",

@@ -79,9 +79,9 @@ def maker_observatory_report(days: int):
         settings = Settings()
         blockers = maker_promotion_blockers(
             rows,
-            min_fills=settings.market_maker.observatory_min_fills,
-            min_markets=settings.market_maker.observatory_min_markets,
-            min_completeness=settings.market_maker.observatory_min_completeness,
+            min_fills=settings.maker_observatory.min_fills,
+            min_markets=settings.maker_observatory.min_markets,
+            min_completeness=settings.maker_observatory.min_completeness,
         )
         if blockers:
             console.print("[yellow]Not promotable:[/]")

@@ -20,6 +20,7 @@ from __future__ import annotations
 from auramaur.strategy.protocols import ExecutionMode
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from auramaur.killswitch import kill_switch_present
@@ -104,23 +105,28 @@ class MarketMaker:
         # Placement runs through the ExecutionGateway (the single choke point);
         # lazily built if not injected so existing callers/tests keep working.
         self._gateway = gateway
+        # Shadow-only instrument. Its config is settings.maker_observatory, a
+        # section deliberately OUTSIDE settings.market_maker: the latter is
+        # hashed into market_maker's strategy_version, so an observatory knob
+        # living there would restart the observed strategy's holdout clock.
         self._observatory = None
-        if getattr(settings.market_maker, "observatory_enabled", False) and db is not None:
+        observatory_cfg = getattr(settings, "maker_observatory", None)
+        if observatory_cfg is not None and observatory_cfg.enabled and db is not None:
             from auramaur.monitoring.maker_observatory import MakerObservatory
             self._observatory = MakerObservatory(
                 db, flow_tracker=flow_tracker,
-                horizons=getattr(settings.market_maker,
-                                 "observatory_horizons_seconds", (30, 60, 300)),
-                retention_days=getattr(settings.market_maker,
-                                       "observatory_retention_days", 45),
-                max_mark_lateness_seconds=getattr(
-                    settings.market_maker,
-                    "observatory_max_mark_lateness_seconds", 45),
-                holdout_days=getattr(
-                    settings.market_maker, "observatory_holdout_days", 7),
+                horizons=observatory_cfg.horizons_seconds,
+                retention_days=observatory_cfg.retention_days,
+                max_mark_lateness_seconds=observatory_cfg.max_mark_lateness_seconds,
+                holdout_days=observatory_cfg.holdout_days,
             )
         self._last_observation: dict[str, int] = {}
-        self._observatory_cycles = 0
+        # Wall-clock, not a cycle counter. A counter starting at 0 every
+        # process start means retention NEVER runs on a stack that restarts
+        # more often than its 24h period — the table then grows without bound
+        # and _mark_due's per-refresh scan grows with it. None = "never pruned
+        # in this process", so the first cycle after startup prunes.
+        self._observatory_pruned_at: float | None = None
 
         # MM configuration from settings
         mm_cfg = settings.market_maker
@@ -154,13 +160,18 @@ class MarketMaker:
             return []
 
         results: list[dict] = []
-        self._observatory_cycles += 1
-        prune_every = max(1, int(86400 / max(self._refresh_seconds, 1)))
-        if self._observatory and self._observatory_cycles % prune_every == 0:
-            try:
-                await self._observatory.prune()
-            except Exception as exc:
-                log.warning("market_maker.observatory_prune_error", error=str(exc))
+        if self._observatory is not None:
+            elapsed = (None if self._observatory_pruned_at is None
+                       else time.monotonic() - self._observatory_pruned_at)
+            if elapsed is None or elapsed >= 86400:
+                try:
+                    await self._observatory.prune()
+                except Exception as exc:
+                    log.warning("market_maker.observatory_prune_error", error=str(exc))
+                finally:
+                    # Stamp on failure too: a prune that raises every cycle
+                    # would otherwise retry on the quoting path forever.
+                    self._observatory_pruned_at = time.monotonic()
 
         # Step 1: Select suitable markets
         candidates = self._select_mm_markets(markets)
@@ -717,7 +728,7 @@ class MarketMaker:
         if self._observatory is None:
             return
         try:
-            await self._observatory.record_fill(
+            await self._observatory.record_observed_fill(
                 observation_id=observation_id,
                 order_id=order_id, market_id=market_id, side=side,
                 price=price, size=size, is_paper=is_paper,

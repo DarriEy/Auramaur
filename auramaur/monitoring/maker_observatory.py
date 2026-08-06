@@ -72,8 +72,17 @@ class MakerObservatory:
         }, sort_keys=True, separators=(",", ":"))
         self.config_json = frozen
         self.strategy_version = hashlib.sha256(frozen.encode()).hexdigest()
+        self._registered = False
 
     async def _register(self) -> None:
+        # Registration is idempotent and constant for this instance's frozen
+        # config, but observe() runs on the market maker's quoting path, where
+        # every statement takes the process-wide Database serializer. Re-issuing
+        # 1 + len(horizons) INSERT OR IGNOREs on every refresh spends four
+        # shared-lock acquisitions per observation to re-learn a fact that
+        # cannot change. Do it once per process.
+        if self._registered:
+            return
         await self.db.execute(
             """INSERT OR IGNORE INTO strategy_experiments
                    (strategy_version,strategy_source,config_json,holdout_starts_at)
@@ -86,6 +95,7 @@ class MakerObservatory:
                        (strategy_version,horizon_seconds) VALUES (?,?)""",
                 (self.strategy_version, horizon),
             )
+        self._registered = True
 
     async def observe(self, market, book: OrderBook, *, quote=None, active_quote=None,
                       observed_at: datetime | None = None) -> int:
@@ -149,10 +159,18 @@ class MakerObservatory:
                    for index in range(1, len(prices))]
         return statistics.pstdev(changes) if len(changes) >= 2 else 0.0
 
-    async def record_fill(self, *, observation_id: int | None, order_id: str,
-                          market_id: str, side: str, price: float, size: float,
-                          is_paper: bool, fill_evidence: str,
-                          filled_at: datetime | None = None) -> None:
+    async def record_observed_fill(self, *, observation_id: int | None, order_id: str,
+                                   market_id: str, side: str, price: float, size: float,
+                                   is_paper: bool, fill_evidence: str,
+                                   filled_at: datetime | None = None) -> None:
+        """Note that a fill happened. NOT ``record_fill``, deliberately.
+
+        ``record_fill`` is in exposure_registry.SENSITIVE_METHODS, and that
+        registry is scanned by attribute name — so calling this method
+        ``record_fill`` forced a pure measurement write to be declared as a
+        ``prediction_quoting`` exposure-mutation callsite, which it is not.
+        This class books no position, moves no cash and touches no venue.
+        """
         if not order_id or price <= 0 or size <= 0:
             return
         stamp = (filled_at or datetime.now(timezone.utc)).astimezone(timezone.utc)

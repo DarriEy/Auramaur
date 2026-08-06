@@ -555,21 +555,35 @@ class MarketMakerConfig(BaseModel):
     # min on a stuck request). Bound each per-market quote op and the stale-cancel
     # with this timeout so a stuck call is abandoned and the cycle continues.
     op_timeout_seconds: float = 15.0
-    # Shadow-only observatory. These fields may record and report; they are
-    # never read by quote formation or execution.
-    observatory_enabled: bool = True
-    observatory_horizons_seconds: tuple[int, ...] = (30, 60, 300)
-    observatory_retention_days: int = Field(default=45, ge=7, le=365)
-    observatory_review_days: int = Field(default=21, ge=7, le=90)
-    observatory_min_fills: int = Field(default=100, ge=20)
-    observatory_min_markets: int = Field(default=5, ge=2)
-    observatory_min_completeness: float = Field(default=0.95, ge=0.8, le=1.0)
-    observatory_max_mark_lateness_seconds: int = Field(default=45, ge=1, le=600)
-    observatory_holdout_days: int = Field(default=7, ge=1, le=30)
+
+
+class MakerObservatoryConfig(BaseModel):
+    """Shadow-only measurement of the market maker. Reads nothing, changes nothing.
+
+    Deliberately its OWN top-level section rather than fields under
+    ``market_maker:``. ExecutionGateway._capture_decision freezes
+    ``settings.market_maker.model_dump()`` into the strategy_version hash, and
+    _prospective_stats joins on the LATEST version — so a knob living inside
+    that section discards every decision captured under the previous hash and
+    restarts the holdout clock. A purely observational instrument must never
+    be able to do that to the strategy it observes; keeping these nine fields
+    outside the hashed section is what makes "no feature below changes quotes"
+    true of the graduation clock as well as of the quotes.
+    """
+
+    enabled: bool = True
+    horizons_seconds: tuple[int, ...] = (30, 60, 300)
+    retention_days: int = Field(default=45, ge=7, le=365)
+    review_days: int = Field(default=21, ge=7, le=90)
+    min_fills: int = Field(default=100, ge=20)
+    min_markets: int = Field(default=5, ge=2)
+    min_completeness: float = Field(default=0.95, ge=0.8, le=1.0)
+    max_mark_lateness_seconds: int = Field(default=45, ge=1, le=600)
+    holdout_days: int = Field(default=7, ge=1, le=30)
 
     @model_validator(mode="after")
     def validate_observatory(self):
-        horizons = self.observatory_horizons_seconds
+        horizons = self.horizons_seconds
         if not horizons or any(value <= 0 for value in horizons):
             raise ValueError("maker observatory horizons must be positive")
         if len(set(horizons)) != len(horizons):
@@ -2296,6 +2310,9 @@ class Settings(BaseSettings):
             **_DEFAULTS.get("intelligence_eval", {})))
     momentum_coupling: MomentumCouplingConfig = Field(default_factory=lambda: MomentumCouplingConfig(**_DEFAULTS.get("momentum_coupling", {})))
     market_maker: MarketMakerConfig = Field(default_factory=lambda: MarketMakerConfig(**_DEFAULTS.get("market_maker", {})))
+    maker_observatory: MakerObservatoryConfig = Field(
+        default_factory=lambda: MakerObservatoryConfig(
+            **_DEFAULTS.get("maker_observatory", {})))
     technical: TechnicalConfig = Field(default_factory=lambda: TechnicalConfig(**_DEFAULTS.get("technical", {})))
     bias_harvest: BiasHarvestConfig = Field(default_factory=lambda: BiasHarvestConfig(**_DEFAULTS.get("bias_harvest", {})))
     platform_consensus: PlatformConsensusConfig = Field(default_factory=lambda: PlatformConsensusConfig(**_DEFAULTS.get("platform_consensus", {})))

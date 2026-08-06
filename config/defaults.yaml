@@ -751,17 +751,25 @@ market_maker:
   # twice on 2026-06-30 (silent 12-24 min). Bound each quote op so a stuck call is
   # abandoned and the cycle continues.
   op_timeout_seconds: 15.0
-  # Shadow-only 21-day measurement contract. No feature below changes quotes.
-  # Review after 100 marked fills; retain 45d so the review is reproducible.
-  observatory_enabled: true
-  observatory_horizons_seconds: [30, 60, 300]
-  observatory_retention_days: 45
-  observatory_review_days: 21
-  observatory_min_fills: 100
-  observatory_min_markets: 5
-  observatory_min_completeness: 0.95
-  observatory_max_mark_lateness_seconds: 45
-  observatory_holdout_days: 7
+
+# Shadow-only 21-day measurement contract for the market maker. No key below
+# changes quotes. It is a TOP-LEVEL section, not nine fields under
+# `market_maker:`, on purpose: ExecutionGateway._capture_decision hashes
+# `settings.market_maker` into market_maker's strategy_version, so a knob
+# parked in that section would restart the strategy's holdout clock every time
+# the instrument was retuned. An observatory must not be able to re-version the
+# thing it observes. Review after 100 marked fills; retain 45d so the review is
+# reproducible.
+maker_observatory:
+  enabled: true
+  horizons_seconds: [30, 60, 300]
+  retention_days: 45
+  review_days: 21
+  min_fills: 100
+  min_markets: 5
+  min_completeness: 0.95
+  max_mark_lateness_seconds: 45
+  holdout_days: 7
 
 arbitrage:
   enabled: true

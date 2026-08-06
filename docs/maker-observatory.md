@@ -4,6 +4,39 @@ Status: shadow-only prospective experiment. It has no order-placement interface,
 and no observatory field is read by quote formation, selection, sizing, or
 execution.
 
+## Configuration lives outside the strategy it observes
+
+The knobs are the top-level `maker_observatory:` section, NOT fields under
+`market_maker:`. `ExecutionGateway._capture_decision` hashes
+`settings.market_maker` into market_maker's `strategy_version`, and
+`_prospective_stats` joins on the LATEST version — so an observatory knob
+parked in that section would discard the observed strategy's accrued
+prospective evidence and restart its holdout clock every time the instrument
+was retuned. An instrument must not be able to re-version its subject.
+`tests/test_maker_observatory.py::test_observatory_config_cannot_reversion_the_strategy_it_observes`
+pins this.
+
+## Cost on the quoting path
+
+"Shadow-only" is a claim about what the observatory READS, not about what it
+costs. `observe()` runs inline in `_quote_market`, inside the
+`op_timeout_seconds` watchdog, and every statement takes the process-wide
+`Database` serializer that ~30 pillar tasks share. Measured on an idle SSD, one
+`observe()` is 6 serialized round-trips and:
+
+| retained fills / market | observe() | 5-market cycle |
+|-------------------------|-----------|----------------|
+| 0 (day 0)               | ~7 ms     | ~38 ms         |
+| 40k (day 7)             | ~236 ms   | ~1.2 s         |
+| 259k (day 45)           | ~917 ms   | ~4.6 s         |
+
+93% of that is `_mark_due`, which rescans every retained fill for the market on
+every refresh. The growth is driven by synthetic paper fills (two per market per
+30 s cycle = ~1.3M rows at 45-day retention), which by this document's own
+evidence contract can never be promoted. Before this instrument runs on a
+latency-sensitive live book, the operator should decide between a per-horizon
+mark watermark, a shorter retention, and not persisting every synthetic fill.
+
 ## Research question
 
 Can L1 microprice skew, top-five depth imbalance, time-decayed signed aggressor
@@ -66,4 +99,19 @@ stable holdout effect and acceptable quote-coverage and fill-rate trade-offs.
 
 Passing this gate does not authorize a quote change. Any quote policy informed
 by these findings is a separate, frozen, prospectively evaluated experiment.
-Raw observations are retained for 45 days.
+Raw observations are retained for 45 days, pruned on the first cycle after
+startup and every 24 hours thereafter (wall-clock, so a stack that restarts
+more often than daily still prunes).
+
+## Known measurement gaps
+
+- `signed_flow` is read from `OrderFlowTracker`, which is fed only by the
+  websocket price-monitor's `on_trade` for the first 20 discovered markets, and
+  keeps at most 50 trades per market. The maker's own five markets are selected
+  by spread and frequently are not in that set, so this feature can be
+  identically 0.0 for reasons that have nothing to do with flow. The column
+  cannot currently distinguish "balanced flow" from "no feed", so a null result
+  on it is uninterpretable rather than negative.
+- A fill whose `observation_id` is NULL (its `observe()` raised) is dropped by
+  the summary's inner join, so it is invisible rather than counted as an
+  incomplete mark.
