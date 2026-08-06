@@ -181,6 +181,12 @@ class ExecutionConfig(BaseModel):
     book_capacity_fraction: float = 0.5
     stop_loss_pct: float = 30.0
     profit_target_pct: float = 50.0
+    profit_target_early_pct: float = Field(default=75.0, gt=0)
+    profit_target_late_pct: float = Field(default=25.0, gt=0)
+    profit_target_early_fraction_remaining: float = Field(default=0.50, ge=0, le=1)
+    profit_target_late_fraction_remaining: float = Field(default=0.10, ge=0, le=1)
+    trailing_stop_activation_pct: float = Field(default=12.0, gt=0)
+    trailing_stop_giveback_fraction: float = Field(default=0.45, gt=0, le=1)
     edge_erosion_min_pct: float = 2.0
     time_decay_hours: float = 12.0
     # Free capital from near-certain winners that are still far from resolution:

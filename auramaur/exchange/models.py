@@ -351,6 +351,7 @@ class OrderBook(BaseModel):
 class ExitReason(str, Enum):
     STOP_LOSS = "STOP_LOSS"
     PROFIT_TARGET = "PROFIT_TARGET"
+    TRAILING_STOP = "TRAILING_STOP"
     EDGE_EROSION = "EDGE_EROSION"
     TIME_DECAY = "TIME_DECAY"
     DUST_CLEANUP = "DUST_CLEANUP"

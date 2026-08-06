@@ -9,6 +9,12 @@ import structlog
 
 from auramaur.db.database import Database
 from auramaur.exchange.models import ExitReason, OrderSide, Position, TokenType
+from auramaur.risk.exit_policy import (
+    binary_exit_economics,
+    lifecycle_profit_target,
+    trailing_stop_triggered,
+)
+from auramaur.strategy.signals import taker_fee_rate
 
 log = structlog.get_logger()
 
@@ -438,6 +444,7 @@ class PortfolioTracker:
         peak_prices = await self._get_peak_prices()
         await self._prune_orphan_peaks()
         prices_updated = False
+        decisions_updated = False
 
         unmarkable: list[str] = []
         for pos in positions:
@@ -519,53 +526,90 @@ class PortfolioTracker:
                 exits.append((pos, ExitReason.STOP_LOSS))
                 continue
 
-            # 2. Trailing stop — if position was up 12%+ but has dropped
-            #    back 45%+ of peak gains, exit to lock in profit.
-            if peak_pnl_pct >= 12.0:
-                drawdown_from_peak = peak_pnl_pct - pnl_pct
-                if drawdown_from_peak > peak_pnl_pct * 0.45:
-                    log.info(
-                        "exit.trailing_stop",
-                        market_id=pos.market_id,
-                        peak_pnl=round(peak_pnl_pct, 1),
-                        current_pnl=round(pnl_pct, 1),
-                    )
-                    exits.append((pos, ExitReason.PROFIT_TARGET))
-                    continue
+            # 2. Trailing stop — config-driven so calibration can change policy
+            # without changing runtime code.
+            if trailing_stop_triggered(
+                peak_pct=peak_pnl_pct,
+                current_pct=pnl_pct,
+                activation_pct=settings.execution.trailing_stop_activation_pct,
+                giveback_fraction=settings.execution.trailing_stop_giveback_fraction,
+            ):
+                decisions_updated |= await self._record_exit_decision(
+                    pos, mode_flag, ExitReason.TRAILING_STOP.value,
+                    pnl_pct, pnl_pct, peak_pnl_pct, None, 0.0)
+                log.info(
+                    "exit.trailing_stop",
+                    market_id=pos.market_id,
+                    peak_pnl=round(peak_pnl_pct, 1),
+                    current_pnl=round(pnl_pct, 1),
+                )
+                exits.append((pos, ExitReason.TRAILING_STOP))
+                continue
 
             # 3. Profit target — time-aware: tighten near expiry, widen early
-            profit_target = settings.execution.profit_target_pct  # default +50%
+            fraction_remaining = None
             if market.end_date is not None:
                 end_dt = market.end_date if market.end_date.tzinfo else market.end_date.replace(tzinfo=timezone.utc)
                 now = datetime.now(timezone.utc)
-                # Look up when position was first entered
-                entry_sql = "SELECT MIN(timestamp) as first_entry FROM trades WHERE market_id = ?"
-                entry_params: list[object] = [pos.market_id]
-                if mode_flag is not None:
-                    entry_sql += " AND is_paper = ?"
-                    entry_params.append(mode_flag)
-                entry_row = await self.db.fetchone(entry_sql, tuple(entry_params))
-                if entry_row and entry_row["first_entry"]:
-                    entry_dt = datetime.fromisoformat(entry_row["first_entry"]).replace(tzinfo=timezone.utc)
-                else:
-                    entry_dt = now  # fallback: assume just entered
+                entry_dt = await self._current_position_entry_time(pos, mode_flag)
+                if entry_dt is None:
+                    entry_dt = now  # unknown age fails safe as newly entered
 
                 total_lifetime = (end_dt - entry_dt).total_seconds()
                 elapsed = (now - entry_dt).total_seconds()
 
                 if total_lifetime > 0:
-                    lifetime_fraction_remaining = 1.0 - (elapsed / total_lifetime)
-                    if lifetime_fraction_remaining > 0.50:
-                        # Early in position lifetime — let winners run
-                        profit_target = 75.0
-                    elif lifetime_fraction_remaining < 0.10:
-                        # Near expiry — take what you can
-                        profit_target = 25.0
-                    # else: keep default (50%)
+                    fraction_remaining = 1.0 - (elapsed / total_lifetime)
 
-            if pnl_pct >= profit_target:
+            profit_target = lifecycle_profit_target(
+                base_pct=settings.execution.profit_target_pct,
+                early_pct=settings.execution.profit_target_early_pct,
+                late_pct=settings.execution.profit_target_late_pct,
+                fraction_remaining=fraction_remaining,
+                early_fraction=settings.execution.profit_target_early_fraction_remaining,
+                late_fraction=settings.execution.profit_target_late_fraction_remaining,
+            )
+
+            binary_venue = exchange in (None, "polymarket", "kalshi", "cryptodotcom")
+            net_pnl_pct = pnl_pct
+            estimated_fees = 0.0
+            if binary_venue:
+                actual_fee_rate = getattr(market, "fee_rate", None)
+                if not isinstance(actual_fee_rate, (int, float)):
+                    actual_fee_rate = None
+                fees_enabled = getattr(market, "fees_enabled", None)
+                if not isinstance(fees_enabled, bool):
+                    fees_enabled = None
+                fee_coefficient = taker_fee_rate(
+                    exchange or pos.exchange, pos.category,
+                    settings.arbitrage.exchange_fees,
+                    actual_fee_rate=actual_fee_rate,
+                    fees_enabled=fees_enabled,
+                )
+                economics = binary_exit_economics(
+                    entry_price=pos.avg_price, exit_price=pos.current_price,
+                    size=pos.size, fee_coefficient=fee_coefficient,
+                    is_long=pos.side == OrderSide.BUY,
+                )
+                net_pnl_pct = economics.net_pnl_pct
+                estimated_fees = economics.estimated_fees
+
+            if net_pnl_pct >= profit_target:
+                decisions_updated |= await self._record_exit_decision(
+                    pos, mode_flag, ExitReason.PROFIT_TARGET.value,
+                    pnl_pct, net_pnl_pct, peak_pnl_pct, profit_target,
+                    estimated_fees)
+                log.info("exit.profit_target", market_id=pos.market_id,
+                         gross_pnl_pct=round(pnl_pct, 2),
+                         net_pnl_pct=round(net_pnl_pct, 2),
+                         estimated_fees=round(estimated_fees, 4),
+                         target_pct=profit_target)
                 exits.append((pos, ExitReason.PROFIT_TARGET))
                 continue
+
+            decisions_updated |= await self._record_exit_decision(
+                pos, mode_flag, "HOLD", pnl_pct, net_pnl_pct, peak_pnl_pct,
+                profit_target, estimated_fees)
 
             # Edge-erosion / capital-efficiency / time-decay assume binary 0-1
             # resolution semantics (price converges to $0 or $1). They're
@@ -573,7 +617,6 @@ class PortfolioTracker:
             # premiums aren't probabilities — so they only run for prediction
             # venues. Non-binary venues rely on the P&L-ratio exits above
             # (stop-loss / profit-target / trailing) plus dust cleanup below.
-            binary_venue = exchange in (None, "polymarket", "kalshi", "cryptodotcom")
             if binary_venue:
                 # 4. Edge erosion — price converging on resolution boundary
                 #    measures how much room is left for the position to pay out
@@ -632,7 +675,7 @@ class PortfolioTracker:
                     0.01 <= (pos.current_price or 0.0)
                     and pos.size >= min_size
                     and current_value < settings.execution.dust_max_notional
-                    and await self._position_age_hours(pos.market_id, mode_flag)
+                    and await self._position_age_hours(pos, mode_flag)
                         >= settings.execution.dust_min_age_hours
                 ):
                     log.info(
@@ -647,16 +690,74 @@ class PortfolioTracker:
         if unmarkable:
             await self._warn_unmarkable(exchange, unmarkable)
 
-        if prices_updated:
+        if prices_updated or decisions_updated:
             await self.db.commit()
 
         return exits
 
-    async def _position_age_hours(self, market_id: str, mode_flag: int | None) -> float:
+    @staticmethod
+    def _as_utc(value: str) -> datetime:
+        parsed = datetime.fromisoformat(value)
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+    async def _record_exit_decision(
+        self, pos, mode_flag: int | None, reason: str, gross_pct: float,
+        net_pct: float, peak_pct: float, target_pct: float | None,
+        estimated_fees: float,
+    ) -> bool:
+        """Best-effort observation; telemetry must never block a protective exit."""
+        try:
+            await self.db.execute(
+                """INSERT INTO exit_decisions
+                   (market_id, exchange, token, is_paper, policy_action,
+                    gross_pnl_pct, net_pnl_pct, peak_pnl_pct, target_pct,
+                    estimated_fees, current_price, entry_price, size)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (pos.market_id, pos.exchange,
+                 getattr(pos.token, "value", pos.token),
+                 1 if mode_flag is None else mode_flag, reason, gross_pct,
+                 net_pct, peak_pct, target_pct, estimated_fees,
+                 pos.current_price, pos.avg_price, pos.size),
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001 — never compromise exits
+            log.debug("exit.decision_record_failed", market_id=pos.market_id,
+                      error=str(exc))
+            return False
+
+    async def _current_position_entry_time(self, pos, mode_flag: int | None) -> datetime | None:
+        """Oldest fill still contributing to the current token inventory."""
+        mode = 1 if mode_flag is None else mode_flag
+        try:
+            row = await self.db.fetchone(
+                """WITH reverse_inventory AS (
+                       SELECT timestamp,
+                              SUM(CASE WHEN side = 'BUY' THEN size ELSE -size END)
+                                OVER (ORDER BY timestamp DESC, id DESC) AS qty
+                         FROM fills
+                        WHERE market_id = ? AND token = ? AND is_paper = ?)
+                   SELECT timestamp FROM reverse_inventory
+                    WHERE qty >= ? ORDER BY timestamp DESC LIMIT 1""",
+                (pos.market_id, getattr(pos.token, "value", pos.token), mode, pos.size),
+            )
+            if row and row["timestamp"]:
+                return self._as_utc(row["timestamp"])
+        except (ValueError, TypeError, KeyError):
+            return None
+        return None
+
+    async def _position_age_hours(self, pos, mode_flag: int | None) -> float:
         """Hours since the position's first recorded fill. Returns 0.0 when the
         entry time is unknown, so dust-sweep treats it as 'too new to touch'."""
+        current_entry = await self._current_position_entry_time(pos, mode_flag)
+        if current_entry is not None:
+            return ((datetime.now(timezone.utc) - current_entry).total_seconds()
+                    / 3600.0)
+        # Legacy fallback for databases whose old trades predate the fills
+        # ledger. It cannot distinguish tokens, so it is used only when no
+        # token-scoped fill ancestry exists.
         sql = "SELECT MIN(timestamp) AS first_entry FROM trades WHERE market_id = ?"
-        params: list[object] = [market_id]
+        params: list[object] = [pos.market_id]
         if mode_flag is not None:
             sql += " AND is_paper = ?"
             params.append(mode_flag)
@@ -664,7 +765,7 @@ class PortfolioTracker:
             row = await self.db.fetchone(sql, tuple(params))
             if not row or not row["first_entry"]:
                 return 0.0
-            entry_dt = datetime.fromisoformat(row["first_entry"]).replace(tzinfo=timezone.utc)
+            entry_dt = self._as_utc(row["first_entry"])
         except (ValueError, TypeError, KeyError):
             return 0.0
         return (datetime.now(timezone.utc) - entry_dt).total_seconds() / 3600.0

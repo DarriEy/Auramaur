@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 49
+SCHEMA_VERSION = 50
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -792,6 +792,26 @@ CREATE TABLE IF NOT EXISTS position_peaks (
     peak_pnl_pct REAL NOT NULL DEFAULT 0.0,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS exit_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    observed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    market_id TEXT NOT NULL,
+    exchange TEXT NOT NULL DEFAULT '',
+    token TEXT NOT NULL DEFAULT 'YES',
+    is_paper INTEGER NOT NULL DEFAULT 1,
+    policy_action TEXT NOT NULL DEFAULT 'HOLD',
+    gross_pnl_pct REAL NOT NULL,
+    net_pnl_pct REAL NOT NULL,
+    peak_pnl_pct REAL NOT NULL,
+    target_pct REAL,
+    estimated_fees REAL NOT NULL DEFAULT 0,
+    current_price REAL NOT NULL,
+    entry_price REAL NOT NULL,
+    size REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_exit_decisions_position_time
+    ON exit_decisions(market_id, token, is_paper, observed_at);
 
 CREATE TABLE IF NOT EXISTS rebalance_blocks (
     event_key TEXT PRIMARY KEY,

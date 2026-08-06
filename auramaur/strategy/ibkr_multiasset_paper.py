@@ -434,6 +434,15 @@ class IBKRMultiAssetPaperBook:
                     gain_pct = (quote.bid / entry - 1) * 100
                     pnl = ((quote.bid - entry) * float(held["quantity"])
                            * quote.multiplier * mark_fx)
+                    exit_notional = (quote.bid * float(held["quantity"])
+                                     * quote.multiplier * mark_fx)
+                    exit_commission = self._commission(
+                        spec, float(held["quantity"]), exit_notional)
+                    entry_commission = float(held["entry_commission_usd"] or 0)
+                    basis_usd = (entry * float(held["quantity"])
+                                 * quote.multiplier * mark_fx)
+                    net_gain_pct = ((pnl - entry_commission - exit_commission)
+                                    / basis_usd * 100 if basis_usd > 0 else gain_pct)
                     await self._db.execute(
                         """UPDATE ibkr_paper_positions SET current_price=?,
                            unrealized_pnl_usd=?, price_source=?, updated_at=datetime('now')
@@ -443,7 +452,7 @@ class IBKRMultiAssetPaperBook:
                     stored_stop = float(held["stop_price"] or 0)
                     hard_exit = ((stored_stop > 0 and quote.bid <= stored_stop)
                                  or gain_pct <= -cfg.stop_loss_pct
-                                 or gain_pct >= cfg.take_profit_pct)
+                                 or net_gain_pct >= cfg.take_profit_pct)
                     momentum_exit = False
                     if not hard_exit:
                         bars = await self._client.get_daily_bars_by_con_id(spec, held_con_id)

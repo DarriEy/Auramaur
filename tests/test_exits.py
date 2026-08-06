@@ -30,6 +30,13 @@ def settings():
     s = MagicMock()
     s.execution.stop_loss_pct = 30.0
     s.execution.profit_target_pct = 50.0
+    s.execution.profit_target_early_pct = 75.0
+    s.execution.profit_target_late_pct = 25.0
+    s.execution.profit_target_early_fraction_remaining = 0.50
+    s.execution.profit_target_late_fraction_remaining = 0.10
+    s.execution.trailing_stop_activation_pct = 12.0
+    s.execution.trailing_stop_giveback_fraction = 0.45
+    s.arbitrage.exchange_fees = {}
     s.execution.edge_erosion_min_pct = 2.0
     s.execution.time_decay_hours = 12.0
     # Off by default so existing exit tests are unaffected; opted in per-test.
@@ -122,8 +129,9 @@ async def test_profit_target_triggered(mock_db, settings):
         _make_position("m1", avg_price=0.40),
     ])
     gamma = AsyncMock()
-    # Current price rose to 0.62 → gain = (0.62-0.40)*10 = 2.20, cost = 4.0, pct = +55%
-    gamma.get_market = AsyncMock(return_value=_make_market("m1", 0.62))
+    # Current price rose to 0.63: target still clears after conservative
+    # round-trip taker fees (gross-only checks are intentionally insufficient).
+    gamma.get_market = AsyncMock(return_value=_make_market("m1", 0.63))
 
     tracker = PortfolioTracker(db=mock_db)
     exits = await tracker.check_exits(settings, gamma)
