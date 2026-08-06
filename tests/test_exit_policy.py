@@ -219,25 +219,35 @@ async def test_unscoped_read_uses_the_positions_own_book_not_paper(tmp_path):
 
 @pytest.mark.asyncio
 async def test_v50_migration_adds_exit_decision_telemetry(tmp_path):
+    """Call the migration DIRECTLY, never through connect().
+
+    ``_init_schema`` runs ``executescript(TABLES)`` before dispatching
+    migrations, so a reconnect-and-migrate test rebuilds the table from
+    TABLES and then runs the migration against a schema that already
+    satisfies it — the migration's own DDL is never observed, and gutting
+    it leaves the test green (verified 2026-08-06).
+    """
     path = tmp_path / "migration.db"
     db = Database(str(path))
     await db.connect()
-    await db.execute("DROP TABLE exit_decisions")
-    await db.execute("UPDATE schema_version SET version = 49")
-    await db.commit()
-    await db.close()
-
-    upgraded = Database(str(path))
-    await upgraded.connect()
     try:
-        version = await upgraded.fetchone("SELECT version FROM schema_version")
-        columns = await upgraded.fetchall("PRAGMA table_info(exit_decisions)")
+        await db.execute("DROP TABLE exit_decisions")
+        await db.execute("UPDATE schema_version SET version = 49")
+
+        await db._migrate_v49_to_v50()
+
+        version = await db.fetchone("SELECT version FROM schema_version")
+        columns = await db.fetchall("PRAGMA table_info(exit_decisions)")
         assert version["version"] == 50
         assert {row["name"] for row in columns} >= {
             "policy_action", "net_pnl_pct", "estimated_fees", "peak_pnl_pct"
         }
+        # Idempotent: a second dispatch must not raise or lose rows.
+        await db._migrate_v49_to_v50()
+        assert (await db.fetchone(
+            "SELECT version FROM schema_version"))["version"] == 50
     finally:
-        await upgraded.close()
+        await db.close()
 
 
 async def _prune_plan(db) -> list[str]:
@@ -348,3 +358,46 @@ def test_every_schema_step_dispatches_to_a_distinct_migration():
     for name in dispatched:
         start, end = (int(g) for g in _MIGRATION_STEP.match(name).groups())
         assert end == start + 1, f"{name} is not a single-version step"
+
+
+def test_degraded_default_matches_the_tracked_setting():
+    """The module fallback and the tracked default must not drift apart —
+    a degraded config must never retain LONGER than a healthy one."""
+    from config.settings import Settings
+
+    from auramaur.risk import portfolio as portfolio_mod
+
+    assert (portfolio_mod._DEFAULT_RETENTION_DAYS
+            == Settings().execution.exit_decision_retention_days)
+
+
+async def test_exit_decision_write_is_one_atomic_span(tmp_path):
+    """Insert batch and retention prune land together or not at all.
+
+    Nothing pinned the span before 2026-08-06: replacing the
+    ``db.transaction`` context manager with ``if True:`` left the suite
+    green, so a partial write (rows inserted, prune skipped) was
+    undetectable.
+    """
+    db = Database(str(tmp_path / "span.db"))
+    await db.connect()
+    try:
+        tracker = PortfolioTracker(db)
+        owners: list[str] = []
+        original = db.transaction
+
+        def _spy(owner=None):
+            owners.append(owner or "")
+            return original(owner=owner)
+
+        db.transaction = _spy
+        rows = [(
+            "2026-08-06 00:00:00", "m1", "polymarket", "YES", 1, "HOLD",
+            10.0, 9.0, 12.0, 50.0, 0.1, 0.6, 0.5, 10.0,
+        )]
+        await tracker._record_exit_decisions(rows, 3)
+        assert owners == ["portfolio.exit_decisions"], (
+            "the batch must take exactly one named span")
+    finally:
+        db.transaction = original
+        await db.close()

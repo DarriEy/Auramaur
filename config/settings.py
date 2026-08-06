@@ -192,7 +192,15 @@ class ExecutionConfig(BaseModel):
     trailing_stop_giveback_fraction: float = Field(default=0.45, ge=0, le=1)
     # Exit-decision telemetry is an observation log, not evidence of record;
     # bound it so a holdout cannot grow the trading DB without limit.
-    exit_decision_retention_days: int = Field(default=14, ge=1, le=365)
+    # 2026-08-06: 14 -> 3. A row is written per open position per tick, so at
+    # the 60s portfolio cadence this table outgrows candidate_dispositions —
+    # the table it was modelled on — by ~5.6x, and carries two indexes. At 14
+    # days that is roughly the size of the entire trading DB again, for rows
+    # nothing reads: the sole consumer (scripts/calibrate_exit_policy.py)
+    # selects `policy_action <> 'HOLD'`, and its MIN_TRAIN_EXITS /
+    # MIN_TEST_EXITS gates count non-HOLD rows only, so retention length does
+    # not affect it. Raise this only alongside a consumer that reads HOLDs.
+    exit_decision_retention_days: int = Field(default=3, ge=1, le=365)
     edge_erosion_min_pct: float = 2.0
     time_decay_hours: float = 12.0
     # Free capital from near-certain winners that are still far from resolution:
