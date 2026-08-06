@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 48
+SCHEMA_VERSION = 49
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -419,6 +419,12 @@ CREATE TABLE IF NOT EXISTS entailment_verdicts (
     source TEXT NOT NULL DEFAULT 'llm',
     reasoning TEXT NOT NULL DEFAULT '',
     traded_at TEXT,
+    -- Deterministic post-check on the LLM-proposed pairing (#405). Recorded
+    -- ALONGSIDE the verdict, never overwriting it: "how often does the rule
+    -- overrule the model" is unanswerable once the model's answer is edited.
+    postcheck_reason TEXT,
+    postcheck_score REAL,
+    postcheck_at TEXT,
     checked_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (market_id_a, market_id_b)
 );

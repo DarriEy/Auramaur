@@ -382,6 +382,28 @@ class Database:
             await self._migrate_v46_to_v47()
         if from_version < 48:
             await self._migrate_v47_to_v48()
+        if from_version < 49:
+            await self._migrate_v48_to_v49()
+
+    async def _migrate_v48_to_v49(self) -> None:
+        """Record the deterministic pair post-check on entailment verdicts (#405).
+
+        Kept alongside the LLM verdict rather than replacing it: the operator's
+        question is how often the rule overrules the model, which cannot be
+        answered from a table where the overruled answer was overwritten.
+        (cross_venue_verdicts is owned by its pillar's own _ensure_schema and
+        gets the same three columns there.)
+        """
+        for column_def in ("postcheck_reason TEXT", "postcheck_score REAL",
+                           "postcheck_at TEXT"):
+            try:
+                await self._db.execute(
+                    f"ALTER TABLE entailment_verdicts ADD COLUMN {column_def}")
+            except Exception:
+                pass  # Column already exists
+        await self._db.execute("UPDATE schema_version SET version = 49")
+        await self._db.commit()
+        log.info("database.migrated", from_version=48, to_version=49)
 
     async def _migrate_v47_to_v48(self) -> None:
         """Cursor state for the manual-trade sweep (off-bot venue exits)."""
