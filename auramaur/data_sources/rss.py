@@ -139,7 +139,7 @@ class RSSSource:
         items: list[NewsItem] = []
         for result in results:
             if isinstance(result, BaseException):
-                logger.warning("rss_feed_error", error=str(result))
+                logger.warning("rss_feed_error", error=redact_error(result))
                 continue
             items.extend(result)
 
