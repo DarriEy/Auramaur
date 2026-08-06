@@ -240,6 +240,65 @@ async def test_v50_migration_adds_exit_decision_telemetry(tmp_path):
         await upgraded.close()
 
 
+async def _prune_plan(db) -> list[str]:
+    """Query plan for the SHIPPED retention delete, not a copy of it."""
+    rows = await db.fetchall(
+        f"EXPLAIN QUERY PLAN {PortfolioTracker._EXIT_DECISION_PRUNE}",
+        ("-14 days",))
+    return [row["detail"] for row in rows]
+
+
+@pytest.mark.asyncio
+async def test_retention_prune_never_scans_the_exit_decision_table(tmp_path):
+    """The per-cycle prune must SEEK, on a fresh schema and a migrated one.
+
+    ``idx_exit_decisions_position_time`` looks like it covers this — it ends in
+    ``observed_at`` — but that is its FOURTH column and the predicate
+    constrains none of the three before it, so SQLite has no seekable prefix
+    and reports ``SCAN exit_decisions``. That scan runs inside the
+    ``portfolio.exit_decisions`` write span on every exit cycle, holding the
+    process-wide write lock against a table that only grows: the one place
+    where a full scan costs closing a position.
+
+    Both schema paths are checked because they are written in different files
+    and can drift: a fresh database gets ``db/models.py``'s TABLES script, an
+    existing one gets the v49 -> v50 migration in ``db/database.py``.
+
+    The migration half calls the step DIRECTLY rather than reconnecting.
+    ``_init_schema`` executes TABLES *before* dispatching migrations, so a
+    reconnect would create the table and its indexes from TABLES and then run
+    the migration against a schema that already satisfies it — the migration's
+    own DDL would never be observed, and an index missing there would pass.
+    """
+    fresh = Database(str(tmp_path / "fresh.db"))
+    await fresh.connect()
+    try:
+        plan = await _prune_plan(fresh)
+        assert not any("SCAN" in step for step in plan), (
+            f"retention delete full-scans a growing table: {plan}")
+        assert any("SEARCH" in step for step in plan), plan
+    finally:
+        await fresh.close()
+
+    # And the same for a database that arrives at v50 by migration.
+    migrated = Database(str(tmp_path / "migrated-plan.db"))
+    await migrated.connect()
+    try:
+        # Dropping the table takes its indexes with it, so what follows is
+        # built by the migration script alone.
+        await migrated.execute("DROP TABLE exit_decisions")
+        await migrated.execute("UPDATE schema_version SET version = 49")
+        await migrated.commit()
+        await migrated._migrate_v49_to_v50()
+
+        plan = await _prune_plan(migrated)
+        assert not any("SCAN" in step for step in plan), (
+            f"the v49 -> v50 migration omitted the index: {plan}")
+        assert any("SEARCH" in step for step in plan), plan
+    finally:
+        await migrated.close()
+
+
 _MIGRATION_STEP = re.compile(r"^_migrate_v(\d+)_to_v(\d+)$")
 
 

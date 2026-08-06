@@ -726,6 +726,12 @@ class PortfolioTracker:
          estimated_fees, current_price, entry_price, size)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 
+    # Named so a test can plan the SHIPPED statement rather than a copy of it:
+    # this predicate must stay index-seekable, and only the real string proves
+    # it. See test_retention_prune_never_scans_the_exit_decision_table.
+    _EXIT_DECISION_PRUNE = (
+        "DELETE FROM exit_decisions WHERE observed_at < datetime('now', ?)")
+
     def _exit_decision_row(
         self, pos, mode_flag: int | None, reason: str, gross_pct: float,
         net_pct: float, peak_pct: float, target_pct: float | None,
@@ -764,9 +770,15 @@ class PortfolioTracker:
                 # candidate_dispositions: cheap when nothing has expired, and
                 # it cannot be missed by an interrupted deployment the way a
                 # separate cleanup job can.
+                #
+                # "Indexed" is load-bearing and was not free: the composite
+                # index leads with market_id, and this predicate constrains
+                # only observed_at, so it took a dedicated single-column index
+                # (idx_exit_decisions_observed_at) to make the seek possible.
+                # Without it this ran as a full scan of a table that gains rows
+                # every cycle, while holding the write lock on the exit path.
                 await self.db.execute(
-                    "DELETE FROM exit_decisions WHERE observed_at < datetime('now', ?)",
-                    (f"-{retention_days} days",))
+                    self._EXIT_DECISION_PRUNE, (f"-{retention_days} days",))
         except Exception as exc:  # noqa: BLE001 — never compromise exits
             log.debug("exit.decision_record_failed", count=len(rows), error=str(exc))
 

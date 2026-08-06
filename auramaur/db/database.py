@@ -404,6 +404,11 @@ class Database:
                 size REAL NOT NULL);
             CREATE INDEX IF NOT EXISTS idx_exit_decisions_position_time
               ON exit_decisions(market_id, token, is_paper, observed_at);
+            -- observed_at is the composite's FOURTH column and the retention
+            -- delete constrains nothing else, so that index offers no seekable
+            -- prefix. Without this one the per-cycle prune full-scans.
+            CREATE INDEX IF NOT EXISTS idx_exit_decisions_observed_at
+              ON exit_decisions(observed_at);
             UPDATE schema_version SET version = 50;
         """)
         await self._db.commit()

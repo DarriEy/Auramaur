@@ -812,6 +812,11 @@ CREATE TABLE IF NOT EXISTS exit_decisions (
 );
 CREATE INDEX IF NOT EXISTS idx_exit_decisions_position_time
     ON exit_decisions(market_id, token, is_paper, observed_at);
+-- The composite above cannot serve the per-cycle retention delete: its
+-- predicate constrains observed_at alone, and the three leading columns are
+-- unconstrained, so SQLite has no seekable prefix and full-scans the table.
+CREATE INDEX IF NOT EXISTS idx_exit_decisions_observed_at
+    ON exit_decisions(observed_at);
 
 CREATE TABLE IF NOT EXISTS rebalance_blocks (
     event_key TEXT PRIMARY KEY,
