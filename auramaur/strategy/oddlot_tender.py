@@ -43,6 +43,7 @@ from auramaur.experiments.strategies.oddlot_tender import (
     OddLotTenderRules,
     assess_oddlot_tender,
 )
+from auramaur.broker.execution_gateway import booked_as_position
 from auramaur.exchange.models import Fill, OrderSide
 from auramaur.nlp.prompts import format_untrusted_block
 
@@ -286,21 +287,49 @@ class OddLotTenderPillar:
                         status=result.status, error=result.error_message)
             await self._set_status(f.accession, "order_rejected")
             return
-        # A resting order is NOT a position. ibkr_equity.place_share_order
-        # returns status="pending", filled_size=0 for EVERY live share order,
-        # and _record_entry falls back to float(qty) when filled_size is 0 — so
-        # an unfilled 99-share limit BUY wrote a full-size portfolio/trades row
-        # at the limit price. Nothing corrects it: broker/sync.py and
-        # broker/reconciler.py have no IBKR path, and resolution_tracker cannot
-        # resolve a ticker market id. The phantom notional inflates `equity` in
-        # risk/manager.py, which raises the 2%-of-equity stake for every other
-        # market.
-        if result.status != "pending" and result.filled_size > 0:
+        # A resting order is NOT a position — see
+        # broker.execution_gateway.booked_as_position.
+        # ibkr_equity.place_share_order returns status="pending",
+        # filled_size=0 for EVERY live share order, and _record_entry falls
+        # back to float(qty) when filled_size is 0 — so an unfilled 99-share
+        # limit BUY wrote a full-size portfolio/trades row at the limit price.
+        # Nothing corrects it: broker/sync.py and broker/reconciler.py have no
+        # IBKR path, and resolution_tracker cannot resolve a ticker market id.
+        # The phantom notional inflates `equity` in risk/manager.py, which
+        # raises the 2%-of-equity stake for every other market.
+        if booked_as_position(result):
             await self._record_entry(ticker, f, qty, price, result)
             await self._set_status(f.accession, "entered")
         else:
-            # Keep the filing out of the permanent dedupe as "placed, unfilled"
-            # so a later cycle can still observe the fill.
+            # KNOWN LIMITATION — the live path has no fill-observation route.
+            # This status is a label for the operator, nothing more: it does
+            # NOT re-open the filing for a later cycle. run_once dedupes on
+            # ROW EXISTENCE ("SELECT 1 FROM oddlot_filings WHERE accession=?")
+            # and _audit_filing already INSERT OR IGNOREd this accession
+            # before _on_opportunity ran, so the row is permanent whatever we
+            # write here; nothing anywhere reads 'order_resting'.
+            #
+            # Consequence: on the LIVE path a share order that later fills is
+            # never booked at all. That is strictly better than the phantom
+            # this replaced (which booked a full-size position for an order
+            # that had NOT filled), but it is a real gap. Closing it needs a
+            # persisted IBKR order-id -> accession mapping plus a poll of
+            # ib_async order status that calls _record_entry on fill — a new
+            # order-lifecycle path for the equity book, deliberately out of
+            # scope for a booking guard.
+            #
+            # Latent today, twice over: oddlot_tender.paper=true forces
+            # dry_run (place_share_order then returns status="paper" with
+            # filled_size=qty and this branch is not taken), and ibkr.readonly
+            # =true refuses live placement outright. WARNING rather than debug
+            # so that if both ever flip, an unbooked live share order is loud.
+            log.warning("oddlot.live_order_resting_unbooked",
+                        accession=f.accession, ticker=ticker, qty=qty,
+                        limit=price, order_id=result.order_id,
+                        status=result.status,
+                        detail="live share order placed but not filled at "
+                               "placement; no fill-observation route exists — "
+                               "check TWS and book manually")
             await self._set_status(f.accession, "order_resting")
 
     async def _set_status(self, accession: str, status: str) -> None:

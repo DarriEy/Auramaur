@@ -56,7 +56,11 @@ from datetime import datetime, timezone
 
 import structlog
 
-from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
+from auramaur.broker.execution_gateway import (
+    ExecutionGateway,
+    TradeIntent,
+    booked_as_position,
+)
 from auramaur.strategy.classifier import blocked_category_hit, ensure_category
 from auramaur.exchange.models import (
     Confidence,
@@ -473,10 +477,12 @@ class BiasHarvestPillar:
                         status=res.status, error=res.reason)
             return False
 
-        # A resting order is deliberately NOT recorded here: the order monitor
-        # books its confirmed fill and the next sync_positions venue snapshot
-        # materializes the portfolio row (same guard as long_horizon:400,
-        # informed_flow_pillar:221 and econ_indicator:227).
+        # A resting order is deliberately NOT recorded here (see
+        # broker.execution_gateway.booked_as_position). The order monitor books
+        # the confirmed fill when the market later trades through, and
+        # _record_deferred_paper_fills materializes the portfolio row from the
+        # resulting cost_basis — position sync does NOT, see _record_position
+        # below.
         #
         # This matters more here than anywhere else: maker_entry prices every
         # bias_harvest order at the bid, so Order.marketable is always False
@@ -485,7 +491,7 @@ class BiasHarvestPillar:
         # a near-perfect paper record — in the 0.90-0.97 band, entered at the
         # bid — and graduation reads exactly those pnl_ledger rows to authorize
         # live trading.
-        if res.status != "pending" and res.result.filled_size > 0:
+        if booked_as_position(res):
             await self._record_position(signal, market, res.order, res.result)
         log.info("bias_harvest.entered", market_id=market.id,
                  token=res.order.token.value, price=res.order.price,

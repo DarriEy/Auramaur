@@ -44,7 +44,11 @@ import structlog
 
 from auramaur.strategy.protocols import ExecutionMode
 
-from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
+from auramaur.broker.execution_gateway import (
+    ExecutionGateway,
+    TradeIntent,
+    booked_as_position,
+)
 from auramaur.data_sources.deribit_iv import DeribitIVSource
 from auramaur.exchange.models import Confidence, Market, OrderSide, Signal
 from auramaur.experiments.strategies.vol_anchor import (
@@ -420,7 +424,10 @@ class VolAnchorPillar:
             log.info("vol_anchor.order_rejected", market_id=market.id,
                      status=res.status, error=res.reason)
             return False
-        await self._record_position(signal, market, res.order, res.result)
+        # A resting order is not a position — see
+        # broker.execution_gateway.booked_as_position.
+        if booked_as_position(res):
+            await self._record_position(signal, market, res.order, res.result)
         log.info("vol_anchor.entered", market_id=market.id,
                  token=res.order.token.value, price=res.order.price,
                  size=res.order.size, fair=round(fair, 3),

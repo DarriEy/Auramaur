@@ -223,9 +223,19 @@ class PaperTrader:
                 # fill AND marked the decision executable with "trade_through"
                 # evidence, which graduation.credible_fill_evidence accepts —
                 # so orders the paper trader refused counted toward promoting a
-                # strategy to live capital. The order also vanished here: the
-                # `continue` skipped the re-queue below, so it neither filled
-                # nor rested. Keep it resting; cash may free up next tick.
+                # strategy to live capital.
+                #
+                # The refusal goes back on `remaining` so the order is not
+                # silently dropped mid-pass — before this, the `continue`
+                # skipped the re-queue below and the order neither filled nor
+                # rested. It does NOT mean the order survives to try again:
+                # bot_order_monitor calls `cancel_expired(ttl)` immediately
+                # after check_fills in the SAME loop iteration, and
+                # cancel_expired ignores its ttl argument entirely
+                # (`self.pending_orders.clear()`), so the whole queue is
+                # discarded either way. What this branch guarantees is only
+                # the thing that matters here: a refusal never leaves as a
+                # fill.
                 if result.status == "rejected" or result.filled_size <= 0:
                     log.debug("paper.limit_fill_refused", order_id=order_id,
                               status=result.status,

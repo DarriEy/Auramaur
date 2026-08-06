@@ -23,7 +23,11 @@ from datetime import datetime, timezone
 
 import structlog
 
-from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
+from auramaur.broker.execution_gateway import (
+    ExecutionGateway,
+    TradeIntent,
+    booked_as_position,
+)
 from auramaur.exchange.models import Confidence, Market, OrderSide, Signal
 from auramaur.experiments.strategies.econ_indicator import (
     EconIndicatorInputs,
@@ -220,11 +224,13 @@ class EconIndicatorPillar:
             log.warning("econ_indicator.order_rejected", market_id=market.id,
                         status=res.status, error=res.reason)
             return False
-        # A resting live order is deliberately NOT recorded here: the order
-        # monitor books its confirmed fill and the next sync_positions venue
-        # snapshot materializes the portfolio row (see docs/KALSHI_HARDENING.md,
-        # "Fill booking for resting live orders").
-        if res.status != "pending" and res.result.filled_size > 0:
+        # A resting live order is deliberately NOT recorded here — see
+        # broker.execution_gateway.booked_as_position and
+        # docs/KALSHI_HARDENING.md, "Fill booking for resting live orders".
+        # The order monitor books the confirmed fill; the portfolio row is
+        # materialized from it there, NOT by position sync (which is
+        # mode-scoped and does not maintain paper rows in a live bot).
+        if booked_as_position(res):
             await self._record_position(signal, market, res.order, res.result)
         log.info("econ_indicator.entered", market_id=market.id, side=side.value,
                  model_p=round(model_p, 3), market_p=round(market_p, 3),

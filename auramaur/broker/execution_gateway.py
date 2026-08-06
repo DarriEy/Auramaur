@@ -108,6 +108,55 @@ class CancelResult:
         return self.status in ("cancelled", "paper")
 
 
+def booked_as_position(res: ExecutionResult | OrderResult | None) -> bool:
+    """True when a submission actually EXECUTED and may be booked as a holding.
+
+    THE single predicate for "did this order become a position". Every caller
+    that writes a ``portfolio`` row, a per-leg record, or a fill must ask this
+    and nothing else.
+
+    It is deliberately the same expression ``_record_result`` applies before it
+    writes the fill (``status in _FILLED_STATUSES and filled_size > 0``) — and
+    that method now calls THIS function, so the agreement holds by
+    construction rather than by nine hand-copied predicates staying in sync. A
+    pillar's portfolio row can no longer claim a position the gateway's own
+    ``fills``/``cost_basis`` writes never recorded.
+
+    Why the test has to be both halves:
+
+    ``status``      Polymarket's LIVE ``place_order`` ALWAYS returns
+                    ``"pending"``, and ``PaperTrader`` defers every
+                    non-marketable (maker-priced) order to ``"pending"`` too.
+                    Resting is the NORMAL outcome, not the exception.
+    ``filled_size`` a ``"paper"``/``"filled"`` status with size 0 is a refusal
+                    that got stamped, not an execution — and every
+                    ``_record_*`` helper in the codebase falls back to
+                    ``order.size`` when ``filled_size`` is 0, so booking one
+                    writes a FULL-SIZE phantom.
+
+    Accepts either half of the pair so one predicate covers both call shapes:
+    an :class:`ExecutionResult` from the gateway (pillars) or a raw
+    :class:`OrderResult` from an exchange adapter / the order monitor. An
+    ``ExecutionResult`` that never reached placement carries ``result=None``
+    (``status="skipped"``), which is not a position either.
+
+    ``status`` is read from the object the caller passed and ``filled_size``
+    from the underlying ``OrderResult``. For an ``OrderResult`` those are the
+    same object; for an ``ExecutionResult`` the two agree by construction —
+    ``_record_result`` is the ONLY place that builds one carrying a
+    ``result``, and it copies ``status=result.status`` verbatim. Attribute
+    probing rather than ``isinstance`` so a test double of either shape is
+    read the same way the real object would be.
+    """
+    if res is None:
+        return False
+    if getattr(res, "status", None) not in _FILLED_STATUSES:
+        return False
+    inner = getattr(res, "result", None)
+    size = getattr(res if inner is None else inner, "filled_size", None)
+    return size is not None and size > 0
+
+
 class ExecutionGateway:
     """Routes an approved :class:`TradeIntent` through route → place → record."""
 
@@ -714,8 +763,7 @@ class ExecutionGateway:
         """
         result = await exchange.place_order(order)
         show_order(result.status, result.order_id, order.side.value, order.size, order.price, result.is_paper, exchange=exchange_name, error_message=result.error_message, market_id=order.market_id)
-        if (decision_id is not None and result.status in _FILLED_STATUSES
-                and result.filled_size > 0):
+        if decision_id is not None and booked_as_position(result):
             evidence = "venue_fill"
             if result.is_paper:
                 snap = await self.db.fetchone(
@@ -898,7 +946,7 @@ class ExecutionGateway:
         # Record P&L only for actual executions.  Pending live orders are
         # mirrored to trades below, then finalized by the order monitor.
         recorded_fill: Fill | None = None
-        if result.status in _FILLED_STATUSES and result.filled_size > 0:
+        if booked_as_position(result):
             fill = Fill(
                 order_id=result.order_id,
                 market_id=order.market_id,
