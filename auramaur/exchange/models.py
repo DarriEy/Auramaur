@@ -250,6 +250,16 @@ class Position(BaseModel):
     category: str = ""
     token: TokenType = TokenType.YES
     token_id: str = ""
+    # Which book this position belongs to. The DB key is
+    # (market_id, is_paper, token), so a Position without it is only 2/3 of a
+    # position identity — and ``PortfolioTracker.get_positions`` can return
+    # BOTH books at once (its mode filter is skipped when settings.is_live is
+    # not a bool), so callers cannot recover it from a mode flag of their own.
+    # bot.py's exit loop keys on it; reading it off an object that lacked the
+    # field raised AttributeError on every tick from 2026-07-25 to 08-06.
+    # Defaults to PAPER, like Fill/OrderResult and the portfolio.is_paper
+    # column (NOT NULL DEFAULT 1): an unstated book must never read as live.
+    is_paper: bool = True
 
     @property
     def unrealized_pnl(self) -> float:

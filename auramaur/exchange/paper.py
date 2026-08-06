@@ -50,6 +50,7 @@ class PaperTrader:
                 category=row["category"] or "",
                 token=TokenType(token_str) if token_str else TokenType.YES,
                 token_id=token_id or "",
+                is_paper=True,  # the query above is WHERE is_paper = 1
             )
 
         self.balance = await self._compute_balance()
@@ -169,6 +170,7 @@ class PaperTrader:
                 current_price=order.price,
                 token=order.token if hasattr(order, 'token') else TokenType.YES,
                 token_id=order.token_id if hasattr(order, 'token_id') else "",
+                is_paper=True,  # PaperTrader books nothing else
             )
 
         # Trade row is written by TradingEngine for every fill (paper/live/limit)

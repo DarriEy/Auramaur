@@ -486,50 +486,74 @@ class AuramaurBot(
                         continue
 
                     for pos, reason in exit_list:
-                        # Key by POSITION, not market: check_exits yields one row
-                        # per (market, token, mode), and a sub-minimum dust leg
-                        # can never sell — a market-wide key let that dust pin
-                        # its sibling legs (2026-07-25: a 1.49-share leg pinned
-                        # $322 of exposure in the same market).
-                        exit_key = (f"exit:{name}:{pos.market_id}:"
-                                    f"{getattr(pos.token, 'value', pos.token)}:"
-                                    f"{int(bool(pos.is_paper))}")
-                        if exit_key in self._exit_pending:
-                            continue
-                        retry_at = self._exit_failures.get(exit_key)
-                        if retry_at is not None and time.monotonic() < retry_at:
-                            continue
-                        log.info(
-                            "exit.triggered",
-                            exchange=name,
-                            market_id=pos.market_id,
-                            reason=reason.value,
-                            pnl=pos.unrealized_pnl,
-                        )
+                        # Per-position containment. A defect in THIS block used
+                        # to escape to the tick-level handler below, which
+                        # abandons every remaining position and every remaining
+                        # exchange for the whole tick — that is how one bad
+                        # attribute read stopped all exits for 12 days. Venue
+                        # errors keep their own inner handler; anything landing
+                        # here is a bug, so it is logged at error (readiness's
+                        # _ERROR_LEVELS) and skips only its own position.
                         try:
-                            if name == "polymarket":
-                                ok = await self._execute_poly_exit(pos, reason, discovery, exchange_client, alerts)
-                            elif name == "kalshi":
-                                ok = await self._execute_kalshi_exit(pos, reason, discovery, exchange_client, alerts)
-                            elif name == "ibkr":
-                                ok = await self._execute_ibkr_exit(pos, reason, discovery, exchange_client, alerts)
-                            else:
+                            # Key by POSITION, not market: check_exits yields one row
+                            # per (market, token, mode), and a sub-minimum dust leg
+                            # can never sell — a market-wide key let that dust pin
+                            # its sibling legs (2026-07-25: a 1.49-share leg pinned
+                            # $322 of exposure in the same market).
+                            exit_key = (f"exit:{name}:{pos.market_id}:"
+                                        f"{getattr(pos.token, 'value', pos.token)}:"
+                                        f"{int(bool(pos.is_paper))}")
+                            if exit_key in self._exit_pending:
+                                continue
+                            retry_at = self._exit_failures.get(exit_key)
+                            if retry_at is not None and time.monotonic() < retry_at:
+                                continue
+                            log.info(
+                                "exit.triggered",
+                                exchange=name,
+                                market_id=pos.market_id,
+                                reason=reason.value,
+                                pnl=pos.unrealized_pnl,
+                            )
+                            try:
+                                if name == "polymarket":
+                                    ok = await self._execute_poly_exit(pos, reason, discovery, exchange_client, alerts)
+                                elif name == "kalshi":
+                                    ok = await self._execute_kalshi_exit(pos, reason, discovery, exchange_client, alerts)
+                                elif name == "ibkr":
+                                    ok = await self._execute_ibkr_exit(pos, reason, discovery, exchange_client, alerts)
+                                else:
+                                    ok = False
+                            except Exception as e:
+                                log.warning("exit.execute_error", exchange=name, market_id=pos.market_id, error=str(e))
                                 ok = False
+                            if ok:
+                                self._exit_pending.add(exit_key)
+                                self._exit_failures.pop(exit_key, None)
+                            else:
+                                self._exit_failures[exit_key] = (
+                                    time.monotonic() + _EXIT_RETRY_BACKOFF_SECONDS)
+                                log.warning(
+                                    "exit.suppressed_until_retry", exchange=name,
+                                    market_id=pos.market_id, reason=reason.value,
+                                    backoff_seconds=_EXIT_RETRY_BACKOFF_SECONDS)
                         except Exception as e:
-                            log.warning("exit.execute_error", exchange=name, market_id=pos.market_id, error=str(e))
-                            ok = False
-                        if ok:
-                            self._exit_pending.add(exit_key)
-                            self._exit_failures.pop(exit_key, None)
-                        else:
-                            self._exit_failures[exit_key] = (
-                                time.monotonic() + _EXIT_RETRY_BACKOFF_SECONDS)
-                            log.warning(
-                                "exit.suppressed_until_retry", exchange=name,
-                                market_id=pos.market_id, reason=reason.value,
-                                backoff_seconds=_EXIT_RETRY_BACKOFF_SECONDS)
+                            log.error(
+                                "exit.loop_error", exchange=name,
+                                market_id=getattr(pos, "market_id", "?"),
+                                error_type=type(e).__name__, error=str(e))
+                            continue
             except Exception as e:
-                log.debug("portfolio_monitor_error", error=str(e))
+                # This aborts the ENTIRE tick — every venue's exits, the equity
+                # mark, the cash read. At debug that is invisible: readiness
+                # scores logs by level and never reads debug, so the 12-day
+                # exit outage (2026-07-25 → 08-06) left no operator-visible
+                # trace anywhere. Every routine failure above has its own
+                # handler (sync, note_equity, attribution, check_exits, and now
+                # the per-position block), so reaching here means the tick
+                # broke, and a broken tick is an error.
+                log.error("portfolio_monitor_error",
+                          error_type=type(e).__name__, error=str(e))
             await asyncio.sleep(interval)
 
     async def _task_cache_cleanup(self) -> None:

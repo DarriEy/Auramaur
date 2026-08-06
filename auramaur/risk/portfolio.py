@@ -73,6 +73,19 @@ class PortfolioTracker:
             token_str = row["token"] if "token" in keys else "YES"
             token_id = row["token_id"] if "token_id" in keys else ""
             exchange_name = row["exchange"] if "exchange" in keys else "polymarket"
+            # The book is part of the position's identity (the portfolio PK is
+            # (market_id, is_paper, token)) and this read can be UNSCOPED — when
+            # settings.is_live is not a bool, mode_flag is None and the rows
+            # below hold BOTH books. Dropping the column left every consumer
+            # unable to tell them apart. Guarded like token/token_id for older
+            # DBs: a mode-scoped read already knows what it asked for, and an
+            # unknown book reads as paper, never as live.
+            if "is_paper" in keys:
+                row_is_paper = bool(row["is_paper"])
+            elif mode_flag is not None:
+                row_is_paper = mode_flag == 1
+            else:
+                row_is_paper = True
             positions.append(Position(
                 market_id=row["market_id"],
                 exchange=exchange_name or "polymarket",
@@ -86,6 +99,7 @@ class PortfolioTracker:
                           else (row["category"] or "other")),
                 token=TokenType(token_str) if token_str else TokenType.YES,
                 token_id=token_id or "",
+                is_paper=row_is_paper,
             ))
         return positions
 
