@@ -40,7 +40,11 @@ from datetime import datetime, timezone
 import structlog
 
 from auramaur.strategy.classifier import ensure_category
-from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
+from auramaur.broker.execution_gateway import (
+    ExecutionGateway,
+    TradeIntent,
+    booked_as_position,
+)
 from auramaur.exchange.models import (
     Confidence,
     Market,
@@ -706,11 +710,21 @@ class EntailmentArbPillar:
             # unwound a live-pending A).
             log.error("entailment.leg_b_failed_single_leg", a=implier.id,
                       b=implied.id, status=res_b.status, error=res_b.reason)
-            await self._record_leg(implier, res_a.order, res_a.result, why, gap)
+            if booked_as_position(res_a):
+                await self._record_leg(implier, res_a.order, res_a.result, why, gap)
             return False
 
+        # A resting leg is NOT a position — see
+        # broker.execution_gateway.booked_as_position. _record_leg falls back
+        # to order.size/order.price when filled_size is 0, so both legs of an
+        # unfilled pair were written as full-size portfolio rows;
+        # resolution_tracker._settle_position prefers the portfolio row over
+        # cost_basis, so those phantoms settled and booked fabricated realized
+        # P&L. Worse on the failure path above: submit_paired had already
+        # cancelled the still-pending leg A.
         for market, res in ((implier, res_a), (implied, res_b)):
-            await self._record_leg(market, res.order, res.result, why, gap)
+            if booked_as_position(res):
+                await self._record_leg(market, res.order, res.result, why, gap)
 
         await self._db.execute(
             "UPDATE entailment_verdicts SET traded_at = datetime('now') "

@@ -37,7 +37,11 @@ import structlog
 
 from auramaur.nlp.prompts import format_untrusted_block
 from auramaur.strategy.classifier import blocked_category_hit, ensure_category
-from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
+from auramaur.broker.execution_gateway import (
+    ExecutionGateway,
+    TradeIntent,
+    booked_as_position,
+)
 from auramaur.exchange.models import (
     Confidence,
     Market,
@@ -797,7 +801,10 @@ class ResolutionLensPillar:
         if res.status not in ("filled", "paper", "partial", "pending"):
             log.warning("lens.order_rejected", market_id=m.id, status=res.status)
             return False
-        await self._record_position(signal, m, res.order, res.result)
+        # A resting order is not a position — see
+        # broker.execution_gateway.booked_as_position.
+        if booked_as_position(res):
+            await self._record_position(signal, m, res.order, res.result)
         log.info("lens.entered", market_id=m.id, fair=fair, market=m.outcome_yes_price,
                  gap_score=score, paper=res.result.is_paper)
         return True

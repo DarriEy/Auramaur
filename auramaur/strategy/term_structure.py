@@ -46,7 +46,11 @@ import structlog
 
 from auramaur.strategy.protocols import ExecutionMode
 
-from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
+from auramaur.broker.execution_gateway import (
+    ExecutionGateway,
+    TradeIntent,
+    booked_as_position,
+)
 from auramaur.broker.router import SmartOrderRouter
 from auramaur.experiments.strategies.term_structure import (
     TermStructureCandidate,
@@ -995,7 +999,12 @@ class TermStructurePillar:
             log.info("term_structure.order_rejected", market_id=market.id,
                      status=res.status, error=res.reason)
             return False
-        await self._record_position(signal, market, res.order, res.result)
+        # A resting order is not a position — see
+        # broker.execution_gateway.booked_as_position. Ladder strikes are
+        # entered maker-side and long-dated, so "pending" is the common
+        # outcome; the portfolio row is materialized from the confirmed fill.
+        if booked_as_position(res):
+            await self._record_position(signal, market, res.order, res.result)
         log.info("term_structure.entered", market_id=market.id,
                  token=res.order.token.value, price=res.order.price,
                  size=res.order.size, model_prob=round(prob_yes, 2),

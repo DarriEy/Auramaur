@@ -42,7 +42,11 @@ import structlog
 
 from auramaur.strategy.protocols import ExecutionMode
 
-from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
+from auramaur.broker.execution_gateway import (
+    ExecutionGateway,
+    TradeIntent,
+    booked_as_position,
+)
 from auramaur.exchange.models import Confidence, Market, OrderSide, Signal
 from auramaur.nlp.prompts import format_untrusted_block
 from auramaur.experiments.strategies.agent_trader import (
@@ -687,7 +691,14 @@ class AgentTraderPillar:
                      market_id=market.id, status=res.status, error=res.reason)
             return False
 
-        await self._record_position(signal, market, res.order, res.result)
+        # A resting order is deliberately NOT recorded here — see
+        # broker.execution_gateway.booked_as_position. Gamma's reported price
+        # often sits below the ask, so prepare_order builds a non-marketable
+        # BUY and the paper trader defers it; writing the row anyway corrupted
+        # the very per-model P&L comparison this pillar's intelligence-cap A/B
+        # exists to measure.
+        if booked_as_position(res):
+            await self._record_position(signal, market, res.order, res.result)
         await self._db.execute(
             """INSERT INTO agent_trader_theses
                (model_alias, cell, market_id, question, token, prob,

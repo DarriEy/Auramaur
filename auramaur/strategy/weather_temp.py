@@ -15,7 +15,11 @@ from datetime import datetime, timezone
 
 import structlog
 
-from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
+from auramaur.broker.execution_gateway import (
+    ExecutionGateway,
+    TradeIntent,
+    booked_as_position,
+)
 from auramaur.experiments.strategies.weather_temp import (
     WeatherTempInputs,
     WeatherTempRejection,
@@ -146,7 +150,10 @@ class WeatherTempPillar:
         if res.status not in ("filled", "paper", "partial", "pending"):
             log.warning("weather_temp.order_rejected", market_id=market.id, status=res.status)
             return False
-        await self._record_position(signal, market, res.order, res.result)
+        # A resting order is not a position — see
+        # broker.execution_gateway.booked_as_position.
+        if booked_as_position(res):
+            await self._record_position(signal, market, res.order, res.result)
         log.info("weather_temp.entered", market_id=market.id, side=side.value,
                  model_p=round(model_p, 3), market_p=round(market_p, 3), paper=res.result.is_paper)
         return True

@@ -32,7 +32,11 @@ from datetime import datetime, timezone
 
 import structlog
 
-from auramaur.broker.execution_gateway import ExecutionGateway, TradeIntent
+from auramaur.broker.execution_gateway import (
+    ExecutionGateway,
+    TradeIntent,
+    booked_as_position,
+)
 from auramaur.experiments.strategies.cross_venue_arb import paired_arb_proposal
 from auramaur.exchange.models import (
     Confidence, Market, Order, OrderSide, OrderType, Signal,
@@ -395,7 +399,15 @@ class CrossVenueArbPillar:
         if res_b.status not in ok_statuses:
             log.error("cross_venue.leg_b_failed_single_leg", a=a.id, b=b.id,
                       status=res_b.status)
-            await self._record_leg(a, res_a.order, res_a.result, why)
+            # Only a leg that actually EXECUTED gets a record — see
+            # broker.execution_gateway.booked_as_position. Unlike
+            # entailment_arb's twin of this path, _record_leg here writes only
+            # a `signals` row (no portfolio row), so an unguarded call
+            # fabricated a traded-leg signal rather than a phantom holding —
+            # still a false record of an arb this pillar never held, and the
+            # row `_already_traded` and the attribution views read.
+            if booked_as_position(res_a):
+                await self._record_leg(a, res_a.order, res_a.result, why)
             # Leg A is now NAKED directional exposure — the opposite of what
             # this pillar exists to hold. Unwind it immediately through the
             # gateway exit contract rather than leaving it resting with no
@@ -407,7 +419,8 @@ class CrossVenueArbPillar:
             return False
 
         for market, res in ((a, res_a), (b, res_b)):
-            await self._record_leg(market, res.order, res.result, why)
+            if booked_as_position(res):
+                await self._record_leg(market, res.order, res.result, why)
         await self._db.execute(
             "UPDATE cross_venue_verdicts SET traded_at = datetime('now') "
             "WHERE poly_id = ? AND kalshi_id = ?", (a.id, b.id))
