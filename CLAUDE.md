@@ -13,6 +13,19 @@
      order method.
    - Prediction-market exits use the gateway exit contract. The sole
      off-gateway exception is the declared IBKR equity path.
+   - **Cancels** use `ExecutionGateway.cancel_resting()`. It covers the other
+     end of an order's lifecycle: strategy pillars must not call an exchange's
+     raw `cancel_order` any more than its raw `place_order`. Bot-level
+     orchestration (shutdown sweep, order-monitor TTL, arb rollback) is
+     outside the pillar perimeter and still cancels directly.
+   - **The cancel path is deliberately UNGATED, and must stay that way.** It
+     carries none of `submit()`'s risk checks and — the part that matters —
+     **no kill-switch check**. A cancel reduces exposure, and arming the kill
+     switch RETIRES live exposure by cancelling resting orders (#408); a
+     blockable cancel would therefore trap the operator inside the exposure the
+     emergency stop exists to shed. `cancel_resting` provides routing, paper
+     interception, terminal-state bookkeeping, audit logging and exception
+     containment. It can never return "blocked".
 4. **Never hardcode API keys.** All secrets come from environment variables.
 5. **Never read `.env` files.** They contain secrets. Use `.env.example` for reference.
 6. **Never force-push to main.**
@@ -21,9 +34,10 @@
 When making git commits, use `Assisted-by: Claude (Anthropic)` in the commit message body instead of `Co-authored-by`. The human author should always be the sole git author of record.
 
 ## Architecture
-- Prediction-market placements flow through `auramaur/broker/execution_gateway.py`;
-  its methods delegate to the appropriate exchange adapter. Strategy pillars
-  must not call raw exchange order methods.
+- Prediction-market placements AND cancels flow through
+  `auramaur/broker/execution_gateway.py`; its methods delegate to the
+  appropriate exchange adapter. Strategy pillars must not call raw exchange
+  order methods — neither `place_order` nor `cancel_order`.
 - Paper trading interception happens in `auramaur/exchange/paper.py`.
 - `auramaur/risk/manager.py` is the approval authority for directional entries.
   Structural strategies use their declared, test-enforced gateway contracts;

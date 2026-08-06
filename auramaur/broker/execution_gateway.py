@@ -17,6 +17,11 @@ evaluation stays with the caller — the caller passes the already risk-approved
 pair (the arb pillars): it builds BOTH orders before placing EITHER, places A
 then B, and unwinds a live-pending A if B fails — preserving the atomicity a
 per-leg ``submit`` could not.
+
+``cancel_resting`` closes the other half of a resting order's lifecycle. It is
+a ROUTING AND AUDIT contract, not a gate: unlike a placement, a cancel reduces
+exposure, so it carries none of ``submit``'s risk checks and cannot refuse.
+See its docstring for why the kill switch must never reach it.
 """
 
 from __future__ import annotations
@@ -78,6 +83,29 @@ class ExecutionResult:
     result: OrderResult | None = None
     fill: Fill | None = None
     reason: str = ""
+
+
+@dataclass
+class CancelResult:
+    """The outcome of a gateway cancel. Never an exception, never a refusal.
+
+    ``status`` is one of:
+
+    ``cancelled``  the venue acknowledged the cancel.
+    ``paper``      a paper order — intercepted, never sent to a venue client.
+    ``rejected``   the venue declined (returns False, e.g. already matched).
+    ``failed``     the venue call raised; the exception was contained here.
+    ``skipped``    no usable order id was supplied — nothing to cancel.
+    """
+
+    order_id: str
+    status: Literal["cancelled", "paper", "rejected", "failed", "skipped"]
+    reason: str = ""
+
+    @property
+    def ok(self) -> bool:
+        """True when the order is no longer resting because of this call."""
+        return self.status in ("cancelled", "paper")
 
 
 class ExecutionGateway:
@@ -472,12 +500,135 @@ class ExecutionGateway:
             # cancelled — that's the genuine single-leg the caller logs).
             if (res_a.result is not None and res_a.result.status == "pending"
                     and not res_a.result.is_paper):
-                try:
-                    await exchange_a.cancel_order(res_a.result.order_id)
-                except Exception as e:  # noqa: BLE001 — best-effort unwind
-                    log.warning("gateway.paired_leg_a_cancel_failed",
-                                order_id=res_a.result.order_id, error=str(e))
+                # Through the gateway's own cancel contract: same best-effort
+                # semantics as the hand-rolled try/except this replaced (the
+                # unwind can fail and the pair still returns), plus the trades
+                # mirror now goes terminal instead of lingering 'pending'.
+                await self.cancel_resting(
+                    res_a.result.order_id, exchange=exchange_a,
+                    exchange_name=exchange_name_a,
+                    is_paper=res_a.result.is_paper,
+                    source=a.signal.strategy_source or "",
+                    reason="paired_leg_a_unwind",
+                )
         return res_a, res_b
+
+    async def cancel_resting(
+        self,
+        order_id: str,
+        *,
+        exchange: ExchangeClient | None = None,
+        exchange_name: str | None = None,
+        is_paper: bool = False,
+        source: str = "",
+        reason: str = "",
+    ) -> CancelResult:
+        """Cancel a resting order. The gateway's cancel contract.
+
+        CLAUDE.md rule 3 makes the gateway the single mechanical path for an
+        order's lifecycle, but until this existed only PLACEMENT had a contract:
+        every cancel in the codebase — including the market maker's three, and
+        the gateway's own paired unwind — reached past the choke point straight
+        to ``ExchangeClient.cancel_order``. The rule asserted an invariant its
+        own enforcer violated.
+
+        THIS IS A ROUTING AND AUDIT CONTRACT, NOT A GATE. It cannot return
+        "blocked" and it has no condition that refuses. A placement adds
+        exposure and is therefore gated fifteen ways by ``RiskManager``; a
+        cancel REMOVES exposure, so every one of those checks is not merely
+        unnecessary here but backwards.
+
+        *** DO NOT ADD A KILL-SWITCH CHECK BELOW (noted 2026-08-06). ***
+        This is the specific mistake to avoid, and it looks helpful. #408 made
+        arming the kill switch RETIRE live exposure by cancelling resting
+        orders (``AuramaurBot._cancel_resting_live_orders``). A cancel path the
+        kill switch could block would therefore trap the operator inside the
+        exposure the emergency stop exists to shed — the emergency stop would
+        become an exposure lock. The kill switch belongs on ``place_order``,
+        where it already is, and nowhere on this path.
+
+        What the contract DOES provide:
+
+        * **Paper interception.** A paper order never reaches a venue client.
+          Quoting runs paper orders through the LIVE client object (paper-ness
+          is per-order ``dry_run``, not a separate adapter), so this is a real
+          boundary, not a formality.
+        * **Terminal-state bookkeeping.** The trades mirror goes 'cancelled'
+          rather than lingering 'pending' forever — the same repair
+          ``_cancel_resting_live_orders`` and the order monitor's TTL sweep
+          each hand-rolled (#94).
+        * **A uniform result type** and one greppable audit event.
+        * **Exception containment.** A venue error is REPORTED, never raised:
+          these run inside a quoting loop, and callers already treated cancels
+          as best-effort.
+
+        ``exchange``/``exchange_name`` default to the gateway's own, exactly as
+        ``submit`` resolves them; a cross-venue caller passes its own the way
+        ``submit_exit`` and ``submit_paired`` do.
+        """
+        client = exchange if exchange is not None else self.exchange
+        venue = exchange_name or self.exchange_name
+        oid = str(order_id or "").strip()
+        if not oid:
+            return CancelResult(order_id="", status="skipped", reason="no order id")
+
+        # Paper-ness is an OR, never an override: an explicit flag intercepts,
+        # and a PAPER-shaped id intercepts on its own even if a caller forgot
+        # (or wrongly computed) the flag. The failure mode being designed out —
+        # a paper order id sent to the live venue — is not worth trusting one
+        # argument for.
+        if is_paper or oid.upper().startswith("PAPER"):
+            await self._mark_cancelled(oid)
+            log.debug("gateway.cancel", order_id=oid, exchange=venue,
+                      status="paper", strategy_source=source, cancel_reason=reason)
+            return CancelResult(order_id=oid, status="paper", reason="paper order")
+
+        try:
+            acknowledged = bool(await client.cancel_order(oid))
+        except Exception as e:  # noqa: BLE001 — reported, never raised at a caller
+            log.warning("gateway.cancel", order_id=oid, exchange=venue,
+                        status="failed", strategy_source=source,
+                        cancel_reason=reason, error=str(e))
+            return CancelResult(order_id=oid, status="failed", reason=str(e))
+
+        if not acknowledged:
+            # The venue declined (already matched, unknown id). Deliberately no
+            # terminal write: the order may still be live, and the order monitor
+            # resolves it on the next status poll.
+            log.warning("gateway.cancel", order_id=oid, exchange=venue,
+                        status="rejected", strategy_source=source,
+                        cancel_reason=reason)
+            return CancelResult(order_id=oid, status="rejected",
+                                reason="venue declined the cancel")
+
+        await self._mark_cancelled(oid)
+        log.info("gateway.cancel", order_id=oid, exchange=venue,
+                 status="cancelled", strategy_source=source, cancel_reason=reason)
+        return CancelResult(order_id=oid, status="cancelled")
+
+    async def _mark_cancelled(self, order_id: str) -> None:
+        """Drive the trades mirror to a terminal state for a cancelled order.
+
+        Same repair as ``AuramaurBot._cancel_resting_live_orders`` and the order
+        monitor's TTL sweep: without it the row stays 'pending' forever even
+        though the collateral was released (#94). Scoped to 'pending' rows —
+        those two callers only ever hand it resting-order ids, so the guard is a
+        no-op for them, while here it makes a mis-supplied id incapable of
+        rewriting a settled row.
+
+        Best-effort by construction: this runs in a quoting loop, and a database
+        fault must not surface as a cancel failure when the venue already
+        acknowledged one.
+        """
+        try:
+            await self._serialized_write(
+                "UPDATE trades SET status = 'cancelled' "
+                "WHERE order_id = ? AND status = 'pending'",
+                (order_id,),
+            )
+        except Exception as e:  # noqa: BLE001 — bookkeeping, never the cancel
+            log.debug("gateway.cancel_bookkeeping_failed",
+                      order_id=order_id, error=str(e))
 
     async def _serialized_write(self, sql: str, params: tuple = ()) -> None:
         """Land gateway bookkeeping without bleeding across shared writers."""
