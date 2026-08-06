@@ -213,14 +213,24 @@ class RiskManager:
                 strategy=signal.strategy_source, divergence=extreme_div.value,
                 threshold=rc.extreme_divergence_threshold,
                 model_prob=signal.claude_prob, market_prob=signal.market_prob)
-        is_paper_entry = (
-            not self.settings.is_live
-            or self.live_entries_blocked  # operational preflight BLOCK
+        # Every RESTRICTION that routes this entry to paper, as one value. This
+        # must be a single expression used both to scope the checks below and to
+        # populate RiskDecision.force_paper: when the two diverged, arming a
+        # protective latch (preflight BLOCK, extreme divergence) skipped the
+        # live-only checks while the entry still went out with real money —
+        # turning a guard into a permission.
+        paper_forced = (
+            self.live_entries_blocked  # operational preflight BLOCK
             or self._paper_forced_strategy(signal.strategy_source)
             or cell.force_paper
             or force_paper  # caller-declared, restriction-only
             or extreme_div.force_paper
         )
+        # The global gate is deliberately NOT part of `paper_forced`: it is the
+        # gateway's own precondition (is_live = settings.is_live and not
+        # intent.force_paper), so folding it in would say "this entry was
+        # restricted" about a bot that simply is not live.
+        is_paper_entry = not self.settings.is_live or paper_forced
 
         # Correlation, MODE-SCOPED. A paper entry adds NO real exposure, so it must
         # only correlate against the PAPER book — counting the live book would let
@@ -485,7 +495,7 @@ class RiskManager:
             # Report the effective mode, not just the ladder's view — a
             # caller-declared paper entry must come back marked paper or the
             # pillar would submit it live after the gate judged it as paper.
-            force_paper=cell.force_paper or force_paper,
+            force_paper=paper_forced,
             graduation_status=cell.status,
         )
 

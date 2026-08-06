@@ -269,12 +269,23 @@ class KrakenSpotClient:
         #    any quote (USDC/USDT/EUR/…), not just USD-quoted pairs.
         cap = max_usd if max_usd is not None else self._settings.kraken.max_order_usd
         est_price = price or await self.get_price(pair)
-        if est_price:
-            notional = await self.usd_notional(pair, volume, est_price) or (volume * est_price)
-            if notional > cap:
-                return OrderResult(order_id="BLOCKED", market_id=pair, status="rejected",
-                                   is_paper=True,
-                                   error_message=f"order ${notional:.2f} exceeds cap ${cap:.2f}")
+        # Fail CLOSED when the pair cannot be priced. get_price returns None
+        # whenever _public("Ticker") yields nothing — a 5xx, a rate-limit
+        # response or a Cloudflare blip, since _public logs and returns {}
+        # rather than raising. Gating the cap check behind `if est_price:` meant
+        # a transient ticker failure removed the ceiling entirely and the order
+        # went to AddOrder unbounded. Every autonomous caller passes price=None,
+        # so the probe is the only source of the number this cap needs.
+        if not est_price:
+            return OrderResult(order_id="BLOCKED", market_id=pair, status="rejected",
+                               is_paper=True,
+                               error_message=f"cannot price {pair} to verify the "
+                                             f"${cap:.2f} per-order cap; refusing")
+        notional = await self.usd_notional(pair, volume, est_price) or (volume * est_price)
+        if notional > cap:
+            return OrderResult(order_id="BLOCKED", market_id=pair, status="rejected",
+                               is_paper=True,
+                               error_message=f"order ${notional:.2f} exceeds cap ${cap:.2f}")
 
         # 4. Three-gate live decision.  ``dry_run=False`` opens only the
         # per-order gate; it must never override either global live gate.

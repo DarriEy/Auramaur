@@ -535,3 +535,101 @@ def test_llm_exit_holds_when_flat_and_view_missing():
         assert await p._llm_exit_reason("X", gain_pct=1.0, kcfg=_llm_kcfg(),
                                         peak_pct=1.0) is None
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# The exit prices itself ONCE.
+#
+# The adapter's per-order USD cap now fails CLOSED: a pair it cannot price is
+# refused rather than sent uncapped. That is right, but the failure it guards
+# against is TRANSIENT — _public logs and returns {} on a 5xx / rate-limit /
+# Cloudflare blip, so get_price returns None — and the exit is the one caller it
+# could hurt. Without price=, place_spot_order re-probes Ticker moments after
+# this loop's own successful probe, so a blip on that SECOND read would refuse a
+# stop-loss / take-profit / trailing-stop / orphan liquidation that the loop had
+# already priced. Passing the validated price also makes the exit cap (which is
+# handed max_usd with headroom precisely so it never binds) deterministic:
+# before, a >10% tick between the two probes could block a close outright.
+# ---------------------------------------------------------------------------
+
+from auramaur.exchange.kraken import KrakenSpotClient  # noqa: E402
+
+
+def test_exit_passes_the_price_the_loop_already_validated():
+    async def run():
+        kcfg = _kcfg()
+        p = _pillar(0.80, kcfg, base_amt=10.0)   # 1.00 -> 0.80 = stop_loss
+        p._momentum = AsyncMock(return_value=-1.0)
+
+        await p._directional()
+
+        _, kwargs = p._k.place_spot_order.call_args
+        # The adapter resolves `price or await get_price(pair)`, so handing it
+        # this number is what stops the redundant second probe.
+        assert kwargs["price"] == 0.80
+
+    asyncio.run(run())
+
+
+def test_exit_survives_a_ticker_blip_once_the_loop_has_priced_it():
+    """End-to-end through the REAL adapter gate: from the moment the loop has
+    priced the exit, every further Ticker read fails. The sell must still reach
+    AddOrder — a transient quote failure cannot veto a stop-loss."""
+    async def run():
+        kcfg = _kcfg()
+        settings = SimpleNamespace(kraken=kcfg, is_live=False,
+                                   kraken_api_key="k", kraken_api_secret="s")
+        k = KrakenSpotClient(settings)          # real place_spot_order, fake transport
+        k.get_free_balance = AsyncMock(return_value={"APE": 10.0, "USDC": 1000.0})
+        k.get_pair_quote = AsyncMock(return_value="USDC")
+        k._public = AsyncMock(return_value={
+            "APEUSDC": {"altname": "APEUSDC", "base": "APE", "ordermin": "1"},
+        })
+        k._private = AsyncMock(return_value={"error": [], "result": {"txid": ["TX1"]}})
+
+        # The blip begins exactly where the loop finishes pricing the exit, so
+        # ANY probe from here on is the redundant one — no call counting needed.
+        blipped = {"on": False}
+
+        async def _usd_notional(pair, vol, px=None):
+            blipped["on"] = True
+            return vol * (px or 0.80)
+
+        async def _get_price(pair):
+            return None if blipped["on"] else 0.80
+
+        k.usd_notional = AsyncMock(side_effect=_usd_notional)
+        k.get_price = AsyncMock(side_effect=_get_price)
+
+        p = KrakenPillar(settings, k, bot=None)
+        p._dir_long = {"APEUSDC": 1.00}
+        p._momentum = AsyncMock(return_value=-1.0)
+
+        with patch("auramaur.exchange.kraken.kill_switch_present", return_value=False):
+            await p._directional()
+
+        assert "AddOrder" in [c.args[0] for c in k._private.await_args_list]
+        assert "APEUSDC" not in p._dir_long   # closed, not vetoed by the blip
+
+    asyncio.run(run())
+
+
+def test_refused_exit_keeps_the_position_and_retries_next_cycle():
+    """A refusal is not a close. The crypto is still held, so the position stays
+    tracked (basis intact) and the sell is attempted again on the next cycle."""
+    async def run():
+        kcfg = _kcfg()
+        p = _pillar(0.80, kcfg, base_amt=10.0)
+        p._momentum = AsyncMock(return_value=-1.0)
+        p._k.place_spot_order = AsyncMock(return_value=SimpleNamespace(
+            order_id="BLOCKED", status="rejected",
+            error_message="cannot price APEUSDC to verify the $25.00 cap; refusing"))
+
+        await p._directional()
+        assert p._dir_long["APEUSDC"] == 1.00   # still held, at its real basis
+
+        await p._directional()
+        assert p._k.place_spot_order.await_count == 2   # retried, not dropped
+        assert p._dir_long["APEUSDC"] == 1.00
+
+    asyncio.run(run())
