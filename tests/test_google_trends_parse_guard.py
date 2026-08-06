@@ -57,7 +57,8 @@ _FEED = """<?xml version="1.0"?>
 async def test_normal_feed_still_parses(monkeypatch):
     _patch_body(monkeypatch, _FEED)
     items = await GoogleTrendsSource().fetch("alpha beta", limit=5)
-    assert isinstance(items, list)
+    assert len(items) == 1
+    assert "alpha" in items[0].title.lower()
 
 
 @pytest.mark.asyncio

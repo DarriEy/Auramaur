@@ -127,8 +127,17 @@ class Finding:
     detail: str
 
     def key(self) -> str:
-        """Line-independent identity, so unrelated edits don't churn baselines."""
-        return f"{self.file}::{self.dimension}::{self.detail}"
+        """Line-independent identity, so unrelated edits don't churn baselines.
+
+        The path is separator-normalized first. ``rglob`` yields
+        ``auramaur\\backtest`` on Windows and ``auramaur/backtest`` on POSIX,
+        but a baseline records one spelling, so a raw ``str(path)`` makes every
+        baselined key miss on the other platform — the whole baseline reported
+        as new, exit 1 — while a Linux CI job stays green and never sees it
+        (2026-08-06). Same normalization the ``_in`` path checks already apply.
+        """
+        rel = self.file.replace("\\", "/")
+        return f"{rel}::{self.dimension}::{self.detail}"
 
 
 def _root_name(node: ast.AST) -> str:
