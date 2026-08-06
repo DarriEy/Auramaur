@@ -479,13 +479,25 @@ class ExecutionGateway:
                                 reason=cap_b or "paired leg blocked by market cap"),
             )
 
-        await self._capture_decision(a, order_a)
-        await self._capture_decision(b, order_b)
+        # Keep the ids. Discarding them left order.decision_id unset, so the
+        # mark_fill block in _place_and_record never ran and EVERY paired-arb
+        # snapshot stayed filled=0 forever. With
+        # graduation.require_executable_fills true (the tracked YAML),
+        # _prospective_stats appends `AND d.filled = 1 AND d.fill_evidence IN
+        # (...)`, so cross_venue_arb and entailment_arb could never graduate
+        # paper->live on merit — while still burning the 14-day holdout clock
+        # and writing snapshots that looked like accumulating evidence.
+        # submit() at :136 plumbs these correctly; this path did not.
+        decision_id_a = await self._capture_decision(a, order_a)
+        decision_id_b = await self._capture_decision(b, order_b)
+        order_a.decision_id = decision_id_a
+        order_b.decision_id = decision_id_b
 
         res_a = await self._place_and_record(
             order_a, strategy_source=a.signal.strategy_source,
             signal_id=getattr(a.signal, "id", None),
-            exchange=exchange_a, exchange_name=exchange_name_a)
+            exchange=exchange_a, exchange_name=exchange_name_a,
+            decision_id=decision_id_a)
         if res_a.status not in _OK_STATUSES:
             # Leg A rejected — B is never placed, nothing to unwind.
             return res_a, ExecutionResult(status="skipped", reason="leg_a_not_ok")
@@ -493,7 +505,8 @@ class ExecutionGateway:
         res_b = await self._place_and_record(
             order_b, strategy_source=b.signal.strategy_source,
             signal_id=getattr(b.signal, "id", None),
-            exchange=exchange_b, exchange_name=exchange_name_b)
+            exchange=exchange_b, exchange_name=exchange_name_b,
+            decision_id=decision_id_b)
         if res_b.status not in _OK_STATUSES:
             # Leg risk: A is in, B failed. Cancel a live-pending A so we don't
             # sit on a naked directional leg (paper / already-filled A can't be

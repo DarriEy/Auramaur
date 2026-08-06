@@ -475,11 +475,26 @@ class IBKRETFPaperPillar:
             forecasts.append(Forecast(
                 float(row["probability"]), str(row["confidence"]),
                 None if outcome is None else int(outcome),
-                # The benchmark each forecast was scored against. Stored
-                # forecasts predate the benchmark column, so fall back to a
-                # coin -- which UNDERSTATES the edge and therefore keeps the
-                # gate shut rather than opening it by accident.
-                0.5))
+                # The benchmark each forecast was scored against. There is no
+                # benchmark column on ibkr_etf_forecasts yet, so this is None
+                # and clearance() treats these as unscoreable.
+                #
+                # It previously passed 0.5 on the reasoning that a coin
+                # "UNDERSTATES the edge and therefore keeps the gate shut".
+                # That is backwards. E[Brier] of a constant forecast r under
+                # base rate q is (r-q)^2 + q(1-q), so a coin benchmark is
+                # EASIER to beat than the instrument's own drift by exactly
+                # (0.5-q)^2 — +0.0036 at the ~0.56 five-session up-rate — and
+                # that constant was added to every forecast's brier_edge. A
+                # flat forecaster answering 0.56 on everything (zero
+                # information: it IS the up-rate) cleared the gate at ~400
+                # resolutions against a min of 100.
+                #
+                # Failing closed is the honest state until the benchmark is
+                # recorded per forecast from risk/ibkr_math.horizon_up_rate,
+                # which already computes exactly the right number and is
+                # currently written only into a different ledger.
+                None))
         return clearance(forecasts,
                          min_resolved=self._s.ibkr.etf_min_resolved_to_trade)
 

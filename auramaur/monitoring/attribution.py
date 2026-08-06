@@ -11,6 +11,17 @@ from auramaur.db.database import Database
 log = structlog.get_logger()
 
 
+# NOTE ON JOIN SCOPE
+# portfolio and cost_basis are BOTH keyed (market_id, is_paper, token). Every
+# join between them must match all three. Joining on market_id + is_paper alone
+# fans each row out per token side, so a market held on BOTH YES and NO
+# double-counts positions, exposure, unrealized and realized P&L — 4 positions
+# and $160 exposure where the truth is 2 and $80. That shape is structurally
+# normal for entailment_arb's both-or-nothing legs and for paired arbitrage.
+# cockpit.py:126 documents the same bug and fixes it there (found via the web
+# UI's duplicate-key warning); these queries were the siblings that did not get
+# the fix.
+
 class PerformanceAttributor:
     """Tracks per-category PnL and computes Kelly multipliers based on demonstrated edge."""
 
@@ -149,6 +160,7 @@ class PerformanceAttributor:
                LEFT JOIN markets m ON p.market_id = m.id
                LEFT JOIN cost_basis cb ON p.market_id = cb.market_id
                                        AND cb.is_paper = p.is_paper
+                                       AND cb.token = p.token
                WHERE p.is_paper = ? OR p.exchange != 'polymarket'
                GROUP BY cat
                ORDER BY exposure DESC""",
@@ -189,6 +201,7 @@ class PerformanceAttributor:
                FROM cost_basis cb
                LEFT JOIN portfolio p ON cb.market_id = p.market_id
                                      AND p.is_paper = cb.is_paper
+                                     AND p.token = cb.token
                LEFT JOIN markets m ON cb.market_id = m.id
                WHERE cb.is_paper = ? {resolved_exclusion}
                GROUP BY cat""",
@@ -272,6 +285,7 @@ class PerformanceAttributor:
                FROM portfolio p
                LEFT JOIN cost_basis cb ON p.market_id = cb.market_id
                                        AND cb.is_paper = p.is_paper
+                                       AND cb.token = p.token
                WHERE (p.is_paper = ? OR p.exchange != 'polymarket') AND p.size > 0
                GROUP BY venue""",
             (paper_flag,),
@@ -447,6 +461,7 @@ class PerformanceAttributor:
                     FROM portfolio p
                     LEFT JOIN cost_basis cb ON p.market_id = cb.market_id
                                             AND cb.is_paper = p.is_paper
+                                            AND cb.token = p.token
                     WHERE (p.is_paper = ? OR p.exchange != 'polymarket') AND p.size > 0
                 ) op
                 WHERE strat IS NOT NULL

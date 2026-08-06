@@ -146,8 +146,20 @@ async def gather_ledger_report(db, *, is_paper: bool, settings=None) -> dict:
     return {
         "is_paper": is_paper,
         "benchmark": risk_free_benchmark(
-            net_pnl=float((total["pnl"] if total else 0) or 0)
-            - float((total["fees"] if total else 0) or 0),
+            # pnl_ledger.pnl is ALREADY NET OF FEES — every writer books it that
+            # way: pnl.py:137 `(price - avg_cost) * size - fill.fee`,
+            # ledger.py:299 the same, kalshi_settlements:152 `payout - cost -
+            # fee`, instrument_booking:127 `pnl=-fee_usd, fees=0.0`. The `fees`
+            # column is the informational breakdown of what is already
+            # deducted, not a second charge.
+            #
+            # Subtracting it again double-counted fees in the one number this
+            # panel labels "net of fees": with SUM(pnl)=+$40 and SUM(fees)=$55
+            # the header printed net +$40.00 and, two lines down, "net of fees
+            # -$15.00 ... behind cash" in bold red. The true figure is +$40.
+            # readiness.py:579 states this convention correctly and explicitly;
+            # this consumer contradicted it.
+            net_pnl=float((total["pnl"] if total else 0) or 0),
             first_at=(span["first_at"] if span else None),
             last_at=(span["last_at"] if span else None),
             settings=settings,

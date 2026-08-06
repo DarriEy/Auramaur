@@ -726,11 +726,24 @@ class ResolutionTracker:
             # doesn't delete a live position for the same market (and vice versa).
             # When the caller settled a specific token, only that row goes: a
             # YES+NO pair (mergeable) settles leg by leg.
-            if token_scope is not None:
+            # Scope to the token actually settled, NOT to token_scope. They
+            # differ exactly when the caller passed token_scope=None: the SELECT
+            # above reads ONE row via fetchone, but this DELETE removed EVERY
+            # token row for the market. A market held on both YES and NO booked
+            # one leg's P&L and dropped the other outright — the winning side
+            # never settled and could never settle, because its portfolio row
+            # was gone while its cost_basis row survived at size > 0.
+            #
+            # The cost_basis UPDATE directly above already scopes by `token`,
+            # with a comment explaining precisely this. The DELETE did not.
+            # Using `token` here means an unscoped call settles one leg per
+            # pass and the next pass picks up the other via the cost_basis arm
+            # of check_resolutions' union.
+            if token:
                 await self._db.execute(
                     "DELETE FROM portfolio WHERE market_id = ? AND is_paper = ? "
                     "AND UPPER(token) = UPPER(?)",
-                    (market_id, is_paper_flag, token_scope),
+                    (market_id, is_paper_flag, token),
                 )
             else:
                 await self._db.execute(
