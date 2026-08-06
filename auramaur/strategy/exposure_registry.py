@@ -345,11 +345,18 @@ REGISTERED_CALLSITES = Counter(
          "prediction_paired"): 1,
         ("auramaur/bot_order_monitor.py", "_task_order_monitor", "cancel_order",
          "gateway_boundary"): 1,
-        ("auramaur/broker/execution_gateway.py", "submit_paired", "cancel_order",
+        # The gateway's paired unwind and the market maker's three quote cancels
+        # now go through the gateway's own cancel contract. The single remaining
+        # raw ``cancel_order`` on this side of the perimeter is the one INSIDE
+        # that contract — the choke point itself, which is where a raw venue
+        # call belongs.
+        ("auramaur/broker/execution_gateway.py", "cancel_resting", "cancel_order",
+         "gateway_boundary"): 1,
+        ("auramaur/broker/execution_gateway.py", "submit_paired", "cancel_resting",
          "prediction_paired"): 1,
-        ("auramaur/strategy/market_maker.py", "_cancel_quote", "cancel_order",
+        ("auramaur/strategy/market_maker.py", "_cancel_quote", "cancel_resting",
          "prediction_quoting"): 2,
-        ("auramaur/strategy/market_maker.py", "_place_two_sided", "cancel_order",
+        ("auramaur/strategy/market_maker.py", "_place_two_sided", "cancel_resting",
          "prediction_quoting"): 1,
         (
             "auramaur/bot_order_monitor.py",
@@ -573,6 +580,11 @@ SENSITIVE_METHODS = frozenset(
         # client, not through the gateway — outside a perimeter this registry
         # claims to close, and left `prediction_quoting`'s declared
         # "cancel/requote" exit path unbacked by any registered callsite.
+        #
+        # Both verbs are pinned: `cancel_resting` is the gateway contract every
+        # pillar must use, `cancel_order` the raw venue call it wraps. Tracking
+        # only the contract would let a raw cancel reappear unregistered.
+        "cancel_resting",
         "cancel_order",
     }
 )

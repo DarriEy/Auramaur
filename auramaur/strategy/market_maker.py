@@ -416,6 +416,19 @@ class MarketMaker:
             spread_bps=proposal.spread_bps,
         ), None
 
+    def _ensure_gateway(self):
+        """The ExecutionGateway this pillar routes BOTH halves of an order
+        lifecycle through — placement via ``place_quote_pair``, cancellation via
+        ``cancel_resting``. Lazily built if not injected so existing
+        callers/tests keep working.
+        """
+        if self._gateway is None:
+            from auramaur.broker.execution_gateway import ExecutionGateway
+            self._gateway = ExecutionGateway(
+                router=None, exchange=self._exchange, exchange_name="polymarket",
+                settings=self._settings, db=self._db, pnl_tracker=None)
+        return self._gateway
+
     async def _place_two_sided(self, quote: MMQuote, is_live: bool) -> dict:
         """Place both legs of a two-sided quote.
 
@@ -469,12 +482,7 @@ class MarketMaker:
         # Place both legs through the gateway's two-sided adapter (bid then ask,
         # not both-or-nothing — the MM owns one-legged cleanup below). The gateway
         # is the single placement choke point; no direct exchange.place_order here.
-        if self._gateway is None:
-            from auramaur.broker.execution_gateway import ExecutionGateway
-            self._gateway = ExecutionGateway(
-                router=None, exchange=self._exchange, exchange_name="polymarket",
-                settings=self._settings, db=self._db, pnl_tracker=None)
-        bid_result, ask_result = await self._gateway.place_quote_pair(
+        bid_result, ask_result = await self._ensure_gateway().place_quote_pair(
             bid_order, ask_order, exchange=self._exchange)
 
         # Track order IDs
@@ -516,18 +524,18 @@ class MarketMaker:
         if bid_live != ask_live:
             survivor_id = bid_result.order_id if bid_live else ask_result.order_id
             survivor_status = bid_result.status if bid_live else ask_result.status
-            if (
-                survivor_status not in ("paper", "filled")
-                and survivor_id
-                and not str(survivor_id).startswith("PAPER")
-            ):
-                try:
-                    await self._exchange.cancel_order(survivor_id)
-                except Exception as e:
-                    log.debug(
-                        "market_maker.partial_leg_cancel_error",
-                        order_id=survivor_id, error=str(e),
-                    )
+            survivor_paper = bid_result.is_paper if bid_live else ask_result.is_paper
+            if survivor_status not in ("paper", "filled") and survivor_id:
+                # The gateway owns the cancel: it intercepts paper ids (the
+                # explicit PAPER-prefix test this used to make is now its job,
+                # not the pillar's), contains any venue error, and writes the
+                # trades row terminal. Still best-effort — the periodic
+                # order-monitor reconcile backstops a cancel that fails.
+                await self._ensure_gateway().cancel_resting(
+                    survivor_id, exchange=self._exchange,
+                    exchange_name="polymarket", is_paper=survivor_paper,
+                    source="market_maker", reason="partial_quote_survivor",
+                )
             self._pending_orders.pop(bid_result.order_id, None)
             self._pending_orders.pop(ask_result.order_id, None)
             log.warning(
@@ -592,20 +600,32 @@ class MarketMaker:
         return cancelled
 
     async def _cancel_quote(self, quote) -> None:
-        """Cancel both legs of a quote and drop its pending-order tracking."""
-        # Cancel bid leg
-        if quote.bid_order_id and not quote.bid_order_id.startswith("PAPER"):
-            try:
-                await self._exchange.cancel_order(quote.bid_order_id)
-            except Exception as e:
-                log.debug("market_maker.cancel_bid_error", order_id=quote.bid_order_id, error=str(e))
+        """Cancel both legs of a quote and drop its pending-order tracking.
 
-        # Cancel ask leg
-        if quote.ask_order_id and not quote.ask_order_id.startswith("PAPER"):
-            try:
-                await self._exchange.cancel_order(quote.ask_order_id)
-            except Exception as e:
-                log.debug("market_maker.cancel_ask_error", order_id=quote.ask_order_id, error=str(e))
+        Both legs route through ``ExecutionGateway.cancel_resting`` — the pillar
+        does not touch ``exchange.cancel_order``, exactly as it does not touch
+        ``exchange.place_order``. The gateway intercepts paper ids, so the
+        PAPER-prefix test that used to live here is gone: interception is the
+        choke point's job, and duplicating it in the pillar is how the two
+        drift apart. Errors are contained by the gateway; this stays
+        best-effort, and the quoting loop never sees an exception from a cancel.
+        """
+        gateway = self._ensure_gateway()
+        # Two explicit legs, not a loop: the exposure registry pins this file's
+        # sensitive callsites as an exact multiset, and a quote is genuinely two
+        # orders.
+        if quote.bid_order_id:
+            await gateway.cancel_resting(
+                quote.bid_order_id, exchange=self._exchange,
+                exchange_name="polymarket", source="market_maker",
+                reason="quote_refresh_bid",
+            )
+        if quote.ask_order_id:
+            await gateway.cancel_resting(
+                quote.ask_order_id, exchange=self._exchange,
+                exchange_name="polymarket", source="market_maker",
+                reason="quote_refresh_ask",
+            )
 
         # Clean up pending order tracking
         self._pending_orders.pop(quote.bid_order_id, None)

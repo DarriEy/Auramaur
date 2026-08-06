@@ -23,12 +23,19 @@ from auramaur.strategy.registry import (
 
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-# Placement primitives an application module must never call directly when its
-# declared mode routes through the gateway. Kept in sync with the exposure
-# registry's perimeter so a new adapter verb is covered in one place.
-_PLACEMENT_METHODS = frozenset({
+# Raw order-lifecycle primitives an application module must never call directly
+# when its declared mode routes through the gateway. Kept in sync with the
+# exposure registry's perimeter so a new adapter verb is covered in one place.
+#
+# cancel_order is here as of 2026-08-06. It was absent because the gateway
+# exposed no cancel contract, so a pillar had nowhere to route one — the market
+# maker's three cancels went straight to the live venue client and this guard
+# had to stay silent about it. ExecutionGateway.cancel_resting is that contract,
+# so the omission is now a real check again: an order's lifecycle has two ends,
+# and the choke point owns both.
+_RAW_ORDER_METHODS = frozenset({
     "place_order", "place_spot_order", "place_share_order", "_place_cash_order",
-    "place", "placeOrder",
+    "place", "placeOrder", "cancel_order",
 })
 
 
@@ -52,21 +59,22 @@ def test_registered_pillar_declares_matching_execution_contract(spec):
 
 
 @pytest.mark.parametrize("spec", STRATEGY_SPECS, ids=lambda spec: spec.key)
-def test_gateway_pillars_do_not_place_orders_directly(spec):
+def test_gateway_pillars_do_not_place_or_cancel_orders_directly(spec):
     if spec.execution_mode not in NO_DIRECT_PLACE_MODES:
         pytest.skip(f"{spec.key} has declared {spec.execution_mode.value} execution")
-    # Match EVERY placement primitive, not just the literal `.place_order(`.
+    # Match EVERY order primitive, not just the literal `.place_order(`.
     # Kraken places via `place_spot_order`, IBKR equities via
     # `place_share_order`/`_place_cash_order`, and the multiasset bridge via
     # `.place(` — none of which the old substring saw, so a pillar could
-    # bypass the gateway and still pass this guard.
+    # bypass the gateway and still pass this guard. `cancel_order` closes the
+    # other end of the lifecycle now that `cancel_resting` exists to route it.
     src = (_ROOT / (spec.module.replace(".", "/") + ".py")).read_text()
     tree = ast.parse(src)
     offenders = sorted({
         node.func.attr
         for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-        and node.func.attr in _PLACEMENT_METHODS
+        and node.func.attr in _RAW_ORDER_METHODS
     })
     assert not offenders, (
         f"{spec.key} ({spec.execution_mode.value}) must use its declared "

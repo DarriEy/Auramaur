@@ -27,7 +27,8 @@ Plus the mechanically checkable subset of CLAUDE.md's "Architecture" rules,
 which were prose and therefore unenforced:
 
   strategy-raw-order  "Strategy pillars must not call raw exchange order
-                      methods" — placements must route via ExecutionGateway.
+                      methods" — placements AND cancels must route via
+                      ExecutionGateway.
   raw-transaction     "never raw BEGIN/COMMIT through execute()".
   await-in-txn-span   "never a network/LLM await inside a span" — holding the
                       write lock across a network call.
@@ -91,12 +92,16 @@ _MONEY_PATHS = ("broker/", "treasury/", "exchange/", "risk/")
 _RAW_ORDER_METHODS = {
     "place_order", "create_order", "submit_order", "post_order", "send_order",
     "buy", "sell", "market_order", "limit_order",
+    # cancel_order was excluded until 2026-08-06 for a reason that has since
+    # been fixed: ExecutionGateway exposed no cancel contract and called
+    # exchange.cancel_order() directly itself, so a strategy had nowhere else
+    # to route and this gate could only have produced findings nobody could
+    # act on. ExecutionGateway.cancel_resting is that contract now, and the
+    # market maker's three cancels route through it, so the rule is checkable.
+    "cancel_order",
 }
-# cancel_order is deliberately absent: ExecutionGateway exposes no cancel
-# contract and calls exchange.cancel_order() directly itself (line 476), so a
-# strategy has nowhere else to route. That is a gap in the gateway's surface,
-# not a strategy violation — see the PR discussion rather than this gate.
-_GATEWAY_OK = {"submit", "submit_paired", "submit_exit", "record_external_fill"}
+_GATEWAY_OK = {"submit", "submit_paired", "submit_exit", "record_external_fill",
+               "cancel_resting"}
 
 # "never raw BEGIN/COMMIT through execute()"
 _RAW_TXN_SQL = ("begin", "commit", "rollback", "savepoint")
