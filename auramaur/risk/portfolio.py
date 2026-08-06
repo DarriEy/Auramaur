@@ -20,7 +20,9 @@ log = structlog.get_logger()
 
 # Mirrors ExecutionConfig.exit_decision_retention_days; used when a caller's
 # settings object cannot supply a usable value (tests, degraded config).
-_DEFAULT_RETENTION_DAYS = 14
+# Keep in lockstep with that field — a degraded config must not silently
+# retain longer than the tracked default (test_exit_policy pins the pair).
+_DEFAULT_RETENTION_DAYS = 3
 
 
 class PortfolioTracker:
