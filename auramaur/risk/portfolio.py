@@ -18,6 +18,10 @@ from auramaur.strategy.signals import taker_fee_rate
 
 log = structlog.get_logger()
 
+# Mirrors ExecutionConfig.exit_decision_retention_days; used when a caller's
+# settings object cannot supply a usable value (tests, degraded config).
+_DEFAULT_RETENTION_DAYS = 14
+
 
 class PortfolioTracker:
     """Reads and writes portfolio / daily-stats tables to provide exposure
@@ -444,7 +448,8 @@ class PortfolioTracker:
         peak_prices = await self._get_peak_prices()
         await self._prune_orphan_peaks()
         prices_updated = False
-        decisions_updated = False
+        # Accumulated, never written inside the loop: see _record_exit_decisions.
+        decisions: list[tuple] = []
 
         unmarkable: list[str] = []
         for pos in positions:
@@ -534,9 +539,9 @@ class PortfolioTracker:
                 activation_pct=settings.execution.trailing_stop_activation_pct,
                 giveback_fraction=settings.execution.trailing_stop_giveback_fraction,
             ):
-                decisions_updated |= await self._record_exit_decision(
+                decisions.append(self._exit_decision_row(
                     pos, mode_flag, ExitReason.TRAILING_STOP.value,
-                    pnl_pct, pnl_pct, peak_pnl_pct, None, 0.0)
+                    pnl_pct, pnl_pct, peak_pnl_pct, None, 0.0))
                 log.info(
                     "exit.trailing_stop",
                     market_id=pos.market_id,
@@ -553,7 +558,13 @@ class PortfolioTracker:
                 now = datetime.now(timezone.utc)
                 entry_dt = await self._current_position_entry_time(pos, mode_flag)
                 if entry_dt is None:
-                    entry_dt = now  # unknown age fails safe as newly entered
+                    # Last resort only — fills, then trades, are consulted
+                    # first. This branch pins fraction_remaining at exactly 1.0
+                    # on EVERY tick, so the target is frozen in its widest band
+                    # and the near-expiry band is permanently unreachable. It
+                    # is safe (wide, never premature) but it is not free, which
+                    # is why the trades fallback exists.
+                    entry_dt = now
 
                 total_lifetime = (end_dt - entry_dt).total_seconds()
                 elapsed = (now - entry_dt).total_seconds()
@@ -595,10 +606,10 @@ class PortfolioTracker:
                 estimated_fees = economics.estimated_fees
 
             if net_pnl_pct >= profit_target:
-                decisions_updated |= await self._record_exit_decision(
+                decisions.append(self._exit_decision_row(
                     pos, mode_flag, ExitReason.PROFIT_TARGET.value,
                     pnl_pct, net_pnl_pct, peak_pnl_pct, profit_target,
-                    estimated_fees)
+                    estimated_fees))
                 log.info("exit.profit_target", market_id=pos.market_id,
                          gross_pnl_pct=round(pnl_pct, 2),
                          net_pnl_pct=round(net_pnl_pct, 2),
@@ -607,9 +618,9 @@ class PortfolioTracker:
                 exits.append((pos, ExitReason.PROFIT_TARGET))
                 continue
 
-            decisions_updated |= await self._record_exit_decision(
+            decisions.append(self._exit_decision_row(
                 pos, mode_flag, "HOLD", pnl_pct, net_pnl_pct, peak_pnl_pct,
-                profit_target, estimated_fees)
+                profit_target, estimated_fees))
 
             # Edge-erosion / capital-efficiency / time-decay assume binary 0-1
             # resolution semantics (price converges to $0 or $1). They're
@@ -690,8 +701,17 @@ class PortfolioTracker:
         if unmarkable:
             await self._warn_unmarkable(exchange, unmarkable)
 
-        if prices_updated or decisions_updated:
+        if prices_updated:
             await self.db.commit()
+
+        # After every exit is decided, so nothing here can hold one up. A
+        # malformed retention setting must not disable pruning, so it degrades
+        # to the tracked default rather than to "keep everything".
+        retention = getattr(
+            settings.execution, "exit_decision_retention_days", _DEFAULT_RETENTION_DAYS)
+        if not isinstance(retention, int) or isinstance(retention, bool) or retention < 1:
+            retention = _DEFAULT_RETENTION_DAYS
+        await self._record_exit_decisions(decisions, retention)
 
         return exits
 
@@ -700,75 +720,153 @@ class PortfolioTracker:
         parsed = datetime.fromisoformat(value)
         return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
 
-    async def _record_exit_decision(
+    _EXIT_DECISION_INSERT = """INSERT INTO exit_decisions
+        (market_id, exchange, token, is_paper, policy_action,
+         gross_pnl_pct, net_pnl_pct, peak_pnl_pct, target_pct,
+         estimated_fees, current_price, entry_price, size)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+
+    def _exit_decision_row(
         self, pos, mode_flag: int | None, reason: str, gross_pct: float,
         net_pct: float, peak_pct: float, target_pct: float | None,
         estimated_fees: float,
-    ) -> bool:
-        """Best-effort observation; telemetry must never block a protective exit."""
+    ) -> tuple:
+        """Build one observation. Pure: no I/O, so it cannot touch the exit."""
+        mode = self._position_mode(pos, mode_flag)
+        return (pos.market_id, pos.exchange,
+                getattr(pos.token, "value", pos.token),
+                # The column is NOT NULL; a position that cannot name its book
+                # takes the schema's own paper default rather than claiming to
+                # be live.
+                1 if mode is None else mode, reason, gross_pct,
+                net_pct, peak_pct, target_pct, estimated_fees,
+                pos.current_price, pos.avg_price, pos.size)
+
+    async def _record_exit_decisions(self, rows: list[tuple], retention_days: int) -> None:
+        """Write one cycle's exit-policy observations as a single batch.
+
+        Deliberately OFF the money path. Written inline, this took the shared
+        serialized write lock once per evaluated position — and the HOLD branch
+        observes every non-exiting position on every tick, so a full book cost
+        hundreds of lock acquisitions per cycle on the path that closes
+        positions. One ``executemany`` after the loop costs one, and by then
+        every exit decision is already in the returned list.
+
+        A telemetry write must never prevent a position from closing, so the
+        whole batch stays contained: callers ignore the outcome.
+        """
+        if not rows:
+            return
         try:
-            await self.db.execute(
-                """INSERT INTO exit_decisions
-                   (market_id, exchange, token, is_paper, policy_action,
-                    gross_pnl_pct, net_pnl_pct, peak_pnl_pct, target_pct,
-                    estimated_fees, current_price, entry_price, size)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (pos.market_id, pos.exchange,
-                 getattr(pos.token, "value", pos.token),
-                 1 if mode_flag is None else mode_flag, reason, gross_pct,
-                 net_pct, peak_pct, target_pct, estimated_fees,
-                 pos.current_price, pos.avg_price, pos.size),
-            )
-            return True
+            async with self.db.transaction(owner="portfolio.exit_decisions"):
+                await self.db.executemany(self._EXIT_DECISION_INSERT, rows)
+                # Bounded delete per cycle on the indexed time column, matching
+                # candidate_dispositions: cheap when nothing has expired, and
+                # it cannot be missed by an interrupted deployment the way a
+                # separate cleanup job can.
+                await self.db.execute(
+                    "DELETE FROM exit_decisions WHERE observed_at < datetime('now', ?)",
+                    (f"-{retention_days} days",))
         except Exception as exc:  # noqa: BLE001 — never compromise exits
-            log.debug("exit.decision_record_failed", market_id=pos.market_id,
-                      error=str(exc))
-            return False
+            log.debug("exit.decision_record_failed", count=len(rows), error=str(exc))
+
+    # Fill sizes accumulate through float arithmetic, so a reverse-inventory
+    # sum that should equal the stored size can land a few ULPs below it. An
+    # exact ``qty >= size`` then reports NO ancestry for a position whose fills
+    # plainly cover it.
+    _SIZE_TOLERANCE = 1e-6
+
+    @staticmethod
+    def _position_mode(pos, mode_flag: int | None) -> int | None:
+        """The book to scope a per-position read to, or None for unscoped.
+
+        ``mode_flag`` is None when ``settings.is_live`` is not a bool and the
+        tracker holds no settings of its own — ``get_positions`` is then
+        UNSCOPED and its list can hold BOTH books. A real ``Settings.is_live``
+        ANDs three bools and so always is one (with the kill switch armed it
+        is False, which scopes the read to paper rather than unscoping it), so
+        this is the duck-typed/no-settings path rather than a live-trading one.
+
+        It still must not hardcode a book. ``1 if mode_flag is None else
+        mode_flag`` answered a LIVE position's history off the PAPER ledger,
+        silently and with no way for the caller to notice. Since #420 a
+        Position carries ``is_paper``, so ask the position; only one that
+        cannot answer falls back to an unscoped read, which is imprecise for
+        everyone rather than wrong for live.
+        """
+        if mode_flag is not None:
+            return mode_flag
+        is_paper = getattr(pos, "is_paper", None)
+        if isinstance(is_paper, bool):
+            return int(is_paper)
+        return None
 
     async def _current_position_entry_time(self, pos, mode_flag: int | None) -> datetime | None:
-        """Oldest fill still contributing to the current token inventory."""
-        mode = 1 if mode_flag is None else mode_flag
+        """When the currently-held inventory was entered.
+
+        Preferred source is the oldest fill still contributing to the current
+        ``(market, token, book)`` inventory: old round trips and opposite
+        tokens do not age a re-entry.
+
+        A miss falls back to the market's first trade rather than reporting
+        nothing. Positions predating the fills ledger, and live rows owned by a
+        venue mirror that never wrote fills, have no fill ancestry at all —
+        and an unknown entry time pins ``fraction_remaining`` at 1.0 forever,
+        which freezes the profit target in its widest band and makes the
+        near-expiry band unreachable. The fallback cannot be token-scoped
+        (``trades`` has no token column, as ``broker/ledger.py`` also notes),
+        so it is market-and-book scoped: coarser than the fills path, but
+        strictly more information than ``None``.
+
+        ``cost_basis`` is deliberately NOT used here despite being the
+        authoritative holdings table: its only timestamp is ``updated_at``,
+        stamped on every write, so it records when inventory last moved, not
+        when it was entered.
+        """
+        mode = self._position_mode(pos, mode_flag)
+        scope = ""
+        params: list[object] = [pos.market_id, getattr(pos.token, "value", pos.token)]
+        if mode is not None:
+            scope = " AND is_paper = ?"
+            params.append(mode)
         try:
             row = await self.db.fetchone(
-                """WITH reverse_inventory AS (
+                f"""WITH reverse_inventory AS (
                        SELECT timestamp,
                               SUM(CASE WHEN side = 'BUY' THEN size ELSE -size END)
                                 OVER (ORDER BY timestamp DESC, id DESC) AS qty
                          FROM fills
-                        WHERE market_id = ? AND token = ? AND is_paper = ?)
+                        WHERE market_id = ? AND token = ?{scope})
                    SELECT timestamp FROM reverse_inventory
                     WHERE qty >= ? ORDER BY timestamp DESC LIMIT 1""",
-                (pos.market_id, getattr(pos.token, "value", pos.token), mode, pos.size),
+                tuple([*params, pos.size - self._SIZE_TOLERANCE]),
             )
             if row and row["timestamp"]:
                 return self._as_utc(row["timestamp"])
+        except (ValueError, TypeError, KeyError):
+            pass  # fall through to the trades ledger
+
+        sql = "SELECT MIN(timestamp) AS first_entry FROM trades WHERE market_id = ?"
+        trade_params: list[object] = [pos.market_id]
+        if mode is not None:
+            sql += " AND is_paper = ?"
+            trade_params.append(mode)
+        try:
+            row = await self.db.fetchone(sql, tuple(trade_params))
+            if row and row["first_entry"]:
+                return self._as_utc(row["first_entry"])
         except (ValueError, TypeError, KeyError):
             return None
         return None
 
     async def _position_age_hours(self, pos, mode_flag: int | None) -> float:
-        """Hours since the position's first recorded fill. Returns 0.0 when the
+        """Hours since the current inventory was entered. Returns 0.0 when the
         entry time is unknown, so dust-sweep treats it as 'too new to touch'."""
         current_entry = await self._current_position_entry_time(pos, mode_flag)
-        if current_entry is not None:
-            return ((datetime.now(timezone.utc) - current_entry).total_seconds()
-                    / 3600.0)
-        # Legacy fallback for databases whose old trades predate the fills
-        # ledger. It cannot distinguish tokens, so it is used only when no
-        # token-scoped fill ancestry exists.
-        sql = "SELECT MIN(timestamp) AS first_entry FROM trades WHERE market_id = ?"
-        params: list[object] = [pos.market_id]
-        if mode_flag is not None:
-            sql += " AND is_paper = ?"
-            params.append(mode_flag)
-        try:
-            row = await self.db.fetchone(sql, tuple(params))
-            if not row or not row["first_entry"]:
-                return 0.0
-            entry_dt = self._as_utc(row["first_entry"])
-        except (ValueError, TypeError, KeyError):
+        if current_entry is None:
             return 0.0
-        return (datetime.now(timezone.utc) - entry_dt).total_seconds() / 3600.0
+        return ((datetime.now(timezone.utc) - current_entry).total_seconds()
+                / 3600.0)
 
     @staticmethod
     def _peak_key(pos, mode_flag: int | None) -> str:

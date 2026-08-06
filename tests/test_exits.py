@@ -124,19 +124,133 @@ async def test_stop_loss_triggered(mock_db, settings):
 
 @pytest.mark.asyncio
 async def test_profit_target_triggered(mock_db, settings):
-    """Position at +55% → PROFIT_TARGET."""
+    """Position at +57.5% gross → PROFIT_TARGET, and still clears net."""
     mock_db.fetchall = AsyncMock(return_value=[
         _make_position("m1", avg_price=0.40),
     ])
     gamma = AsyncMock()
-    # Current price rose to 0.63: target still clears after conservative
-    # round-trip taker fees (gross-only checks are intentionally insufficient).
+    # Current price rose to 0.63: target still clears after the executable
+    # exit fee (gross-only checks are intentionally insufficient).
     gamma.get_market = AsyncMock(return_value=_make_market("m1", 0.63))
 
     tracker = PortfolioTracker(db=mock_db)
     exits = await tracker.check_exits(settings, gamma)
     assert len(exits) == 1
     assert exits[0][1] == ExitReason.PROFIT_TARGET
+
+
+@pytest.mark.asyncio
+async def test_profit_target_holds_when_only_the_gross_clears(mock_db, settings):
+    """The discriminating case: gross over target, net under it.
+
+    At 0.61 the gross gain is +52.5% on a 50% target, so a gross-only gate
+    sells. The executable exit fee (0.05 * p * (1-p) * size for this category)
+    costs ~3 points, leaving +49.5% net — under the target, so the position is
+    held. A price that clears BOTH legs cannot tell the two gates apart.
+    """
+    mock_db.fetchall = AsyncMock(return_value=[
+        _make_position("m1", avg_price=0.40),
+    ])
+    gamma = AsyncMock()
+    gamma.get_market = AsyncMock(return_value=_make_market("m1", 0.61))
+
+    tracker = PortfolioTracker(db=mock_db)
+    exits = await tracker.check_exits(settings, gamma)
+    assert exits == [], "a net-of-fees gate must not sell on the gross alone"
+
+
+@pytest.mark.asyncio
+async def test_trailing_stop_exit_is_emitted_by_check_exits(settings, tmp_path):
+    """The trailing tier must be reachable through the real exit path.
+
+    ``trailing_stop_triggered`` was only ever exercised as a pure function, so
+    nothing proved ``check_exits`` wires the peak, the configured bands and the
+    TRAILING_STOP reason together — and until #420 the exit loop raised on
+    every tick, so production could not have shown it either.
+    """
+    db = Database(str(tmp_path / "trailing.db"))
+    await db.connect()
+    try:
+        settings.is_live = True
+        await db.execute(
+            """INSERT INTO portfolio
+               (market_id, exchange, side, size, avg_price, current_price,
+                category, token, token_id, is_paper)
+               VALUES ('m1', 'polymarket', 'BUY', 10, 0.50, 0.50,
+                       'test', 'YES', 'tok', 0)""")
+        # Peaked at +40%; the mark below leaves +10%. 40 >= the 12% activation
+        # and the 30-point giveback exceeds 45% of the peak, so the tier fires
+        # before the profit target is ever considered.
+        await db.execute(
+            "INSERT INTO position_peaks (market_id, peak_pnl_pct) "
+            "VALUES ('m1:YES:0', 40.0)")
+        await db.commit()
+
+        gamma = AsyncMock()
+        gamma.get_market = AsyncMock(return_value=_make_market("m1", 0.55))
+
+        tracker = PortfolioTracker(db=db, settings=settings)
+        exits = await tracker.check_exits(settings, gamma, exchange="polymarket")
+
+        assert [reason for _, reason in exits] == [ExitReason.TRAILING_STOP]
+        assert exits[0][0].market_id == "m1"
+        # And the decision is observed under its own action, not as a HOLD.
+        row = await db.fetchone(
+            "SELECT policy_action, peak_pnl_pct FROM exit_decisions "
+            "WHERE market_id = 'm1'")
+        assert row["policy_action"] == "TRAILING_STOP"
+        assert row["peak_pnl_pct"] == pytest.approx(40.0)
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_exit_survives_a_telemetry_write_failure(mock_db, settings):
+    """Observability must never be able to trap a position.
+
+    The decision log is written after every exit is decided, in one batch, and
+    a failure there is contained: a broken or missing telemetry table cannot
+    stop a protective exit from being returned to the caller.
+    """
+    mock_db.fetchall = AsyncMock(return_value=[
+        _make_position("m1", avg_price=0.40),
+    ])
+    mock_db.executemany = AsyncMock(side_effect=RuntimeError("exit_decisions is gone"))
+    gamma = AsyncMock()
+    gamma.get_market = AsyncMock(return_value=_make_market("m1", 0.63))
+
+    tracker = PortfolioTracker(db=mock_db)
+    exits = await tracker.check_exits(settings, gamma)
+
+    assert [reason for _, reason in exits] == [ExitReason.PROFIT_TARGET]
+    mock_db.executemany.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_decision_telemetry_costs_one_write_per_cycle(mock_db, settings):
+    """The HOLD branch observes every non-exiting position on every tick.
+
+    Written inline, that took the shared serialized write lock once per
+    position on the path that closes positions. Batched, a whole book costs a
+    single ``executemany`` after every exit has already been decided — so the
+    write count must not grow with the number of positions held.
+    """
+    mock_db.fetchall = AsyncMock(return_value=[
+        _make_position(f"m{i}", avg_price=0.50) for i in range(12)
+    ])
+    mock_db.executemany = AsyncMock()
+    gamma = AsyncMock()
+    # Flat marks: every position holds, so every one emits a HOLD observation.
+    gamma.get_market = AsyncMock(side_effect=lambda mid: _make_market(mid, 0.50))
+
+    tracker = PortfolioTracker(db=mock_db)
+    exits = await tracker.check_exits(settings, gamma)
+
+    assert exits == []
+    assert mock_db.executemany.await_count == 1
+    rows = mock_db.executemany.await_args.args[1]
+    assert len(rows) == 12, "one observation per evaluated position"
+    assert {row[4] for row in rows} == {"HOLD"}
 
 
 @pytest.mark.asyncio

@@ -34,8 +34,10 @@ execution:
   profit_target_late_pct: 25.0
   profit_target_early_fraction_remaining: 0.50
   profit_target_late_fraction_remaining: 0.10
+  # Set either to 0 to disable the trailing tier entirely.
   trailing_stop_activation_pct: 12.0
   trailing_stop_giveback_fraction: 0.45
+  exit_decision_retention_days: 14
   edge_erosion_min_pct: 2.0
   time_decay_hours: 12.0
   # Free capital from near-certain winners far from resolution (sell early to

@@ -185,8 +185,14 @@ class ExecutionConfig(BaseModel):
     profit_target_late_pct: float = Field(default=25.0, gt=0)
     profit_target_early_fraction_remaining: float = Field(default=0.50, ge=0, le=1)
     profit_target_late_fraction_remaining: float = Field(default=0.10, ge=0, le=1)
-    trailing_stop_activation_pct: float = Field(default=12.0, gt=0)
-    trailing_stop_giveback_fraction: float = Field(default=0.45, gt=0, le=1)
+    # ge=0, not gt=0: zero is how an operator turns the trailing tier OFF, and
+    # `trailing_stop_triggered` honours that. Rejecting it crashed startup for
+    # a setting the neighbouring stop_loss_pct/profit_target_pct accept freely.
+    trailing_stop_activation_pct: float = Field(default=12.0, ge=0)
+    trailing_stop_giveback_fraction: float = Field(default=0.45, ge=0, le=1)
+    # Exit-decision telemetry is an observation log, not evidence of record;
+    # bound it so a holdout cannot grow the trading DB without limit.
+    exit_decision_retention_days: int = Field(default=14, ge=1, le=365)
     edge_erosion_min_pct: float = 2.0
     time_decay_hours: float = 12.0
     # Free capital from near-certain winners that are still far from resolution:
