@@ -473,7 +473,20 @@ class BiasHarvestPillar:
                         status=res.status, error=res.reason)
             return False
 
-        await self._record_position(signal, market, res.order, res.result)
+        # A resting order is deliberately NOT recorded here: the order monitor
+        # books its confirmed fill and the next sync_positions venue snapshot
+        # materializes the portfolio row (same guard as long_horizon:400,
+        # informed_flow_pillar:221 and econ_indicator:227).
+        #
+        # This matters more here than anywhere else: maker_entry prices every
+        # bias_harvest order at the bid, so Order.marketable is always False
+        # and PaperTrader defers every one of them to "pending". Writing a
+        # full-size portfolio row for an order that never filled manufactured
+        # a near-perfect paper record — in the 0.90-0.97 band, entered at the
+        # bid — and graduation reads exactly those pnl_ledger rows to authorize
+        # live trading.
+        if res.status != "pending" and res.result.filled_size > 0:
+            await self._record_position(signal, market, res.order, res.result)
         log.info("bias_harvest.entered", market_id=market.id,
                  token=res.order.token.value, price=res.order.price,
                  size=res.order.size, paper=res.result.is_paper)

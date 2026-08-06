@@ -214,6 +214,24 @@ class PaperTrader:
             if should_fill:
                 result = await self.execute(order, force=True)
                 result.order_id = order_id
+                # execute() can still REFUSE. ``force`` bypasses only the
+                # marketability/resting check (line 102), not the balance gate
+                # below it — so a trade-through on a book with insufficient
+                # paper cash returns status="rejected", filled_size=0,
+                # filled_price=0 and updates no position, balance or cost
+                # basis. Stamping "filled" over that booked a size-0/price-0
+                # fill AND marked the decision executable with "trade_through"
+                # evidence, which graduation.credible_fill_evidence accepts —
+                # so orders the paper trader refused counted toward promoting a
+                # strategy to live capital. The order also vanished here: the
+                # `continue` skipped the re-queue below, so it neither filled
+                # nor rested. Keep it resting; cash may free up next tick.
+                if result.status == "rejected" or result.filled_size <= 0:
+                    log.debug("paper.limit_fill_refused", order_id=order_id,
+                              status=result.status,
+                              reason=(result.error_message or "")[:120])
+                    remaining.append((order, order_id))
+                    continue
                 result.status = "filled"
                 filled.append((result, order))
                 log.info("paper.limit_filled", order_id=order_id, price=order.price)

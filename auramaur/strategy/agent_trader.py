@@ -687,7 +687,14 @@ class AgentTraderPillar:
                      market_id=market.id, status=res.status, error=res.reason)
             return False
 
-        await self._record_position(signal, market, res.order, res.result)
+        # A resting order is deliberately NOT recorded here: the order monitor
+        # books its confirmed fill (same guard as long_horizon:400). Gamma's
+        # reported price often sits below the ask, so prepare_order builds a
+        # non-marketable BUY and the paper trader defers it — writing the row
+        # anyway corrupted the very per-model P&L comparison this pillar's
+        # intelligence-cap A/B exists to measure.
+        if res.status != "pending" and res.result.filled_size > 0:
+            await self._record_position(signal, market, res.order, res.result)
         await self._db.execute(
             """INSERT INTO agent_trader_theses
                (model_alias, cell, market_id, question, token, prob,

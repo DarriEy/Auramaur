@@ -286,8 +286,22 @@ class OddLotTenderPillar:
                         status=result.status, error=result.error_message)
             await self._set_status(f.accession, "order_rejected")
             return
-        await self._record_entry(ticker, f, qty, price, result)
-        await self._set_status(f.accession, "entered")
+        # A resting order is NOT a position. ibkr_equity.place_share_order
+        # returns status="pending", filled_size=0 for EVERY live share order,
+        # and _record_entry falls back to float(qty) when filled_size is 0 — so
+        # an unfilled 99-share limit BUY wrote a full-size portfolio/trades row
+        # at the limit price. Nothing corrects it: broker/sync.py and
+        # broker/reconciler.py have no IBKR path, and resolution_tracker cannot
+        # resolve a ticker market id. The phantom notional inflates `equity` in
+        # risk/manager.py, which raises the 2%-of-equity stake for every other
+        # market.
+        if result.status != "pending" and result.filled_size > 0:
+            await self._record_entry(ticker, f, qty, price, result)
+            await self._set_status(f.accession, "entered")
+        else:
+            # Keep the filing out of the permanent dedupe as "placed, unfilled"
+            # so a later cycle can still observe the fill.
+            await self._set_status(f.accession, "order_resting")
 
     async def _set_status(self, accession: str, status: str) -> None:
         await self._db.execute(

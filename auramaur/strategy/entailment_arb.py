@@ -706,11 +706,22 @@ class EntailmentArbPillar:
             # unwound a live-pending A).
             log.error("entailment.leg_b_failed_single_leg", a=implier.id,
                       b=implied.id, status=res_b.status, error=res_b.reason)
-            await self._record_leg(implier, res_a.order, res_a.result, why, gap)
+            if res_a.status != "pending" and res_a.result.filled_size > 0:
+                await self._record_leg(implier, res_a.order, res_a.result, why, gap)
             return False
 
+        # A resting leg is NOT a position (same guard as long_horizon:400 and
+        # informed_flow_pillar:221, both of which carry the explanation).
+        # Polymarket's live place_order ALWAYS returns "pending" with
+        # filled_size=0, and _record_leg falls back to order.size/order.price
+        # when filled_size is 0 — so both legs of an unfilled pair were written
+        # as full-size portfolio rows. resolution_tracker._settle_position
+        # prefers the portfolio row over cost_basis, so those phantoms settle
+        # and book fabricated realized P&L. Worse on the failure path above:
+        # submit_paired had already cancelled the still-pending leg A.
         for market, res in ((implier, res_a), (implied, res_b)):
-            await self._record_leg(market, res.order, res.result, why, gap)
+            if res.status != "pending" and res.result.filled_size > 0:
+                await self._record_leg(market, res.order, res.result, why, gap)
 
         await self._db.execute(
             "UPDATE entailment_verdicts SET traded_at = datetime('now') "

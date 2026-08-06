@@ -42,6 +42,17 @@ class OrderMonitorMixin:
         if db is None:
             return
         for result, order in filled:
+            # Same guard the LIVE branch applies below (`result.status ==
+            # "filled" and ... result.filled_size > 0`). The paper branch had
+            # none, so anything the paper trader handed over was booked
+            # verbatim — including a refusal stamped "filled". Defence in
+            # depth now that paper.py no longer produces those: a size-0 fill
+            # is never a fill, whichever book it came from.
+            if result.status != "filled" or result.filled_size <= 0:
+                log.debug("order_monitor.deferred_fill_skipped",
+                          order_id=result.order_id, status=result.status,
+                          filled_size=result.filled_size)
+                continue
             try:
                 if tracker is not None:
                     await tracker.record_fill(Fill(
