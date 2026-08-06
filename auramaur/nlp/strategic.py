@@ -26,21 +26,25 @@ from auramaur.data_sources.base import NewsItem
 from auramaur.db.database import Database
 from auramaur.exchange.models import Market
 from auramaur.nlp.cache import NLPCache, coarse_evidence_digest, make_cache_key
-from auramaur.nlp.prompts import format_evidence, format_untrusted_text
+from auramaur.nlp.prompts import format_evidence, format_untrusted_block
 from auramaur.runtime import state_dir
 
 def _scrub(value: object, limit: int) -> str:
     """Bound and neutralize externally-authored text for the batch prompt.
 
     Same treatment prompts.py gives evidence on the single-market path: NFKC
-    normalize, strip control/BiDi characters, collapse all whitespace, bound
-    the length, then escape angle brackets so hostile text cannot synthesize
-    the block's trust-boundary delimiters. Whitespace collapsing is the
-    load-bearing part here — without a newline a payload cannot forge a
-    "--- MARKET n ---" separator and claim to be a different market.
+    normalize, strip control/BiDi/zero-width characters, collapse all
+    whitespace, bound the length, then escape angle brackets so hostile text
+    cannot synthesize the block's trust-boundary delimiters. Whitespace
+    collapsing is the load-bearing part here - without a newline a payload
+    cannot forge a "--- MARKET n ---" separator and claim to be a different
+    market.
+
+    The body moved to prompts.format_untrusted_block (#405) so the six
+    strategy pillars converted there share one definition instead of importing
+    this private name; the alias stays for this module and tool_use_analyzer.
     """
-    return (format_untrusted_text(value, limit)
-            .replace("<", "\\u003c").replace(">", "\\u003e"))
+    return format_untrusted_block(value, limit)
 
 
 log = structlog.get_logger()
