@@ -15,6 +15,51 @@ FEATURE_SCHEMA = "maker-observatory-v2"
 CREDIBLE_FILL_EVIDENCE = frozenset({"venue_fill", "book_cross", "trade_through"})
 
 
+# The resolver's two hot statements, named so tests can EXPLAIN QUERY PLAN the
+# exact SQL that ships. Both compare a timestamp column against a bound
+# computed in Python.
+#
+# The MAX(observed_at) term is a liveness guard, not a filter on the evidence.
+# A mark can only ever come from an observation, so a fill whose market has not
+# been observed until at least its EARLIEST horizon cannot be marked at all
+# yet — and because the batch below is oldest-first, fills stranded by a market
+# that left the maker's five would otherwise hold the head of the queue until
+# retention pruned them 45 days later, starving every newer mark behind them.
+# Excluding them changes nothing about what gets concluded: the moment that
+# market is observed again the fill re-enters the scan and takes its (late,
+# is_valid=0) mark exactly as before. It is a per-candidate-row filter, not the
+# driving predicate — `filled_at<=?` still seeks the index — and the subquery
+# is an index-max lookup on (market_id, observed_at).
+#
+# The predicate this replaced,
+# ``unixepoch(?) - unixepoch(f.filled_at) >= ?``, wrapped the column in a
+# function: SQLite could seek to the market but then had to walk EVERY retained
+# fill in it and probe the markouts index once per row
+# (``SEARCH f USING INDEX idx_maker_fills_market_time (market_id=?)`` +
+# ``CORRELATED SCALAR SUBQUERY``), which is where the 4.6 s went.
+DUE_FILL_SCAN_SQL = """SELECT f.id,f.market_id,f.side,f.fill_price,f.filled_at
+     FROM maker_observatory_fills f
+    WHERE f.marks_pending=1 AND f.filled_at<=?
+      AND unixepoch((SELECT MAX(o.observed_at) FROM maker_observations o
+                      WHERE o.market_id=f.market_id))
+          - unixepoch(f.filled_at) >= ?
+    ORDER BY f.filled_at LIMIT ?"""
+MARK_BOOK_SQL = """SELECT observed_at,midpoint FROM maker_observations
+    WHERE market_id=? AND observed_at>=?
+    ORDER BY observed_at LIMIT 1"""
+
+
+def _stamp(moment: datetime) -> str:
+    """The one timestamp spelling this module writes and compares.
+
+    Every ``observed_at``/``filled_at`` is written through here, so the columns
+    are fixed-width UTC ISO-8601 and lexicographic order IS chronological
+    order. That is what lets the resolver's range predicates use an index
+    instead of wrapping the column in ``unixepoch()``.
+    """
+    return moment.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
 @dataclass(frozen=True)
 class MakerFeatures:
     best_bid: float
@@ -54,17 +99,29 @@ def compute_maker_features(book: OrderBook, *, levels: int = 5) -> MakerFeatures
 
 
 class MakerObservatory:
-    """Persist measurements only; this class has no order-placement capability."""
+    """Persist measurements only; this class has no order-placement capability.
+
+    The two halves run on different paths on purpose. ``observe()`` is on the
+    market maker's quoting path and stays cheap and constant-cost:
+    ``compute_maker_features`` plus a bounded, indexed volatility window plus
+    one INSERT. ``resolve_markouts()`` — deciding whether a fill from four
+    minutes ago moved against us — is on its own timer and touches nothing the
+    current quote depends on. See docs/maker-observatory.md.
+    """
 
     def __init__(self, db, *, flow_tracker=None, horizons=(30, 60, 300),
                  retention_days: int = 45, max_mark_lateness_seconds: int = 45,
-                 holdout_days: int = 7) -> None:
+                 holdout_days: int = 7, resolve_batch_fills: int = 500) -> None:
         self.db = db
         self.flow_tracker = flow_tracker
         self.horizons = tuple(sorted(set(int(value) for value in horizons)))
         self.retention_days = retention_days
         self.max_mark_lateness_seconds = max_mark_lateness_seconds
         self.holdout_days = holdout_days
+        # Bounds one resolver pass. A backlog (long outage, clock jump) must not
+        # let a single pass hold the shared Database serializer for minutes;
+        # the remainder stays pending and the next pass takes it.
+        self.resolve_batch_fills = max(1, int(resolve_batch_fills))
         frozen = json.dumps({
             "feature_schema": FEATURE_SCHEMA,
             "horizons": self.horizons,
@@ -99,13 +156,24 @@ class MakerObservatory:
 
     async def observe(self, market, book: OrderBook, *, quote=None, active_quote=None,
                       observed_at: datetime | None = None) -> int:
+        """Record one microstructure sample. Runs on the quoting path.
+
+        Everything here is O(1) in retained history. Markout resolution is
+        deliberately absent: it belongs to ``resolve_markouts()``, because an
+        instrument that added seconds to the quote path would cause the adverse
+        selection it exists to measure.
+        """
         now = (observed_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
         await self._register()
         features = compute_maker_features(book)
-        signed_flow = 0.0
+        # NULL, not 0.0, when no feed ever reached this market. See
+        # OrderFlowTracker.signed_flow: the two are different facts and the
+        # column has to be able to say which.
+        signed_flow = None
         if self.flow_tracker is not None:
             signed_flow = self.flow_tracker.signed_flow(
-                (market.id, market.condition_id, market.clob_token_yes), now=now)
+                (market.id, getattr(market, "condition_id", "") or "",
+                 market.clob_token_yes), now=now)
         quote_age = (
             max(0.0, (now - active_quote.placed_at).total_seconds())
             if active_quote is not None else None
@@ -132,27 +200,24 @@ class MakerObservatory:
                     ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (market.id, getattr(market, "condition_id", "") or "",
              market.clob_token_yes, self.strategy_version,
-             now.isoformat(timespec="microseconds"), self.strategy_version,
-             now.isoformat(timespec="microseconds"),
+             _stamp(now), self.strategy_version, _stamp(now),
              features.best_bid, features.best_ask, features.midpoint,
              features.microprice, features.spread, features.bid_depth,
              features.ask_depth, features.imbalance, signed_flow, short_vol, long_vol,
              getattr(quote, "bid_price", None), getattr(quote, "ask_price", None),
              quote_changed, quote_age, int(active_quote is not None)),
         )
-        await self._mark_due(market.id, features.midpoint, now)
         return int(cursor.lastrowid)
 
     async def _realized_vol(self, market_id: str, midpoint: float,
                             now: datetime, window_seconds: int) -> float:
-        cutoff = datetime.fromtimestamp(
-            now.timestamp() - window_seconds, tz=timezone.utc
-        ).isoformat(timespec="microseconds")
+        cutoff = _stamp(datetime.fromtimestamp(
+            now.timestamp() - window_seconds, tz=timezone.utc))
         rows = await self.db.fetchall(
             """SELECT midpoint FROM maker_observations
                WHERE market_id=? AND observed_at>=? AND observed_at<?
                ORDER BY observed_at""",
-            (market_id, cutoff, now.isoformat(timespec="microseconds")),
+            (market_id, cutoff, _stamp(now)),
         )
         prices = [float(row["midpoint"]) for row in rows] + [midpoint]
         changes = [prices[index] - prices[index - 1]
@@ -179,38 +244,99 @@ class MakerObservatory:
                    (order_id,observation_id,market_id,side,fill_price,fill_size,
                     is_paper,fill_evidence,filled_at) VALUES (?,?,?,?,?,?,?,?,?)""",
             (order_id, observation_id, market_id, side, price, size, int(is_paper),
-             fill_evidence, stamp.isoformat(timespec="microseconds")),
+             fill_evidence, _stamp(stamp)),
         )
 
-    async def _mark_due(self, market_id: str, midpoint: float, now: datetime) -> None:
+    async def resolve_markouts(self, *, now: datetime | None = None) -> int:
+        """Mark out every fill whose horizon has come due. Runs OFF the quote path.
+
+        This used to run inline in ``observe()``, inside the market maker's
+        per-market ``op_timeout`` window, holding the process-wide
+        ``Database`` serializer that ~30 pillar tasks share. It was 93% of
+        ``observe()``'s cost and it grew with retained history (4.6 s per
+        5-market cycle at 45-day retention), so the instrument would have
+        slowed the quotes it measures into exactly the adverse selection it
+        exists to detect.
+
+        Two properties make the move safe:
+
+        * **The mark is a pure function of the record, not of when this runs.**
+          A fill's mark is taken from the FIRST observation at or after
+          ``filled_at + horizon`` — which is precisely the book the inline scan
+          used, because the inline scan ran on the observation that first found
+          the fill due. Horizons, lateness and the validity rule are unchanged,
+          and a mark taken from a late book is still stored with
+          ``is_valid=0``. Running once an hour and running every cycle
+          therefore produce identical rows; only the wall-clock moment of the
+          INSERT differs.
+        * **An interrupted pass leaves due marks unresolved, never fabricated.**
+          ``marks_pending`` is only cleared in the same transaction that writes
+          a fill's last mark, and every insert is ``INSERT OR IGNORE`` against
+          the ``(fill_id,horizon_seconds)`` primary key, so a re-run resumes
+          rather than double-counting. A fill whose market has not been
+          observed since its horizon simply stays pending.
+
+        ``marks_pending`` is also what keeps this cheap: the partial index
+        ``idx_maker_fills_pending`` contains only unresolved fills, so the scan
+        is proportional to the backlog, not to the 259k retained fills per
+        market that the old ``unixepoch()`` predicate had to re-read.
+        """
+        instant = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        due_bound = _stamp(datetime.fromtimestamp(
+            instant.timestamp() - min(self.horizons), tz=timezone.utc))
+        pending = await self.db.fetchall(
+            DUE_FILL_SCAN_SQL,
+            (due_bound, min(self.horizons), self.resolve_batch_fills))
+        resolved = 0
+        for fill in pending:
+            resolved += await self._resolve_one(fill, instant)
+        return resolved
+
+    async def _resolve_one(self, fill, instant: datetime) -> int:
+        filled_at = datetime.fromisoformat(str(fill["filled_at"]))
+        marked = {int(row["horizon_seconds"]) for row in await self.db.fetchall(
+            "SELECT horizon_seconds FROM maker_observatory_markouts WHERE fill_id=?",
+            (fill["id"],))}
+        # Reads first, writes second: the transaction below must not span the
+        # per-horizon lookups, or the resolver would hold the write lock for
+        # the whole fill instead of for its inserts.
+        rows: list[tuple] = []
         for horizon in self.horizons:
-            rows = await self.db.fetchall(
-                """SELECT f.id,f.side,f.fill_price,f.filled_at
-                   FROM maker_observatory_fills f
-                   WHERE f.market_id=?
-                     AND unixepoch(?) - unixepoch(f.filled_at) >= ?
-                     AND NOT EXISTS (SELECT 1 FROM maker_observatory_markouts m
-                         WHERE m.fill_id=f.id AND m.horizon_seconds=?)
-                   """,
-                (market_id, now.isoformat(timespec="microseconds"), horizon, horizon),
-            )
+            if horizon in marked:
+                continue
+            target_at = datetime.fromtimestamp(
+                filled_at.timestamp() + horizon, tz=timezone.utc)
+            if target_at > instant:
+                continue
+            mark = await self.db.fetchone(
+                MARK_BOOK_SQL, (fill["market_id"], _stamp(target_at)))
+            if mark is None:
+                continue  # no book at or after the horizon yet: stay pending
+            marked_at = datetime.fromisoformat(str(mark["observed_at"]))
+            midpoint = float(mark["midpoint"])
+            lateness = max(0.0, (marked_at - target_at).total_seconds())
+            # Positive means price moved in the maker fill's favour.
+            markout = (midpoint - fill["fill_price"] if fill["side"] == "bid"
+                       else fill["fill_price"] - midpoint)
+            rows.append((fill["id"], horizon, _stamp(target_at), midpoint, markout,
+                         _stamp(marked_at), lateness,
+                         int(lateness <= self.max_mark_lateness_seconds)))
+            marked.add(horizon)
+        if not rows:
+            return 0
+        complete = marked.issuperset(self.horizons)
+        async with self.db.transaction(owner="maker_observatory.resolve_markouts"):
             for row in rows:
-                filled_at = datetime.fromisoformat(str(row["filled_at"]))
-                target_at = datetime.fromtimestamp(
-                    filled_at.timestamp() + horizon, tz=timezone.utc)
-                lateness = max(0.0, (now - target_at).total_seconds())
-                # Positive means price moved in the maker fill's favour.
-                markout = (midpoint - row["fill_price"] if row["side"] == "bid"
-                           else row["fill_price"] - midpoint)
                 await self.db.execute(
                     """INSERT OR IGNORE INTO maker_observatory_markouts
                            (fill_id,horizon_seconds,target_at,midpoint,markout,
                             marked_at,lateness_seconds,is_valid)
-                       VALUES (?,?,?,?,?,?,?,?)""",
-                    (row["id"], horizon, target_at.isoformat(timespec="microseconds"),
-                     midpoint, markout, now.isoformat(timespec="microseconds"),
-                     lateness, int(lateness <= self.max_mark_lateness_seconds)),
-                )
+                       VALUES (?,?,?,?,?,?,?,?)""", row)
+            if complete:
+                await self.db.execute(
+                    "UPDATE maker_observatory_fills SET marks_pending=0 WHERE id=?",
+                    (fill["id"],))
+        return len(rows)
 
     async def prune(self) -> None:
         """Bound raw storage while retaining rows needed by surviving fills."""
@@ -289,7 +415,17 @@ async def maker_observatory_summary(db, *, days: int = 21) -> list[dict]:
 
 
 async def maker_observatory_feature_report(db, *, days: int = 21) -> list[dict]:
-    """Score frozen warmup thresholds only on credible holdout fill markouts."""
+    """Score frozen warmup thresholds only on credible holdout fill markouts.
+
+    Every row carries its own ``covered_n``/``coverage``: the share of the
+    horizon's marks for which this feature was actually recorded. A feature
+    can be NULL for reasons that have nothing to do with the market —
+    ``signed_flow`` is NULL whenever no trade feed reached the market — and a
+    "no effect" verdict computed over a feature that was never measured is not
+    a negative result, it is an absent one. NULLs are excluded from the warmup
+    median and from both holdout buckets; the coverage number is what stops a
+    future reader from reading that exclusion as balance.
+    """
     rows = await db.fetchall(
         """SELECT m.horizon_seconds,f.market_id,f.fill_evidence,f.filled_at,
                   o.is_holdout,o.microprice-o.midpoint AS microprice_skew,
@@ -326,23 +462,33 @@ async def maker_observatory_feature_report(db, *, days: int = 21) -> list[dict]:
             effect = (statistics.fmean(value for _, value in high)
                       - statistics.fmean(value for _, value in low)
                       if high and low else None)
+            covered = sum(row[feature] is not None for row in horizon_rows)
             output.append({
                 "horizon_seconds": horizon, "feature": feature,
                 "warmup_n": len(warmup), "holdout_n": len(holdout),
                 "threshold": threshold, "high_n": len(high), "low_n": len(low),
                 "effect": effect,
                 "markets": len({key for key, _ in high + low}),
+                "marks_n": len(horizon_rows), "covered_n": covered,
+                "coverage": covered / len(horizon_rows) if horizon_rows else None,
             })
     return output
 
 
 async def maker_quote_coverage(db, *, days: int = 21) -> dict:
-    """Report cadence-weighted quote presence without pretending it is uptime."""
+    """Report cadence-weighted quote presence without pretending it is uptime.
+
+    Also reports trade-feed coverage. ``COUNT(signed_flow)`` skips NULLs by
+    definition, so ``flow_samples`` is literally "how many observations had
+    flow data at all" — the number that separates a market whose flow was
+    balanced from one no feed ever reached.
+    """
     row = await db.fetchone(
         """SELECT COUNT(*) AS samples,
                   SUM(quote_active=1) AS active,
                   SUM(quote_changed=1) AS changed,
-                  SUM(is_holdout=1) AS holdout
+                  SUM(is_holdout=1) AS holdout,
+                  COUNT(signed_flow) AS flow
              FROM maker_observations
             WHERE datetime(observed_at) >= datetime('now', ?)""",
         (f"-{days} days",),
@@ -355,6 +501,8 @@ async def maker_quote_coverage(db, *, days: int = 21) -> dict:
         "holdout_samples": int(row["holdout"] or 0),
         "sampled_quote_coverage": (
             int(row["active"] or 0) / samples if samples else None),
+        "flow_samples": int(row["flow"] or 0),
+        "flow_coverage": int(row["flow"] or 0) / samples if samples else None,
     }
 
 

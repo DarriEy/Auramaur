@@ -61,21 +61,40 @@ def maker_observatory_report(days: int):
                       "holdout marks. Synthetic paper fills never count.[/]")
         scorecard = Table(title="Frozen-threshold holdout scorecard")
         for column in ("Horizon", "Feature", "Warmup", "Holdout", "Markets",
-                       "High-low markout"):
+                       "Measured", "High-low markout"):
             scorecard.add_column(column)
         for row in features:
+            # "Measured" is the share of this horizon's marks for which the
+            # feature was recorded at all. A blank effect over low coverage is
+            # an absent result, not a negative one.
+            covered = row["coverage"]
             scorecard.add_row(
                 f"{row['horizon_seconds']}s", row["feature"],
                 str(row["warmup_n"]), str(row["holdout_n"]), str(row["markets"]),
+                ("—" if covered is None
+                 else f"{row['covered_n']}/{row['marks_n']} ({covered:.0%})"),
                 "—" if row["effect"] is None else f"{row['effect']:+.4f}",
             )
         console.print(scorecard)
         sampled = coverage["sampled_quote_coverage"]
+        flow = coverage["flow_coverage"]
         console.print(
             f"[dim]Cadence samples={coverage['samples']}; active quote present="
             f"{'—' if sampled is None else f'{sampled:.1%}'}; "
             f"holdout samples={coverage['holdout_samples']}. This is sampled "
             "coverage, not venue-certified uptime.[/]")
+        console.print(
+            f"[dim]Trade-feed coverage: {coverage['flow_samples']}/"
+            f"{coverage['samples']} observations had signed_flow data"
+            f"{'' if flow is None else f' ({flow:.1%})'}. The rest are NULL — "
+            "no feed reached the market, which is NOT balanced flow and is "
+            "excluded from every flow statistic.[/]")
+        if flow is not None and flow < 1.0:
+            console.print(
+                "[yellow]signed_flow is not fully covered.[/] The websocket "
+                "feed subscribes to the first 20 discovered markets; the maker "
+                "picks its five by spread. Read any signed_flow effect as "
+                "conditional on the covered subset.")
         settings = Settings()
         blockers = maker_promotion_blockers(
             rows,

@@ -566,7 +566,7 @@ class MakerObservatoryConfig(BaseModel):
     _prospective_stats joins on the LATEST version — so a knob living inside
     that section discards every decision captured under the previous hash and
     restarts the holdout clock. A purely observational instrument must never
-    be able to do that to the strategy it observes; keeping these nine fields
+    be able to do that to the strategy it observes; keeping these fields
     outside the hashed section is what makes "no feature below changes quotes"
     true of the graduation clock as well as of the quotes.
     """
@@ -580,6 +580,14 @@ class MakerObservatoryConfig(BaseModel):
     min_completeness: float = Field(default=0.95, ge=0.8, le=1.0)
     max_mark_lateness_seconds: int = Field(default=45, ge=1, le=600)
     holdout_days: int = Field(default=7, ge=1, le=30)
+    # Cadence of the offline markout resolver task. It does NOT affect what a
+    # mark concludes — a mark is taken from the first observation at or after
+    # its horizon, whenever the resolver gets round to it — so this is a
+    # report-freshness and DB-contention knob only.
+    resolve_interval_seconds: float = Field(default=60.0, ge=1.0, le=3600.0)
+    # Ceiling on fills examined per resolver pass, so a backlog cannot hold the
+    # shared Database serializer for minutes. The remainder stays pending.
+    resolve_batch_fills: int = Field(default=500, ge=1, le=20000)
 
     @model_validator(mode="after")
     def validate_observatory(self):

@@ -398,7 +398,10 @@ class Database:
                 observed_at TEXT NOT NULL, best_bid REAL NOT NULL, best_ask REAL NOT NULL,
                 midpoint REAL NOT NULL, microprice REAL NOT NULL, spread REAL NOT NULL,
                 bid_depth REAL NOT NULL, ask_depth REAL NOT NULL,
-                depth_imbalance REAL NOT NULL, signed_flow REAL NOT NULL DEFAULT 0,
+                depth_imbalance REAL NOT NULL,
+                -- Nullable: NULL is "no trade feed reached this market", which
+                -- is a different fact from balanced flow. See models.py.
+                signed_flow REAL,
                 short_vol REAL NOT NULL DEFAULT 0, long_vol REAL NOT NULL DEFAULT 0,
                 quote_bid REAL, quote_ask REAL, quote_changed INTEGER,
                 quote_age_seconds REAL, quote_active INTEGER NOT NULL DEFAULT 0,
@@ -414,9 +417,12 @@ class Database:
                 side TEXT NOT NULL CHECK(side IN ('bid','ask')),
                 fill_price REAL NOT NULL, fill_size REAL NOT NULL,
                 is_paper INTEGER NOT NULL, fill_evidence TEXT NOT NULL,
-                filled_at TEXT NOT NULL);
+                filled_at TEXT NOT NULL,
+                marks_pending INTEGER NOT NULL DEFAULT 1);
             CREATE INDEX IF NOT EXISTS idx_maker_fills_market_time
                 ON maker_observatory_fills(market_id, filled_at);
+            CREATE INDEX IF NOT EXISTS idx_maker_fills_pending
+                ON maker_observatory_fills(filled_at) WHERE marks_pending=1;
             CREATE TABLE IF NOT EXISTS maker_observatory_markouts (
                 fill_id INTEGER NOT NULL, horizon_seconds INTEGER NOT NULL,
                 target_at TEXT NOT NULL, midpoint REAL NOT NULL, markout REAL NOT NULL,

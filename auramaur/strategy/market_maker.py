@@ -119,6 +119,7 @@ class MarketMaker:
                 retention_days=observatory_cfg.retention_days,
                 max_mark_lateness_seconds=observatory_cfg.max_mark_lateness_seconds,
                 holdout_days=observatory_cfg.holdout_days,
+                resolve_batch_fills=observatory_cfg.resolve_batch_fills,
             )
         self._last_observation: dict[str, int] = {}
         # Wall-clock, not a cycle counter. A counter starting at 0 every
@@ -719,6 +720,24 @@ class MarketMaker:
             size=size,
             net_inventory=self._inventory[market_id],
         )
+
+    async def resolve_markouts(self) -> int:
+        """Mark out fills whose horizon has come due. NOT on the quoting path.
+
+        The bot drives this from its own timer (`_task_maker_observatory`)
+        rather than from `run_cycle`, because the scan grows with retained
+        history — 4.6 s per 5-market cycle at 45-day retention, 93% of
+        `observe()`'s cost — and a market maker that takes seconds to requote
+        gets picked off. An observatory that caused the adverse selection it
+        measures would be worse than no observatory. Nothing about "did a fill
+        from four minutes ago move against us" is an input to the current
+        quote, so nothing is lost by resolving it elsewhere.
+
+        Returns the number of marks written, 0 when the observatory is off.
+        """
+        if self._observatory is None:
+            return 0
+        return await self._observatory.resolve_markouts()
 
     async def _record_observatory_fill(self, order_id: str, market_id: str,
                                        side: str, price: float, size: float,
