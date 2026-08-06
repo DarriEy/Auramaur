@@ -65,8 +65,11 @@ class Forecast:
     # No default. A coin reference is not a conservative stand-in for the
     # instrument's drift — it is EASIER to beat, by exactly (0.5 - q)^2, so
     # defaulting to it handed every forecast free measured edge. At the ~0.56
-    # five-session up-rate that is +0.0036 per forecast, and a flat forecaster
-    # with zero information cleared the gate inside a few hundred resolutions.
+    # five-session up-rate that is +0.0036 per forecast, which a flat
+    # forecaster with zero information rides through the gate on patience
+    # alone at ~1,050 resolutions (its 95% lower bound is still -0.00224 at
+    # 400, so the defect is real but slower than the first telling claimed —
+    # see test_a_coin_benchmark_hands_out_free_edge_of_exactly_the_drift_gap).
     # A forecast with no recorded benchmark cannot be scored; clearance()
     # treats it as unscoreable rather than scoring it against a coin.
     reference: float | None = None

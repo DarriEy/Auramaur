@@ -25,6 +25,26 @@ Safety properties:
     a risk check and never upsizes beyond the risk manager's Kelly size.
   * Exempt strategies (arbitrage, market_maker by default) bypass the
     ladder: they are structural/two-sided, not directional conviction.
+
+LEDGER CONVENTION, and it is the whole reason the SQL below reads SUM(pnl)
+rather than SUM(pnl - fees). ``pnl_ledger.pnl`` is ALREADY NET OF FEES at
+every one of its six writers — pnl.py `(price - avg_cost) * size - fill.fee`,
+ledger.py the same, kalshi_settlements `payout - cost - fee`,
+instrument_booking `pnl=-fee_usd, fees=0.0`, manual_trades and
+resolution_tracker `fees=0.0`. The `fees` column is the informational
+breakdown of what has already been deducted, not a second charge —
+readiness.check_pnl_after_fees says so outright, commenting `# already net of
+fees` on SUM(pnl) and then recovering gross as `net + fees`.
+
+Subtracting it again charged every fee twice on the paper->live PROMOTION
+path. The error is conservative (it understates P&L, so it holds a cell back
+rather than promoting one that has not earned it), which is why it survived
+unnoticed, but a promotion gate that judges cells on a number that is not
+their P&L is judging the wrong thing. Corrected 2026-08-06 alongside the same
+defect in ledger_report's benchmark panel; measured on the live DB the change
+moves exactly one of 127 cells (kraken_directional/kraken_spot, -$43.98 ->
+-$36.53, negative under both conventions and carrying no decision_snapshots),
+so no verdict flips today.
 """
 
 from __future__ import annotations
@@ -97,7 +117,9 @@ class GraduationLadder:
         # decision. See GraduationConfig.strategy_level_strategies.
         if strategy in self._settings.graduation.strategy_level_strategies:
             rows = await self._db.fetchall(
-                """SELECT market_id, is_paper, SUM(pnl - fees) AS pnl
+                # SUM(pnl), not SUM(pnl - fees): pnl is already net at every
+                # writer. See LEDGER CONVENTION in the module docstring.
+                """SELECT market_id, is_paper, SUM(pnl) AS pnl
                    FROM pnl_ledger
                    WHERE strategy_source = ?
                      AND realized_at >= datetime('now', ?)
@@ -107,7 +129,8 @@ class GraduationLadder:
             )
         else:
             rows = await self._db.fetchall(
-                """SELECT market_id, is_paper, SUM(pnl - fees) AS pnl
+                # SUM(pnl), not SUM(pnl - fees) — see the module docstring.
+                """SELECT market_id, is_paper, SUM(pnl) AS pnl
                    FROM pnl_ledger
                    WHERE strategy_source = ? AND category = ?
                      AND realized_at >= datetime('now', ?)
@@ -153,7 +176,9 @@ class GraduationLadder:
                     SELECT strategy_version FROM strategy_experiments
                     WHERE strategy_source = ? ORDER BY registered_at DESC LIMIT 1
                 ), pnl AS (
-                    SELECT market_id, is_paper, SUM(pnl - fees) AS net_pnl
+                    -- SUM(pnl): already net of fees at every writer. See the
+                    -- module docstring. This is the promotion path.
+                    SELECT market_id, is_paper, SUM(pnl) AS net_pnl
                     FROM pnl_ledger WHERE strategy_source = ?
                     GROUP BY market_id, is_paper
                 )
@@ -282,9 +307,10 @@ class GraduationLadder:
         rows = await self._db.fetchall(
             """SELECT strategy_source AS strategy, category,
                  SUM(CASE WHEN is_paper = 0 THEN 1 ELSE 0 END) AS live_n,
-                 COALESCE(SUM(CASE WHEN is_paper = 0 THEN pnl - fees ELSE 0 END), 0) AS live_pnl,
+                 -- pnl only; already net of fees (module docstring).
+                 COALESCE(SUM(CASE WHEN is_paper = 0 THEN pnl ELSE 0 END), 0) AS live_pnl,
                  SUM(CASE WHEN is_paper = 1 THEN 1 ELSE 0 END) AS paper_n,
-                 COALESCE(SUM(CASE WHEN is_paper = 1 THEN pnl - fees ELSE 0 END), 0) AS paper_pnl
+                 COALESCE(SUM(CASE WHEN is_paper = 1 THEN pnl ELSE 0 END), 0) AS paper_pnl
                FROM pnl_ledger
                WHERE realized_at >= datetime('now', ?)
                GROUP BY 1, 2 ORDER BY 1, 2""",

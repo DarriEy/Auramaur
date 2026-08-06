@@ -213,10 +213,23 @@ def render_ledger_report(state: dict) -> Panel:
     bench = state.get("benchmark") or {}
     if bench.get("available"):
         head.append("\n")
-        # "net of fees" stated explicitly: the header's `net` above is
-        # SUM(pnl) with fees broken out separately, while this annualises
-        # SUM(pnl - fees) — the same figure graduation judges cells on. Same
-        # word, two meanings, so name which one this is.
+        # Both numbers on this panel are the SAME quantity: SUM(pnl), which is
+        # already net of fees because every ledger writer books it that way.
+        # readiness.check_pnl_after_fees states the convention outright — it
+        # comments `# already net of fees` on SUM(pnl) and then recovers gross
+        # as `net + fees`. The `fees ${...}` in the header is therefore the
+        # informational breakdown of what has already been deducted, not a
+        # further charge, and this line annualises the identical figure over
+        # the span of the record.
+        #
+        # This comment used to claim the two differed — that the header was
+        # SUM(pnl) while this annualised SUM(pnl - fees). That was accurate
+        # while the call above subtracted fees a second time, and the
+        # difference it named was the double-count itself: at SUM(pnl)=+$40
+        # with SUM(fees)=$55 the header read +$40.00 and this line read
+        # -$15.00 "behind cash" in bold red, two lines apart. The subtraction
+        # is gone (see the call site above) and so is the discrepancy; the
+        # phrase "net of fees" now has exactly one meaning on this panel.
         head.append(
             f"\n{bench['days']}d of record ({bench['first_at']} → "
             f"{bench['last_at']}), net of fees ")

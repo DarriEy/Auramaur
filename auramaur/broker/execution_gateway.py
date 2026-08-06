@@ -480,13 +480,20 @@ class ExecutionGateway:
             )
 
         # Keep the ids. Discarding them left order.decision_id unset, so the
-        # mark_fill block in _place_and_record never ran and EVERY paired-arb
-        # snapshot stayed filled=0 forever. With
+        # mark_fill block in _place_and_record never ran and any paired-arb
+        # snapshot this path wrote would stay filled=0 forever. With
         # graduation.require_executable_fills true (the tracked YAML),
         # _prospective_stats appends `AND d.filled = 1 AND d.fill_evidence IN
         # (...)`, so cross_venue_arb and entailment_arb could never graduate
-        # paper->live on merit — while still burning the 14-day holdout clock
-        # and writing snapshots that looked like accumulating evidence.
+        # paper->live on merit however long they ran.
+        #
+        # Scope of the damage so far, measured rather than assumed (live DB,
+        # 2026-08-06): ZERO decision_snapshots rows and ZERO
+        # strategy_experiments rows for either strategy. No holdout clock was
+        # ever registered and no snapshot was ever written, so nothing was
+        # corrupted and nothing was burned — the defect was a gate these two
+        # strategies could not have passed had they started producing
+        # evidence, not evidence already spoiled. Fixed before that mattered.
         # submit() at :136 plumbs these correctly; this path did not.
         decision_id_a = await self._capture_decision(a, order_a)
         decision_id_b = await self._capture_decision(b, order_b)

@@ -739,17 +739,17 @@ class ResolutionTracker:
             # Using `token` here means an unscoped call settles one leg per
             # pass and the next pass picks up the other via the cost_basis arm
             # of check_resolutions' union.
-            if token:
-                await self._db.execute(
-                    "DELETE FROM portfolio WHERE market_id = ? AND is_paper = ? "
-                    "AND UPPER(token) = UPPER(?)",
-                    (market_id, is_paper_flag, token),
-                )
-            else:
-                await self._db.execute(
-                    "DELETE FROM portfolio WHERE market_id = ? AND is_paper = ?",
-                    (market_id, is_paper_flag),
-                )
+            #
+            # Unconditional, because `token` cannot be falsy: it was
+            # normalised to `(token or "YES").upper()` above, so an `if token:`
+            # guard here would be a branch that always takes the same arm and
+            # an unscoped-DELETE fallback that can never run — which is exactly
+            # the whole-market DELETE this fix removes.
+            await self._db.execute(
+                "DELETE FROM portfolio WHERE market_id = ? AND is_paper = ? "
+                "AND UPPER(token) = UPPER(?)",
+                (market_id, is_paper_flag, token),
+            )
 
             # Remove peak tracking
             await self._db.execute(

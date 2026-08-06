@@ -365,10 +365,25 @@ def test_strategy_level_election_aggregates_categories():
 
 
 
-def test_graduation_uses_pnl_net_of_fees():
+def test_graduation_does_not_subtract_fees_twice():
+    """``pnl_ledger.pnl`` is ALREADY net of fees at every one of its writers —
+    pnl.py books ``(price - avg_cost) * size - fill.fee`` and records the fee
+    separately in ``fees`` as the breakdown of what it just deducted. The
+    ladder read ``SUM(pnl - fees)``, charging every fee a second time on the
+    paper->live PROMOTION path.
+
+    The error was conservative (it understates P&L, holding a cell back rather
+    than promoting one that has not earned it), which is why it survived
+    unnoticed. It is still the wrong number: a gate that judges a cell on
+    something which is not its P&L judges the wrong thing.
+
+    This test used to assert the opposite, with a fixture — pnl=+1 alongside
+    fees=2 — that no writer can produce: a $2 fee on a $1 gross books pnl=-1
+    with fees=2, never pnl=+1. It encoded the defect as the contract."""
     async def run():
         db = Database(":memory:")
         await db.connect()
+        # Five markets that each NETTED +$1 after a $2 fee was already taken.
         for i in range(5):
             await db.execute(
                 """INSERT INTO pnl_ledger
@@ -378,10 +393,22 @@ def test_graduation_uses_pnl_net_of_fees():
                            1, 1, 2, 1, ?)""",
                 (f"fee-{i}", f"fee-ref-{i}"),
             )
+        await db.commit()
         ladder = GraduationLadder(db, _settings(min_markets=5))
+
+        stats = await ladder._cell_stats("fee_test", "crypto")
+        assert abs(stats["paper_pnl"] - 5.0) < 1e-9, \
+            f"SUM(pnl - fees) would read -5.0; got {stats['paper_pnl']}"
+        assert stats["paper_n"] == 5
+
+        # And the verdict follows the true number: paper-positive is
+        # probation, not the paper_negative the double-count produced.
         decision = await ladder.decide("fee_test", "crypto")
-        assert decision.status == "paper_negative"
-        assert decision.force_paper is True
+        assert decision.status == "probation", decision
+
+        report = await ladder.report()
+        cell = [r for r in report if r["strategy"] == "fee_test"][0]
+        assert abs(cell["paper_pnl"] - 5.0) < 1e-9, cell
         await db.close()
 
     asyncio.run(run())
