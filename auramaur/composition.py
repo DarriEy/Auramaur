@@ -552,7 +552,8 @@ async def assemble_components(
     # rebate tier is introduced.
     market_maker = None
     if s.market_maker.enabled and exchange is not None:
-        market_maker = MarketMaker(settings=s, exchange=exchange, db=db)
+        market_maker = MarketMaker(
+            settings=s, exchange=exchange, db=db, flow_tracker=flow_tracker)
 
     # Alerts
     alerts = AlertManager(

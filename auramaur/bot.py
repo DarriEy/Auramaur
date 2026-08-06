@@ -1279,6 +1279,43 @@ class AuramaurBot(
                 show_error(f"Market maker cycle failed: {e}")
             await asyncio.sleep(interval)
 
+    async def _task_maker_observatory(self) -> None:
+        """Resolve due maker fill markouts on their own timer.
+
+        Deliberately NOT folded into `_task_market_maker`. The scan grows with
+        retained history and used to run inside `_quote_market`, inside the
+        per-market `op_timeout` window, holding the process-wide Database
+        serializer — 4.6 s per 5-market cycle at 45-day retention. Slow quotes
+        get picked off, so leaving it there meant the instrument would cause
+        the adverse selection it exists to measure. Its own task also keeps
+        resolution running when the maker has nothing to quote, so the
+        measurement record does not silently develop holes.
+
+        This task deliberately does NOT `beat()`. `check_strategy_data_delivery`
+        fails a readiness criterion for any heartbeat whose strategy has no
+        registered data contract, and this task consumes no market data — it
+        reads rows the maker already wrote. Its liveness surface is the
+        observatory's own valid-mark completeness, which is the honest one.
+
+        No kill-switch gate, on purpose: this places no orders and moves no
+        cash. Halting it would only corrupt the measurement record (marks would
+        go permanently late) for a reason unrelated to trading safety.
+        """
+        mm: MarketMaker | None = self._components.market_maker
+        observatory = getattr(self.settings, "maker_observatory", None)
+        if mm is None or observatory is None or not observatory.enabled:
+            return
+        interval = observatory.resolve_interval_seconds
+        while self._running:
+            try:
+                resolved = await mm.resolve_markouts()
+                if resolved:
+                    log.info("maker_observatory.markouts_resolved", marks=resolved)
+            except Exception as e:
+                # Measurement must never take the process down.
+                log.warning("maker_observatory.resolve_error", error=str(e))
+            await asyncio.sleep(interval)
+
     async def _task_price_monitor(self) -> None:
         """Monitor real-time price changes via WebSocket."""
         ws = self._components.websocket
@@ -1936,6 +1973,12 @@ class AuramaurBot(
         # Market maker (if enabled)
         if self._components.market_maker:
             tasks.append(asyncio.create_task(self._task_market_maker(), name="market_maker"))
+            # Shadow measurement, on its own timer so markout resolution never
+            # sits on the quoting path.
+            if getattr(self.settings, "maker_observatory", None) is not None \
+                    and self.settings.maker_observatory.enabled:
+                tasks.append(asyncio.create_task(
+                    self._task_maker_observatory(), name="maker_observatory"))
 
         # Hybrid strategy report (hourly per-pillar P&L)
         if self._hybrid and self._components.attributor:

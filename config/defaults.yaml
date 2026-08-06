@@ -752,6 +752,31 @@ market_maker:
   # abandoned and the cycle continues.
   op_timeout_seconds: 15.0
 
+# Shadow-only 21-day measurement contract for the market maker. No key below
+# changes quotes. It is a TOP-LEVEL section, not a set of fields under
+# `market_maker:`, on purpose: ExecutionGateway._capture_decision hashes
+# `settings.market_maker` into market_maker's strategy_version, so a knob
+# parked in that section would restart the strategy's holdout clock every time
+# the instrument was retuned. An observatory must not be able to re-version the
+# thing it observes. Review after 100 marked fills; retain 45d so the review is
+# reproducible.
+maker_observatory:
+  enabled: true
+  horizons_seconds: [30, 60, 300]
+  retention_days: 45
+  review_days: 21
+  min_fills: 100
+  min_markets: 5
+  min_completeness: 0.95
+  max_mark_lateness_seconds: 45
+  holdout_days: 7
+  # Markout resolution runs on its own task at this cadence, never on the
+  # quoting path. It cannot change what a mark concludes (the mark comes from
+  # the first observation at or after the horizon), only how fresh the report
+  # is and how often the resolver competes for the DB serializer.
+  resolve_interval_seconds: 60.0
+  resolve_batch_fills: 500
+
 arbitrage:
   enabled: true
   min_profit_after_fees_pct: 1.5  # minimum % profit after all exchange fees

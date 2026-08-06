@@ -384,6 +384,55 @@ class Database:
             await self._migrate_v47_to_v48()
         if from_version < 49:
             await self._migrate_v48_to_v49()
+        if from_version < 50:
+            await self._migrate_v49_to_v50()
+
+    async def _migrate_v49_to_v50(self) -> None:
+        """Shadow-only maker microstructure observations and fill markouts."""
+        await self._db.executescript("""
+            CREATE TABLE IF NOT EXISTS maker_observations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                market_id TEXT NOT NULL, condition_id TEXT NOT NULL DEFAULT '',
+                token_id TEXT NOT NULL, strategy_version TEXT NOT NULL,
+                is_holdout INTEGER NOT NULL DEFAULT 0,
+                observed_at TEXT NOT NULL, best_bid REAL NOT NULL, best_ask REAL NOT NULL,
+                midpoint REAL NOT NULL, microprice REAL NOT NULL, spread REAL NOT NULL,
+                bid_depth REAL NOT NULL, ask_depth REAL NOT NULL,
+                depth_imbalance REAL NOT NULL,
+                -- Nullable: NULL is "no trade feed reached this market", which
+                -- is a different fact from balanced flow. See models.py.
+                signed_flow REAL,
+                short_vol REAL NOT NULL DEFAULT 0, long_vol REAL NOT NULL DEFAULT 0,
+                quote_bid REAL, quote_ask REAL, quote_changed INTEGER,
+                quote_age_seconds REAL, quote_active INTEGER NOT NULL DEFAULT 0,
+                reward_eligible INTEGER);
+            CREATE INDEX IF NOT EXISTS idx_maker_obs_market_time
+                ON maker_observations(market_id, observed_at);
+            CREATE TABLE IF NOT EXISTS maker_observatory_horizons (
+                strategy_version TEXT NOT NULL, horizon_seconds INTEGER NOT NULL,
+                PRIMARY KEY (strategy_version, horizon_seconds));
+            CREATE TABLE IF NOT EXISTS maker_observatory_fills (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, order_id TEXT NOT NULL UNIQUE,
+                observation_id INTEGER, market_id TEXT NOT NULL,
+                side TEXT NOT NULL CHECK(side IN ('bid','ask')),
+                fill_price REAL NOT NULL, fill_size REAL NOT NULL,
+                is_paper INTEGER NOT NULL, fill_evidence TEXT NOT NULL,
+                filled_at TEXT NOT NULL,
+                marks_pending INTEGER NOT NULL DEFAULT 1);
+            CREATE INDEX IF NOT EXISTS idx_maker_fills_market_time
+                ON maker_observatory_fills(market_id, filled_at);
+            CREATE INDEX IF NOT EXISTS idx_maker_fills_pending
+                ON maker_observatory_fills(filled_at) WHERE marks_pending=1;
+            CREATE TABLE IF NOT EXISTS maker_observatory_markouts (
+                fill_id INTEGER NOT NULL, horizon_seconds INTEGER NOT NULL,
+                target_at TEXT NOT NULL, midpoint REAL NOT NULL, markout REAL NOT NULL,
+                marked_at TEXT NOT NULL, lateness_seconds REAL NOT NULL,
+                is_valid INTEGER NOT NULL,
+                PRIMARY KEY (fill_id, horizon_seconds));
+            UPDATE schema_version SET version = 50;
+        """)
+        await self._db.commit()
+        log.info("database.migrated", from_version=49, to_version=50)
 
     async def _migrate_v48_to_v49(self) -> None:
         """Record the deterministic pair post-check on entailment verdicts (#405).

@@ -358,6 +358,11 @@ NON_STRATEGY_TASKS = frozenset(
         "_task_ibkr_registry_refresh",
         "_task_kill_switch_monitor",
         "_task_live_gate_monitor",
+        # Shadow measurement of market_maker: resolves due fill markouts from
+        # rows the maker already wrote. It reaches no venue, opens no risk and
+        # places no order — it exists precisely so that work is NOT on the
+        # quoting path.
+        "_task_maker_observatory",
         "_task_market_scan",
         "_task_order_monitor",
         "_task_resolution_checker",
