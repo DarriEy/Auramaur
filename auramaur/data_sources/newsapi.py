@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import aiohttp
 import structlog
 
-from auramaur.data_sources.base import NewsItem
+from auramaur.data_sources.base import NewsItem, redact_error
 
 logger = structlog.get_logger(__name__)
 
@@ -68,7 +68,7 @@ class NewsAPISource:
                     data = await resp.json()
                     break
             except Exception as e:
-                logger.warning("newsapi_fetch_failed", query=query[:50], error=str(e)[:80])
+                logger.warning("newsapi_fetch_failed", query=query[:50], error=redact_error(e, 80))
                 return []
         if data is None:
             return []

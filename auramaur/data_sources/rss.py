@@ -11,7 +11,7 @@ import aiohttp
 import feedparser  # type: ignore[import-untyped]
 import structlog
 
-from auramaur.data_sources.base import NewsItem
+from auramaur.data_sources.base import NewsItem, redact_error
 
 logger = structlog.get_logger(__name__)
 
@@ -75,7 +75,7 @@ class RSSSource:
                 resp.raise_for_status()
                 body = await resp.text()
         except Exception as e:
-            logger.debug("rss_feed_unreachable", url=url, error=str(e)[:60])
+            logger.debug("rss_feed_unreachable", url=url, error=redact_error(e, 60))
             return []
 
         if len(body) > _MAX_FEED_BYTES:
@@ -139,7 +139,7 @@ class RSSSource:
         items: list[NewsItem] = []
         for result in results:
             if isinstance(result, BaseException):
-                logger.warning("rss_feed_error", error=str(result))
+                logger.warning("rss_feed_error", error=redact_error(result))
                 continue
             items.extend(result)
 

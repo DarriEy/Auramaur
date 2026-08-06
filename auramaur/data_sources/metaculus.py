@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 import aiohttp
 import structlog
 
-from auramaur.data_sources.base import NewsItem
+from auramaur.data_sources.base import NewsItem, redact_error
 
 logger = structlog.get_logger(__name__)
 
@@ -168,7 +168,7 @@ class MetaculusSource:
             logger.warning("metaculus.timeout", query=query[:40])
             return []
         except Exception as e:
-            logger.warning("metaculus.fetch_failed", error=str(e)[:60])
+            logger.warning("metaculus.fetch_failed", error=redact_error(e, 60))
             return []
 
     async def close(self) -> None:

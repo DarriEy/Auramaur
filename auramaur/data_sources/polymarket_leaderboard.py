@@ -22,6 +22,7 @@ from dataclasses import dataclass
 
 import aiohttp
 import structlog
+from auramaur.data_sources.base import redact_error
 
 log = structlog.get_logger()
 
@@ -94,7 +95,7 @@ class PolymarketLeaderboard:
                     return None
                 return await r.json()
         except Exception as e:
-            log.debug("leaderboard.fetch_failed", path=path, error=str(e))
+            log.debug("leaderboard.fetch_failed", path=path, error=redact_error(e))
             return None
         finally:
             if self._owned:

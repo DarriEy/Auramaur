@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 import logging
 import structlog
 
-from auramaur.data_sources.base import NewsItem
+from auramaur.data_sources.base import NewsItem, redact_error
 
 try:
     from ddgs import DDGS  # type: ignore[import-untyped]
@@ -50,7 +50,7 @@ class WebSearchSource:
             news_items = await asyncio.to_thread(self._search_news, query, limit)
             items.extend(news_items)
         except Exception as e:
-            logger.warning("websearch_news_error", error=str(e)[:120], query=query)
+            logger.warning("websearch_news_error", error=redact_error(e, 120), query=query)
 
         # Fetch general web results if we need more
         if len(items) < limit:
@@ -60,7 +60,7 @@ class WebSearchSource:
                 web_items = await asyncio.to_thread(self._search_text, query, remaining)
                 items.extend(web_items)
             except Exception as e:
-                logger.warning("websearch_text_error", error=str(e)[:120], query=query)
+                logger.warning("websearch_text_error", error=redact_error(e, 120), query=query)
 
         items.sort(key=lambda n: n.published_at, reverse=True)
         logger.info("websearch_fetched", count=len(items[:limit]), query=query)

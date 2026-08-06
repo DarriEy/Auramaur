@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 import aiohttp
 import structlog
 
-from auramaur.data_sources.base import NewsItem
+from auramaur.data_sources.base import NewsItem, redact_error
 
 logger = structlog.get_logger(__name__)
 
@@ -58,7 +58,7 @@ class GDELTSource:
                     except Exception:
                         return []
         except Exception as e:
-            logger.debug("gdelt.fetch_error", error=str(e)[:120])
+            logger.debug("gdelt.fetch_error", error=redact_error(e, 120))
             return []
 
         items: list[NewsItem] = []

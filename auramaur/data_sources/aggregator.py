@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from auramaur.data_sources.base import DataSource, NewsItem
+from auramaur.data_sources.base import DataSource, NewsItem, redact_error
 if TYPE_CHECKING:
     from auramaur.lineage_observer import LineageObserver
 
@@ -112,9 +112,16 @@ class Aggregator:
                                    round((time.monotonic() - before) * 1000), "",
                                    datetime.now(tz=timezone.utc).isoformat(), mode))
                 return items
+            # 2026-08-06: these two rows are the package's catch-all sink. They
+            # catch whatever propagates out of *any* source — including a source
+            # that forgets to redact its own logging — and their 500-char window
+            # is four times wider than any per-source site. They also outlive the
+            # log: the text lands in source_fetches.error in the trading DB, which
+            # the read-only web dashboard renders. Redact before it is durable.
             except TimeoutError as exc:
                 fetch_rows.append((run_id, source_name, "timeout", 0,
-                                   round((time.monotonic() - before) * 1000), str(exc)[:500],
+                                   round((time.monotonic() - before) * 1000),
+                                   redact_error(exc, 500),
                                    datetime.now(tz=timezone.utc).isoformat(),
                                    getattr(source, "information_mode", "production")))
                 logger.warning("aggregator_source_timeout", source=source_name,
@@ -122,7 +129,8 @@ class Aggregator:
                 return []
             except Exception as exc:
                 fetch_rows.append((run_id, source_name, "error", 0,
-                                   round((time.monotonic() - before) * 1000), str(exc)[:500],
+                                   round((time.monotonic() - before) * 1000),
+                                   redact_error(exc, 500),
                                    datetime.now(tz=timezone.utc).isoformat(),
                                    getattr(source, "information_mode", "production")))
                 logger.exception(

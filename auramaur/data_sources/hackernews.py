@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 import aiohttp
 import structlog
 
-from auramaur.data_sources.base import NewsItem
+from auramaur.data_sources.base import NewsItem, redact_error
 
 logger = structlog.get_logger(__name__)
 
@@ -37,7 +37,7 @@ class HackerNewsSource:
                     return []
                 return (await resp.json())[: self._max_stories]
         except Exception as e:
-            logger.debug("hackernews.ids_error", error=str(e)[:120])
+            logger.debug("hackernews.ids_error", error=redact_error(e, 120))
             return []
 
     async def _fetch_item(self, session: aiohttp.ClientSession, item_id: int) -> dict | None:

@@ -14,6 +14,7 @@ from datetime import date
 
 import aiohttp
 import structlog
+from auramaur.data_sources.base import redact_error
 
 log = structlog.get_logger()
 
@@ -47,7 +48,7 @@ class OpenMeteoSource:
                         return []
                     data = await r.json()
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            log.warning("openmeteo.fetch_error", error=str(e)[:80])
+            log.warning("openmeteo.fetch_error", error=redact_error(e, 80))
             return []
         daily = data.get("daily") or {}
         times = daily.get("time") or []
