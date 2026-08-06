@@ -823,8 +823,20 @@ class KrakenPillar:
                 assert proposal.action is KrakenAction.SELL
                 vol = proposal.volume
                 notional = await self._k.usd_notional(pair, vol, price) or (vol * price)
+                # Hand the adapter the price THIS cycle already validated. The
+                # per-order cap now fails closed on an unpriceable pair, and
+                # without `price=` the adapter re-probes Ticker — a second,
+                # independent network call moments after the loop's own probe.
+                # Its transient failure (5xx, rate limit, Cloudflare) would
+                # refuse a stop-loss / take-profit / trailing-stop / orphan
+                # liquidation that the loop had just priced successfully. It
+                # also makes the deliberately non-binding exit cap deterministic:
+                # both sides of the comparison come from one number, so a >10%
+                # tick between two probes can no longer block a close. ordertype
+                # is "market", so this price only feeds the cap — AddOrder never
+                # receives it.
                 res = await self._k.place_spot_order(
-                    pair, OrderSide.SELL, volume=vol, ordertype="market",
+                    pair, OrderSide.SELL, volume=vol, ordertype="market", price=price,
                     purpose="directional", max_usd=max(notional, kcfg.max_order_usd) * 1.1,
                     dry_run=True if effective_paper else None,
                     client_order_id=str(uuid.uuid4()))
