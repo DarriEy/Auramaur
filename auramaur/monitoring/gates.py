@@ -9,6 +9,7 @@ glance, which switches are ready and which are still waiting on evidence.
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 
 import structlog
@@ -25,15 +26,18 @@ def _resolved_dollar_markets(db_path: str) -> int:
     """Count live markets with fills AND a resolved outcome (the $-edge sample)."""
     # busy_timeout: without it a checkpoint in flight raises SQLITE_BUSY, which
     # the except below turns into 0 — indistinguishable from "no data".
+    # contextlib.closing, not a bare c.close(): the close was unreachable if the
+    # PRAGMA or the query raised mid-way, leaking the connection into the except
+    # arm below — exactly what #399's leaked-connection guard now fails on.
     try:
-        c = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
-        c.execute("PRAGMA busy_timeout=5000")
-        n = c.execute(
-            "SELECT COUNT(DISTINCT f.market_id) FROM fills f "
-            "JOIN calibration cal ON cal.market_id=f.market_id "
-            "WHERE f.is_paper=0 AND cal.actual_outcome IS NOT NULL").fetchone()[0]
-        c.close()
-        return n
+        with contextlib.closing(
+            sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
+        ) as c:
+            c.execute("PRAGMA busy_timeout=5000")
+            return c.execute(
+                "SELECT COUNT(DISTINCT f.market_id) FROM fills f "
+                "JOIN calibration cal ON cal.market_id=f.market_id "
+                "WHERE f.is_paper=0 AND cal.actual_outcome IS NOT NULL").fetchone()[0]
     except Exception as exc:
         # Returning 0 makes an unreadable database look like an empty one, and
         # the gate dashboard renders that as "WAIT (need data)" — so an
