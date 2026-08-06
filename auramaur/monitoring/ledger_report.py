@@ -146,8 +146,20 @@ async def gather_ledger_report(db, *, is_paper: bool, settings=None) -> dict:
     return {
         "is_paper": is_paper,
         "benchmark": risk_free_benchmark(
-            net_pnl=float((total["pnl"] if total else 0) or 0)
-            - float((total["fees"] if total else 0) or 0),
+            # pnl_ledger.pnl is ALREADY NET OF FEES — every writer books it that
+            # way: pnl.py:137 `(price - avg_cost) * size - fill.fee`,
+            # ledger.py:299 the same, kalshi_settlements:152 `payout - cost -
+            # fee`, instrument_booking:127 `pnl=-fee_usd, fees=0.0`. The `fees`
+            # column is the informational breakdown of what is already
+            # deducted, not a second charge.
+            #
+            # Subtracting it again double-counted fees in the one number this
+            # panel labels "net of fees": with SUM(pnl)=+$40 and SUM(fees)=$55
+            # the header printed net +$40.00 and, two lines down, "net of fees
+            # -$15.00 ... behind cash" in bold red. The true figure is +$40.
+            # readiness.py:579 states this convention correctly and explicitly;
+            # this consumer contradicted it.
+            net_pnl=float((total["pnl"] if total else 0) or 0),
             first_at=(span["first_at"] if span else None),
             last_at=(span["last_at"] if span else None),
             settings=settings,
@@ -201,10 +213,23 @@ def render_ledger_report(state: dict) -> Panel:
     bench = state.get("benchmark") or {}
     if bench.get("available"):
         head.append("\n")
-        # "net of fees" stated explicitly: the header's `net` above is
-        # SUM(pnl) with fees broken out separately, while this annualises
-        # SUM(pnl - fees) — the same figure graduation judges cells on. Same
-        # word, two meanings, so name which one this is.
+        # Both numbers on this panel are the SAME quantity: SUM(pnl), which is
+        # already net of fees because every ledger writer books it that way.
+        # readiness.check_pnl_after_fees states the convention outright — it
+        # comments `# already net of fees` on SUM(pnl) and then recovers gross
+        # as `net + fees`. The `fees ${...}` in the header is therefore the
+        # informational breakdown of what has already been deducted, not a
+        # further charge, and this line annualises the identical figure over
+        # the span of the record.
+        #
+        # This comment used to claim the two differed — that the header was
+        # SUM(pnl) while this annualised SUM(pnl - fees). That was accurate
+        # while the call above subtracted fees a second time, and the
+        # difference it named was the double-count itself: at SUM(pnl)=+$40
+        # with SUM(fees)=$55 the header read +$40.00 and this line read
+        # -$15.00 "behind cash" in bold red, two lines apart. The subtraction
+        # is gone (see the call site above) and so is the discrepancy; the
+        # phrase "net of fees" now has exactly one meaning on this panel.
         head.append(
             f"\n{bench['days']}d of record ({bench['first_at']} → "
             f"{bench['last_at']}), net of fees ")

@@ -454,7 +454,11 @@ class IBKRETFPaperPillar:
         still resolve and are readable through `auramaur ibkr-calibration`,
         where they serve as an early kill signal: if the model shows no skill
         there within a few weeks, abandon before waiting out a 42-session
-        clock.
+        clock. That report prints the signal as an explicit "kill-signal
+        diagnostic" line, scored against a coin and labelled kill-only —
+        because this gate returns "unscoreable" (below) for every one of those
+        rows, and a gate's honest refusal must not take the kill signal down
+        with it.
 
         Deliberately fails closed. Any error, and the arm does not trade.
         """
@@ -475,11 +479,29 @@ class IBKRETFPaperPillar:
             forecasts.append(Forecast(
                 float(row["probability"]), str(row["confidence"]),
                 None if outcome is None else int(outcome),
-                # The benchmark each forecast was scored against. Stored
-                # forecasts predate the benchmark column, so fall back to a
-                # coin -- which UNDERSTATES the edge and therefore keeps the
-                # gate shut rather than opening it by accident.
-                0.5))
+                # The benchmark each forecast was scored against. There is no
+                # benchmark column on ibkr_etf_forecasts yet, so this is None
+                # and clearance() treats these as unscoreable.
+                #
+                # It previously passed 0.5 on the reasoning that a coin
+                # "UNDERSTATES the edge and therefore keeps the gate shut".
+                # That is backwards. E[Brier] of a constant forecast r under
+                # base rate q is (r-q)^2 + q(1-q), so a coin benchmark is
+                # EASIER to beat than the instrument's own drift by exactly
+                # (0.5-q)^2 — +0.0036 at the ~0.56 five-session up-rate — and
+                # that constant was added to every forecast's brier_edge. A
+                # flat forecaster answering 0.56 on everything (zero
+                # information: it IS the up-rate) rides that constant through
+                # the gate at ~1,050 resolutions, against a min of 100. Not
+                # ~400: at 400 its 95% lower bound is still -0.00224. The
+                # defect is patience, not speed, and at ~125 scoreable calls a
+                # week it is about two months of free pass.
+                #
+                # Failing closed is the honest state until the benchmark is
+                # recorded per forecast from risk/ibkr_math.horizon_up_rate,
+                # which already computes exactly the right number and is
+                # currently written only into a different ledger.
+                None))
         return clearance(forecasts,
                          min_resolved=self._s.ibkr.etf_min_resolved_to_trade)
 

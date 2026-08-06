@@ -1194,7 +1194,17 @@ class KrakenPillar:
     async def _realised_pnl_usd(self) -> float:
         try:
             row = await self._db.fetchone(
-                "SELECT COALESCE(SUM(pnl - fees), 0) AS v FROM pnl_ledger "
+                # SUM(pnl), not SUM(pnl - fees). pnl_ledger.pnl is already net
+                # of fees at every writer (pnl.py books
+                # `(price - avg_cost) * size - fill.fee`); `fees` is the
+                # breakdown of what was already deducted. Subtracting it again
+                # charged this desk's Kraken commissions twice — the only book
+                # in the ledger carrying non-zero fees, so this was the one
+                # place the defect had a live dollar effect: it reported
+                # -$43.98 realised against a true -$36.53 as of 2026-08-06.
+                # Corrected with the same defect in risk/graduation.py and
+                # monitoring/ledger_report.py.
+                "SELECT COALESCE(SUM(pnl), 0) AS v FROM pnl_ledger "
                 "WHERE strategy_source = 'kraken_directional'")
         except Exception:  # noqa: BLE001
             return 0.0
