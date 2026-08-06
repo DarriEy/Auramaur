@@ -137,6 +137,24 @@ async def check_cycle_health(
             detail="log format has drifted; readiness parser may be unreliable",
         )
 
+    if in_window == 0:
+        # Zero entries is not zero errors. The window can be empty because the
+        # bot is dead, or because rotation carried it away: _rotate() renames
+        # at rotate_max_mb (10MB, 3 backups) and this parser opens exactly one
+        # path, so a bot writing >10MB/day gives a criterion advertising 7 days
+        # under one day of actual visibility. An error burst two rotations ago
+        # scored PASS, and with the other criteria green `overall_pass` was
+        # True and the CLI exited 0 — an automated "ready to arm live" built on
+        # evidence nobody could see.
+        return CriterionResult(
+            name="cycle_health",
+            status="INSUFFICIENT_DATA",
+            value="no log entries in window",
+            threshold="0 errors",
+            detail=("window is empty — the bot may be stopped, or the log "
+                    "rotated (rotate_max_mb) before the window opened"),
+        )
+
     if errors == 0:
         return CriterionResult(
             name="cycle_health",

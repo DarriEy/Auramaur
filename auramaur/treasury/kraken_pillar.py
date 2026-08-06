@@ -708,6 +708,25 @@ class KrakenPillar:
         # Sizing exits/entries off the free amount avoids requesting more than is
         # actually sellable/spendable (which Kraken rejects as insufficient funds).
         bal = await self._k.get_free_balance()
+        # An empty dict is an API FAILURE, not a flat book. get_free_balance
+        # falls back to get_balance, which returns {} on any error (kraken.py
+        # :121-123 logs and returns the empty result rather than raising) — so
+        # one 5xx, rate-limit or invalid-nonce response made every tracked
+        # position look closed. _reconcile_positions then cleared _dir_long,
+        # _clear_peak() DELETED the position_peaks row — the trailing-stop
+        # high-water mark, which is NOT recoverable from cost_basis — and
+        # _mirror_to_portfolio removed every live kraken portfolio row. A
+        # position that peaked +40% and sat at +30% re-anchored at +30% and
+        # the give-back was never banked.
+        #
+        # _treasury guards this exact case at line 419 (`if not bal: return`).
+        # Skipping the cycle costs one iteration; the next healthy poll
+        # re-reads the wallet, which is the source of truth anyway.
+        if not bal and not effective_paper:
+            log.warning("kraken.directional.balance_unavailable",
+                        detail="empty balance response; skipping cycle rather "
+                               "than treating the book as flat")
+            return
         if self._pair_base is None:
             await self._resolve_pairs(kcfg.directional_pairs)
         # Evaluate the UNION of configured pairs and everything we actually hold,

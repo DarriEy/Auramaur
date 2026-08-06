@@ -8,6 +8,7 @@ import click
 from rich.table import Table
 
 from auramaur.db.database import Database
+from auramaur.runtime import db_path as runtime_db_path
 from config.settings import Settings
 
 from auramaur.cli._base import console, main
@@ -141,7 +142,21 @@ def dust_exit(max_notional: float, exchange: str | None, execute: bool, yes: boo
 
         settings = Settings()
         from auramaur.cli import AuramaurBot  # call-time lookup keeps test patch working
-        bot = AuramaurBot(settings=settings, db_path="auramaur.db", exchange_filter=exchange)
+        # Resolve through runtime.db_path() the way run.py:61 does. The bare
+        # literal only resolves under a CWD that happens to be the repo root,
+        # and this command's ONLY concurrency protection is the flock on
+        # f"{db_path}.lock" — also CWD-relative. Under any deployment that
+        # relocates state (compose sets /app/state/auramaur.db; deploy/*.sh set
+        # AURAMAUR_DB_PATH) it flocked ./auramaur.db.lock, which is
+        # uncontended, so the "refuses to run while the bot is running" guard
+        # never engaged. It would then attach to ./auramaur.db — either a stale
+        # pre-migration file, in which case it exits real positions the running
+        # bot is concurrently managing, or a nonexistent one, in which case
+        # composition.assemble_components CREATES it with full schema DDL and
+        # reports "No dust positions" to an operator who then concludes there
+        # are none.
+        bot = AuramaurBot(settings=settings, db_path=str(runtime_db_path()),
+                          exchange_filter=exchange)
         try:
             await bot._init_components()
         except RuntimeError as e:

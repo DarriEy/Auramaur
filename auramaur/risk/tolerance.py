@@ -14,14 +14,20 @@ Applied at the RiskManager gateway, so every trade respects it.
 
 from __future__ import annotations
 
-from pathlib import Path
+from auramaur.runtime import state_dir
 
 _CONF = ["LOW", "MEDIUM", "HIGH"]
 
 # Runtime override so `auramaur risk <n>` takes effect LIVE (no restart): the CLI
 # writes here, every consumer reads it each time, falling back to config.
-_OVERRIDE = Path("data/risk_tolerance")
-
+# Anchored to the state dir, NOT the CWD. As a bare relative path this was the
+# last CWD-relative state file in the codebase, and it governs the whole risk
+# surface: Kelly x3, min-edge /3, category cap 100%, second-opinion divergence
+# 0.75, max open positions 1500. A stale `data/risk_tolerance` left in a launch
+# directory silently put the book at maximum aggression with no log line, and
+# `auramaur risk 0` run from anywhere other than the bot's CWD had no effect at
+# all while printing that it did. runtime.py exists to anchor exactly this.
+_OVERRIDE = state_dir() / "data" / "risk_tolerance"
 
 def current_tolerance(settings) -> float:
     """Effective risk tolerance now: the live override file if present, else config."""
@@ -30,33 +36,27 @@ def current_tolerance(settings) -> float:
     except (OSError, ValueError):
         return float(getattr(settings, "risk_tolerance", 50.0))
 
-
 def set_tolerance(value: float) -> None:
     """Persist a live override (clamped 0..100)."""
     _OVERRIDE.parent.mkdir(parents=True, exist_ok=True)
     _OVERRIDE.write_text(str(max(0.0, min(100.0, float(value)))))
 
-
 def scale_budget(base_usd: float, tolerance: float) -> float:
     """Scale a directional exposure budget by the lever (0..100)."""
     return base_usd * _aggr(max(0.0, min(100.0, tolerance)) / 100.0)
-
 
 # Multiplier at YOLO (t=1); 1/_SPAN at most-conservative (t=0). Geometric so the
 # lever is symmetric in log-space and far more sensitive near the extremes than a
 # linear ramp (e.g. 65 -> 1.39x vs the old 1.18x; 100 -> 3x vs 1.6x).
 _SPAN = 3.0
 
-
 def _aggr(t: float) -> float:
     """Multiplier for params that GROW with aggression. 0->0.33, .5->1.0, 1->3.0."""
     return _SPAN ** (2.0 * max(0.0, min(1.0, t)) - 1.0)
 
-
 def _cons(t: float) -> float:
     """Multiplier for params that SHRINK with aggression (inverse of _aggr)."""
     return 1.0 / _aggr(t)
-
 
 def _confidence_floor(base: str, t: float) -> str:
     i = _CONF.index(base) if base in _CONF else 1
@@ -65,7 +65,6 @@ def _confidence_floor(base: str, t: float) -> str:
     elif t <= 0.34:      # timid: demand higher confidence
         i = min(2, i + 1)
     return _CONF[i]
-
 
 def scale_risk(risk, kelly_fraction: float, tolerance: float):
     """Return (tolerance-scaled RiskConfig, scaled kelly fraction).
