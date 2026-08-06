@@ -264,7 +264,14 @@ async def gather_state(db, settings, cache: dict | None = None,
     """
     now = datetime.now(timezone.utc)
     if book is None:
-        is_paper_flag = 0 if settings.is_live else 1
+        # Deliberately NOT settings.is_live. That property folds in
+        # kill_switch_active, so arming the kill switch silently swapped the
+        # operator's view from the LIVE book to the PAPER book — at exactly the
+        # moment they most need to see live exposure, and while resting live
+        # orders were still working. Which book the bot TRADES is a
+        # configuration question; whether it may trade *right now* is a
+        # separate one, and only the second is affected by the kill switch.
+        is_paper_flag = 0 if (settings.auramaur_live and settings.execution.live) else 1
     else:
         is_paper_flag = 0 if book == "live" else 1
 
@@ -284,6 +291,10 @@ async def gather_state(db, settings, cache: dict | None = None,
     return {
         "now": now,
         "is_live": settings.is_live,
+        # Which book the numbers below describe. Previously unlabelled, so a
+        # kill-switch-induced book swap was indistinguishable from "the live
+        # positions are gone".
+        "book": "live" if is_paper_flag == 0 else "paper",
         "transfers_armed": settings.transfers_armed,
         "kill_switch": settings.kill_switch_active,
         "venues": venues,
@@ -327,9 +338,15 @@ def _header_panel(s: dict) -> Panel:
         gates.append("[bold red]KILL SWITCH[/]")
     if s["transfers_armed"]:
         gates.append("[yellow]transfers armed[/]")
+    # Name the book explicitly. `mode` reports whether trading is permitted
+    # right now; it is NOT the same question as which book these numbers come
+    # from, and conflating the two is how a halted-but-exposed bot reads as flat.
+    book = s.get("book", "paper")
+    book_label = ("[bold red]book: LIVE[/]" if book == "live"
+                  else "[green]book: paper[/]")
     return Panel(Text.from_markup(
-        f"  AURAMAUR cockpit   {mode}   {s['now'].strftime('%H:%M:%S UTC')}   "
-        + "  ".join(gates)))
+        f"  AURAMAUR cockpit   {mode}   {book_label}   "
+        f"{s['now'].strftime('%H:%M:%S UTC')}   " + "  ".join(gates)))
 
 
 def _venues_panel(s: dict) -> Panel:

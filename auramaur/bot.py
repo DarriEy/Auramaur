@@ -94,6 +94,9 @@ class AuramaurBot(
         # positions round-tripped from +$29/+$75 peaks to -$26/-$25.
         self._exit_failures: dict[str, float] = {}
         self._exit_pending: set[str] = set()  # Track exits with resting orders
+        # Latch so the kill switch's one-time cancel sweep runs once, not on
+        # every one of the ~20 _check_kill_switch call sites.
+        self._kill_switch_handled = False
         self._exit_gateway_obj = None  # Lazily built; see _exit_gateway property
         # Track attempted cross-exchange arbs so the scanner doesn't re-execute
         # the same opportunity every 5-minute cycle. Maps arb-key -> expiry ts.
@@ -154,14 +157,33 @@ class AuramaurBot(
             rm.gap_auditor = GapAuditor(self._components.db, an, self.settings)
 
     async def _check_kill_switch(self) -> bool:
-        if kill_switch_present():
-            show_error("KILL SWITCH ACTIVE — halting all trading")
-            self._running = False
-            alerts = self._components.alerts
-            if alerts:
-                await alerts.send("KILL SWITCH ACTIVATED — bot halted", level="critical")
+        if not kill_switch_present():
+            return False
+        self._running = False
+        if self._kill_switch_handled:
             return True
-        return False
+        self._kill_switch_handled = True
+        show_error("KILL SWITCH ACTIVE — halting all trading")
+
+        # Halting PLACEMENT is not halting EXPOSURE. GTC orders already resting
+        # on the venue keep filling after the halt, and _task_order_monitor
+        # stops on the same _running flag, so those fills are never recorded.
+        # Cancelling only in shutdown() was not enough: shutdown() runs after
+        # asyncio.gather(*tasks) returns, and tasks that loop on `while True`
+        # rather than `while self._running` never return.
+        cancelled = 0
+        try:
+            cancelled = await self._cancel_resting_live_orders() or 0
+        except Exception as e:
+            log.warning("kill_switch.cancel_sweep_error", error=str(e))
+
+        alerts = self._components.alerts
+        if alerts:
+            await alerts.send(
+                f"KILL SWITCH ACTIVATED — bot halted; "
+                f"cancelled {cancelled} resting live order(s)",
+                level="critical")
+        return True
 
     async def _task_market_scan(self, engine: TradingEngine, name: str = "") -> None:
         """Periodically scan and store markets."""
@@ -1968,8 +1990,11 @@ class AuramaurBot(
 
         console.print("[dim]Stopped.[/]")
 
-    async def _cancel_resting_live_orders(self) -> None:
-        """Cancel live orders still resting on the book before exit.
+    async def _cancel_resting_live_orders(self) -> int:
+        """Cancel live orders still resting on the book. Returns the count.
+
+        Called both from shutdown() and from _check_kill_switch — halting
+        placement does not retire exposure that is already working.
 
         GTC orders outlive the process, so every restart used to inherit the
         prior session's market-maker quotes and in-flight entries — collateral
@@ -2020,3 +2045,4 @@ class AuramaurBot(
         if cancelled:
             console.print(f"[dim]Cancelled {cancelled} resting live orders[/]")
             log.info("shutdown.orders_cancelled", count=cancelled)
+        return cancelled
