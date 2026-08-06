@@ -223,6 +223,8 @@ def dust_exit(max_notional: float, exchange: str | None, execute: bool, yes: boo
                         current_price=float(row["current_price"] or 0.0),
                         category=live_cat,
                         token=tok, token_id=row["token_id"] or "",
+                        # The SELECT above is scoped to this bot's book.
+                        is_paper=bool(is_paper),
                     )
                     # Pre-filter on the stored value so we only hit the API for
                     # likely-dust positions, then refresh their price to confirm.
