@@ -13,6 +13,7 @@ The RSS feed has been stable for years and is the safest choice.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -25,6 +26,14 @@ from auramaur.data_sources.base import NewsItem, redact_error
 logger = structlog.get_logger(__name__)
 
 _FEED_URL = "https://trends.google.com/trending/rss?geo={geo}"
+
+# ET.fromstring is synchronous and CPU-bound; a pathological body run on the
+# event loop freezes exits and risk checks for its whole duration — the same
+# failure rss.py hit on 2026-07-23 (~25-minute parse). The ClientTimeout below
+# bounds the fetch, not the parse, so the body is size-capped and parsed in a
+# worker thread with a deadline. A feed that trips either limit is dropped.
+_MAX_FEED_BYTES = 3_000_000
+_PARSE_TIMEOUT_SECONDS = 60.0
 
 
 class GoogleTrendsSource:
@@ -51,8 +60,18 @@ class GoogleTrendsSource:
             logger.debug("trends.fetch_error", error=redact_error(e, 120))
             return []
 
+        if len(text) > _MAX_FEED_BYTES:
+            logger.warning("trends.feed_oversized", body_bytes=len(text))
+            return []
+
         try:
-            root = ET.fromstring(text)
+            root = await asyncio.wait_for(
+                asyncio.to_thread(ET.fromstring, text),
+                timeout=_PARSE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("trends.parse_timeout", body_bytes=len(text))
+            return []
         except ET.ParseError as e:
             logger.debug("trends.parse_error", error=redact_error(e, 120))
             return []
