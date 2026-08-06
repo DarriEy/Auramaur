@@ -20,13 +20,25 @@ _SECRET_PARAM_RE = re.compile(
     r"[^&\s'\"]*",
     re.IGNORECASE,
 )
-# Backstop for parameters we have not enumerated: any value that is long and
-# opaque is treated as a credential regardless of its name.
-# 2026-08-06: '%' belongs in the value class. aiohttp percent-encodes the
-# reserved characters of a standard-base64 secret ('+' -> %2B, '=' -> %3D), and
-# without '%' the escape splits the value into runs shorter than the 20-char
-# threshold — so `?cred=AbCdEfGhIj%2FKlMnOpQrStUvWxYz0123` survived intact.
-_OPAQUE_VALUE_RE = re.compile(r"([?&][A-Za-z0-9_.-]+=)([A-Za-z0-9_%-]{20,})")
+# Backstop for parameters we have not enumerated: any long value is treated as
+# a credential regardless of its name.
+#
+# This class went through two rounds, and the second one is the point. It began
+# as [A-Za-z0-9_-]{20,}; that missed '%', because aiohttp percent-encodes the
+# reserved characters of a standard-base64 secret ('+' -> %2B, '=' -> %3D) and
+# the escape split the value into runs under the threshold. Adding '%' fixed
+# that case and left '/' open — yarl does not encode '/' inside a query value —
+# which was recorded as needing its own decision, since adding '/' to a
+# character class would also redact ordinary path-shaped parameters.
+#
+# The decision: stop enumerating. Match everything up to a real delimiter, the
+# same terminator set _SECRET_PARAM_RE already uses. Enumerating the characters
+# a secret may contain is the same losing move as enumerating the ways
+# untrusted text can be unsafe — both are written from the author's
+# imagination, and the gap is precisely what was not imagined. The cost is
+# over-redaction of long benign values; status, host, path and short
+# diagnostic parameters still log verbatim, which is what an error line is for.
+_OPAQUE_VALUE_RE = re.compile(r"([?&][A-Za-z0-9_.\-]+=)([^&\s'\"]{20,})")
 
 
 def redact_error(exc: BaseException | str, limit: int = 120) -> str:

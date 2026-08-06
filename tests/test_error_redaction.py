@@ -8,7 +8,6 @@ cleartext. Truncation is not a mitigation; the key is early in the URL.
 """
 
 from types import SimpleNamespace
-
 import pytest
 from aiohttp import ClientResponseError, RequestInfo
 from yarl import URL
@@ -132,3 +131,35 @@ async def test_aggregator_catch_all_redacts_before_the_row_is_persisted():
     assert "<redacted>" in error_column[0]
     # Still diagnostic: the venue and the ordinary parameter survive.
     assert "vendor.test" in error_column[0] and "format=json" in error_column[0]
+# ---------------------------------------------------------------------------
+# The opaque-value backstop must terminate at a delimiter, not enumerate the
+# characters a secret is allowed to contain. A base64 credential defeats a
+# character class: '/', '+' and a percent-encoded '%2F' all fall outside
+# [A-Za-z0-9_-], so the run before the first one is under the length threshold
+# and nothing matches at all.
+# ---------------------------------------------------------------------------
+
+_B64_SLASH = "aB3dEf/GhIjKlMnOpQrStUvWxYz0123456789"
+_B64_PLUS = "aB3dEf+GhIjKlMnOpQrStUvWxYz0123456789"
+_PCT_ENC = "aB3dEf%2FGhIjKlMnOpQrStUvW0123456789"
+_JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r"
+
+
+@pytest.mark.parametrize("secret", [_B64_SLASH, _B64_PLUS, _PCT_ENC, _JWT])
+def test_base64_and_jwt_secrets_are_redacted_under_unknown_param_names(secret):
+    """The param name is deliberately one we never enumerated."""
+    out = redact_error(
+        _client_error(f"https://vendor.test/v1/data?subscription_credential={secret}&fmt=json"),
+        300,
+    )
+    assert secret not in out
+    assert "<redacted>" in out
+    # Partial exposure is still exposure — no run of the secret may survive.
+    assert secret[:12] not in out
+
+
+def test_backstop_does_not_swallow_short_diagnostic_params():
+    """Over-redaction is safe but useless; short ordinary params must survive."""
+    out = redact_error(
+        _client_error("https://api.example.test/v1/x?format=json&limit=20&page=3"), 300)
+    assert "format=json" in out and "limit=20" in out and "page=3" in out
