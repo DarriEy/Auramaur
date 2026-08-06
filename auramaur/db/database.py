@@ -384,6 +384,35 @@ class Database:
             await self._migrate_v47_to_v48()
         if from_version < 49:
             await self._migrate_v48_to_v49()
+        if from_version < 50:
+            await self._migrate_v49_to_v50()
+
+    async def _migrate_v49_to_v50(self) -> None:
+        """Add auditable exit-policy observations for holdout calibration."""
+        await self._db.executescript("""
+            CREATE TABLE IF NOT EXISTS exit_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                observed_at TEXT NOT NULL DEFAULT (datetime('now')),
+                market_id TEXT NOT NULL, exchange TEXT NOT NULL DEFAULT '',
+                token TEXT NOT NULL DEFAULT 'YES',
+                is_paper INTEGER NOT NULL DEFAULT 1,
+                policy_action TEXT NOT NULL DEFAULT 'HOLD',
+                gross_pnl_pct REAL NOT NULL, net_pnl_pct REAL NOT NULL,
+                peak_pnl_pct REAL NOT NULL, target_pct REAL,
+                estimated_fees REAL NOT NULL DEFAULT 0,
+                current_price REAL NOT NULL, entry_price REAL NOT NULL,
+                size REAL NOT NULL);
+            CREATE INDEX IF NOT EXISTS idx_exit_decisions_position_time
+              ON exit_decisions(market_id, token, is_paper, observed_at);
+            -- observed_at is the composite's FOURTH column and the retention
+            -- delete constrains nothing else, so that index offers no seekable
+            -- prefix. Without this one the per-cycle prune full-scans.
+            CREATE INDEX IF NOT EXISTS idx_exit_decisions_observed_at
+              ON exit_decisions(observed_at);
+            UPDATE schema_version SET version = 50;
+        """)
+        await self._db.commit()
+        log.info("database.migrated", from_version=49, to_version=50)
 
     async def _migrate_v48_to_v49(self) -> None:
         """Record the deterministic pair post-check on entailment verdicts (#405).
