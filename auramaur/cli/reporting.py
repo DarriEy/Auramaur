@@ -531,6 +531,7 @@ def graduation():
                 return
             table = Table()
             table.add_column("strategy", style="cyan")
+            table.add_column("venue")
             table.add_column("category")
             table.add_column("live n/$", justify="right")
             table.add_column("paper n/$", justify="right")
@@ -543,7 +544,7 @@ def graduation():
                 mode_str = ("LIVE" if not c["force_paper"] else "paper") + (
                     f" x{c['multiplier']}" if c["multiplier"] != 1.0 else "")
                 table.add_row(
-                    c["strategy"], c["category"],
+                    c["strategy"], c["venue"], c["category"],
                     f"{c['live_n']} / ${c['live_pnl']:+.2f}",
                     f"{c['paper_n']} / ${c['paper_pnl']:+.2f}",
                     f"[{status_style}]{c['status']}[/]",
