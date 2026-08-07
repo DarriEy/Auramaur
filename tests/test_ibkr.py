@@ -204,8 +204,8 @@ class TestIBKRExit:
             token_id="123:buy_call:C:200:20260418",
             token=TokenType.YES, size=2.0, current_price=4.0, unrealized_pnl=10.0)
 
-        ok = await bot._execute_ibkr_exit(pos, ExitReason.STOP_LOSS, None, exch, alerts)
-        assert ok is True
+        attempt = await bot._execute_ibkr_exit(pos, ExitReason.STOP_LOSS, None, exch, alerts)
+        assert attempt.ok is True
         order = exch.place_order.await_args.args[0]
         assert order.side == OrderSide.SELL
         assert order.exchange == "ibkr"
@@ -220,9 +220,9 @@ class TestIBKRExit:
         exch = SimpleNamespace(place_order=AsyncMock())
         pos = SimpleNamespace(market_id="x", token_id="", token=TokenType.YES,
                               size=2.0, current_price=4.0, unrealized_pnl=0.0)
-        ok = await bot._execute_ibkr_exit(
+        attempt = await bot._execute_ibkr_exit(
             pos, ExitReason.STOP_LOSS, None, exch, SimpleNamespace(send=AsyncMock()))
-        assert ok is False
+        assert attempt.ok is False
         exch.place_order.assert_not_called()
 
 

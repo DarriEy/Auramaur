@@ -305,9 +305,10 @@ def dust_exit(max_notional: float, exchange: str | None, execute: bool, yes: boo
             for name, discovery, exch, p in sellables:
                 try:
                     if name == "polymarket":
-                        ok = await bot._execute_poly_exit(p, ExitReason.DUST_CLEANUP, discovery, exch, alerts)
+                        attempt = await bot._execute_poly_exit(p, ExitReason.DUST_CLEANUP, discovery, exch, alerts)
                     else:
-                        ok = await bot._execute_kalshi_exit(p, ExitReason.DUST_CLEANUP, discovery, exch, alerts)
+                        attempt = await bot._execute_kalshi_exit(p, ExitReason.DUST_CLEANUP, discovery, exch, alerts)
+                    ok = attempt.ok
                 except Exception as e:
                     console.print(f"[red]ERROR closing {p.market_id[:24]}: {e}[/]")
                     ok = False

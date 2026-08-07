@@ -158,6 +158,115 @@ def test_doctor_fails_when_zero_expected_pillars_are_alive(tmp_path):
     asyncio.run(run())
 
 
+def test_doctor_exit_lifecycle_warns_only_on_actionable_rows():
+    """The blocked-exit check must be falsifiable: routine backoff and rows
+    whose position already left the book are NOT blockages, or the check
+    degrades to a permanently-warning counter the operator learns to ignore
+    (the alarm-fatigue mode the 12-day exit outage postmortem warned about).
+    """
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        settings = SimpleNamespace(
+            is_live=False, kill_switch_active=False,
+            logging=SimpleNamespace(file="/nonexistent/auramaur.log"),
+        )
+
+        async def seed_row(market, state, retry_mod):
+            await db.execute(
+                """INSERT INTO exit_lifecycle
+                       (exchange, market_id, token, is_paper, state,
+                        next_retry_at)
+                     VALUES ('polymarket', ?, 'YES', 1, ?,
+                             datetime('now', ?))""",
+                (market, state, retry_mod))
+
+        async def seed_position(market):
+            await db.execute(
+                """INSERT INTO portfolio
+                       (market_id, exchange, side, size, avg_price,
+                        current_price, category, token, token_id, is_paper)
+                     VALUES (?, 'polymarket', 'BUY', 10, 0.5, 0.5,
+                             'politics', 'YES', 't', 1)""",
+                (market,))
+
+        # Routine backoff: future wall, live position -> not blocked.
+        await seed_position("M-backoff")
+        await seed_row("M-backoff", "RETRYABLE", "+10 minutes")
+        s = await gather_doctor(settings, db)
+        check = next(c for c in s["checks"] if c["name"] == "exit lifecycle")
+        assert check["status"] == "ok"
+
+        # Past-due wall with NO surviving position (settled out-of-band):
+        # invisible, never an eternal warning.
+        await seed_row("M-ghost", "RETRYABLE", "-30 minutes")
+        s = await gather_doctor(settings, db)
+        check = next(c for c in s["checks"] if c["name"] == "exit lifecycle")
+        assert check["status"] == "ok"
+
+        # Past-due wall WITH a live position: genuinely stuck -> warn.
+        await seed_position("M-stuck")
+        await seed_row("M-stuck", "RETRYABLE", "-30 minutes")
+        s = await gather_doctor(settings, db)
+        check = next(c for c in s["checks"] if c["name"] == "exit lifecycle")
+        assert check["status"] == "warn"
+        assert "retryable=1" in check["detail"]
+
+        # Held dust is a known book state with its own remedy: named in the
+        # detail, but it alone must not degrade the verdict.
+        await db.execute("DELETE FROM exit_lifecycle")
+        await db.execute("DELETE FROM portfolio")
+        await seed_position("M-dust")
+        await seed_row("M-dust", "UNSALEABLE_DUST", "+15 minutes")
+        s = await gather_doctor(settings, db)
+        check = next(c for c in s["checks"] if c["name"] == "exit lifecycle")
+        assert check["status"] == "ok"
+        assert "dust=1" in check["detail"]
+        await db.close()
+
+    asyncio.run(run())
+
+
+def test_doctor_attribution_is_windowed_and_skips_sentinels():
+    """One pre-attribution '' row from history must not pin the check at warn
+    forever, and deliberately-bucketed rows (venue_/phantom_/legacy_
+    unattributed) are labeled outcomes, not leaks."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        settings = SimpleNamespace(
+            is_live=False, kill_switch_active=False,
+            logging=SimpleNamespace(file="/nonexistent/auramaur.log"),
+        )
+
+        async def seed_ledger(ref, source, age_mod):
+            await db.execute(
+                """INSERT INTO pnl_ledger
+                       (market_id, strategy_source, kind, pnl, is_paper,
+                        source_ref, realized_at)
+                     VALUES ('M1', ?, 'sell', 1.0, 1, ?,
+                             datetime('now', ?))""",
+                (source, ref, age_mod))
+
+        # Ancient empty-source row: historical, outside the window -> ok.
+        await seed_ledger("old-empty", "", "-30 days")
+        # Recent sentinel-bucket row: a labeled outcome, not a leak -> ok.
+        await seed_ledger("recent-bucket", "venue_unattributed", "-1 hours")
+        s = await gather_doctor(settings, db)
+        check = next(c for c in s["checks"] if c["name"] == "P&L attribution")
+        assert check["status"] == "ok"
+
+        # Recent empty-source row: a live leak -> warn.
+        await seed_ledger("recent-empty", "", "-1 hours")
+        s = await gather_doctor(settings, db)
+        check = next(c for c in s["checks"] if c["name"] == "P&L attribution")
+        assert check["status"] == "warn"
+        assert "1 unattributed" in check["detail"]
+        await db.close()
+
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     test_summarize_counts_and_excludes_info()
     test_summarize_empty()

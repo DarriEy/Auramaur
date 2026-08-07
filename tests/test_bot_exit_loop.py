@@ -29,6 +29,7 @@ from structlog.testing import capture_logs
 from auramaur.bot import AuramaurBot
 from auramaur.components import Components
 from auramaur.exchange.models import ExitReason, OrderSide, Position, TokenType
+from auramaur.risk.exit_lifecycle import ExitAttempt
 
 
 def _position(market_id: str = "M1", *, is_paper: bool,
@@ -66,7 +67,7 @@ def _bot(exit_list: list, *, is_live: bool = True):
 
     async def _execute_poly_exit(pos, reason, _discovery, _exchange, _alerts):
         attempted.append((pos, reason))
-        return True
+        return ExitAttempt(True)
 
     bot._execute_poly_exit = _execute_poly_exit
     bot._components = Components({
