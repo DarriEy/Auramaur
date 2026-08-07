@@ -157,6 +157,86 @@ def booked_as_position(res: ExecutionResult | OrderResult | None) -> bool:
     return size is not None and size > 0
 
 
+async def materialize_paper_portfolio_row(db, order) -> None:
+    """Project the just-updated paper ``cost_basis`` row into ``portfolio``.
+
+    THE single maintainer of a paper ``portfolio`` row after a booked fill,
+    called from the gateway's ``_record_result`` (instant paper fills — entries
+    AND exits) and from the order monitor's deferred-fill path. One
+    implementation so the two cannot diverge — the same doctrine as
+    :func:`booked_as_position` above.
+
+    Why anything must do this at all: ``PnLTracker.record_fill`` writes
+    ``fills`` and ``cost_basis`` and NOTHING else, and position sync is
+    mode-scoped (``is_paper_flag = 0 if settings.is_live else 1``), so in a
+    live bot nothing else maintains paper rows. On the ENTRY side that left
+    deferred fills invisible to ``RiskManager`` and every pillar's
+    ``_open_position_count`` (measured 2026-08-06: 13 such long_horizon rows
+    and 18 llm rows, all settling correctly yet uncounted). On the EXIT side
+    the mirror image shipped a day later: an exit that filled INSTANTLY
+    through paper interception zeroed ``cost_basis`` and left the portfolio
+    row at FULL SIZE until resolution cleanup (observed live 2026-08-06, the
+    evening after the deferred-fill fix deployed) — inflating exposure and
+    ``max_open`` counts for however long the market kept trading.
+
+    PROJECTED FROM cost_basis, not from the triggering fill, so the two
+    cannot diverge. ``cost_basis`` carries the CUMULATIVE size and
+    weighted-average cost for (market, token, mode) across every fill — a
+    fill-shaped upsert would undercount the second fill in a market (the
+    portfolio upsert REPLACES size) and would leave a stale full-size row
+    after a partial exit. It is also the exact row
+    ``resolution_tracker._settle_position`` falls back to when no portfolio
+    row exists.
+
+    Cannot double-book at settlement. ``_settle_position`` reads the
+    portfolio row OR the cost_basis row (portfolio preferred) to obtain
+    (size, entry_price), but derives its idempotency key from neither:
+    ``source_ref = f"settle:{market_id}:{canon_token}:{is_paper_flag}"``
+    comes from the position KEY alone, and ``_prior_settlement`` dedupes on
+    it. Materializing the row therefore changes only WHICH branch supplies
+    the numbers — and both branches read the same cost_basis values.
+    ``side`` is hardcoded "BUY" for the same reason ``_settle_position``'s
+    cost_basis branch hardcodes it: Polymarket holdings are always long.
+    """
+    row = await db.fetchone(
+        "SELECT size, avg_cost, token, token_id FROM cost_basis "
+        "WHERE market_id = ? AND is_paper = 1 AND token = ?",
+        (order.market_id, order.token.value),
+    )
+    if row is None:
+        return
+    size = float(row["size"])
+    if size <= 0:
+        # The fill closed the holding. Leaving the portfolio row behind is
+        # the stale-exit phantom: it survives until _settle_position's
+        # resolution-time cleanup, inflating exposure the whole way — so
+        # drop it now, the same cleanup settlement performs at cost_basis
+        # zero.
+        await db.execute(
+            "DELETE FROM portfolio WHERE market_id = ? AND is_paper = 1 "
+            "AND UPPER(token) = UPPER(?)",
+            (order.market_id, order.token.value),
+        )
+        return
+    price = float(row["avg_cost"])
+    await db.execute(
+        """INSERT INTO portfolio (market_id, exchange, side, size, avg_price,
+           current_price, unrealized_pnl, category, token, token_id,
+           is_paper, updated_at)
+           VALUES (?, ?, 'BUY', ?, ?, ?, 0,
+                   COALESCE((SELECT category FROM markets WHERE id = ?), ''),
+                   ?, ?, 1, datetime('now'))
+           ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
+               size = excluded.size,
+               avg_price = excluded.avg_price,
+               current_price = excluded.current_price,
+               updated_at = excluded.updated_at""",
+        (order.market_id, order.exchange or "polymarket", size, price, price,
+         order.market_id, row["token"] or order.token.value,
+         row["token_id"] or order.token_id),
+    )
+
+
 class ExecutionGateway:
     """Routes an approved :class:`TradeIntent` through route → place → record."""
 
@@ -986,6 +1066,23 @@ class ExecutionGateway:
                     # into an apparent placement failure that callers may retry.
                     log.critical(
                         "gateway.fill_record_failed",
+                        order_id=result.order_id,
+                        market_id=order.market_id,
+                        error=str(e),
+                    )
+            if recorded_fill is not None and result.is_paper:
+                # record_fill maintains cost_basis only; nothing else maintains
+                # paper portfolio rows in a live bot (position sync is
+                # mode-scoped). Without this, an instant-fill paper EXIT leaves
+                # its full-size portfolio row standing until resolution.
+                try:
+                    await materialize_paper_portfolio_row(self.db, order)
+                except Exception as e:
+                    # Contained like record_fill above — but at error, never
+                    # debug: a swallow here recreates the stale row this call
+                    # exists to prevent, and readiness must see it.
+                    log.error(
+                        "gateway.paper_portfolio_projection_failed",
                         order_id=result.order_id,
                         market_id=order.market_id,
                         error=str(e),

@@ -34,7 +34,10 @@ class OrderMonitorMixin:
         Fails soft: a bookkeeping error here must never take down the monitor
         loop that also reaps live orders.
         """
-        from auramaur.broker.execution_gateway import booked_as_position
+        from auramaur.broker.execution_gateway import (
+            booked_as_position,
+            materialize_paper_portfolio_row,
+        )
         from auramaur.exchange.models import Fill
         from auramaur.research.polymarket_strategies import DecisionTracker
 
@@ -62,7 +65,12 @@ class OrderMonitorMixin:
                         token_id=order.token_id, side=order.side,
                         size=result.filled_size, price=result.filled_price,
                         fee=0.0, is_paper=True, order_id=result.order_id))
-                    await self._materialize_paper_portfolio_row(db, order)
+                    # The pillar that placed this order deliberately did not
+                    # write a portfolio row — the order was resting when
+                    # ``submit`` returned — so the deferred fill must leave
+                    # one now. Shared with the gateway's instant-fill path
+                    # so the two projections cannot diverge.
+                    await materialize_paper_portfolio_row(db, order)
                 if order.decision_id is not None:
                     await DecisionTracker(db).mark_fill(
                         int(order.decision_id),
@@ -71,83 +79,6 @@ class OrderMonitorMixin:
             except Exception as exc:  # noqa: BLE001
                 log.warning("order_monitor.deferred_fill_unbooked",
                             order_id=result.order_id, error=str(exc)[:160])
-
-    @staticmethod
-    async def _materialize_paper_portfolio_row(db, order) -> None:
-        """Project the just-updated paper ``cost_basis`` row into ``portfolio``.
-
-        ``PnLTracker.record_fill`` writes ``fills`` and ``cost_basis`` and
-        NOTHING else. The pillar that placed this order deliberately did not
-        write a portfolio row — the order was resting when ``submit`` returned
-        — and nothing else fills the gap: position sync is mode-scoped
-        (``is_paper_flag = 0 if settings.is_live else 1``), so in a live bot it
-        never touches paper rows. That is exactly what every pillar's
-        ``_record_position`` docstring says ("the mode-scoped position sync
-        won't maintain paper rows in a live bot, so the pillar owns this
-        write"). Without this the deferred fill leaves a holding that settles
-        correctly — ``check_resolutions`` scans ``cost_basis`` — but is
-        invisible to ``RiskManager``'s position reads and to every pillar's
-        ``_open_position_count``, both of which read FROM ``portfolio``, so
-        ``max_open`` undercounts. Measured on the live DB 2026-08-06:
-        long_horizon held 13 such paper rows worth $141.03 and llm 18 worth
-        $374.31, all with no portfolio row.
-
-        PROJECTED FROM cost_basis, not from this one fill, so the two cannot
-        diverge. ``cost_basis`` carries the CUMULATIVE size and
-        weighted-average cost for (market, token, mode) across every fill —
-        the second deferred fill in a market would make a fill-shaped upsert
-        undercount, since the portfolio upsert REPLACES size rather than
-        adding to it. It is also the exact row
-        ``resolution_tracker._settle_position`` falls back to when no
-        portfolio row exists.
-
-        Cannot double-book at settlement. ``_settle_position`` reads the
-        portfolio row OR the cost_basis row (portfolio preferred) to obtain
-        (size, entry_price), but derives its idempotency key from neither:
-        ``source_ref = f"settle:{market_id}:{canon_token}:{is_paper_flag}"``
-        comes from the position KEY alone, and ``_prior_settlement`` dedupes
-        on it. Materializing the row therefore changes only WHICH branch
-        supplies the numbers — and because both branches now read the same
-        cost_basis values, they supply identical numbers. ``side`` is
-        hardcoded "BUY" for the same reason ``_settle_position``'s cost_basis
-        branch hardcodes it: Polymarket holdings are always long.
-        """
-        row = await db.fetchone(
-            "SELECT size, avg_cost, token, token_id FROM cost_basis "
-            "WHERE market_id = ? AND is_paper = 1 AND token = ?",
-            (order.market_id, order.token.value),
-        )
-        if row is None:
-            return
-        size = float(row["size"])
-        if size <= 0:
-            # A deferred SELL that closed the holding. Leaving the portfolio
-            # row behind would be the mirror phantom of the one the entry
-            # guards remove, so drop it — the same cleanup _settle_position
-            # performs once cost_basis reaches zero.
-            await db.execute(
-                "DELETE FROM portfolio WHERE market_id = ? AND is_paper = 1 "
-                "AND UPPER(token) = UPPER(?)",
-                (order.market_id, order.token.value),
-            )
-            return
-        price = float(row["avg_cost"])
-        await db.execute(
-            """INSERT INTO portfolio (market_id, exchange, side, size, avg_price,
-               current_price, unrealized_pnl, category, token, token_id,
-               is_paper, updated_at)
-               VALUES (?, ?, 'BUY', ?, ?, ?, 0,
-                       COALESCE((SELECT category FROM markets WHERE id = ?), ''),
-                       ?, ?, 1, datetime('now'))
-               ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
-                   size = excluded.size,
-                   avg_price = excluded.avg_price,
-                   current_price = excluded.current_price,
-                   updated_at = excluded.updated_at""",
-            (order.market_id, order.exchange or "polymarket", size, price, price,
-             order.market_id, row["token"] or order.token.value,
-             row["token_id"] or order.token_id),
-        )
 
     async def _task_order_monitor(self) -> None:
         """Monitor pending limit orders for fills and expiry."""
