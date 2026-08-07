@@ -735,6 +735,35 @@ async def test_partial_paper_exit_projects_the_remaining_size():
 
 
 @pytest.mark.asyncio
+async def test_projection_labels_the_row_with_the_gateways_venue():
+    """``Order.exchange`` DEFAULTS to "polymarket" — truthy — so any
+    ``order.exchange or ...`` fallback mislabels every order whose builder
+    left the field alone, and the kalshi long_horizon instance does exactly
+    that. The projection must take the gateway's own venue-scoped name."""
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        s = Settings()
+        gw = _exit_gateway(db, s, _instant_fill_exchange())
+        order = Order(market_id="kx1", token_id="tok", side=OrderSide.BUY,
+                      token=TokenType.YES, size=10.0, price=0.30,
+                      order_type=OrderType.LIMIT, dry_run=True)
+        result = OrderResult(order_id="PAPER-K-1", market_id="kx1",
+                             status="paper", filled_size=10.0,
+                             filled_price=0.30, is_paper=True)
+
+        await gw.record_external_fill(
+            order, result, strategy_source="long_horizon_kalshi",
+            exchange_name="kalshi")
+
+        rows = await _portfolio_rows(db, "kx1")
+        assert len(rows) == 1
+        assert rows[0]["exchange"] == "kalshi"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_live_fill_does_not_touch_paper_portfolio_rows():
     """The projection is paper-mode maintenance only. Live portfolio rows
     belong to position sync against the venue; a live fill on a market that

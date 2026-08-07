@@ -69,8 +69,12 @@ class OrderMonitorMixin:
                     # write a portfolio row — the order was resting when
                     # ``submit`` returned — so the deferred fill must leave
                     # one now. Shared with the gateway's instant-fill path
-                    # so the two projections cannot diverge.
-                    await materialize_paper_portfolio_row(db, order)
+                    # so the two projections cannot diverge. The deferred
+                    # queue is the polymarket PaperTrader's, so the order's
+                    # exchange field (defaulting "polymarket") is the venue
+                    # truth available here.
+                    await materialize_paper_portfolio_row(
+                        db, order, venue=order.exchange or "polymarket")
                 if order.decision_id is not None:
                     await DecisionTracker(db).mark_fill(
                         int(order.decision_id),

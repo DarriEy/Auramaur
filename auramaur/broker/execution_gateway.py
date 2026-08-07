@@ -157,7 +157,7 @@ def booked_as_position(res: ExecutionResult | OrderResult | None) -> bool:
     return size is not None and size > 0
 
 
-async def materialize_paper_portfolio_row(db, order) -> None:
+async def materialize_paper_portfolio_row(db, order, venue: str) -> None:
     """Project the just-updated paper ``cost_basis`` row into ``portfolio``.
 
     THE single maintainer of a paper ``portfolio`` row after a booked fill,
@@ -197,7 +197,25 @@ async def materialize_paper_portfolio_row(db, order) -> None:
     the numbers — and both branches read the same cost_basis values.
     ``side`` is hardcoded "BUY" for the same reason ``_settle_position``'s
     cost_basis branch hardcodes it: Polymarket holdings are always long.
+
+    SCOPED to the prediction-market venues whose paper holdings ``portfolio``
+    actually represents. The IBKR arms route their simulated fills through
+    the gateway for the rails (``fills``/``cost_basis``/``pnl_ledger`` —
+    without those the book cannot graduate) but keep positions in their own
+    ``ibkr_*`` tables; a portfolio row for one would leak into the
+    paper-breadth cap, the drawdown fallback and the exit monitor, none of
+    which manage that book. Kraken rows are pillar-owned and never pass
+    through here.
+
+    ``venue`` must be the CALLER's venue truth — the gateway passes its
+    venue-scoped ``exchange_name``. ``Order.exchange`` is deliberately not
+    consulted: its ``"polymarket"`` DEFAULT is truthy, so an
+    ``order.exchange or exchange_name`` fallback silently mislabels every
+    order whose builder left the field alone (the kalshi long_horizon
+    instance does exactly that, and its portfolio rows must say kalshi).
     """
+    if venue not in ("polymarket", "kalshi"):
+        return
     row = await db.fetchone(
         "SELECT size, avg_cost, token, token_id FROM cost_basis "
         "WHERE market_id = ? AND is_paper = 1 AND token = ?",
@@ -231,7 +249,7 @@ async def materialize_paper_portfolio_row(db, order) -> None:
                avg_price = excluded.avg_price,
                current_price = excluded.current_price,
                updated_at = excluded.updated_at""",
-        (order.market_id, order.exchange or "polymarket", size, price, price,
+        (order.market_id, venue, size, price, price,
          order.market_id, row["token"] or order.token.value,
          row["token_id"] or order.token_id),
     )
@@ -1076,7 +1094,8 @@ class ExecutionGateway:
                 # mode-scoped). Without this, an instant-fill paper EXIT leaves
                 # its full-size portfolio row standing until resolution.
                 try:
-                    await materialize_paper_portfolio_row(self.db, order)
+                    await materialize_paper_portfolio_row(
+                        self.db, order, venue=exchange_name)
                 except Exception as e:
                     # Contained like record_fill above — but at error, never
                     # debug: a swallow here recreates the stale row this call
