@@ -624,3 +624,164 @@ def test_every_position_booking_site_uses_the_shared_predicate():
     assert offenders == [], (
         "hand-rolled fill predicate(s) — use "
         f"broker.execution_gateway.booked_as_position: {offenders}")
+
+
+# ======================================================================
+# 4. The gateway's instant-fill mirror: a paper fill that closes the
+#    holding must take the portfolio row with it.
+#
+#    The deferred-fill path got this projection first; the INSTANT path
+#    did not, so a paper exit that filled immediately through paper
+#    interception zeroed cost_basis and left the portfolio row at full
+#    size until resolution cleanup — inflating RiskManager exposure and
+#    every max_open count the whole time (observed on the live book the
+#    evening the deferred-fill fix deployed). These drive the real
+#    consumer path: submit_exit → _place_and_record → _record_result.
+# ======================================================================
+
+def _instant_fill_exchange():
+    """An exchange whose place_order executes immediately, paper-style."""
+    ex = MagicMock()
+    ex.place_order = AsyncMock(side_effect=lambda o: OrderResult(
+        order_id=f"PAPER-X-{o.market_id}", market_id=o.market_id,
+        status="paper" if o.dry_run else "filled",
+        filled_size=o.size, filled_price=o.price, is_paper=o.dry_run))
+    return ex
+
+
+def _exit_gateway(db, settings, exchange):
+    from auramaur.broker.execution_gateway import ExecutionGateway
+
+    return ExecutionGateway(
+        router=None, exchange=exchange, exchange_name="polymarket",
+        settings=settings, db=db, pnl_tracker=PnLTracker(db, settings))
+
+
+async def _seed_paper_holding(db, settings, market_id, token, size, price):
+    """A pillar-shaped holding: cost_basis via record_fill + the pillar's own
+    portfolio write (exactly the state an instant-fill exit finds)."""
+    from auramaur.exchange.models import Fill
+
+    await PnLTracker(db, settings).record_fill(Fill(
+        order_id=f"seed-{market_id}", market_id=market_id, token_id="tok",
+        side=OrderSide.BUY, token=token, size=size, price=price,
+        is_paper=True))
+    await db.execute(
+        """INSERT INTO portfolio (market_id, exchange, side, size, avg_price,
+           token, token_id, is_paper, updated_at)
+           VALUES (?, 'polymarket', 'BUY', ?, ?, ?, 'tok', 1, datetime('now'))""",
+        (market_id, size, price, token.value))
+
+
+def _exit_order(market_id, token, size, price, dry_run=True) -> Order:
+    return Order(market_id=market_id, exchange="polymarket", token_id="tok",
+                 side=OrderSide.SELL, token=token, size=size, price=price,
+                 order_type=OrderType.LIMIT, dry_run=dry_run, source="exit")
+
+
+@pytest.mark.asyncio
+async def test_instant_paper_exit_deletes_the_portfolio_row():
+    """The full-close regression: cost_basis reaches zero, and the portfolio
+    row — which used to stand at full size until the market resolved — goes
+    with it."""
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        s = Settings()
+        gw = _exit_gateway(db, s, _instant_fill_exchange())
+        await _seed_paper_holding(db, s, "xm1", TokenType.NO, 10.99, 0.91)
+
+        res = await gw.submit_exit(
+            _exit_order("xm1", TokenType.NO, 10.99, 0.96),
+            exchange=gw.exchange, exchange_name="polymarket")
+
+        assert res.status == "paper"
+        cb = await db.fetchone(
+            "SELECT size, realized_pnl FROM cost_basis WHERE market_id='xm1'")
+        assert cb is not None and abs(cb["size"]) < 1e-9
+        assert cb["realized_pnl"] > 0, "the sell itself must still book P&L"
+        assert await _portfolio_rows(db, "xm1") == [], (
+            "a closed paper holding must not keep a portfolio row")
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_partial_paper_exit_projects_the_remaining_size():
+    """A partial close must shrink the row to cost_basis's remainder — the
+    same projected-from-cost_basis rule the deferred path follows, for the
+    same reason: the upsert REPLACES size, so any fill-shaped write here
+    would leave the FULL entry size standing."""
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        s = Settings()
+        gw = _exit_gateway(db, s, _instant_fill_exchange())
+        await _seed_paper_holding(db, s, "xm2", TokenType.YES, 20.0, 0.50)
+
+        await gw.submit_exit(
+            _exit_order("xm2", TokenType.YES, 8.0, 0.60),
+            exchange=gw.exchange, exchange_name="polymarket")
+
+        cb = await db.fetchone(
+            "SELECT size, avg_cost FROM cost_basis WHERE market_id='xm2'")
+        rows = await _portfolio_rows(db, "xm2")
+        assert abs(cb["size"] - 12.0) < 1e-9
+        assert len(rows) == 1
+        assert abs(rows[0]["size"] - cb["size"]) < 1e-9
+        assert abs(rows[0]["avg_price"] - cb["avg_cost"]) < 1e-9
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_projection_labels_the_row_with_the_gateways_venue():
+    """``Order.exchange`` DEFAULTS to "polymarket" — truthy — so any
+    ``order.exchange or ...`` fallback mislabels every order whose builder
+    left the field alone, and the kalshi long_horizon instance does exactly
+    that. The projection must take the gateway's own venue-scoped name."""
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        s = Settings()
+        gw = _exit_gateway(db, s, _instant_fill_exchange())
+        order = Order(market_id="kx1", token_id="tok", side=OrderSide.BUY,
+                      token=TokenType.YES, size=10.0, price=0.30,
+                      order_type=OrderType.LIMIT, dry_run=True)
+        result = OrderResult(order_id="PAPER-K-1", market_id="kx1",
+                             status="paper", filled_size=10.0,
+                             filled_price=0.30, is_paper=True)
+
+        await gw.record_external_fill(
+            order, result, strategy_source="long_horizon_kalshi",
+            exchange_name="kalshi")
+
+        rows = await _portfolio_rows(db, "kx1")
+        assert len(rows) == 1
+        assert rows[0]["exchange"] == "kalshi"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_live_fill_does_not_touch_paper_portfolio_rows():
+    """The projection is paper-mode maintenance only. Live portfolio rows
+    belong to position sync against the venue; a live fill on a market that
+    also carries a paper holding must leave the paper row alone."""
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        s = Settings()
+        gw = _exit_gateway(db, s, _instant_fill_exchange())
+        await _seed_paper_holding(db, s, "xm3", TokenType.YES, 15.0, 0.40)
+
+        await gw.submit_exit(
+            _exit_order("xm3", TokenType.YES, 15.0, 0.55, dry_run=False),
+            exchange=gw.exchange, exchange_name="polymarket")
+
+        rows = await _portfolio_rows(db, "xm3")
+        assert len(rows) == 1 and rows[0]["is_paper"] == 1
+        assert abs(rows[0]["size"] - 15.0) < 1e-9, (
+            "a live fill must not resize or delete the paper row")
+    finally:
+        await db.close()
