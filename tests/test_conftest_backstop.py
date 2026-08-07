@@ -13,10 +13,24 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from types import SimpleNamespace
 
 import aiosqlite
+import pytest
 
 from tests import conftest
+
+
+def test_sessionfinish_marks_a_leaking_suite_failed(monkeypatch, capsys):
+    stranded = [(SimpleNamespace(), "tests/test_owner.py::test_leak", "stack")]
+    monkeypatch.setattr(
+        conftest, "_reap_stranded_connections", lambda: stranded)
+    session = SimpleNamespace(exitstatus=pytest.ExitCode.OK)
+
+    conftest.pytest_sessionfinish(session=session, exitstatus=0)
+
+    assert session.exitstatus == pytest.ExitCode.TESTS_FAILED
+    assert "tests/test_owner.py::test_leak" in capsys.readouterr().err
 
 
 def test_sessionfinish_backstop_reaps_a_stranded_worker_thread():
@@ -33,9 +47,10 @@ def test_sessionfinish_backstop_reaps_a_stranded_worker_thread():
         thread = conn  # <= 0.21: Connection IS the thread
     assert thread is not None and thread.is_alive()
 
-    conftest.pytest_sessionfinish(session=None, exitstatus=0)
+    stranded = conftest._reap_stranded_connections()
 
     thread.join(timeout=3.0)
+    assert len(stranded) == 1
     assert not thread.is_alive(), (
         "backstop failed to stop a stranded aiosqlite worker — under this "
         "aiosqlite version the suite would hang at interpreter exit"

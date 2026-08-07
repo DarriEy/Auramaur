@@ -18,23 +18,45 @@ from pathlib import Path
 
 _CONF = ["LOW", "MEDIUM", "HIGH"]
 
-# Runtime override so `auramaur risk <n>` takes effect LIVE (no restart): the CLI
-# writes here, every consumer reads it each time, falling back to config.
-_OVERRIDE = Path("data/risk_tolerance")
+
+def _override_path() -> Path:
+    """Where `auramaur risk <n>` writes the live override, resolved at CALL time.
+
+    Runtime override so the lever takes effect LIVE (no restart): the CLI writes
+    here, every consumer reads it each time, falling back to config.
+
+    Anchored to the state dir, NOT the CWD. As a bare relative path this was the
+    last CWD-relative state file in the codebase, and it governs the whole risk
+    surface: Kelly x3, min-edge /3, category cap 100%, second-opinion divergence
+    0.75, max open positions 1500. A stale `data/risk_tolerance` left in a launch
+    directory silently put the book at maximum aggression with no log line, and
+    `auramaur risk 0` run from anywhere other than the bot's CWD had no effect at
+    all while printing that it did. runtime.py exists to anchor exactly this.
+
+    A function, not a module constant: every other runtime-path consumer resolves
+    at call time (see treasury/transfers.py:_default_ledger_path). Freezing it at
+    import binds the path to whatever AURAMAUR_STATE_DIR happened to be when this
+    module was first imported — which no process can change and no test can
+    monkeypatch, so the risk surface would be the one path nobody could redirect.
+    """
+    from auramaur.runtime import state_dir  # call-time: honors AURAMAUR_STATE_DIR
+
+    return state_dir() / "data" / "risk_tolerance"
 
 
 def current_tolerance(settings) -> float:
     """Effective risk tolerance now: the live override file if present, else config."""
     try:
-        return max(0.0, min(100.0, float(_OVERRIDE.read_text().strip())))
+        return max(0.0, min(100.0, float(_override_path().read_text().strip())))
     except (OSError, ValueError):
         return float(getattr(settings, "risk_tolerance", 50.0))
 
 
 def set_tolerance(value: float) -> None:
     """Persist a live override (clamped 0..100)."""
-    _OVERRIDE.parent.mkdir(parents=True, exist_ok=True)
-    _OVERRIDE.write_text(str(max(0.0, min(100.0, float(value)))))
+    override = _override_path()
+    override.parent.mkdir(parents=True, exist_ok=True)
+    override.write_text(str(max(0.0, min(100.0, float(value)))))
 
 
 def scale_budget(base_usd: float, tolerance: float) -> float:

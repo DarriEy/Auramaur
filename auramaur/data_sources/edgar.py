@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 import aiohttp
 import structlog
+from auramaur.data_sources.base import redact_error
 
 log = structlog.get_logger()
 
@@ -74,7 +75,7 @@ def parse_search_hits(payload: dict) -> list[TenderFiling]:
                 primary_doc=filename,
             ))
         except Exception as e:  # pragma: no cover - defensive
-            log.debug("edgar.parse_hit_error", error=str(e))
+            log.debug("edgar.parse_hit_error", error=redact_error(e))
     return out
 
 
@@ -108,7 +109,7 @@ class EdgarClient:
                 resp.raise_for_status()
                 payload = await resp.json()
         except Exception as e:
-            log.warning("edgar.search_error", error=str(e)[:120])
+            log.warning("edgar.search_error", error=redact_error(e, 120))
             return []
         filings = parse_search_hits(payload)
         log.info("edgar.search_done", hits=len(filings), days=days)
@@ -126,7 +127,7 @@ class EdgarClient:
                 body = await resp.text(errors="replace")
         except Exception as e:
             log.warning("edgar.fetch_error", accession=filing.accession,
-                        error=str(e)[:120])
+                        error=redact_error(e, 120))
             return ""
         # crude but adequate tag strip for LLM consumption
         text = re.sub(r"<[^>]+>", " ", body)

@@ -669,8 +669,8 @@ def test_place_quote_pair_paper_quotes_rest_and_never_reach_the_client():
     legs merged into one blended phantom position that regrew every refresh
     with no trades/fills provenance (the 2026-07-23 orphan-position factory).
     They rest synthetically instead: pending, PAPER-prefixed ids (so the MM's
-    check_fills prunes and _cancel_quote skips them), and the exchange client
-    is never touched."""
+    check_fills prunes them and cancel_resting intercepts them), and the
+    exchange client is never touched."""
     async def run():
         db = Database(":memory:")
         await db.connect()
@@ -949,3 +949,291 @@ def test_llm_kalshi_freezes_the_same_config_as_llm():
     src = inspect.getsource(ExecutionGateway._capture_decision)
     assert '"llm", "llm_kalshi", "news_speed"' in src, (
         "llm_kalshi must map to the nlp section")
+
+
+# ---------------------------------------------------------------------------
+# The cancel contract (cancel_resting).
+#
+# CLAUDE.md rule 3 asserted that pillars route orders through the gateway, but
+# only PLACEMENT had a contract — every cancel, including the gateway's own
+# paired unwind, reached past the choke point to the venue client. These lock in
+# the contract that closed that gap, and above all that it is UNGATED.
+# ---------------------------------------------------------------------------
+
+
+def _cancel_client(*, raises: Exception | None = None, acknowledged: bool = True):
+    """A venue client that records the ids it was asked to cancel."""
+    seen: list[str] = []
+
+    async def _cancel(order_id):
+        seen.append(order_id)
+        if raises is not None:
+            raise raises
+        return acknowledged
+
+    ex = MagicMock()
+    ex.cancel_order = _cancel
+    ex.seen = seen
+    return ex
+
+
+def _quote(bid_id: str, ask_id: str):
+    from auramaur.strategy.market_maker import MMQuote
+
+    return MMQuote(market_id="mm", token_yes_id="yes", token_no_id="no",
+                   bid_price=0.40, ask_price=0.55, size=20.0, spread_bps=150,
+                   bid_order_id=bid_id, ask_order_id=ask_id)
+
+
+def _market_maker(db, exchange, gateway):
+    from auramaur.strategy.market_maker import MarketMaker
+
+    return MarketMaker(Settings(), exchange, db, gateway=gateway)
+
+
+def test_pillar_cancel_routes_through_the_gateway_to_the_client():
+    """(a) The market maker's cancels reach the venue THROUGH the gateway.
+
+    The pillar itself no longer names `cancel_order` — the guard in
+    tests/test_strategy_protocol.py enforces that statically. This is the other
+    half: routing through the contract must still actually cancel the order.
+    """
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            ex = _cancel_client()
+            gw = _gateway(db, ex)
+            mm = _market_maker(db, ex, gw)
+            mm._pending_orders = {"oid-bid": {}, "oid-ask": {}}
+
+            await mm._cancel_quote(_quote("oid-bid", "oid-ask"))
+
+            assert ex.seen == ["oid-bid", "oid-ask"]
+            # And the pillar's own tracking is dropped, as before.
+            assert mm._pending_orders == {}
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_paper_cancel_never_reaches_a_live_client():
+    """(b) Paper interception. Quoting runs paper orders through the LIVE client
+    object (paper-ness is per-order dry_run, not a separate adapter), so a
+    PAPER-prefixed id must be intercepted here or it goes to the venue."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            ex = MagicMock()
+
+            async def _cancel(order_id):
+                raise AssertionError("a paper cancel must never reach the client")
+
+            ex.cancel_order = _cancel
+            gw = _gateway(db, ex)
+
+            # Intercepted on the id shape alone — place_quote_pair's synthetic
+            # resting ids look exactly like this.
+            res = await gw.cancel_resting("PAPER-QUOTE-abc123", exchange=ex)
+            assert res.status == "paper" and res.ok
+
+            # And on an explicit flag, for a caller holding OrderResult.is_paper.
+            flagged = await gw.cancel_resting("oid-live-shaped", exchange=ex,
+                                              is_paper=True)
+            assert flagged.status == "paper" and flagged.ok
+
+            # The pillar path too, through the market maker's own cancel.
+            mm = _market_maker(db, ex, gw)
+            await mm._cancel_quote(_quote("PAPER-QUOTE-b", "PAPER-QUOTE-a"))
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_cancel_succeeds_while_the_kill_switch_is_armed(monkeypatch):
+    """(c) THE regression that matters. A cancel must NOT be blockable.
+
+    #408 made arming the kill switch retire live exposure by cancelling resting
+    orders. If a kill-switch check ever appears on this path, arming the
+    emergency stop would trap the operator inside the exposure it exists to
+    shed — the stop would become a lock. Both halves are checked: the behavior
+    with the switch armed, and the source, so a future 'helpful' gate fails here
+    rather than in production.
+    """
+    import ast as _ast
+    import inspect
+    import textwrap
+
+    import auramaur.killswitch as killswitch
+
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            # Arm it for real: the file at the (conftest-isolated) path, and the
+            # shared predicate every gate consults.
+            killswitch.KILL_SWITCH_PATH.parent.mkdir(parents=True, exist_ok=True)
+            killswitch.KILL_SWITCH_PATH.touch()
+            monkeypatch.setattr(killswitch, "kill_switch_present", lambda: True)
+            assert killswitch.kill_switch_present()
+
+            ex = _cancel_client()
+            gw = _gateway(db, ex)
+            res = await gw.cancel_resting("oid-1", exchange=ex, reason="halt")
+
+            assert res.status == "cancelled" and res.ok
+            assert ex.seen == ["oid-1"], "the kill switch must not block a cancel"
+
+            # The MM path is equally unblockable.
+            mm = _market_maker(db, ex, gw)
+            await mm._cancel_quote(_quote("oid-bid", "oid-ask"))
+            assert ex.seen == ["oid-1", "oid-bid", "oid-ask"]
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+    # Structural: no gate in the body, docstring and comments excluded (the
+    # docstring is *about* the kill switch, so it must not be searched).
+    fn = _ast.parse(
+        textwrap.dedent(inspect.getsource(ExecutionGateway.cancel_resting))
+    ).body[0]
+    body = fn.body
+    if body and isinstance(body[0], _ast.Expr) and isinstance(body[0].value, _ast.Constant):
+        body = body[1:]
+    code = "\n".join(_ast.unparse(node) for node in body).lower()
+    assert "kill_switch" not in code
+    assert "riskmanager" not in code and "evaluate" not in code
+
+
+def test_venue_exception_is_contained_and_reported_not_raised():
+    """(d) A cancel runs inside a quoting loop. A venue fault must come back as
+    a result, never as an exception the loop has to catch — that containment is
+    exactly what the three hand-rolled try/excepts at the old call sites did."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            ex = _cancel_client(raises=RuntimeError("clob 503"))
+            gw = _gateway(db, ex)
+
+            res = await gw.cancel_resting("oid-1", exchange=ex)
+            assert res.status == "failed"
+            assert res.ok is False
+            assert "clob 503" in res.reason
+
+            # A venue that declines (already matched) is reported, not raised
+            # either — and is NOT treated as a successful cancel.
+            declined = await gw.cancel_resting(
+                "oid-2", exchange=_cancel_client(acknowledged=False))
+            assert declined.status == "rejected" and declined.ok is False
+
+            # An empty id is a no-op, not a client call.
+            assert (await gw.cancel_resting("", exchange=ex)).status == "skipped"
+
+            # The pillar loop survives a raising venue with no try/except of
+            # its own — both legs are still attempted.
+            mm = _market_maker(db, ex, gw)
+            await mm._cancel_quote(_quote("oid-bid", "oid-ask"))
+            assert ex.seen == ["oid-1", "oid-bid", "oid-ask"]
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_cancelled_order_reaches_a_terminal_trades_state():
+    """(e) The bookkeeping half. Without it a cancelled order's trades row stays
+    'pending' forever even though the collateral was released (#94) — the same
+    repair the shutdown sweep and the order-monitor TTL each hand-rolled."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            async def _mirror(order_id, status):
+                await db.execute(
+                    "INSERT INTO trades (market_id, side, size, price, is_paper,"
+                    " order_id, status) VALUES ('mm','BUY',20,0.4,0,?,?)",
+                    (order_id, status),
+                )
+                await db.commit()
+
+            async def _status(order_id):
+                row = await db.fetchone(
+                    "SELECT status FROM trades WHERE order_id = ?", (order_id,))
+                return dict(row)["status"]
+
+            await _mirror("oid-1", "pending")
+            await _mirror("oid-filled", "filled")
+            await _mirror("oid-declined", "pending")
+
+            gw = _gateway(db, _cancel_client())
+            await gw.cancel_resting("oid-1", exchange=_cancel_client())
+            assert await _status("oid-1") == "cancelled"
+
+            # A settled row is never rewritten by a mis-supplied id.
+            await gw.cancel_resting("oid-filled", exchange=_cancel_client())
+            assert await _status("oid-filled") == "filled"
+
+            # A declined cancel leaves the row pending: the order may still be
+            # live, and the monitor resolves it on the next status poll.
+            await gw.cancel_resting(
+                "oid-declined", exchange=_cancel_client(acknowledged=False))
+            assert await _status("oid-declined") == "pending"
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_paired_unwind_goes_through_the_cancel_contract():
+    """The gateway's OWN unwind uses its own contract — the enforcer no longer
+    violates the rule it enforces. Same best-effort semantics as the try/except
+    it replaced, plus leg A's trades row now goes terminal."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            await db.execute(
+                "INSERT INTO markets (id, exchange, question, category, active,"
+                " last_updated) VALUES ('m1','polymarket','Q?','tech',1,datetime('now'))")
+            await db.commit()
+
+            order_a = Order(market_id="m1", exchange="polymarket", token_id="a",
+                            side=OrderSide.BUY, token=TokenType.YES, size=20.0,
+                            price=0.50, dry_run=False)
+            order_b = Order(market_id="m1", exchange="polymarket", token_id="b",
+                            side=OrderSide.BUY, token=TokenType.NO, size=20.0,
+                            price=0.45, dry_run=False)
+            res_a = OrderResult(order_id="oid-a", market_id="m1", status="pending",
+                                is_paper=False)
+            res_b = OrderResult(order_id="ERROR", market_id="m1", status="rejected",
+                                is_paper=False, error_message="venue down")
+
+            ex_a = _cancel_client()
+            ex_a.prepare_order = MagicMock(return_value=order_a)
+            ex_a.place_order = AsyncMock(return_value=res_a)
+            ex_b = MagicMock()
+            ex_b.prepare_order = MagicMock(return_value=order_b)
+            ex_b.place_order = AsyncMock(return_value=res_b)
+
+            gw = _gateway(db, ex_a)
+            market = Market(id="m1", question="Q?")
+            a, b = await gw.submit_paired(
+                TradeIntent(signal=_signal(), market=market, size_dollars=5.0),
+                TradeIntent(signal=_signal(), market=market, size_dollars=5.0),
+                exchange_a=ex_a, exchange_name_a="polymarket",
+                exchange_b=ex_b, exchange_name_b="polymarket")
+
+            assert a.status == "pending" and b.status == "rejected"
+            assert ex_a.seen == ["oid-a"]
+            row = await db.fetchone(
+                "SELECT status FROM trades WHERE order_id = 'oid-a'")
+            assert dict(row)["status"] == "cancelled"
+        finally:
+            await db.close()
+
+    asyncio.run(run())

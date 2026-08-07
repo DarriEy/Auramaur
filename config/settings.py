@@ -181,6 +181,26 @@ class ExecutionConfig(BaseModel):
     book_capacity_fraction: float = 0.5
     stop_loss_pct: float = 30.0
     profit_target_pct: float = 50.0
+    profit_target_early_pct: float = Field(default=75.0, gt=0)
+    profit_target_late_pct: float = Field(default=25.0, gt=0)
+    profit_target_early_fraction_remaining: float = Field(default=0.50, ge=0, le=1)
+    profit_target_late_fraction_remaining: float = Field(default=0.10, ge=0, le=1)
+    # ge=0, not gt=0: zero is how an operator turns the trailing tier OFF, and
+    # `trailing_stop_triggered` honours that. Rejecting it crashed startup for
+    # a setting the neighbouring stop_loss_pct/profit_target_pct accept freely.
+    trailing_stop_activation_pct: float = Field(default=12.0, ge=0)
+    trailing_stop_giveback_fraction: float = Field(default=0.45, ge=0, le=1)
+    # Exit-decision telemetry is an observation log, not evidence of record;
+    # bound it so a holdout cannot grow the trading DB without limit.
+    # 2026-08-06: 14 -> 3. A row is written per open position per tick, so at
+    # the 60s portfolio cadence this table outgrows candidate_dispositions —
+    # the table it was modelled on — by ~5.6x, and carries two indexes. At 14
+    # days that is roughly the size of the entire trading DB again, for rows
+    # nothing reads: the sole consumer (scripts/calibrate_exit_policy.py)
+    # selects `policy_action <> 'HOLD'`, and its MIN_TRAIN_EXITS /
+    # MIN_TEST_EXITS gates count non-HOLD rows only, so retention length does
+    # not affect it. Raise this only alongside a consumer that reads HOLDs.
+    exit_decision_retention_days: int = Field(default=3, ge=1, le=365)
     edge_erosion_min_pct: float = 2.0
     time_decay_hours: float = 12.0
     # Free capital from near-certain winners that are still far from resolution:
@@ -1339,6 +1359,10 @@ class GraduationConfig(BaseModel):
     window_days: int = 90
     confidence_z: float = 1.645
     min_mean_pnl_lower_bound: float = 0.0
+    # Require realized returns to clear the configured cash benchmark after
+    # charging opportunity cost for the capital and time committed. Applied to
+    # prospective evidence, where stake and holding-period provenance exist.
+    require_cash_benchmark: bool = False
     probation_multiplier: float = 0.5
     cache_seconds: int = 300
     exempt_strategies: list[str] = ["arbitrage", "market_maker", "order_monitor"]
@@ -1368,6 +1392,14 @@ class BrokerConfig(BaseModel):
     limit_edge_threshold: float = 20.0    # Use market orders when edge > 20%
     limit_price_improvement_ticks: int = 1  # Improve on BBO by 1 tick
     max_slippage_bps: int = 100
+    # Manual-trade sweep (auramaur/broker/manual_trades.py): poll the venue's
+    # per-wallet trade history each position-sync cycle and book off-bot SELLs
+    # of bot-held Polymarket positions into pnl_ledger (2026-08-05 incident:
+    # two operator sells reconciled holdings-only and +$37.70 of realized P&L
+    # vanished from attribution). Lives here — NOT in a strategy section and
+    # not in risk.min_edge_pct/max_spread_pct/confidence_floor — so it is
+    # outside every frozen strategy_version hash (graduation-clock safe).
+    manual_trade_sweep_enabled: bool = True
 
 
 class KalshiConfig(BaseModel):
@@ -2098,6 +2130,17 @@ class MonitoringConfig(BaseModel):
     pillar_stale_seconds: int = 900
     candidate_retention_days: int = 30
     candidate_summary_retention_days: int = 90
+    # readiness.check_exit_liveness — "entries continue but exits stopped".
+    # Lookback over which a (venue, book, mode) cell must show at least one
+    # realization (SELL fill or settlement) if it took entries. Calibrated by
+    # replaying the criterion over the full trade history: 7d is the shortest
+    # window whose historical false-alarm count bottoms out, and a window as
+    # long as the outage it is meant to catch never fires at all, because the
+    # pre-outage exits stay inside it. See docs/exit-liveness-criterion.md.
+    # These are health-check thresholds, outside every strategy_version hash,
+    # so tuning them cannot reset a graduation clock.
+    exit_liveness_window_days: int = 7
+    exit_liveness_min_entries: int = 3
 
 
 class BenchmarkConfig(BaseModel):
@@ -2114,12 +2157,46 @@ class BenchmarkConfig(BaseModel):
     # Annualised risk-free rate the book is measured against. Roughly the
     # T-bill / money-market rate available on idle balances.
     risk_free_annual_rate: float = 0.045
+    # Arm the allocator's per-candidate cash hurdle (EV minus
+    # stake x rate x years-to-END-DATE, refusing non-positive excess).
+    # Default OFF: the charge models hold-to-resolution, which overstates
+    # cost for a book that exits long-dated positions on repricing, and a
+    # 14-day live replay showed it refusing 7 of 13 real entries — the
+    # llm_kalshi long-dated cells whose worth the 2026-10-31 pre-registered
+    # review adjudicates on evidence. Measurement (graduation's
+    # require_cash_benchmark) stays on regardless; this flag only gates the
+    # ENTRY veto. Outside every strategy_version hash — clock-safe to flip.
+    allocator_cash_hurdle_enabled: bool = False
     # Total deployable capital across ALL venues, in USD. Operator-maintained:
     # only Polymarket reports capital numerically in venue_balances, and the
     # rest are mixed-currency, so this cannot be derived reliably. 0 disables
     # the percentage comparison rather than inventing a denominator — a wrong
     # book size would produce a confidently wrong verdict.
     book_capital_usd: float = 0.0
+
+
+class ExperimentCapacityConfig(BaseModel):
+    """Operator-attention budget for concurrent paper strategy families."""
+
+    max_concurrent_paper_trials: int = Field(default=12, ge=1, le=20)
+
+
+_PAPER_TRIAL_SECTIONS = (
+    "entailment_arb",
+    "cross_venue_arb",
+    "econ_indicator",
+    "long_horizon",
+    "agent_trader",
+    "term_structure",
+    "vol_anchor",
+    "informed_flow",
+    "settlement_arb",
+    "weather_temp",
+    "oddlot_tender",
+    "resolution_lens",
+    "bias_harvest",
+    "platform_consensus",
+)
 
 
 class Settings(BaseSettings):
@@ -2258,6 +2335,28 @@ class Settings(BaseSettings):
     logging: LoggingConfig = Field(default_factory=lambda: LoggingConfig(**_DEFAULTS.get("logging", {})))
     monitoring: MonitoringConfig = Field(default_factory=lambda: MonitoringConfig(**_DEFAULTS.get("monitoring", {})))
     benchmark: BenchmarkConfig = Field(default_factory=lambda: BenchmarkConfig(**_DEFAULTS.get("benchmark", {})))
+    experiment_capacity: ExperimentCapacityConfig = Field(
+        default_factory=lambda: ExperimentCapacityConfig(
+            **_DEFAULTS.get("experiment_capacity", {})))
+
+    @property
+    def active_paper_trials(self) -> tuple[str, ...]:
+        """Enabled paper strategy families consuming operator review capacity."""
+        return tuple(
+            name for name in _PAPER_TRIAL_SECTIONS
+            if getattr(self, name).enabled and getattr(self, name).paper
+        )
+
+    @model_validator(mode="after")
+    def enforce_experiment_capacity(self):
+        active = self.active_paper_trials
+        limit = self.experiment_capacity.max_concurrent_paper_trials
+        if len(active) > limit:
+            raise ValueError(
+                f"{len(active)} concurrent paper trials exceed capacity {limit}: "
+                + ", ".join(active)
+            )
+        return self
 
     # Resolve .env to an absolute path anchored at the repo root so Settings
     # loads the same secrets regardless of the caller's CWD. A bare ".env"

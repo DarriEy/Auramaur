@@ -34,6 +34,10 @@ class OrderMonitorMixin:
         Fails soft: a bookkeeping error here must never take down the monitor
         loop that also reaps live orders.
         """
+        from auramaur.broker.execution_gateway import (
+            booked_as_position,
+            materialize_paper_portfolio_row,
+        )
         from auramaur.exchange.models import Fill
         from auramaur.research.polymarket_strategies import DecisionTracker
 
@@ -42,6 +46,18 @@ class OrderMonitorMixin:
         if db is None:
             return
         for result, order in filled:
+            # The same predicate the LIVE branch below applies, and the same
+            # one the gateway applies before IT writes a fill — see
+            # broker.execution_gateway.booked_as_position. The paper branch
+            # had none, so anything the paper trader handed over was booked
+            # verbatim, including a refusal stamped "filled". Defence in depth
+            # now that paper.py no longer produces those: a size-0 fill is
+            # never a fill, whichever book it came from.
+            if not booked_as_position(result):
+                log.debug("order_monitor.deferred_fill_skipped",
+                          order_id=result.order_id, status=result.status,
+                          filled_size=result.filled_size)
+                continue
             try:
                 if tracker is not None:
                     await tracker.record_fill(Fill(
@@ -49,6 +65,16 @@ class OrderMonitorMixin:
                         token_id=order.token_id, side=order.side,
                         size=result.filled_size, price=result.filled_price,
                         fee=0.0, is_paper=True, order_id=result.order_id))
+                    # The pillar that placed this order deliberately did not
+                    # write a portfolio row — the order was resting when
+                    # ``submit`` returned — so the deferred fill must leave
+                    # one now. Shared with the gateway's instant-fill path
+                    # so the two projections cannot diverge. The deferred
+                    # queue is the polymarket PaperTrader's, so the order's
+                    # exchange field (defaulting "polymarket") is the venue
+                    # truth available here.
+                    await materialize_paper_portfolio_row(
+                        db, order, venue=order.exchange or "polymarket")
                 if order.decision_id is not None:
                     await DecisionTracker(db).mark_fill(
                         int(order.decision_id),
@@ -63,6 +89,8 @@ class OrderMonitorMixin:
         from datetime import datetime, timezone
 
         paper: PaperTrader = self._components.paper
+        from auramaur.broker.execution_gateway import booked_as_position
+
         primary_exchange: PolymarketClient = self._components.exchange
         exchanges: dict[str, ExchangeClient] = self._components.get("exchanges", {})
         discovery: MarketDiscovery = self._components.discovery
@@ -144,7 +172,13 @@ class OrderMonitorMixin:
                             order = pending.get(order_id)
                             result = await live_exchange.get_order_status(order_id)
                             if result.status in ("filled", "cancelled", "expired", "rejected"):
-                                if result.status == "filled" and order is not None and result.filled_size > 0:
+                                # Same predicate as the paper branch above and
+                                # as the gateway's own fill write — see
+                                # broker.execution_gateway.booked_as_position.
+                                # Behaviour is unchanged here: of the four
+                                # terminal statuses this branch admits, only
+                                # "filled" is a filled status.
+                                if booked_as_position(result) and order is not None:
                                     try:
                                         fill = Fill(
                                             order_id=order_id,

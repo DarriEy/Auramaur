@@ -627,3 +627,59 @@ async def test_entries_off_blocks_new_risk_but_keeps_managing_held():
     assert len(rows) == 1  # no new risk, held position not stranded
     assert rows[0]["current_price"] is not None  # still being marked
     await db.close()
+
+
+@pytest.mark.parametrize(
+    "bid, expect_sell",
+    [
+        # Round-trip commissions straddle take_profit_pct (10%). Entry 100.0,
+        # 1 unit: $1.00 charged on the way in and $1.00 on the way out.
+        (111.0, False),  # gross +11.0%, net +9.0% — under the threshold
+        (113.0, True),   # gross +13.0%, net +11.0% — clears it
+    ],
+)
+@pytest.mark.asyncio
+async def test_take_profit_waits_for_commissions_to_clear_the_threshold(
+        bid, expect_sell):
+    """IBKR take-profit measures the NET gain, not the quoted one.
+
+    Both commissions are known exactly here — the entry's is stored on the
+    position and the exit's is priced off the executable bid — so a gross
+    comparison sells a winner the round trip has not actually earned. The two
+    bids bracket the threshold, which a single-sided case cannot.
+    """
+    class _BidQuotes(FakeMarketData):
+        async def get_quote_by_con_id(self, spec, con_id):
+            return MarketDataQuote(spec.key, bid, bid * 1.0001, time.time(),
+                                   con_id, spec.currency, spec.multiplier)
+
+    db = Database(":memory:")
+    await db.connect()
+    settings = Settings()
+    settings.ibkr.multiasset_paper_enabled = True
+    settings.ibkr.multiasset_registry_required = False
+    cfg = settings.ibkr.multiasset_books["global_etf"]
+    cfg.entries_enabled = False  # isolate exit management from new risk
+    cfg.take_profit_pct = 10.0
+    spec = BY_BOOK[IBKRBook.GLOBAL_ETF][0]
+    await db.execute(
+        """INSERT INTO ibkr_paper_positions
+           (book, instrument_key, con_id, currency, quantity, multiplier,
+            fx_to_usd, avg_cost, current_price, stop_price,
+            entry_commission_usd, entry_fill_ref)
+           VALUES ('global_etf', ?, 42, ?, 1, ?, 1, 100.0, 100.0, 0, 1.0,
+                   'seed')""",
+        (spec.key, spec.currency, spec.multiplier))
+    await db.commit()
+
+    pillar = IBKRMultiAssetPaperBook(settings, _BidQuotes(), db, IBKRBook.GLOBAL_ETF)
+    pillar.market_open = lambda now=None: True
+    await pillar.run_once()
+
+    sells = await db.fetchone(
+        "SELECT COUNT(*) AS n FROM ibkr_paper_fills WHERE side = 'SELL'")
+    assert bool(sells["n"]) is expect_sell
+    held = await db.fetchone(
+        "SELECT COUNT(*) AS n FROM ibkr_paper_positions WHERE book='global_etf'")
+    assert bool(held["n"]) is not expect_sell
+    await db.close()

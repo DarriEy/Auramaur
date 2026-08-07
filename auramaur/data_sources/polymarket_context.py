@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 
 import structlog
 
-from auramaur.data_sources.base import NewsItem
+from auramaur.data_sources.base import NewsItem, redact_error
 
 logger = structlog.get_logger(__name__)
 
@@ -100,7 +100,7 @@ class PolymarketContextSource:
             return items
 
         except Exception as e:
-            logger.warning("polymarket_context_failed", error=str(e)[:60])
+            logger.warning("polymarket_context_failed", error=redact_error(e, 60))
             return []
 
     async def close(self) -> None:

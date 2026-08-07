@@ -27,14 +27,12 @@ jobs:
           uv export --frozen --extra kalshi --extra ibkr --extra web
           --no-hashes --output-file requirements-audit.txt
 
-      # ADVISORY, never blocking. This verdict depends on an external advisory
-      # feed, so a HIGH published against any locked package would otherwise
-      # turn every open PR red with no code change — the same failure mode as
-      # the unpinned ruff that broke every PR when 0.16.0 shipped. pip-audit
-      # itself is pinned for that same reason.
-      - name: Audit locked Python dependencies
-        continue-on-error: true
-        run: uvx pip-audit==2.10.1 -r requirements-audit.txt
+      - name: Generate Python dependency audit
+        shell: bash
+        run: |
+          uvx pip-audit==2.10.1 -r requirements-audit.txt \
+            --format=json --output=python-audit.json || true
+          test -s python-audit.json
 
       - uses: actions/setup-node@v7
         with:
@@ -42,10 +40,23 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      - name: Audit web dependencies
-        continue-on-error: true
+      - name: Generate web dependency audit
         working-directory: web
-        run: npm audit --audit-level=high
+        shell: bash
+        run: |
+          npm audit --json > npm-audit.json || true
+          test -s npm-audit.json
+
+      # Scanner exit code 1 means findings exist, so generation above captures
+      # JSON and this deterministic policy step owns the blocking verdict.
+      # Exceptions require an advisory ID, owner, reason, and future expiry.
+      - name: Enforce dependency audit policy
+        run: >
+          python scripts/check_dependency_audit.py
+          --policy .github/dependency-audit-policy.json
+          --pip-report python-audit.json
+          --npm-report web/npm-audit.json
+          --npm-min-severity high
 
   safety-tests:
     name: Safety gate tests
@@ -82,8 +93,11 @@ jobs:
       # Then the FULL suite — CI previously ran only the two files above, so
       # every other regression guard (risk checks, execution gateway, exchange
       # adapters, strategy logic) was invisible to CI and could land on main.
-      - name: Run full test suite
-        run: uv run pytest -q
+      - name: Run full test suite with coverage ratchet
+        # Floor lives in pyproject [tool.coverage.report] fail_under — set
+        # from a fresh measure on main (65.86% on 2026-08-05), minus drift
+        # headroom. Raise it only after re-measuring, never speculatively.
+        run: uv run pytest -q --cov=auramaur --cov-report=term
 
   lint:
     name: Lint (ruff)

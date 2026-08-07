@@ -19,7 +19,7 @@ logging.getLogger("py_clob_client_v2.http_helpers.helpers").setLevel(logging.CRI
 from config.settings import Settings
 from auramaur.components import Components
 from auramaur.db.database import Database
-from auramaur.exchange.models import OrderSide, TokenType
+from auramaur.exchange.models import OrderSide
 
 if TYPE_CHECKING:
     pass
@@ -94,6 +94,9 @@ class AuramaurBot(
         # positions round-tripped from +$29/+$75 peaks to -$26/-$25.
         self._exit_failures: dict[str, float] = {}
         self._exit_pending: set[str] = set()  # Track exits with resting orders
+        # Latch so the kill switch's one-time cancel sweep runs once, not on
+        # every one of the ~20 _check_kill_switch call sites.
+        self._kill_switch_handled = False
         self._exit_gateway_obj = None  # Lazily built; see _exit_gateway property
         # Track attempted cross-exchange arbs so the scanner doesn't re-execute
         # the same opportunity every 5-minute cycle. Maps arb-key -> expiry ts.
@@ -154,14 +157,33 @@ class AuramaurBot(
             rm.gap_auditor = GapAuditor(self._components.db, an, self.settings)
 
     async def _check_kill_switch(self) -> bool:
-        if kill_switch_present():
-            show_error("KILL SWITCH ACTIVE — halting all trading")
-            self._running = False
-            alerts = self._components.alerts
-            if alerts:
-                await alerts.send("KILL SWITCH ACTIVATED — bot halted", level="critical")
+        if not kill_switch_present():
+            return False
+        self._running = False
+        if self._kill_switch_handled:
             return True
-        return False
+        self._kill_switch_handled = True
+        show_error("KILL SWITCH ACTIVE — halting all trading")
+
+        # Halting PLACEMENT is not halting EXPOSURE. GTC orders already resting
+        # on the venue keep filling after the halt, and _task_order_monitor
+        # stops on the same _running flag, so those fills are never recorded.
+        # Cancelling only in shutdown() was not enough: shutdown() runs after
+        # asyncio.gather(*tasks) returns, and tasks that loop on `while True`
+        # rather than `while self._running` never return.
+        cancelled = 0
+        try:
+            cancelled = await self._cancel_resting_live_orders() or 0
+        except Exception as e:
+            log.warning("kill_switch.cancel_sweep_error", error=str(e))
+
+        alerts = self._components.alerts
+        if alerts:
+            await alerts.send(
+                f"KILL SWITCH ACTIVATED — bot halted; "
+                f"cancelled {cancelled} resting live order(s)",
+                level="critical")
+        return True
 
     async def _task_market_scan(self, engine: TradingEngine, name: str = "") -> None:
         """Periodically scan and store markets."""
@@ -464,50 +486,74 @@ class AuramaurBot(
                         continue
 
                     for pos, reason in exit_list:
-                        # Key by POSITION, not market: check_exits yields one row
-                        # per (market, token, mode), and a sub-minimum dust leg
-                        # can never sell — a market-wide key let that dust pin
-                        # its sibling legs (2026-07-25: a 1.49-share leg pinned
-                        # $322 of exposure in the same market).
-                        exit_key = (f"exit:{name}:{pos.market_id}:"
-                                    f"{getattr(pos.token, 'value', pos.token)}:"
-                                    f"{int(bool(pos.is_paper))}")
-                        if exit_key in self._exit_pending:
-                            continue
-                        retry_at = self._exit_failures.get(exit_key)
-                        if retry_at is not None and time.monotonic() < retry_at:
-                            continue
-                        log.info(
-                            "exit.triggered",
-                            exchange=name,
-                            market_id=pos.market_id,
-                            reason=reason.value,
-                            pnl=pos.unrealized_pnl,
-                        )
+                        # Per-position containment. A defect in THIS block used
+                        # to escape to the tick-level handler below, which
+                        # abandons every remaining position and every remaining
+                        # exchange for the whole tick — that is how one bad
+                        # attribute read stopped all exits for 12 days. Venue
+                        # errors keep their own inner handler; anything landing
+                        # here is a bug, so it is logged at error (readiness's
+                        # _ERROR_LEVELS) and skips only its own position.
                         try:
-                            if name == "polymarket":
-                                ok = await self._execute_poly_exit(pos, reason, discovery, exchange_client, alerts)
-                            elif name == "kalshi":
-                                ok = await self._execute_kalshi_exit(pos, reason, discovery, exchange_client, alerts)
-                            elif name == "ibkr":
-                                ok = await self._execute_ibkr_exit(pos, reason, discovery, exchange_client, alerts)
-                            else:
+                            # Key by POSITION, not market: check_exits yields one row
+                            # per (market, token, mode), and a sub-minimum dust leg
+                            # can never sell — a market-wide key let that dust pin
+                            # its sibling legs (2026-07-25: a 1.49-share leg pinned
+                            # $322 of exposure in the same market).
+                            exit_key = (f"exit:{name}:{pos.market_id}:"
+                                        f"{getattr(pos.token, 'value', pos.token)}:"
+                                        f"{int(bool(pos.is_paper))}")
+                            if exit_key in self._exit_pending:
+                                continue
+                            retry_at = self._exit_failures.get(exit_key)
+                            if retry_at is not None and time.monotonic() < retry_at:
+                                continue
+                            log.info(
+                                "exit.triggered",
+                                exchange=name,
+                                market_id=pos.market_id,
+                                reason=reason.value,
+                                pnl=pos.unrealized_pnl,
+                            )
+                            try:
+                                if name == "polymarket":
+                                    ok = await self._execute_poly_exit(pos, reason, discovery, exchange_client, alerts)
+                                elif name == "kalshi":
+                                    ok = await self._execute_kalshi_exit(pos, reason, discovery, exchange_client, alerts)
+                                elif name == "ibkr":
+                                    ok = await self._execute_ibkr_exit(pos, reason, discovery, exchange_client, alerts)
+                                else:
+                                    ok = False
+                            except Exception as e:
+                                log.warning("exit.execute_error", exchange=name, market_id=pos.market_id, error=str(e))
                                 ok = False
+                            if ok:
+                                self._exit_pending.add(exit_key)
+                                self._exit_failures.pop(exit_key, None)
+                            else:
+                                self._exit_failures[exit_key] = (
+                                    time.monotonic() + _EXIT_RETRY_BACKOFF_SECONDS)
+                                log.warning(
+                                    "exit.suppressed_until_retry", exchange=name,
+                                    market_id=pos.market_id, reason=reason.value,
+                                    backoff_seconds=_EXIT_RETRY_BACKOFF_SECONDS)
                         except Exception as e:
-                            log.warning("exit.execute_error", exchange=name, market_id=pos.market_id, error=str(e))
-                            ok = False
-                        if ok:
-                            self._exit_pending.add(exit_key)
-                            self._exit_failures.pop(exit_key, None)
-                        else:
-                            self._exit_failures[exit_key] = (
-                                time.monotonic() + _EXIT_RETRY_BACKOFF_SECONDS)
-                            log.warning(
-                                "exit.suppressed_until_retry", exchange=name,
-                                market_id=pos.market_id, reason=reason.value,
-                                backoff_seconds=_EXIT_RETRY_BACKOFF_SECONDS)
+                            log.error(
+                                "exit.loop_error", exchange=name,
+                                market_id=getattr(pos, "market_id", "?"),
+                                error_type=type(e).__name__, error=str(e))
+                            continue
             except Exception as e:
-                log.debug("portfolio_monitor_error", error=str(e))
+                # This aborts the ENTIRE tick — every venue's exits, the equity
+                # mark, the cash read. At debug that is invisible: readiness
+                # scores logs by level and never reads debug, so the 12-day
+                # exit outage (2026-07-25 → 08-06) left no operator-visible
+                # trace anywhere. Every routine failure above has its own
+                # handler (sync, note_equity, attribution, check_exits, and now
+                # the per-position block), so reaching here means the tick
+                # broke, and a broken tick is an error.
+                log.error("portfolio_monitor_error",
+                          error_type=type(e).__name__, error=str(e))
             await asyncio.sleep(interval)
 
     async def _task_cache_cleanup(self) -> None:
@@ -1381,7 +1427,8 @@ class AuramaurBot(
 
     async def _task_position_sync(self) -> None:
         """Periodically sync net current positions from Polymarket."""
-        from auramaur.broker.reconciler import PositionReconciler
+        from auramaur.broker.manual_trades import sweep_manual_trades
+        from auramaur.broker.reconciler import PositionReconciler, reconciled_token
         from auramaur.broker.sync import PositionSyncer
 
         reconciler: PositionReconciler = self._components.reconciler
@@ -1391,6 +1438,25 @@ class AuramaurBot(
         while self._running:
             try:
                 if self.settings.is_live:
+                    # Manual-trade sweep BEFORE the reconcile/mirror: the
+                    # mirror below deletes a manually-exited position's
+                    # cost_basis row the moment the venue stops reporting the
+                    # token, and the sweep prefers that row as the P&L basis
+                    # (2026-08-05 incident: two off-bot sells reconciled
+                    # holdings-only and +$37.70 vanished from attribution).
+                    # A sweep failure must never break position sync.
+                    if (self.settings.broker.manual_trade_sweep_enabled
+                            and self.settings.polymarket_proxy_address):
+                        try:
+                            swept = await sweep_manual_trades(
+                                self._components.db,
+                                self.settings.polymarket_proxy_address)
+                            if swept:
+                                log.info("manual_trades.booked", count=swept)
+                        except Exception as exc:
+                            log.warning("manual_trades.sweep_error",
+                                        error=str(exc))
+
                     # The Data API's net current positions are venue truth.
                     reconciled = await reconciler.reconcile()
                     positions = reconciler.to_live_positions(reconciled)
@@ -1415,7 +1481,10 @@ class AuramaurBot(
                             settled = set()
                         unsettled = [
                             rp for rp in reconciled
-                            if (rp.market_id, TokenType.from_str(rp.outcome).value)
+                            # 2026-08-05: unified mapper — the settled-key
+                            # skip must test the SAME side label the mirror
+                            # below writes, or a settled leg re-enters.
+                            if (rp.market_id, reconciled_token(rp).value)
                             not in settled
                         ]
                         positions = reconciler.to_live_positions(unsettled)
@@ -1441,7 +1510,17 @@ class AuramaurBot(
                                     # title-case outcome here was the one site that diverged
                                     # from the fill/Kalshi paths, splitting a single position
                                     # into duplicate (market, "No") + (market, "NO") rows.
-                                    (rp.market_id, TokenType.from_str(rp.outcome).value,
+                                    # 2026-08-05: normalize via reconciled_token — the SAME
+                                    # per-asset mapper to_live_positions uses (outcomeIndex
+                                    # first, from_str fallback). Using from_str here while
+                                    # the portfolio projection used an ad-hoc ternary gave
+                                    # one venue asset a YES cost_basis row and a NO
+                                    # portfolio row on team-name outcomes → two settlement
+                                    # source_refs → the sweep booked the SAME tokens twice
+                                    # (market 0x7557f7ac41736a, live money). It also keeps a
+                                    # both-sides holding as two rows instead of collapsing
+                                    # onto one (market_id, is_paper, token) PK.
+                                    (rp.market_id, reconciled_token(rp).value,
                                      rp.token_id, rp.size,
                                      rp.avg_cost, rp.size * rp.avg_cost),
                                 )
@@ -1935,8 +2014,11 @@ class AuramaurBot(
 
         console.print("[dim]Stopped.[/]")
 
-    async def _cancel_resting_live_orders(self) -> None:
-        """Cancel live orders still resting on the book before exit.
+    async def _cancel_resting_live_orders(self) -> int:
+        """Cancel live orders still resting on the book. Returns the count.
+
+        Called both from shutdown() and from _check_kill_switch — halting
+        placement does not retire exposure that is already working.
 
         GTC orders outlive the process, so every restart used to inherit the
         prior session's market-maker quotes and in-flight entries — collateral
@@ -1987,3 +2069,4 @@ class AuramaurBot(
         if cancelled:
             console.print(f"[dim]Cancelled {cancelled} resting live orders[/]")
             log.info("shutdown.orders_cancelled", count=cancelled)
+        return cancelled

@@ -38,6 +38,18 @@ from auramaur.experiments.strategies.kraken import (
 
 log = structlog.get_logger()
 
+# Consecutive empty-balance cycles before a skipped cycle stops being routine
+# and becomes an outage. Measured on the live deployment (2026-08-06, 4 log
+# rotations): 5 empty responses against 865 successes — 0.58%, roughly once a
+# day — so a single skip must NOT alarm, but three in a row cannot be that
+# transient. At treasury_interval_seconds=300 that is a 15-minute blackout of
+# the ENTIRE exit ladder (stop-loss, take-profit, trailing stop, orphan
+# liquidation), which is what a revoked or expired API key looks like: an
+# unchanging {} that skips forever behind a log.warning readiness ignores
+# (_ERROR_LEVELS is {"error", "critical"}). Deliberately a module constant, not
+# a config knob — the graduation holdout clocks reset on any config change.
+_BALANCE_OUTAGE_ESCALATE_CYCLES = 3
+
 
 class KrakenPillar:
     name = "kraken"
@@ -64,6 +76,10 @@ class KrakenPillar:
         self._base_to_pair: dict[str, str] = {}        # base asset -> liquidation pair (altname)
         self._base_pair_meta: dict[str, tuple] = {}    # pair -> (base, ordermin, lot_decimals)
         self._pnl = None                               # lazy PnLTracker (needs db)
+        # Consecutive cycles get_free_balance came back empty. Counted and reset
+        # independently of paper/live so a mode flip can never suppress a real
+        # alert: only a genuinely non-empty wallet read clears it.
+        self._empty_balance_cycles = 0
         self._cooldown_until: dict[str, float] = {}    # pair -> monotonic re-entry gate
         # LLM directional view cache: pair -> (monotonic_ts, prob, confidence).
         # Throttles LLM calls to directional_llm_refresh_hours per pair (cost).
@@ -723,6 +739,49 @@ class KrakenPillar:
         # Sizing exits/entries off the free amount avoids requesting more than is
         # actually sellable/spendable (which Kraken rejects as insufficient funds).
         bal = await self._k.get_free_balance()
+        # An empty dict is an API FAILURE, not a flat book. get_free_balance
+        # falls back to get_balance, which returns {} on any error (kraken.py
+        # :121-123 logs and returns the empty result rather than raising) — so
+        # one 5xx, rate-limit or invalid-nonce response made every tracked
+        # position look closed. _reconcile_positions then cleared _dir_long,
+        # _clear_peak() DELETED the position_peaks row — the trailing-stop
+        # high-water mark, which is NOT recoverable from cost_basis — and
+        # _mirror_to_portfolio removed every live kraken portfolio row. A
+        # position that peaked +40% and sat at +30% re-anchored at +30% and
+        # the give-back was never banked.
+        #
+        # _treasury guards this exact case at line 419 (`if not bal: return`).
+        # Skipping the cycle costs one iteration; the next healthy poll
+        # re-reads the wallet, which is the source of truth anyway.
+        #
+        # But "skip the cycle" is only safe while the outage is transient. A
+        # revoked or expired API key returns {} forever, and the live branch
+        # below then skips the ENTIRE exit ladder — stop-loss, take-profit,
+        # trailing stop, orphan liquidation — indefinitely and silently, because
+        # readiness's _ERROR_LEVELS does not include "warning". So count
+        # consecutive empties and escalate to error once the outage is no longer
+        # explainable as the ~0.58% transient. The counter is mode-independent
+        # (incremented on every empty read, cleared only by a non-empty one), so
+        # a paper/live flip cannot reset it part-way and mute the escalation.
+        if not bal:
+            self._empty_balance_cycles += 1
+            cycles = self._empty_balance_cycles
+            if cycles >= _BALANCE_OUTAGE_ESCALATE_CYCLES:
+                log.error("kraken.directional.balance_unavailable_sustained",
+                          cycles=cycles, paper=effective_paper,
+                          detail="get_free_balance has returned empty for "
+                                 f"{cycles} consecutive cycles; the exit ladder "
+                                 "(stop-loss/take-profit/trailing/orphan) is not "
+                                 "running — check the Kraken API credentials")
+            else:
+                log.warning("kraken.directional.balance_unavailable",
+                            cycles=cycles, paper=effective_paper,
+                            detail="empty balance response; skipping cycle rather "
+                                   "than treating the book as flat")
+            if not effective_paper:
+                return
+        else:
+            self._empty_balance_cycles = 0
         if self._pair_base is None:
             await self._resolve_pairs(kcfg.directional_pairs)
         # Evaluate the UNION of configured pairs and everything we actually hold,
@@ -838,8 +897,20 @@ class KrakenPillar:
                 assert proposal.action is KrakenAction.SELL
                 vol = proposal.volume
                 notional = await self._k.usd_notional(pair, vol, price) or (vol * price)
+                # Hand the adapter the price THIS cycle already validated. The
+                # per-order cap now fails closed on an unpriceable pair, and
+                # without `price=` the adapter re-probes Ticker — a second,
+                # independent network call moments after the loop's own probe.
+                # Its transient failure (5xx, rate limit, Cloudflare) would
+                # refuse a stop-loss / take-profit / trailing-stop / orphan
+                # liquidation that the loop had just priced successfully. It
+                # also makes the deliberately non-binding exit cap deterministic:
+                # both sides of the comparison come from one number, so a >10%
+                # tick between two probes can no longer block a close. ordertype
+                # is "market", so this price only feeds the cap — AddOrder never
+                # receives it.
                 res = await self._k.place_spot_order(
-                    pair, OrderSide.SELL, volume=vol, ordertype="market",
+                    pair, OrderSide.SELL, volume=vol, ordertype="market", price=price,
                     purpose="directional", max_usd=max(notional, kcfg.max_order_usd) * 1.1,
                     dry_run=True if effective_paper else None,
                     client_order_id=str(uuid.uuid4()))
@@ -1138,7 +1209,17 @@ class KrakenPillar:
     async def _realised_pnl_usd(self) -> float:
         try:
             row = await self._db.fetchone(
-                "SELECT COALESCE(SUM(pnl - fees), 0) AS v FROM pnl_ledger "
+                # SUM(pnl), not SUM(pnl - fees). pnl_ledger.pnl is already net
+                # of fees at every writer (pnl.py books
+                # `(price - avg_cost) * size - fill.fee`); `fees` is the
+                # breakdown of what was already deducted. Subtracting it again
+                # charged this desk's Kraken commissions twice — the only book
+                # in the ledger carrying non-zero fees, so this was the one
+                # place the defect had a live dollar effect: it reported
+                # -$43.98 realised against a true -$36.53 as of 2026-08-06.
+                # Corrected with the same defect in risk/graduation.py and
+                # monitoring/ledger_report.py.
+                "SELECT COALESCE(SUM(pnl), 0) AS v FROM pnl_ledger "
                 "WHERE strategy_source = 'kraken_directional'")
         except Exception:  # noqa: BLE001
             return 0.0

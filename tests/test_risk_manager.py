@@ -856,3 +856,80 @@ async def test_long_settlement_bucket_disabled_by_zero_knobs():
         two_years, 365, 0.0, 999.0, 30.0, 100.0)).passed
     assert (await check_long_settlement_bucket(
         two_years, 0, 50.0, 999.0, 30.0, 100.0)).passed
+
+
+# ---------------------------------------------------------------------------
+# force_paper must report EVERY restriction, not a subset.
+#
+# is_paper_entry is built from six sources and is what disables the live-only
+# checks. RiskDecision.force_paper previously carried only two of them, so a
+# preflight BLOCK or an extreme-divergence route-to-paper skipped the live
+# checks and still reached the venue with real money: arming a guard made the
+# system MORE permissive.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@patch("auramaur.risk.manager.check_kill_switch")
+async def test_preflight_block_is_reported_as_force_paper(mock_kill):
+    from auramaur.risk.checks import CheckResult
+    mock_kill.return_value = CheckResult(name="kill_switch", passed=True, reason="", value=False)
+
+    settings = _make_settings(is_live=True)
+    db = MagicMock()
+    db.fetchone = AsyncMock(return_value=None)
+
+    manager = RiskManager(settings, db)
+    manager.portfolio = _mock_portfolio()
+    manager.live_entries_blocked = True  # what bot._run_live_gate sets on BLOCK
+
+    decision = await manager.evaluate(
+        _make_signal(), _make_market(), available_cash=500.0)
+
+    # The gateway computes is_live = settings.is_live and not intent.force_paper,
+    # so a False here sends a preflight-blocked entry out with real money.
+    assert decision.force_paper is True
+
+
+@pytest.mark.asyncio
+@patch("auramaur.risk.manager.check_kill_switch")
+async def test_extreme_divergence_is_reported_as_force_paper(mock_kill):
+    from auramaur.risk.checks import CheckResult
+    mock_kill.return_value = CheckResult(name="kill_switch", passed=True, reason="", value=False)
+
+    settings = _make_settings(is_live=True)
+    settings.risk.extreme_divergence_enabled = True
+    settings.risk.extreme_divergence_threshold = 0.40
+    db = MagicMock()
+    db.fetchone = AsyncMock(return_value=None)
+
+    manager = RiskManager(settings, db)
+    manager.portfolio = _mock_portfolio()
+
+    # The documented adverse bucket: model far below a confident market.
+    decision = await manager.evaluate(
+        _make_signal(claude_prob=0.10, market_prob=0.89, edge=10.0),
+        _make_market(yes_price=0.89), available_cash=500.0)
+
+    assert decision.force_paper is True
+
+
+@pytest.mark.asyncio
+@patch("auramaur.risk.manager.check_kill_switch")
+async def test_unrestricted_live_entry_is_not_marked_force_paper(mock_kill):
+    """The global live gate is not a restriction — a paper-mode bot must not
+    report force_paper, or the flag stops meaning 'this entry was restricted'."""
+    from auramaur.risk.checks import CheckResult
+    mock_kill.return_value = CheckResult(name="kill_switch", passed=True, reason="", value=False)
+
+    settings = _make_settings(is_live=False)  # simply not live
+    db = MagicMock()
+    db.fetchone = AsyncMock(return_value=None)
+
+    manager = RiskManager(settings, db)
+    manager.portfolio = _mock_portfolio()
+
+    decision = await manager.evaluate(
+        _make_signal(), _make_market(), available_cash=500.0)
+
+    assert decision.force_paper is False

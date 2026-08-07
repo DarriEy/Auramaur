@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 import aiohttp
 import structlog
 
-from auramaur.data_sources.base import NewsItem
+from auramaur.data_sources.base import NewsItem, redact_error
 
 logger = structlog.get_logger(__name__)
 
@@ -55,7 +55,7 @@ class CoinGeckoSource:
                     return []
                 data = await resp.json()
         except Exception as e:
-            logger.debug("coingecko.prices_error", error=str(e)[:120])
+            logger.debug("coingecko.prices_error", error=redact_error(e, 120))
             return []
 
         now = datetime.now(timezone.utc)
@@ -87,7 +87,7 @@ class CoinGeckoSource:
                     return []
                 data = await resp.json()
         except Exception as e:
-            logger.debug("coingecko.trending_error", error=str(e)[:120])
+            logger.debug("coingecko.trending_error", error=redact_error(e, 120))
             return []
 
         now = datetime.now(timezone.utc)

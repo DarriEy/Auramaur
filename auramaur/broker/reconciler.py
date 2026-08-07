@@ -29,11 +29,54 @@ class ReconciledPosition:
     market_id: str          # Our numeric ID (for DB lookups)
     condition_id: str       # CLOB condition hash (for market queries)
     token_id: str           # CLOB asset_id (for placing sell orders)
-    outcome: str            # "Yes" or "No"
+    outcome: str            # "Yes"/"No" — or a literal outcome (team name)
     question: str           # Market question
     size: float             # Net token balance
     avg_cost: float = 0.0   # From cost_basis table
     current_price: float = 0.0
+    # 2026-08-05: data-api outcomeIndex (0 = YES slot, 1 = NO slot, -1 =
+    # unknown). Carried so every consumer maps the held ASSET to the same
+    # side; see reconciled_token().
+    outcome_index: int = -1
+
+
+def reconciled_token(p: ReconciledPosition) -> TokenType:
+    """THE single outcome→side normalizer for reconciled venue positions.
+
+    2026-08-05: to_live_positions (portfolio projection) and bot.py's
+    cost_basis mirror previously normalized the outcome label independently —
+    the ad-hoc ternary here labeled every non-"Yes" outcome NO while the
+    mirror's TokenType.from_str labeled every non-"NO" outcome YES. On a
+    non-binary (team-name) market the SAME venue asset therefore carried a NO
+    portfolio row and a YES cost_basis row, producing two distinct settlement
+    source_refs and a double-booked settlement (market 0x7557f7ac41736a
+    booked +24.104 twice across two sweep cycles, live money, 2026-08-05).
+    It also collapsed a both-sides (arb) holding onto one PK per table,
+    destroying the second leg's basis.
+
+    The data-api's outcomeIndex is the per-asset truth: slot 0 is the
+    market's first outcome — the clob_token_yes slot our tables call YES —
+    and slot 1 the second (NO). Only when the index is absent (legacy
+    snapshots, the CLOB-history reconstruction path) do we fall back to the
+    shared label normalizer — never the ad-hoc ternary.
+    """
+    return token_for_outcome(p.outcome_index, p.outcome)
+
+
+def token_for_outcome(outcome_index: int, outcome: str) -> TokenType:
+    """Map a venue (outcomeIndex, outcome-label) pair to the held side.
+
+    The bare-values form of :func:`reconciled_token`, for callers that hold a
+    venue record rather than a ReconciledPosition (the manual-trade sweep maps
+    data-api trade rows). Same contract: outcomeIndex is the per-asset truth
+    (slot 0 = YES, slot 1 = NO); only when it is absent (-1) fall back to the
+    shared label normalizer.
+    """
+    if outcome_index == 0:
+        return TokenType.YES
+    if outcome_index == 1:
+        return TokenType.NO
+    return TokenType.from_str(outcome)
 
 
 class PositionReconciler:
@@ -97,6 +140,7 @@ class PositionReconciler:
                 token_id=item.asset_id, outcome=item.outcome,
                 question=item.title, size=item.size, avg_cost=avg_cost,
                 current_price=current_price,
+                outcome_index=item.outcome_index,
             ))
         await self._flush_pending_stubs()
         async with self._db.transaction():
@@ -440,11 +484,15 @@ class PositionReconciler:
         return yes_id, no_id
 
     async def repair_orphaned_ids(self, reconciled: list[ReconciledPosition]) -> int:
-        """Fix cost_basis/portfolio entries that use truncated condition_ids.
+        """Fix cost_basis/portfolio/fills/pnl_ledger entries that use
+        truncated condition_ids.
 
         When the reconciler previously couldn't match a condition_id to a
         market, it stored condition_id[:16] as the market_id.  Now that we
-        may have the real mapping, update those rows.
+        may have the real mapping, update those rows — including the P&L
+        ledger's market_id and the market-id segment embedded in settlement
+        source_refs (2026-08-05), so a settlement booked under the stub id
+        stays visible to the dedup checks after the migration.
 
         Returns number of rows repaired.
         """
@@ -464,18 +512,48 @@ class PositionReconciler:
                 (orphan_id,),
             )
             if row:
-                await self._db.execute(
-                    "UPDATE cost_basis SET market_id = ? WHERE market_id = ? AND is_paper = 0",
-                    (pos.market_id, orphan_id),
-                )
-                await self._db.execute(
-                    "UPDATE portfolio SET market_id = ? WHERE market_id = ? AND is_paper = 0",
-                    (pos.market_id, orphan_id),
-                )
-                await self._db.execute(
-                    "UPDATE fills SET market_id = ? WHERE market_id = ? AND is_paper = 0",
-                    (pos.market_id, orphan_id),
-                )
+                # All statements below are db-only (no network awaits), so the
+                # per-position rename batch lands atomically in one span.
+                async with self._db.transaction(
+                        owner="reconciler.repair_orphaned_ids"):
+                    await self._db.execute(
+                        "UPDATE cost_basis SET market_id = ? WHERE market_id = ? AND is_paper = 0",
+                        (pos.market_id, orphan_id),
+                    )
+                    await self._db.execute(
+                        "UPDATE portfolio SET market_id = ? WHERE market_id = ? AND is_paper = 0",
+                        (pos.market_id, orphan_id),
+                    )
+                    await self._db.execute(
+                        "UPDATE fills SET market_id = ? WHERE market_id = ? AND is_paper = 0",
+                        (pos.market_id, orphan_id),
+                    )
+                    # 2026-08-05: the LEDGER must migrate with the position
+                    # tables. A settlement booked while the market was still a
+                    # stub carries source_ref settle:<stub>:<side>:<mode>;
+                    # renaming only cost_basis/portfolio/fills left that ref
+                    # invisible to _settled_keys and the sweep's prior check
+                    # (both parse the market-id segment), so the same tokens
+                    # settled AGAIN under the real id (~9 historical
+                    # duplicates). Only settle: refs embed the market id
+                    # (fill:<id> / kalshi-settle:<ticker> / <ref>:commission
+                    # don't), so only they need surgery. UPDATE OR IGNORE:
+                    # where the duplicate was ALREADY booked under the real id
+                    # the rename would collide with the UNIQUE source_ref —
+                    # leave that stub row for operator-side dedup rather than
+                    # fail the whole repair batch.
+                    await self._db.execute(
+                        """UPDATE OR IGNORE pnl_ledger
+                           SET source_ref = replace(source_ref,
+                                                    'settle:' || ? || ':',
+                                                    'settle:' || ? || ':')
+                           WHERE source_ref LIKE 'settle:' || ? || ':%'""",
+                        (orphan_id, pos.market_id, orphan_id),
+                    )
+                    await self._db.execute(
+                        "UPDATE pnl_ledger SET market_id = ? WHERE market_id = ?",
+                        (pos.market_id, orphan_id),
+                    )
                 repaired += 1
                 log.info("reconciler.id_repaired",
                          orphan_id=orphan_id, real_id=pos.market_id)
@@ -492,7 +570,10 @@ class PositionReconciler:
             LivePosition(
                 market_id=p.market_id,
                 token_id=p.token_id,
-                token=TokenType.YES if p.outcome == "Yes" else TokenType.NO,
+                # 2026-08-05: unified mapper — must stay identical to the
+                # cost_basis mirror's, or the two tables disagree on the
+                # held side and settlements double-book (see reconciled_token).
+                token=reconciled_token(p),
                 size=p.size,
                 avg_cost=p.avg_cost,
                 current_price=p.current_price,

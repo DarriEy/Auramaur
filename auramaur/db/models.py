@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 47
+SCHEMA_VERSION = 50
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -419,6 +419,12 @@ CREATE TABLE IF NOT EXISTS entailment_verdicts (
     source TEXT NOT NULL DEFAULT 'llm',
     reasoning TEXT NOT NULL DEFAULT '',
     traded_at TEXT,
+    -- Deterministic post-check on the LLM-proposed pairing (#405). Recorded
+    -- ALONGSIDE the verdict, never overwriting it: "how often does the rule
+    -- overrule the model" is unanswerable once the model's answer is edited.
+    postcheck_reason TEXT,
+    postcheck_score REAL,
+    postcheck_at TEXT,
     checked_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (market_id_a, market_id_b)
 );
@@ -787,6 +793,31 @@ CREATE TABLE IF NOT EXISTS position_peaks (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS exit_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    observed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    market_id TEXT NOT NULL,
+    exchange TEXT NOT NULL DEFAULT '',
+    token TEXT NOT NULL DEFAULT 'YES',
+    is_paper INTEGER NOT NULL DEFAULT 1,
+    policy_action TEXT NOT NULL DEFAULT 'HOLD',
+    gross_pnl_pct REAL NOT NULL,
+    net_pnl_pct REAL NOT NULL,
+    peak_pnl_pct REAL NOT NULL,
+    target_pct REAL,
+    estimated_fees REAL NOT NULL DEFAULT 0,
+    current_price REAL NOT NULL,
+    entry_price REAL NOT NULL,
+    size REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_exit_decisions_position_time
+    ON exit_decisions(market_id, token, is_paper, observed_at);
+-- The composite above cannot serve the per-cycle retention delete: its
+-- predicate constrains observed_at alone, and the three leading columns are
+-- unconstrained, so SQLite has no seekable prefix and full-scans the table.
+CREATE INDEX IF NOT EXISTS idx_exit_decisions_observed_at
+    ON exit_decisions(observed_at);
+
 CREATE TABLE IF NOT EXISTS rebalance_blocks (
     event_key TEXT PRIMARY KEY,
     blocked_until TEXT NOT NULL,
@@ -942,6 +973,16 @@ CREATE TABLE IF NOT EXISTS venue_positions (
 );
 CREATE INDEX IF NOT EXISTS idx_venue_positions_market
     ON venue_positions(venue, market_id);
+-- v48: cursor for the manual-trade sweep (auramaur/broker/manual_trades.py).
+-- One row per venue: unix timestamp of the newest venue trade the sweep has
+-- processed. Initialized to NOW on first run — deliberately no historical
+-- backfill (pre-existing off-bot exits were hand-booked under manual-sell:*
+-- refs; a backfill would double-book them under venue-trade:* refs).
+CREATE TABLE IF NOT EXISTS manual_trade_state (
+    venue TEXT PRIMARY KEY,
+    cursor_ts REAL NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 -- v35: local Ollama LLM tier (evidence-side only, never trades).
 -- Distilled claims are keyed by the SHA-256 of title, a newline, and content,
 -- the same formula the aggregator stamps into evidence_observations, so claims

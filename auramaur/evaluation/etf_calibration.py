@@ -62,7 +62,17 @@ class Forecast:
     probability: float
     confidence: str
     actual_outcome: int | None
-    reference: float = COIN
+    # No default. A coin reference is not a conservative stand-in for the
+    # instrument's drift — it is EASIER to beat, by exactly (0.5 - q)^2, so
+    # defaulting to it handed every forecast free measured edge. At the ~0.56
+    # five-session up-rate that is +0.0036 per forecast, which a flat
+    # forecaster with zero information rides through the gate on patience
+    # alone at ~1,050 resolutions (its 95% lower bound is still -0.00224 at
+    # 400, so the defect is real but slower than the first telling claimed —
+    # see test_a_coin_benchmark_hands_out_free_edge_of_exactly_the_drift_gap).
+    # A forecast with no recorded benchmark cannot be scored; clearance()
+    # treats it as unscoreable rather than scoring it against a coin.
+    reference: float | None = None
 
     @property
     def resolved(self) -> bool:
@@ -275,8 +285,19 @@ def clearance(forecasts, *, min_resolved: int = 100,
     this universe whatever its calibration, and that is a different failure
     from being wrong.
     """
-    resolved = [f for f in forecasts if f.resolved]
+    # Only forecasts carrying the benchmark they were scored against can
+    # contribute. Scoring against a coin overstates edge; scoring against
+    # nothing is not scoring. Both fail CLOSED here, which is what the gate is
+    # for — an arm that cannot demonstrate edge does not get to trade.
+    resolved = [f for f in forecasts if f.resolved and f.reference is not None]
+    unscoreable = sum(1 for f in forecasts if f.resolved and f.reference is None)
     conviction = max((abs(f.probability - 0.5) for f in forecasts), default=0.0)
+    if unscoreable and not resolved:
+        return TradingClearance(
+            False,
+            f"{unscoreable} resolved forecast(s) carry no benchmark to score "
+            "against; record horizon_up_rate per forecast to open this gate",
+            0, 0.0, float("-inf"), conviction)
     # Two is the floor regardless of configuration: sample variance is
     # undefined below it, so a single lucky forecast could otherwise open the
     # gate (or divide by zero trying).

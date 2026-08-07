@@ -1,6 +1,6 @@
 """Readiness checks — gate live trading until all criteria pass.
 
-Eight criteria produce a CriterionResult with one of three statuses:
+Each criterion produces a CriterionResult with one of three statuses:
   PASS              — measurable and within threshold
   FAIL              — measurable and outside threshold
   INSUFFICIENT_DATA — not enough samples to evaluate honestly
@@ -11,12 +11,14 @@ Overall readiness passes only if every criterion is PASS.
 from __future__ import annotations
 
 import json
+import re
 import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
+from auramaur.broker.ledger import PHANTOM_STRATEGY, VENUE_STRATEGY
 from auramaur.db.database import Database
 
 Status = Literal["PASS", "FAIL", "INSUFFICIENT_DATA"]
@@ -50,50 +52,119 @@ class ReadinessReport:
 
 _REQUIRED_KEYS = ("level", "timestamp", "event")
 _ERROR_LEVELS = {"error", "critical"}
+_ROTATION_SUFFIX = re.compile(r"\.(\d+)$")
+
+
+def log_files_for(log_file: Path) -> list[Path]:
+    """The active log plus its rotated backups, oldest first.
+
+    ``_RotatingWriter`` renames the active file to ``<path>.1`` and shifts older
+    backups up to ``<path>.<backups>`` (monitoring/logger.py), so a parser that
+    opens exactly one path sees only what currently fits in ``rotate_max_mb``.
+    Measured against the live deployment on 2026-08-06 that was 0.7 of the 7
+    days the criterion advertises — 10% coverage, rotating every ~21-30 hours —
+    and 1,487 error events sat in ``.1``/``.2``/``.3`` where nothing looked.
+    Reading the backups is what makes a 7-day criterion actually score 7 days.
+
+    A higher suffix is an OLDER file, so backups are walked in descending suffix
+    order with the active file last. That keeps the fold chronological, which is
+    what makes both the sampled error events (the first N in time, as before)
+    and the earliest-timestamp coverage figure mean what they say.
+    """
+    backups: list[tuple[int, Path]] = []
+    try:
+        candidates = list(log_file.parent.glob(log_file.name + ".*"))
+    except OSError:
+        candidates = []
+    for candidate in candidates:
+        match = _ROTATION_SUFFIX.search(candidate.name)
+        if match and candidate.is_file():
+            backups.append((int(match.group(1)), candidate))
+    ordered = [path for _suffix, path in sorted(backups, key=lambda item: -item[0])]
+    if log_file.exists():
+        ordered.append(log_file)
+    return ordered
 
 
 def _parse_log_for_errors(
-    log_file: Path,
+    log_files: list[Path],
     since: datetime,
     sample_events_to_keep: int,
-) -> tuple[int, int, int, int, list[str]]:
+) -> tuple[int, int, int, int, list[str], datetime | None]:
+    """Fold the error/entry counts across every log file, oldest first.
+
+    Semantics per line are unchanged: unparseable and schema-drifted lines are
+    tolerated (counted in ``total`` but not ``well_formed``, which is what feeds
+    the drift canary), and only well-formed entries at or after ``since`` are
+    scored. ``earliest`` is the earliest well-formed timestamp seen anywhere in
+    the corpus — the parser already computed it implicitly and threw it away, and
+    it is the only honest measure of how much of the window was actually read.
+    """
     total = 0
     well_formed = 0
     in_window = 0
     errors = 0
     error_events: list[str] = []
+    earliest: datetime | None = None
 
-    with log_file.open() as f:
-        for line in f:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            total += 1
-            try:
-                entry = json.loads(stripped)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(entry, dict):
-                continue
-            if not all(k in entry for k in _REQUIRED_KEYS):
-                continue
-            try:
-                ts = datetime.fromisoformat(entry["timestamp"].replace("Z", "+00:00"))
-            except (ValueError, AttributeError):
-                continue
-            well_formed += 1
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            if ts < since:
-                continue
-            in_window += 1
-            level = str(entry.get("level", "")).lower()
-            if level in _ERROR_LEVELS or "exception" in entry:
-                errors += 1
-                if len(error_events) < sample_events_to_keep:
-                    event = entry.get("event", "")
-                    error_events.append(f"{level}:{event}")
-    return total, well_formed, in_window, errors, error_events
+    for log_file in log_files:
+        try:
+            handle = log_file.open()
+        except OSError:
+            # Rotation is a sequence of os.replace calls, so a backup can be
+            # renamed out from under the walk. Skipping it keeps the criterion
+            # honest — the coverage figure below reports on what was read.
+            continue
+        with handle as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                total += 1
+                try:
+                    entry = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                if not all(k in entry for k in _REQUIRED_KEYS):
+                    continue
+                try:
+                    ts = datetime.fromisoformat(
+                        entry["timestamp"].replace("Z", "+00:00"))
+                except (ValueError, AttributeError):
+                    continue
+                well_formed += 1
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if earliest is None or ts < earliest:
+                    earliest = ts
+                if ts < since:
+                    continue
+                in_window += 1
+                level = str(entry.get("level", "")).lower()
+                if level in _ERROR_LEVELS or "exception" in entry:
+                    errors += 1
+                    if len(error_events) < sample_events_to_keep:
+                        event = entry.get("event", "")
+                        error_events.append(f"{level}:{event}")
+    return total, well_formed, in_window, errors, error_events, earliest
+
+
+def _coverage_note(earliest: datetime | None, since: datetime) -> str:
+    """Say so when the logs do not reach back as far as the window claims.
+
+    Empty when the corpus predates ``since`` — the criterion really did score
+    the window it advertises. Otherwise it scored a shorter one, and reporting
+    "0 errors" without that caveat is the same class of laundering as reporting
+    an unreadable database as zero.
+    """
+    if earliest is None or earliest <= since:
+        return ""
+    now = datetime.now(timezone.utc)
+    requested_days = max((now - since).total_seconds(), 0.0) / 86400.0
+    covered_days = max((now - earliest).total_seconds(), 0.0) / 86400.0
+    return f"; log covers {covered_days:.1f}d of {requested_days:.1f}d"
 
 
 async def check_cycle_health(
@@ -103,7 +174,8 @@ async def check_cycle_health(
     drift_threshold_pct: float = 5.0,
     sample_events_to_keep: int = 5,
 ) -> CriterionResult:
-    if not log_file.exists():
+    log_files = log_files_for(log_file)
+    if not log_files:
         return CriterionResult(
             name="cycle_health",
             status="INSUFFICIENT_DATA",
@@ -114,9 +186,11 @@ async def check_cycle_health(
 
     import asyncio
 
-    total, well_formed, in_window, errors, error_events = await asyncio.to_thread(
-        _parse_log_for_errors, log_file, since, sample_events_to_keep
+    (total, well_formed, in_window, errors, error_events,
+     earliest) = await asyncio.to_thread(
+        _parse_log_for_errors, log_files, since, sample_events_to_keep
     )
+    coverage = _coverage_note(earliest, since)
 
     if total == 0:
         return CriterionResult(
@@ -137,19 +211,34 @@ async def check_cycle_health(
             detail="log format has drifted; readiness parser may be unreliable",
         )
 
+    if in_window == 0:
+        # Zero entries is not zero errors. Nothing in the window means the bot
+        # is stopped (or was, for the whole window) — every log file we could
+        # find predates it. This is the residual case now that the rotated
+        # backups are read; before that it also stood in for rotation
+        # blindness, which log_files_for() addresses at the source.
+        return CriterionResult(
+            name="cycle_health",
+            status="INSUFFICIENT_DATA",
+            value="no log entries in window",
+            threshold="0 errors",
+            detail=(f"window is empty across {len(log_files)} log file(s) — "
+                    "the bot may be stopped"),
+        )
+
     if errors == 0:
         return CriterionResult(
             name="cycle_health",
             status="PASS",
-            value="0 errors",
+            value=f"0 errors{coverage}",
             threshold="0 errors",
-            detail=f"{in_window} entries in window",
+            detail=f"{in_window} entries in window across {len(log_files)} log file(s)",
         )
 
     return CriterionResult(
         name="cycle_health",
         status="FAIL",
-        value=f"{errors} error/critical events",
+        value=f"{errors} error/critical events{coverage}",
         threshold="0 errors",
         detail="; ".join(error_events),
     )
@@ -664,8 +753,219 @@ async def check_divergence(
 
 
 # ---------------------------------------------------------------------------
+# Criterion 9 — exit liveness (entries continue while exits are absent)
+# ---------------------------------------------------------------------------
+
+# Calibrated by replaying the criterion over the full trade history; see
+# docs/exit-liveness-criterion.md for the measurement and the evidence.
+_EXIT_LIVENESS_WINDOW_DAYS = 7
+_EXIT_LIVENESS_MIN_ENTRIES = 3
+
+# A realization event. `commission` rows are cash adjustments booked against a
+# still-open position — money moving is not a position leaving.
+_EXIT_KINDS = ("sell", "settlement")
+
+# Attribution buckets, not strategy books. The ledger's entry-strategy
+# resolution refuses to credit any of these as the entrant
+# (broker/ledger.py::_market_context), so a realization can never be booked
+# back to them and their exit count is zero *by construction*. Judging them
+# would be a permanent structural false alarm rather than a signal. `exit` is
+# the exit path's own attribution on the trades mirror, which is exactly why
+# exits are counted from the ledger (entry-attributed) and not from trades.
+_UNJUDGEABLE_BOOKS = frozenset({
+    "", "exit", "order_monitor", "legacy_unattributed", "adopted_unknown",
+    PHANTOM_STRATEGY, VENUE_STRATEGY,
+})
+
+
+def _exit_cell_label(venue: str, book: str, is_paper: int) -> str:
+    return f"{venue or '?'}/{book} [{'paper' if is_paper else 'live'}]"
+
+
+async def _exit_events_by_cell(
+    db: Database, *, since: datetime, exchange: str | None, before: bool,
+) -> dict[tuple[str, str, int], int]:
+    """Realization counts per (venue, book, mode), either side of ``since``.
+
+    ``datetime(col)`` rather than a raw string compare: realized_at is written
+    both as ``YYYY-MM-DD HH:MM:SS`` (settlements) and as an offset-aware ISO
+    string with a ``T`` (sell fills), and lexical ordering disagrees with
+    chronological ordering across those two forms inside a single day.
+    """
+    comparison = "<" if before else ">="
+    kinds = ", ".join("?" for _ in _EXIT_KINDS)
+    params: list = [*_EXIT_KINDS, since.astimezone(timezone.utc).isoformat()]
+    clause = ""
+    if exchange:
+        clause = " AND venue = ?"
+        params.append(exchange)
+    rows = await db.fetchall(
+        f"""SELECT venue, strategy_source AS book, is_paper, COUNT(*) AS n
+              FROM pnl_ledger
+             WHERE kind IN ({kinds})
+               AND datetime(realized_at) {comparison} datetime(?){clause}
+             GROUP BY 1, 2, 3""",
+        tuple(params),
+    )
+    return {
+        ((r["venue"] or ""), (r["book"] or "").strip(), int(r["is_paper"] or 0)):
+            int(r["n"] or 0)
+        for r in rows
+    }
+
+
+async def check_exit_liveness(
+    db: Database,
+    *,
+    since: datetime,
+    exchange: str | None,
+    min_entries: int = _EXIT_LIVENESS_MIN_ENTRIES,
+) -> CriterionResult:
+    """FAIL when a book keeps taking entries while its exits have stopped.
+
+    Watches OUTCOMES, not mechanisms. The live prediction-market exit loop
+    once raised on every tick, and the raise landed in a ``debug``-level
+    handler — so cycle_health, which scores cycles by log level, reported
+    clean while entries continued and exits were absent for an extended
+    period. Any cause with that shape (an exception, a config mistake, a stuck
+    lock, an adapter silently refusing sells) produces the same observable,
+    and this criterion reads only the observable.
+
+    Cells are ``(venue, book, mode)``. Paper and live are judged separately on
+    purpose: paper exits kept working throughout that incident, which is
+    precisely why nothing looked wrong in aggregate.
+
+    Entries are BUY rows on ``trades`` (the gateway's mirror carries the
+    exchange and the deciding strategy). Exits are ``pnl_ledger`` rows of kind
+    ``sell`` or ``settlement``, because the ledger attributes a realization to
+    the strategy that OPENED the position while the trades mirror attributes
+    the SELL to the exit path itself. Settlements count: a long-dated book can
+    legitimately hold for weeks with no sell while positions resolve, and
+    excluding them fires constantly on ``long_horizon``.
+
+    Three ways out of a FAIL, each deliberate:
+      * fewer than ``min_entries`` entries — one entry proves nothing;
+      * no exit event ever recorded for the cell — "stopped" presupposes it
+        was running, and a brand-new book's first realization is genuinely
+        weeks away. Reported as not-yet-judgeable rather than silently
+        dropped;
+      * a dormant book (no entries at all) is never a FAIL.
+    """
+    now = datetime.now(timezone.utc)
+    window_days = max((now - since).total_seconds(), 0.0) / 86400.0
+    threshold = (
+        f"every book with ≥{min_entries} entries in {window_days:.0f}d "
+        f"shows ≥1 exit"
+    )
+
+    params: list = [since.astimezone(timezone.utc).isoformat()]
+    clause = ""
+    if exchange:
+        clause = " AND exchange = ?"
+        params.append(exchange)
+    entry_rows = await db.fetchall(
+        f"""SELECT exchange AS venue, strategy_source AS book, is_paper,
+                   COUNT(*) AS n
+              FROM trades
+             WHERE side = 'BUY'
+               AND COALESCE(status, '') NOT IN ('cancelled', 'rejected')
+               AND datetime(timestamp) >= datetime(?){clause}
+             GROUP BY 1, 2, 3""",
+        tuple(params),
+    )
+
+    in_window = await _exit_events_by_cell(
+        db, since=since, exchange=exchange, before=False)
+    earlier = await _exit_events_by_cell(
+        db, since=since, exchange=exchange, before=True)
+
+    stalled: list[str] = []
+    unproven: list[str] = []
+    active: list[str] = []
+    for row in entry_rows:
+        book = (row["book"] or "").strip()
+        if book in _UNJUDGEABLE_BOOKS:
+            continue
+        entries = int(row["n"] or 0)
+        if entries < min_entries:
+            continue
+        venue = row["venue"] or ""
+        is_paper = int(row["is_paper"] or 0)
+        cell = (venue, book, is_paper)
+        label = _exit_cell_label(venue, book, is_paper)
+        exits = in_window.get(cell, 0)
+        if exits > 0:
+            active.append(f"{label}: {entries} entries, {exits} exits")
+        elif earlier.get(cell, 0) == 0:
+            unproven.append(f"{label}: {entries} entries, no exit ever recorded")
+        else:
+            stalled.append(f"{label}: {entries} entries, 0 exits")
+
+    judged = len(active) + len(stalled)
+    if stalled:
+        return CriterionResult(
+            name="exit_liveness",
+            status="FAIL",
+            value=f"{len(stalled)} book(s) entering with no exits",
+            threshold=threshold,
+            detail="; ".join(sorted(stalled)),
+            n_samples=judged,
+        )
+    if judged == 0:
+        detail = (
+            "; ".join(sorted(unproven)) if unproven
+            else f"no book took ≥{min_entries} entries in the window"
+        )
+        return CriterionResult(
+            name="exit_liveness",
+            status="INSUFFICIENT_DATA",
+            value="0 books judgeable",
+            threshold=threshold,
+            detail=detail,
+            n_samples=0,
+        )
+    detail = "; ".join(sorted(active))
+    if unproven:
+        detail += " | not yet judgeable: " + "; ".join(sorted(unproven))
+    return CriterionResult(
+        name="exit_liveness",
+        status="PASS",
+        value=f"{judged} book(s) exiting",
+        threshold=threshold,
+        detail=detail,
+        n_samples=judged,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Top-level evaluator
 # ---------------------------------------------------------------------------
+
+
+def _exit_liveness_settings() -> tuple[int, int]:
+    """Operator overrides for the exit-liveness window and entry floor.
+
+    They live under `monitoring:` — the operator-declared health-check
+    contract — and NOT in any strategy's section. strategy_version hashes
+    exactly {strategy_source, that strategy's own config section, and
+    risk.min_edge_pct / max_spread_pct / confidence_floor}
+    (broker/execution_gateway.py::_capture_decision), and `monitoring` is
+    never resolved as a strategy section, so retuning these cannot reset a
+    14-day graduation clock.
+
+    Never raises: a config fault must degrade to the calibrated defaults
+    rather than take down the whole readiness report.
+    """
+    try:
+        from config.settings import Settings
+
+        monitoring = Settings().monitoring
+        return (
+            max(1, int(monitoring.exit_liveness_window_days)),
+            max(1, int(monitoring.exit_liveness_min_entries)),
+        )
+    except Exception:  # noqa: BLE001 - config must never break the report
+        return _EXIT_LIVENESS_WINDOW_DAYS, _EXIT_LIVENESS_MIN_ENTRIES
 
 
 async def evaluate_readiness(
@@ -679,6 +979,12 @@ async def evaluate_readiness(
     now = datetime.now(timezone.utc)
     since_window = now - timedelta(days=days)
     since_24h = now - timedelta(hours=24)
+    # exit_liveness keeps its own calibrated window rather than following
+    # `days`: the entry floor is only meaningful against the window it was
+    # measured for, and widening the report must not quietly change what the
+    # criterion means. Its threshold string states the window it used.
+    exit_window_days, exit_min_entries = _exit_liveness_settings()
+    since_exits = now - timedelta(days=exit_window_days)
     if log_file is None:
         # Follow the configured logging path (LOGGING__FILE / logging.file) so
         # cycle_health reads the file the bot actually writes — in a container
@@ -701,6 +1007,10 @@ async def evaluate_readiness(
             db, since=since_window, exchange=exchange, fee_rate=fee_rate
         ),
         await check_divergence(db, since=since_window, exchange=exchange),
+        await check_exit_liveness(
+            db, since=since_exits, exchange=exchange,
+            min_entries=exit_min_entries,
+        ),
     ]
     return ReadinessReport(
         timestamp=now,

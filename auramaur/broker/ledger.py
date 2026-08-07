@@ -90,6 +90,14 @@ _ENTRY_STRATEGY_SQL = """COALESCE(
 _SETTLEMENT_QTY_MULT = 2.0
 _SETTLEMENT_QTY_SLACK = 5.0
 PHANTOM_STRATEGY = "phantom_unattributed"
+# 2026-08-05: a settlement with no in-DB ancestry at all (no trades, no
+# signals — e.g. a venue-swept holding acquired outside the bot, or one whose
+# entry rows predate the ledger) used to book strategy_source='' and pollute
+# per-strategy reports/graduation cells with an empty key. Settlements are
+# always venue-truth events, so they get an explicit bucket instead. Sells
+# and other kinds keep '' — an empty sell attribution is a real signal that
+# an entry row is missing, and must stay visible as such.
+VENUE_STRATEGY = "venue_unattributed"
 
 
 async def _settlement_qty_explained(
@@ -208,6 +216,9 @@ async def record_ledger_event(
                 displaced_strategy=strategy, is_paper=is_paper,
             )
             strategy = PHANTOM_STRATEGY
+        if kind == "settlement" and not strategy:
+            # 2026-08-05: never book a settlement under the empty key.
+            strategy = VENUE_STRATEGY
         if realized_at is None:
             await db.execute(
                 """INSERT OR IGNORE INTO pnl_ledger

@@ -307,3 +307,77 @@ async def test_mirror_removes_stale_rows_from_prior_sessions():
         "SELECT market_id FROM portfolio")}
     assert rows == {"XBTUSDC", "poly-1"}  # ADAUSDC gone, polymarket untouched
     await db.close()
+
+
+# ---------------------------------------------------------------------------
+# The per-order USD cap is safety layer #3 in this module's own docstring. It
+# sat behind `if est_price:`, and get_price() returns None whenever
+# _public("Ticker") yields nothing — _public logs and returns {} on any error
+# rather than raising. A transient 5xx or rate-limit therefore removed the
+# ceiling entirely and the order went to AddOrder unbounded. Every autonomous
+# caller passes price=None, so the probe is the only source of that number.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_unpriceable_pair_is_refused_rather_than_uncapped():
+    settings = MagicMock()
+    settings.is_live = True
+    settings.kraken.directional_enabled = True
+    settings.kraken.max_order_usd = 30.0
+    client = KrakenSpotClient(settings)
+    client.get_pair_quote = AsyncMock(return_value="USDC")
+    client.get_price = AsyncMock(return_value=None)   # ticker blip
+    client._private = AsyncMock(return_value={"error": [], "result": {"txid": ["x"]}})
+
+    with patch("auramaur.exchange.kraken.kill_switch_present", return_value=False):
+        result = await client.place_spot_order(
+            "XBTUSDC", OrderSide.BUY, 10.0, price=None, dry_run=False,
+        )
+
+    assert result.status == "rejected"
+    assert "cannot price" in (result.error_message or "")
+    client._private.assert_not_awaited()   # nothing reached AddOrder
+
+
+@pytest.mark.asyncio
+async def test_priced_pair_still_enforces_the_cap():
+    settings = MagicMock()
+    settings.is_live = True
+    settings.kraken.directional_enabled = True
+    settings.kraken.max_order_usd = 30.0
+    client = KrakenSpotClient(settings)
+    client.get_pair_quote = AsyncMock(return_value="USDC")
+    client.get_price = AsyncMock(return_value=50_000.0)
+    client.usd_notional = AsyncMock(return_value=500.0)
+    client._private = AsyncMock(return_value={"error": [], "result": {"txid": ["x"]}})
+
+    with patch("auramaur.exchange.kraken.kill_switch_present", return_value=False):
+        result = await client.place_spot_order(
+            "XBTUSDC", OrderSide.BUY, 0.01, price=None, dry_run=False,
+        )
+
+    assert result.status == "rejected"
+    assert "exceeds cap" in (result.error_message or "")
+    client._private.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_priced_pair_under_the_cap_still_places():
+    settings = MagicMock()
+    settings.is_live = True
+    settings.kraken.directional_enabled = True
+    settings.kraken.max_order_usd = 100.0
+    client = KrakenSpotClient(settings)
+    client.get_pair_quote = AsyncMock(return_value="USDC")
+    client.get_price = AsyncMock(return_value=50_000.0)
+    client.usd_notional = AsyncMock(return_value=50.0)
+    client._private = AsyncMock(return_value={"error": [], "result": {"txid": ["ok"]}})
+
+    with patch("auramaur.exchange.kraken.kill_switch_present", return_value=False):
+        result = await client.place_spot_order(
+            "XBTUSDC", OrderSide.BUY, 0.001, price=None, dry_run=False,
+        )
+
+    assert result.status != "rejected"
+    client._private.assert_awaited()

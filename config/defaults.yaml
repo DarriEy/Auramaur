@@ -29,6 +29,21 @@ execution:
   spread_capture_min_bps: 50
   stop_loss_pct: 30.0
   profit_target_pct: 50.0
+  # Lifecycle bands remain behavior-compatible, but are explicit and calibratable.
+  profit_target_early_pct: 75.0
+  profit_target_late_pct: 25.0
+  profit_target_early_fraction_remaining: 0.50
+  profit_target_late_fraction_remaining: 0.10
+  # Set either to 0 to disable the trailing tier entirely.
+  trailing_stop_activation_pct: 12.0
+  trailing_stop_giveback_fraction: 0.45
+  # 2026-08-06: 14 -> 3. One row per open position per tick outgrows
+  # candidate_dispositions (the table this was modelled on) ~5.6x and carries
+  # two indexes; 14 days costs roughly the size of the whole trading DB for
+  # rows nothing reads. calibrate_exit_policy.py filters HOLD out and gates on
+  # non-HOLD counts, so this does not affect it. Raise only with a consumer
+  # that actually reads HOLD rows.
+  exit_decision_retention_days: 3
   edge_erosion_min_pct: 2.0
   time_decay_hours: 12.0
   # Free capital from near-certain winners far from resolution (sell early to
@@ -190,6 +205,9 @@ graduation:
   # Prospective proof contract: old/backfilled rows remain reportable but cannot
   # graduate a strategy whose parameters and execution provenance were not frozen.
   prospective_only: true
+  # Positive dollars are not enough: charge the committed stake the return it
+  # could have earned at benchmark.risk_free_annual_rate over the actual hold.
+  require_cash_benchmark: true
   require_market_brier_edge: true
   require_executable_fills: true
   min_calendar_days: 30
@@ -291,6 +309,10 @@ broker:
   limit_edge_threshold: 20.0
   limit_price_improvement_ticks: 1
   max_slippage_bps: 100
+  # Book off-bot Polymarket exits (operator sells at the venue) into
+  # pnl_ledger each position-sync cycle. Outside every strategy_version
+  # hash — toggling never resets a graduation clock.
+  manual_trade_sweep_enabled: true
 
 kalshi:
   enabled: true
@@ -1140,8 +1162,12 @@ settlement_arb:
   # is ALREADY PUBLISHED and deterministically satisfies/fails the criterion, and
   # the market hasn't repriced (the lag is the edge). No forecasting; the LLM only
   # extracts the predicate (adversarially verified, cached). PAPER-FORCED, own
-  # graduation cell. DEFAULT OFF — flip enabled:true to start the 2-week spike.
-  enabled: true      # spike STARTED 2026-06-26 — 2wk paper measurement
+  # graduation cell. The spike ran 2026-06-26 through its preregistered
+  # 2-week endpoint (2026-07-10). WOUND DOWN 2026-08-05 pending adjudication:
+  # historical evidence remains intact, but an expired clock cannot keep
+  # consuming candidates and operator attention indefinitely. Re-enable only
+  # as a new, dated trial after recording the prior verdict.
+  enabled: false
   paper: true
   stake_usd: 10.0
   min_edge: 0.05
@@ -1228,7 +1254,9 @@ resolution_lens:
   # now (empty descriptions -> rules-text fix; long-dated-only discovery ->
   # close-window merge; 300 floor vs underreporting bulk liquidity field ->
   # 50, matching cross_venue). Don't judge the pre-07-03 silence.
-  kalshi_enabled: true
+  # WOUND DOWN 2026-08-05: the restarted two-week clock ended 2026-07-17.
+  # Keep the Polymarket family running; this only stops the expired Kalshi arm.
+  kalshi_enabled: false
   kalshi_min_liquidity: 50.0
   min_gap_score: 0.4       # lens-judged headline/criteria divergence floor
   high_conf_gap_score: 0.7 # >= this -> HIGH confidence (clears divergence filter)
@@ -1331,6 +1359,12 @@ monitoring:
   pillar_stale_seconds: 900
   candidate_retention_days: 30
   candidate_summary_retention_days: 90
+  # readiness.check_exit_liveness: every book that took >= min_entries entries
+  # in the lookback must show at least one exit (SELL fill or settlement), per
+  # venue and per paper/live mode. Health-check thresholds only — outside every
+  # strategy_version hash, so changing them is graduation-clock safe.
+  exit_liveness_window_days: 7
+  exit_liveness_min_entries: 3
 
 cross_venue_arb:
   # Cross-venue semantic-equivalence arb (Poly x Kalshi): logically equivalent
@@ -1356,9 +1390,26 @@ cross_venue_arb:
 # judgement in the system was scored against zero.
 benchmark:
   risk_free_annual_rate: 0.045
+  # Allocator ENTRY veto stays disarmed (2026-08-05): the hurdle prices a
+  # hold-to-resolution the book does not practice (long-dated edges get
+  # exited on repricing), and a 14-day live replay showed it refusing 7 of
+  # 13 real entries — the llm_kalshi long-dated cells the 2026-10-31
+  # pre-registered review adjudicates. Flip AFTER that review, on its
+  # evidence. Graduation measurement (require_cash_benchmark) is on
+  # regardless of this flag.
+  allocator_cash_hurdle_enabled: false
   # Total deployable capital across ALL venues, USD. Operator-maintained:
   # only Polymarket reports capital numerically, and the venues are
   # mixed-currency, so this cannot be derived. Measured 2026-08-01:
   # Polymarket $1,180 equity + IBKR ~$795 + Kalshi $221 + Kraken ~$145.
   # Set to 0 to suppress the percentage comparison rather than guess.
   book_capital_usd: 2340.0
+
+# An experiment is not free because its orders are paper: every active family
+# consumes candidate flow, API budget, monitoring surface, and an eventual
+# human adjudication. Families (not model arms) consume one slot because arms
+# share a hypothesis, runtime, and review. Current tracked defaults use 11/12;
+# starting a trial beyond the one free slot fails Settings validation until an
+# existing trial is wound down. See docs/experiment-capacity.md.
+experiment_capacity:
+  max_concurrent_paper_trials: 12

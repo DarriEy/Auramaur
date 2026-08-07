@@ -6,6 +6,7 @@ or schemaless database (the service must explain itself and recover on its
 own) — and the dashboard's DB handle is structurally unable to write.
 """
 
+import asyncio
 import time
 
 import aiosqlite
@@ -24,6 +25,40 @@ from auramaur.web.serialize import serialize_state  # noqa: E402
 from config.settings import Settings  # noqa: E402
 
 FAST_REFRESH = 0.1  # keep degraded-recovery tests quick
+
+
+@pytest.mark.asyncio
+async def test_readonly_connect_cancellation_closes_started_worker(monkeypatch):
+    """Cancellation between worker startup and await completion must not
+    orphan an aiosqlite thread with no handle available to shutdown."""
+    started = asyncio.Event()
+
+    class PendingConnection:
+        def __init__(self):
+            self.closed = False
+
+        def __await__(self):
+            return self._wait().__await__()
+
+        async def _wait(self):
+            started.set()
+            await asyncio.Event().wait()
+
+        async def close(self):
+            self.closed = True
+
+    connection = PendingConnection()
+    monkeypatch.setattr(aiosqlite, "connect", lambda *args, **kwargs: connection)
+    db = ReadOnlyDatabase("unused.db")
+
+    task = asyncio.create_task(db.connect())
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert connection.closed is True
+    assert db.connected is False
 
 
 async def _seed_bot_db(db_path: str) -> None:

@@ -17,6 +17,11 @@ evaluation stays with the caller — the caller passes the already risk-approved
 pair (the arb pillars): it builds BOTH orders before placing EITHER, places A
 then B, and unwinds a live-pending A if B fails — preserving the atomicity a
 per-leg ``submit`` could not.
+
+``cancel_resting`` closes the other half of a resting order's lifecycle. It is
+a ROUTING AND AUDIT contract, not a gate: unlike a placement, a cancel reduces
+exposure, so it carries none of ``submit``'s risk checks and cannot refuse.
+See its docstring for why the kill switch must never reach it.
 """
 
 from __future__ import annotations
@@ -78,6 +83,176 @@ class ExecutionResult:
     result: OrderResult | None = None
     fill: Fill | None = None
     reason: str = ""
+
+
+@dataclass
+class CancelResult:
+    """The outcome of a gateway cancel. Never an exception, never a refusal.
+
+    ``status`` is one of:
+
+    ``cancelled``  the venue acknowledged the cancel.
+    ``paper``      a paper order — intercepted, never sent to a venue client.
+    ``rejected``   the venue declined (returns False, e.g. already matched).
+    ``failed``     the venue call raised; the exception was contained here.
+    ``skipped``    no usable order id was supplied — nothing to cancel.
+    """
+
+    order_id: str
+    status: Literal["cancelled", "paper", "rejected", "failed", "skipped"]
+    reason: str = ""
+
+    @property
+    def ok(self) -> bool:
+        """True when the order is no longer resting because of this call."""
+        return self.status in ("cancelled", "paper")
+
+
+def booked_as_position(res: ExecutionResult | OrderResult | None) -> bool:
+    """True when a submission actually EXECUTED and may be booked as a holding.
+
+    THE single predicate for "did this order become a position". Every caller
+    that writes a ``portfolio`` row, a per-leg record, or a fill must ask this
+    and nothing else.
+
+    It is deliberately the same expression ``_record_result`` applies before it
+    writes the fill (``status in _FILLED_STATUSES and filled_size > 0``) — and
+    that method now calls THIS function, so the agreement holds by
+    construction rather than by nine hand-copied predicates staying in sync. A
+    pillar's portfolio row can no longer claim a position the gateway's own
+    ``fills``/``cost_basis`` writes never recorded.
+
+    Why the test has to be both halves:
+
+    ``status``      Polymarket's LIVE ``place_order`` ALWAYS returns
+                    ``"pending"``, and ``PaperTrader`` defers every
+                    non-marketable (maker-priced) order to ``"pending"`` too.
+                    Resting is the NORMAL outcome, not the exception.
+    ``filled_size`` a ``"paper"``/``"filled"`` status with size 0 is a refusal
+                    that got stamped, not an execution — and every
+                    ``_record_*`` helper in the codebase falls back to
+                    ``order.size`` when ``filled_size`` is 0, so booking one
+                    writes a FULL-SIZE phantom.
+
+    Accepts either half of the pair so one predicate covers both call shapes:
+    an :class:`ExecutionResult` from the gateway (pillars) or a raw
+    :class:`OrderResult` from an exchange adapter / the order monitor. An
+    ``ExecutionResult`` that never reached placement carries ``result=None``
+    (``status="skipped"``), which is not a position either.
+
+    ``status`` is read from the object the caller passed and ``filled_size``
+    from the underlying ``OrderResult``. For an ``OrderResult`` those are the
+    same object; for an ``ExecutionResult`` the two agree by construction —
+    ``_record_result`` is the ONLY place that builds one carrying a
+    ``result``, and it copies ``status=result.status`` verbatim. Attribute
+    probing rather than ``isinstance`` so a test double of either shape is
+    read the same way the real object would be.
+    """
+    if res is None:
+        return False
+    if getattr(res, "status", None) not in _FILLED_STATUSES:
+        return False
+    inner = getattr(res, "result", None)
+    size = getattr(res if inner is None else inner, "filled_size", None)
+    return size is not None and size > 0
+
+
+async def materialize_paper_portfolio_row(db, order, venue: str) -> None:
+    """Project the just-updated paper ``cost_basis`` row into ``portfolio``.
+
+    THE single maintainer of a paper ``portfolio`` row after a booked fill,
+    called from the gateway's ``_record_result`` (instant paper fills — entries
+    AND exits) and from the order monitor's deferred-fill path. One
+    implementation so the two cannot diverge — the same doctrine as
+    :func:`booked_as_position` above.
+
+    Why anything must do this at all: ``PnLTracker.record_fill`` writes
+    ``fills`` and ``cost_basis`` and NOTHING else, and position sync is
+    mode-scoped (``is_paper_flag = 0 if settings.is_live else 1``), so in a
+    live bot nothing else maintains paper rows. On the ENTRY side that left
+    deferred fills invisible to ``RiskManager`` and every pillar's
+    ``_open_position_count`` (measured 2026-08-06: 13 such long_horizon rows
+    and 18 llm rows, all settling correctly yet uncounted). On the EXIT side
+    the mirror image shipped a day later: an exit that filled INSTANTLY
+    through paper interception zeroed ``cost_basis`` and left the portfolio
+    row at FULL SIZE until resolution cleanup (observed live 2026-08-06, the
+    evening after the deferred-fill fix deployed) — inflating exposure and
+    ``max_open`` counts for however long the market kept trading.
+
+    PROJECTED FROM cost_basis, not from the triggering fill, so the two
+    cannot diverge. ``cost_basis`` carries the CUMULATIVE size and
+    weighted-average cost for (market, token, mode) across every fill — a
+    fill-shaped upsert would undercount the second fill in a market (the
+    portfolio upsert REPLACES size) and would leave a stale full-size row
+    after a partial exit. It is also the exact row
+    ``resolution_tracker._settle_position`` falls back to when no portfolio
+    row exists.
+
+    Cannot double-book at settlement. ``_settle_position`` reads the
+    portfolio row OR the cost_basis row (portfolio preferred) to obtain
+    (size, entry_price), but derives its idempotency key from neither:
+    ``source_ref = f"settle:{market_id}:{canon_token}:{is_paper_flag}"``
+    comes from the position KEY alone, and ``_prior_settlement`` dedupes on
+    it. Materializing the row therefore changes only WHICH branch supplies
+    the numbers — and both branches read the same cost_basis values.
+    ``side`` is hardcoded "BUY" for the same reason ``_settle_position``'s
+    cost_basis branch hardcodes it: Polymarket holdings are always long.
+
+    SCOPED to the prediction-market venues whose paper holdings ``portfolio``
+    actually represents. The IBKR arms route their simulated fills through
+    the gateway for the rails (``fills``/``cost_basis``/``pnl_ledger`` —
+    without those the book cannot graduate) but keep positions in their own
+    ``ibkr_*`` tables; a portfolio row for one would leak into the
+    paper-breadth cap, the drawdown fallback and the exit monitor, none of
+    which manage that book. Kraken rows are pillar-owned and never pass
+    through here.
+
+    ``venue`` must be the CALLER's venue truth — the gateway passes its
+    venue-scoped ``exchange_name``. ``Order.exchange`` is deliberately not
+    consulted: its ``"polymarket"`` DEFAULT is truthy, so an
+    ``order.exchange or exchange_name`` fallback silently mislabels every
+    order whose builder left the field alone (the kalshi long_horizon
+    instance does exactly that, and its portfolio rows must say kalshi).
+    """
+    if venue not in ("polymarket", "kalshi"):
+        return
+    row = await db.fetchone(
+        "SELECT size, avg_cost, token, token_id FROM cost_basis "
+        "WHERE market_id = ? AND is_paper = 1 AND token = ?",
+        (order.market_id, order.token.value),
+    )
+    if row is None:
+        return
+    size = float(row["size"])
+    if size <= 0:
+        # The fill closed the holding. Leaving the portfolio row behind is
+        # the stale-exit phantom: it survives until _settle_position's
+        # resolution-time cleanup, inflating exposure the whole way — so
+        # drop it now, the same cleanup settlement performs at cost_basis
+        # zero.
+        await db.execute(
+            "DELETE FROM portfolio WHERE market_id = ? AND is_paper = 1 "
+            "AND UPPER(token) = UPPER(?)",
+            (order.market_id, order.token.value),
+        )
+        return
+    price = float(row["avg_cost"])
+    await db.execute(
+        """INSERT INTO portfolio (market_id, exchange, side, size, avg_price,
+           current_price, unrealized_pnl, category, token, token_id,
+           is_paper, updated_at)
+           VALUES (?, ?, 'BUY', ?, ?, ?, 0,
+                   COALESCE((SELECT category FROM markets WHERE id = ?), ''),
+                   ?, ?, 1, datetime('now'))
+           ON CONFLICT(market_id, is_paper, token) DO UPDATE SET
+               size = excluded.size,
+               avg_price = excluded.avg_price,
+               current_price = excluded.current_price,
+               updated_at = excluded.updated_at""",
+        (order.market_id, venue, size, price, price,
+         order.market_id, row["token"] or order.token.value,
+         row["token_id"] or order.token_id),
+    )
 
 
 class ExecutionGateway:
@@ -451,13 +626,32 @@ class ExecutionGateway:
                                 reason=cap_b or "paired leg blocked by market cap"),
             )
 
-        await self._capture_decision(a, order_a)
-        await self._capture_decision(b, order_b)
+        # Keep the ids. Discarding them left order.decision_id unset, so the
+        # mark_fill block in _place_and_record never ran and any paired-arb
+        # snapshot this path wrote would stay filled=0 forever. With
+        # graduation.require_executable_fills true (the tracked YAML),
+        # _prospective_stats appends `AND d.filled = 1 AND d.fill_evidence IN
+        # (...)`, so cross_venue_arb and entailment_arb could never graduate
+        # paper->live on merit however long they ran.
+        #
+        # Scope of the damage so far, measured rather than assumed (live DB,
+        # 2026-08-06): ZERO decision_snapshots rows and ZERO
+        # strategy_experiments rows for either strategy. No holdout clock was
+        # ever registered and no snapshot was ever written, so nothing was
+        # corrupted and nothing was burned — the defect was a gate these two
+        # strategies could not have passed had they started producing
+        # evidence, not evidence already spoiled. Fixed before that mattered.
+        # submit() at :136 plumbs these correctly; this path did not.
+        decision_id_a = await self._capture_decision(a, order_a)
+        decision_id_b = await self._capture_decision(b, order_b)
+        order_a.decision_id = decision_id_a
+        order_b.decision_id = decision_id_b
 
         res_a = await self._place_and_record(
             order_a, strategy_source=a.signal.strategy_source,
             signal_id=getattr(a.signal, "id", None),
-            exchange=exchange_a, exchange_name=exchange_name_a)
+            exchange=exchange_a, exchange_name=exchange_name_a,
+            decision_id=decision_id_a)
         if res_a.status not in _OK_STATUSES:
             # Leg A rejected — B is never placed, nothing to unwind.
             return res_a, ExecutionResult(status="skipped", reason="leg_a_not_ok")
@@ -465,19 +659,143 @@ class ExecutionGateway:
         res_b = await self._place_and_record(
             order_b, strategy_source=b.signal.strategy_source,
             signal_id=getattr(b.signal, "id", None),
-            exchange=exchange_b, exchange_name=exchange_name_b)
+            exchange=exchange_b, exchange_name=exchange_name_b,
+            decision_id=decision_id_b)
         if res_b.status not in _OK_STATUSES:
             # Leg risk: A is in, B failed. Cancel a live-pending A so we don't
             # sit on a naked directional leg (paper / already-filled A can't be
             # cancelled — that's the genuine single-leg the caller logs).
             if (res_a.result is not None and res_a.result.status == "pending"
                     and not res_a.result.is_paper):
-                try:
-                    await exchange_a.cancel_order(res_a.result.order_id)
-                except Exception as e:  # noqa: BLE001 — best-effort unwind
-                    log.warning("gateway.paired_leg_a_cancel_failed",
-                                order_id=res_a.result.order_id, error=str(e))
+                # Through the gateway's own cancel contract: same best-effort
+                # semantics as the hand-rolled try/except this replaced (the
+                # unwind can fail and the pair still returns), plus the trades
+                # mirror now goes terminal instead of lingering 'pending'.
+                await self.cancel_resting(
+                    res_a.result.order_id, exchange=exchange_a,
+                    exchange_name=exchange_name_a,
+                    is_paper=res_a.result.is_paper,
+                    source=a.signal.strategy_source or "",
+                    reason="paired_leg_a_unwind",
+                )
         return res_a, res_b
+
+    async def cancel_resting(
+        self,
+        order_id: str,
+        *,
+        exchange: ExchangeClient | None = None,
+        exchange_name: str | None = None,
+        is_paper: bool = False,
+        source: str = "",
+        reason: str = "",
+    ) -> CancelResult:
+        """Cancel a resting order. The gateway's cancel contract.
+
+        CLAUDE.md rule 3 makes the gateway the single mechanical path for an
+        order's lifecycle, but until this existed only PLACEMENT had a contract:
+        every cancel in the codebase — including the market maker's three, and
+        the gateway's own paired unwind — reached past the choke point straight
+        to ``ExchangeClient.cancel_order``. The rule asserted an invariant its
+        own enforcer violated.
+
+        THIS IS A ROUTING AND AUDIT CONTRACT, NOT A GATE. It cannot return
+        "blocked" and it has no condition that refuses. A placement adds
+        exposure and is therefore gated fifteen ways by ``RiskManager``; a
+        cancel REMOVES exposure, so every one of those checks is not merely
+        unnecessary here but backwards.
+
+        *** DO NOT ADD A KILL-SWITCH CHECK BELOW (noted 2026-08-06). ***
+        This is the specific mistake to avoid, and it looks helpful. #408 made
+        arming the kill switch RETIRE live exposure by cancelling resting
+        orders (``AuramaurBot._cancel_resting_live_orders``). A cancel path the
+        kill switch could block would therefore trap the operator inside the
+        exposure the emergency stop exists to shed — the emergency stop would
+        become an exposure lock. The kill switch belongs on ``place_order``,
+        where it already is, and nowhere on this path.
+
+        What the contract DOES provide:
+
+        * **Paper interception.** A paper order never reaches a venue client.
+          Quoting runs paper orders through the LIVE client object (paper-ness
+          is per-order ``dry_run``, not a separate adapter), so this is a real
+          boundary, not a formality.
+        * **Terminal-state bookkeeping.** The trades mirror goes 'cancelled'
+          rather than lingering 'pending' forever — the same repair
+          ``_cancel_resting_live_orders`` and the order monitor's TTL sweep
+          each hand-rolled (#94).
+        * **A uniform result type** and one greppable audit event.
+        * **Exception containment.** A venue error is REPORTED, never raised:
+          these run inside a quoting loop, and callers already treated cancels
+          as best-effort.
+
+        ``exchange``/``exchange_name`` default to the gateway's own, exactly as
+        ``submit`` resolves them; a cross-venue caller passes its own the way
+        ``submit_exit`` and ``submit_paired`` do.
+        """
+        client = exchange if exchange is not None else self.exchange
+        venue = exchange_name or self.exchange_name
+        oid = str(order_id or "").strip()
+        if not oid:
+            return CancelResult(order_id="", status="skipped", reason="no order id")
+
+        # Paper-ness is an OR, never an override: an explicit flag intercepts,
+        # and a PAPER-shaped id intercepts on its own even if a caller forgot
+        # (or wrongly computed) the flag. The failure mode being designed out —
+        # a paper order id sent to the live venue — is not worth trusting one
+        # argument for.
+        if is_paper or oid.upper().startswith("PAPER"):
+            await self._mark_cancelled(oid)
+            log.debug("gateway.cancel", order_id=oid, exchange=venue,
+                      status="paper", strategy_source=source, cancel_reason=reason)
+            return CancelResult(order_id=oid, status="paper", reason="paper order")
+
+        try:
+            acknowledged = bool(await client.cancel_order(oid))
+        except Exception as e:  # noqa: BLE001 — reported, never raised at a caller
+            log.warning("gateway.cancel", order_id=oid, exchange=venue,
+                        status="failed", strategy_source=source,
+                        cancel_reason=reason, error=str(e))
+            return CancelResult(order_id=oid, status="failed", reason=str(e))
+
+        if not acknowledged:
+            # The venue declined (already matched, unknown id). Deliberately no
+            # terminal write: the order may still be live, and the order monitor
+            # resolves it on the next status poll.
+            log.warning("gateway.cancel", order_id=oid, exchange=venue,
+                        status="rejected", strategy_source=source,
+                        cancel_reason=reason)
+            return CancelResult(order_id=oid, status="rejected",
+                                reason="venue declined the cancel")
+
+        await self._mark_cancelled(oid)
+        log.info("gateway.cancel", order_id=oid, exchange=venue,
+                 status="cancelled", strategy_source=source, cancel_reason=reason)
+        return CancelResult(order_id=oid, status="cancelled")
+
+    async def _mark_cancelled(self, order_id: str) -> None:
+        """Drive the trades mirror to a terminal state for a cancelled order.
+
+        Same repair as ``AuramaurBot._cancel_resting_live_orders`` and the order
+        monitor's TTL sweep: without it the row stays 'pending' forever even
+        though the collateral was released (#94). Scoped to 'pending' rows —
+        those two callers only ever hand it resting-order ids, so the guard is a
+        no-op for them, while here it makes a mis-supplied id incapable of
+        rewriting a settled row.
+
+        Best-effort by construction: this runs in a quoting loop, and a database
+        fault must not surface as a cancel failure when the venue already
+        acknowledged one.
+        """
+        try:
+            await self._serialized_write(
+                "UPDATE trades SET status = 'cancelled' "
+                "WHERE order_id = ? AND status = 'pending'",
+                (order_id,),
+            )
+        except Exception as e:  # noqa: BLE001 — bookkeeping, never the cancel
+            log.debug("gateway.cancel_bookkeeping_failed",
+                      order_id=order_id, error=str(e))
 
     async def _serialized_write(self, sql: str, params: tuple = ()) -> None:
         """Land gateway bookkeeping without bleeding across shared writers."""
@@ -563,8 +881,7 @@ class ExecutionGateway:
         """
         result = await exchange.place_order(order)
         show_order(result.status, result.order_id, order.side.value, order.size, order.price, result.is_paper, exchange=exchange_name, error_message=result.error_message, market_id=order.market_id)
-        if (decision_id is not None and result.status in _FILLED_STATUSES
-                and result.filled_size > 0):
+        if decision_id is not None and booked_as_position(result):
             evidence = "venue_fill"
             if result.is_paper:
                 snap = await self.db.fetchone(
@@ -747,7 +1064,7 @@ class ExecutionGateway:
         # Record P&L only for actual executions.  Pending live orders are
         # mirrored to trades below, then finalized by the order monitor.
         recorded_fill: Fill | None = None
-        if result.status in _FILLED_STATUSES and result.filled_size > 0:
+        if booked_as_position(result):
             fill = Fill(
                 order_id=result.order_id,
                 market_id=order.market_id,
@@ -767,6 +1084,24 @@ class ExecutionGateway:
                     # into an apparent placement failure that callers may retry.
                     log.critical(
                         "gateway.fill_record_failed",
+                        order_id=result.order_id,
+                        market_id=order.market_id,
+                        error=str(e),
+                    )
+            if recorded_fill is not None and result.is_paper:
+                # record_fill maintains cost_basis only; nothing else maintains
+                # paper portfolio rows in a live bot (position sync is
+                # mode-scoped). Without this, an instant-fill paper EXIT leaves
+                # its full-size portfolio row standing until resolution.
+                try:
+                    await materialize_paper_portfolio_row(
+                        self.db, order, venue=exchange_name)
+                except Exception as e:
+                    # Contained like record_fill above — but at error, never
+                    # debug: a swallow here recreates the stale row this call
+                    # exists to prevent, and readiness must see it.
+                    log.error(
+                        "gateway.paper_portfolio_projection_failed",
                         order_id=result.order_id,
                         market_id=order.market_id,
                         error=str(e),

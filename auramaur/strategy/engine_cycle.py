@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from auramaur.broker.allocator import CandidateTrade, CapitalAllocator
+from auramaur.broker.allocator import CandidateTrade
 from auramaur.killswitch import kill_switch_present
 from auramaur.exchange.models import Market, OrderSide, Signal
 from auramaur.experiments.strategies.core_trading import (
@@ -566,7 +566,8 @@ class CycleOrchestrationMixin:
             results.append(result)
 
             if decision.approved and decision.position_size > 0 and self.allocator:
-                ev = CapitalAllocator.compute_expected_value(tc.signal, decision.position_size)
+                ev = self.allocator.compute_expected_value(
+                    tc.signal, decision.position_size, tc.market)
                 alloc_candidates.append(CandidateTrade(
                     market=tc.market, signal=tc.signal, risk_decision=decision,
                     kelly_size=decision.position_size, expected_value=ev,
@@ -908,7 +909,8 @@ class CycleOrchestrationMixin:
             results.append(result)
 
             if decision.approved and decision.position_size > 0 and self.allocator:
-                ev = CapitalAllocator.compute_expected_value(signal, decision.position_size)
+                ev = self.allocator.compute_expected_value(
+                    signal, decision.position_size, market)
                 candidates.append(CandidateTrade(
                     market=market, signal=signal, risk_decision=decision,
                     kelly_size=decision.position_size, expected_value=ev,
@@ -961,7 +963,8 @@ class CycleOrchestrationMixin:
             decision = r["decision"]
             if decision.approved and decision.position_size > 0:
                 signal = r["signal"]
-                ev = CapitalAllocator.compute_expected_value(signal, decision.position_size)
+                ev = self.allocator.compute_expected_value(
+                    signal, decision.position_size, r["market"])
                 candidates.append(CandidateTrade(
                     market=r["market"],
                     signal=signal,

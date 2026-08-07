@@ -187,6 +187,8 @@ def ibkr_calibration(arm: str, width: float):
     coin flip until proven otherwise.
     """
     async def _run():
+        from dataclasses import replace
+
         from auramaur.evaluation.etf_calibration import (
             COIN, CONFIDENCE_RANKS, Forecast, brier_score, clearance,
             confidence_bands, probability_bands, samples_for_reliable_edge,
@@ -206,7 +208,7 @@ def ibkr_calibration(arm: str, width: float):
                 clause, params = " WHERE model_alias = ?", [arm]
             rows = await db.fetchall(
                 f"""SELECT model_alias, probability, confidence, actual_outcome,
-                           due_at
+                           due_at, horizon_sessions
                     FROM ibkr_etf_forecasts{clause}
                     ORDER BY model_alias, id""", tuple(params))
             if not rows:
@@ -214,14 +216,23 @@ def ibkr_calibration(arm: str, width: float):
                 return
             by_arm: dict[str, list] = {}
             pending: dict[str, list[str]] = {}
+            resolved_horizons: dict[str, set[int]] = {}
             for row in rows:
                 by_arm.setdefault(row["model_alias"], []).append(Forecast(
                     float(row["probability"]), str(row["confidence"]),
                     None if row["actual_outcome"] is None
-                    else int(row["actual_outcome"])))
+                    else int(row["actual_outcome"]),
+                    # No benchmark column on ibkr_etf_forecasts, so these are
+                    # unscoreable to the gate. The COIN diagnostic below is
+                    # what keeps the kill signal readable meanwhile.
+                    None))
                 if row["actual_outcome"] is None:
                     pending.setdefault(row["model_alias"], []).append(
                         str(row["due_at"]))
+                else:
+                    resolved_horizons.setdefault(
+                        row["model_alias"], set()).add(
+                            int(row["horizon_sessions"] or 0))
 
             for alias in sorted(by_arm):
                 forecasts = by_arm[alias]
@@ -262,6 +273,60 @@ def ibkr_calibration(arm: str, width: float):
                 console.print(
                     f"  trading: {'[green]CLEARED[/]' if verdict.cleared else '[yellow]LOCKED[/]'}"
                     f" — {verdict.reason}")
+
+                # KILL SIGNAL — deliberately NOT the gate printed above.
+                #
+                # ibkr_etf_paper._clearance designates these 5-session
+                # resolutions as "an early kill signal: if the model shows no
+                # skill there within a few weeks, abandon before waiting out a
+                # 42-session clock". Passing reference=None to the gate is
+                # right — an unrecorded benchmark is not a benchmark — but it
+                # also made this report print LOCKED/"no benchmark" and
+                # nothing else, which retires the kill signal along with the
+                # trade permission. Silence is the one answer a kill signal
+                # must never give.
+                #
+                # A coin reference is unusable for CLEARING because it is the
+                # EASIER benchmark: E[Brier] of a constant r under base rate q
+                # is (r-q)^2 + q(1-q), so scoring against 0.5 instead of the
+                # ~0.56 drift adds (0.5-q)^2 ≈ +0.0036 of free edge to every
+                # forecast. That asymmetry is exactly what makes it valid in
+                # the KILL direction and only there: an arm that cannot beat
+                # the inflated benchmark certainly cannot beat the real one.
+                # So a negative number here is conclusive; a positive one
+                # proves nothing and is labelled as proving nothing.
+                #
+                # Read alongside the hit-rate table below, which measures a
+                # different thing. Direction and probability quality can and
+                # do disagree — an arm can call 67% of moves right while its
+                # stated probabilities sit near 0.5 and score worse than a
+                # coin. The trade gate is the Brier edge; the hit rate is not
+                # a substitute for it.
+                coin_view = clearance(
+                    [replace(f, reference=COIN) for f in forecasts],
+                    min_resolved=2)
+                if coin_view.resolved >= 2:
+                    if coin_view.brier_edge_lo > 0:
+                        tone, phrase = "dim", (
+                            "clears the INFLATED benchmark — not evidence of "
+                            "skill; only the recorded drift can show that")
+                    elif coin_view.brier_edge <= 0:
+                        tone, phrase = "bold red", (
+                            "NO SKILL — worse than a coin, and a coin is the "
+                            "easier benchmark. This is the kill signal")
+                    else:
+                        tone, phrase = "yellow", (
+                            "indistinguishable from a coin at 95%")
+                    spans = ", ".join(
+                        f"{h}s" for h in sorted(resolved_horizons.get(alias, ())))
+                    console.print(
+                        f"  [dim]kill-signal diagnostic (vs COIN {COIN}, an "
+                        f"inflated benchmark — valid only for killing):[/] "
+                        f"{coin_view.resolved} resolved over {spans or '—'}, "
+                        f"Brier edge {coin_view.brier_edge:+.5f} "
+                        f"(95% low {coin_view.brier_edge_lo:+.5f}) — "
+                        f"[{tone}]{phrase}[/]")
+
                 if not resolved:
                     nxt = min(pending.get(alias, [])) if pending.get(alias) else "—"
                     console.print(

@@ -17,12 +17,13 @@ from unittest.mock import MagicMock, patch
 
 from auramaur.db.database import Database
 from auramaur.risk.graduation import GraduationLadder
-from config.settings import GraduationConfig
+from config.settings import BenchmarkConfig, GraduationConfig
 
 
 def _settings(mode="enforce", min_markets=5, **kw):
     s = MagicMock()
     s.graduation = GraduationConfig(mode=mode, min_markets=min_markets, **kw)
+    s.benchmark = BenchmarkConfig(risk_free_annual_rate=0.045)
     return s
 
 
@@ -364,10 +365,25 @@ def test_strategy_level_election_aggregates_categories():
 
 
 
-def test_graduation_uses_pnl_net_of_fees():
+def test_graduation_does_not_subtract_fees_twice():
+    """``pnl_ledger.pnl`` is ALREADY net of fees at every one of its writers —
+    pnl.py books ``(price - avg_cost) * size - fill.fee`` and records the fee
+    separately in ``fees`` as the breakdown of what it just deducted. The
+    ladder read ``SUM(pnl - fees)``, charging every fee a second time on the
+    paper->live PROMOTION path.
+
+    The error was conservative (it understates P&L, holding a cell back rather
+    than promoting one that has not earned it), which is why it survived
+    unnoticed. It is still the wrong number: a gate that judges a cell on
+    something which is not its P&L judges the wrong thing.
+
+    This test used to assert the opposite, with a fixture — pnl=+1 alongside
+    fees=2 — that no writer can produce: a $2 fee on a $1 gross books pnl=-1
+    with fees=2, never pnl=+1. It encoded the defect as the contract."""
     async def run():
         db = Database(":memory:")
         await db.connect()
+        # Five markets that each NETTED +$1 after a $2 fee was already taken.
         for i in range(5):
             await db.execute(
                 """INSERT INTO pnl_ledger
@@ -377,8 +393,86 @@ def test_graduation_uses_pnl_net_of_fees():
                            1, 1, 2, 1, ?)""",
                 (f"fee-{i}", f"fee-ref-{i}"),
             )
+        await db.commit()
         ladder = GraduationLadder(db, _settings(min_markets=5))
+
+        stats = await ladder._cell_stats("fee_test", "crypto")
+        assert abs(stats["paper_pnl"] - 5.0) < 1e-9, \
+            f"SUM(pnl - fees) would read -5.0; got {stats['paper_pnl']}"
+        assert stats["paper_n"] == 5
+
+        # And the verdict follows the true number: paper-positive is
+        # probation, not the paper_negative the double-count produced.
         decision = await ladder.decide("fee_test", "crypto")
+        assert decision.status == "probation", decision
+
+        report = await ladder.report()
+        cell = [r for r in report if r["strategy"] == "fee_test"][0]
+        assert abs(cell["paper_pnl"] - 5.0) < 1e-9, cell
+        await db.close()
+
+    asyncio.run(run())
+
+
+def test_prospective_graduation_charges_cash_opportunity_cost():
+    """A nominally profitable strategy must not graduate when its committed
+    capital would have earned more at the configured cash benchmark."""
+    async def run():
+        db = Database(":memory:")
+        await db.connect()
+        await db.execute(
+            """INSERT INTO strategy_experiments
+               (strategy_version, strategy_source, config_json, holdout_starts_at)
+               VALUES ('cash-v1', 'cash_test', '{}', datetime('now', '-60 days'))"""
+        )
+        for i in range(2):
+            market_id = f"cash-{i}"
+            await db.execute(
+                """INSERT INTO markets
+                   (id, question, category, last_updated)
+                   VALUES (?, 'Cash hurdle?', 'tech', datetime('now'))""",
+                (market_id,),
+            )
+            await db.execute(
+                """INSERT INTO decision_snapshots
+                   (market_id, strategy_source, side, fair_probability,
+                    reference_price, requested_size, venue, event_family,
+                    strategy_version, is_holdout, fill_evidence, is_paper,
+                    filled, observed_at)
+                   VALUES (?, 'cash_test', 'BUY', 0.7, 0.5, 100,
+                           'polymarket', ?, 'cash-v1', 1, 'venue_fill', 1, 1,
+                           datetime('now', '-40 days'))""",
+                (market_id, f"family-{i}"),
+            )
+            await db.execute(
+                """INSERT INTO market_outcomes
+                   (event_key, venue, market_id, outcome, resolved_at, source)
+                   VALUES (?, 'polymarket', ?, 1, datetime('now'), 'test')""",
+                (f"polymarket:{market_id}", market_id),
+            )
+            await db.execute(
+                """INSERT INTO pnl_ledger
+                   (market_id, venue, category, strategy_source, kind, token,
+                    qty, pnl, fees, is_paper, source_ref)
+                   VALUES (?, 'polymarket', 'tech', 'cash_test', 'sell', 'YES',
+                           1, 0.20, 0, 1, ?)""",
+                (market_id, f"cash-ref-{i}"),
+            )
+        await db.commit()
+
+        base = dict(
+            prospective_only=True,
+            min_markets=2,
+            confidence_z=0,
+            require_executable_fills=True,
+        )
+        nominal = GraduationLadder(
+            db, _settings(require_cash_benchmark=False, **base))
+        assert (await nominal.decide("cash_test", "tech")).status == "probation"
+
+        benchmarked = GraduationLadder(
+            db, _settings(require_cash_benchmark=True, **base))
+        decision = await benchmarked.decide("cash_test", "tech")
         assert decision.status == "paper_negative"
         assert decision.force_paper is True
         await db.close()
