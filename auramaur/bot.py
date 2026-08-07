@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from auramaur.killswitch import kill_switch_present
 from typing import TYPE_CHECKING
 
@@ -33,6 +33,7 @@ from auramaur.nlp.cache import NLPCache
 from auramaur.nlp.calibration import CalibrationTracker
 from auramaur.risk.manager import RiskManager
 from auramaur.risk.portfolio import PortfolioTracker
+from auramaur.risk.exit_lifecycle import ExitState, record_exit_state
 from auramaur.strategy.engine import TradingEngine
 from auramaur.strategy.market_maker import MarketMaker
 from auramaur.strategy.news_reactor import NewsReactor
@@ -508,6 +509,11 @@ class AuramaurBot(
                             retry_at = self._exit_failures.get(exit_key)
                             if retry_at is not None and time.monotonic() < retry_at:
                                 continue
+                            await record_exit_state(
+                                self._components.db, pos, ExitState.REQUESTED,
+                                exchange=name, reason=reason.value,
+                                increment_attempt=True,
+                            )
                             log.info(
                                 "exit.triggered",
                                 exchange=name,
@@ -530,9 +536,26 @@ class AuramaurBot(
                             if ok:
                                 self._exit_pending.add(exit_key)
                                 self._exit_failures.pop(exit_key, None)
+                                await record_exit_state(
+                                    self._components.db, pos, ExitState.ORDER_WORKING,
+                                    exchange=name, reason=reason.value,
+                                )
                             else:
                                 self._exit_failures[exit_key] = (
                                     time.monotonic() + _EXIT_RETRY_BACKOFF_SECONDS)
+                                retry_wall = datetime.now(timezone.utc) + timedelta(
+                                    seconds=_EXIT_RETRY_BACKOFF_SECONDS)
+                                dust = (
+                                    name == "polymarket" and pos.size < 5
+                                ) or (
+                                    name == "kalshi" and pos.size < 1
+                                )
+                                await record_exit_state(
+                                    self._components.db, pos,
+                                    ExitState.UNSALEABLE_DUST if dust else ExitState.RETRYABLE,
+                                    exchange=name, reason=reason.value,
+                                    next_retry_at=None if dust else retry_wall,
+                                )
                                 log.warning(
                                     "exit.suppressed_until_retry", exchange=name,
                                     market_id=pos.market_id, reason=reason.value,

@@ -258,6 +258,36 @@ async def gather_doctor(settings, db, *, max_bytes: int = 8_000_000) -> dict:
     except Exception:  # noqa: BLE001
         checks.append(_chk("positions", "warn", "could not read portfolio"))
 
+    try:
+        lifecycle = await db.fetchall(
+            """SELECT state, COUNT(*) AS c
+                 FROM exit_lifecycle
+                WHERE is_paper = ?
+                GROUP BY state ORDER BY state""",
+            (flag,),
+        )
+        blocked = {r["state"]: int(r["c"]) for r in lifecycle
+                   if r["state"] in ("UNSALEABLE_DUST", "UNMARKABLE", "RETRYABLE")}
+        detail = ", ".join(f"{state.lower()}={count}"
+                           for state, count in blocked.items()) or "no blocked exits"
+        checks.append(_chk("exit lifecycle", "warn" if blocked else "ok", detail))
+    except Exception:  # noqa: BLE001
+        checks.append(_chk("exit lifecycle", "warn", "lifecycle state unavailable"))
+
+    try:
+        missing = await db.fetchone(
+            """SELECT COUNT(*) AS c, COALESCE(SUM(pnl), 0) AS pnl
+                 FROM pnl_ledger
+                WHERE is_paper = ?
+                  AND (strategy_source IS NULL OR TRIM(strategy_source) = '')""",
+            (flag,),
+        )
+        count = int(missing["c"] or 0)
+        detail = f"{count} unattributed rows, {float(missing['pnl'] or 0):+.2f} USD"
+        checks.append(_chk("P&L attribution", "warn" if count else "ok", detail))
+    except Exception:  # noqa: BLE001
+        checks.append(_chk("P&L attribution", "warn", "could not reconcile ledger"))
+
     verdict = max((c["status"] for c in checks), key=lambda s: _STATUS_RANK.get(s, 0))
     return {"checks": checks, "verdict": verdict, "now": now}
 

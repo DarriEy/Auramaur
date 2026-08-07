@@ -386,6 +386,27 @@ class Database:
             await self._migrate_v48_to_v49()
         if from_version < 50:
             await self._migrate_v49_to_v50()
+        if from_version < 51:
+            await self._migrate_v50_to_v51()
+
+    async def _migrate_v50_to_v51(self) -> None:
+        """Persist position-scoped exit disposition and retry state."""
+        await self._db.executescript("""
+            CREATE TABLE IF NOT EXISTS exit_lifecycle (
+                exchange TEXT NOT NULL, market_id TEXT NOT NULL,
+                token TEXT NOT NULL DEFAULT 'YES', is_paper INTEGER NOT NULL DEFAULT 1,
+                state TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
+                attempt_count INTEGER NOT NULL DEFAULT 0, last_error TEXT,
+                next_retry_at TEXT, requested_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (exchange, market_id, token, is_paper));
+            CREATE INDEX IF NOT EXISTS idx_exit_lifecycle_state_retry
+              ON exit_lifecycle(state, next_retry_at);
+            UPDATE schema_version SET version = 51;
+        """)
+        await self._db.commit()
+        log.info("database.migrated", from_version=50, to_version=51)
+
 
     async def _migrate_v49_to_v50(self) -> None:
         """Add auditable exit-policy observations for holdout calibration."""
