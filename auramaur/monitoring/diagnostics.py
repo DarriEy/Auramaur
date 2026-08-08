@@ -228,28 +228,60 @@ async def gather_doctor(settings, db, *, max_bytes: int = 8_000_000) -> dict:
     else:
         checks.append(_chk("pillars", "ok", f"all {len(alive)} alive{dorm_note}"))
 
-    # Error rate + data-source failures. Severity is rate-aware (errors/min over
-    # the scanned span) so a burst isn't hidden by a long window, nor a long
-    # quiet window flagged by a stale absolute count.
-    err = summarize_errors(records, top=50)
-    err_rate = (err["errors"] / span_min) if span_min else None
-    if err_rate is not None and err_rate >= 5:
+    # Current health is a bounded state, not the lifetime of the log tail.
+    # Keep the full tail for liveness/freshness, but only recent records can
+    # degrade the operational verdict.
+    health_window_seconds = int(
+        getattr(monitoring, "doctor_health_window_seconds", 1800))
+    health_cutoff = now.timestamp() - health_window_seconds
+    current_records = [
+        record for record in records
+        if (stamp := _parse_ts(record.get("timestamp", "")))
+        and stamp.timestamp() >= health_cutoff
+    ]
+    err = summarize_errors(current_records, top=50)
+    window_min = max(health_window_seconds / 60.0, 1.0)
+    err_rate = err["errors"] / window_min
+    if err_rate >= 5:
         elvl = "fail"
     elif err["errors"] or err["warnings"]:
         elvl = "warn"
     else:
         elvl = "ok"
-    span_note = (f" over ~{int(span_min)}m (~{err_rate:.1f} err/min)"
-                 if span_min else f" (last ~{round(max_bytes/1e6, 1)} MB)")
-    checks.append(_chk("errors", elvl,
-                       f"{err['errors']} err / {err['warnings']} warn{span_note}"))
-    bad_sources = sorted({
-        e["event"] for e in err["top"]
-        if any(h in e["event"] for h in _SOURCE_ERROR_HINTS)
-    })
-    checks.append(_chk("data sources", "ok", "no source errors")
-                  if not bad_sources else
-                  _chk("data sources", "warn", f"{len(bad_sources)} erroring: {', '.join(bad_sources[:5])}"))
+    checks.append(_chk(
+        "errors", elvl,
+        f"{err['errors']} err / {err['warnings']} warn in last "
+        f"{int(window_min)}m (~{err_rate:.1f} err/min)",
+    ))
+
+    # Provider state comes from durable fetch telemetry. A provider that failed
+    # hours ago but later succeeded is healthy; only its latest recent result
+    # controls the current verdict.
+    try:
+        source_rows = await db.fetchall(
+            """SELECT sf.source, sf.status
+                 FROM source_fetches sf
+                 JOIN (
+                       SELECT source, MAX(observed_at) AS observed_at
+                         FROM source_fetches
+                        WHERE datetime(observed_at) >= datetime('now', ?)
+                        GROUP BY source
+                 ) latest
+                   ON latest.source = sf.source
+                  AND latest.observed_at = sf.observed_at""",
+            (f"-{health_window_seconds} seconds",),
+        )
+        bad_sources = sorted({
+            row["source"] for row in source_rows
+            if row["status"] in {"timeout", "error", "circuit_open"}
+        })
+        checks.append(_chk("data sources", "ok", "all recent providers recovered")
+                      if not bad_sources else _chk(
+                          "data sources", "warn",
+                          f"{len(bad_sources)} currently erroring: "
+                          + ", ".join(bad_sources[:5])))
+    except Exception:  # noqa: BLE001
+        checks.append(_chk("data sources", "warn", "provider state unavailable"))
 
     # P&L / positions sanity (current mode).
     flag = 0 if settings.is_live else 1

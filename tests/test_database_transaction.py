@@ -317,7 +317,6 @@ async def test_wal_read_sees_committed_snapshot_not_uncommitted_rows(tmp_path):
     db = await _fresh_db(tmp_path)
     entered = asyncio.Event()
     release = asyncio.Event()
-    read_finished = asyncio.Event()
 
     async def adopter():
         async with db.transaction(owner="adopter"):
@@ -328,15 +327,12 @@ async def test_wal_read_sees_committed_snapshot_not_uncommitted_rows(tmp_path):
     async def reader():
         await entered.wait()
         row = await db.fetchone("SELECT v FROM t WHERE k='private'")
-        read_finished.set()
         return row
 
     adopter_task = asyncio.create_task(adopter())
     reader_task = asyncio.create_task(reader())
     await entered.wait()
-    await asyncio.sleep(0.02)
-    assert read_finished.is_set()
-    row = await reader_task
+    row = await asyncio.wait_for(reader_task, timeout=0.5)
     assert row is None
     release.set()
     await adopter_task

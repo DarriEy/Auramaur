@@ -405,6 +405,23 @@ class Database:
             await self._migrate_v50_to_v51()
         if from_version < 52:
             await self._migrate_v51_to_v52()
+        if from_version < 53:
+            await self._migrate_v52_to_v53()
+
+    async def _migrate_v52_to_v53(self) -> None:
+        """Label legacy venue settlements that predate the attribution guard.
+
+        Empty sell attribution remains actionable evidence of a missing entry;
+        settlements without ancestry are venue truth and belong in the explicit
+        sentinel bucket used by current writers.
+        """
+        await self._db.execute(
+            "UPDATE pnl_ledger SET strategy_source = 'venue_unattributed' "
+            "WHERE kind = 'settlement' AND TRIM(strategy_source) = ''"
+        )
+        await self._db.execute("UPDATE schema_version SET version = 53")
+        await self._db.commit()
+        log.info("database.migrated", from_version=52, to_version=53)
 
     async def _migrate_v51_to_v52(self) -> None:
         """Start prospective trade-to-decision lineage.
