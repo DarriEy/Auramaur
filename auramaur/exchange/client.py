@@ -650,12 +650,16 @@ class PolymarketClient:
                 # promotions armed bias_harvest/term_structure/opus, whose
                 # resting entries were then booked to the MM's live record.
                 source = "adopted_unknown"
+                decision_id = None
                 try:
                     row = await self._paper.db.fetchone(
-                        "SELECT strategy_source FROM trades WHERE order_id = ?",
+                        """SELECT strategy_source, decision_id FROM trades
+                           WHERE order_id = ? ORDER BY id DESC LIMIT 1""",
                         (oid,))
                     if row and row["strategy_source"]:
                         source = row["strategy_source"]
+                    if row and row["decision_id"] is not None:
+                        decision_id = int(row["decision_id"])
                 except Exception as e:  # noqa: BLE001 — attribution must not block adoption
                     log.debug("order.reconcile_source_lookup_failed",
                               order_id=oid, error=str(e)[:80])
@@ -669,6 +673,7 @@ class PolymarketClient:
                     order_type=OrderType.LIMIT,
                     dry_run=False,
                     created_at=created,
+                    decision_id=decision_id,
                     source=source,
                 )
                 count += 1

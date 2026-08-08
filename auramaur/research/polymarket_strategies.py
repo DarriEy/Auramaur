@@ -224,7 +224,7 @@ class DecisionTracker:
             (strategy_version, strategy_source, config_json,
              f"+{max(0, holdout_warmup_days)} days"),
         )
-        await self.db.execute(
+        cursor = await self.db.execute(
             """INSERT OR IGNORE INTO decision_snapshots
                (market_id, strategy_source, signal_id, side, fair_probability,
                 reference_price, executable_price, best_bid, best_ask,
@@ -240,6 +240,8 @@ class DecisionTracker:
              strategy_version, cohort_id, int(is_paper), strategy_version),
         )
         await self.db.commit()
+        if cursor.rowcount == 1 and cursor.lastrowid is not None:
+            return int(cursor.lastrowid)
         row = await self.db.fetchone(
             "SELECT id FROM decision_snapshots WHERE signal_id IS ? "
             "AND strategy_source=? ORDER BY id DESC LIMIT 1",

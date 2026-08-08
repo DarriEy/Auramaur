@@ -871,6 +871,20 @@ class KalshiClient:
                     created = datetime.now(timezone.utc)
                 remaining = float(o.get("remaining_count_fp") or
                                   o.get("remaining_count") or o.get("count") or 0)
+                decision_id = None
+                try:
+                    db = getattr(self._paper, "db", None)
+                    if db is not None:
+                        row = await db.fetchone(
+                            """SELECT decision_id FROM trades
+                               WHERE order_id=? ORDER BY id DESC LIMIT 1""",
+                            (oid,),
+                        )
+                        if row and row["decision_id"] is not None:
+                            decision_id = int(row["decision_id"])
+                except Exception as e:  # noqa: BLE001
+                    log.debug("kalshi.reconcile_lineage_lookup_failed",
+                              order_id=oid, error=str(e)[:80])
                 self._live_pending[oid] = Order(
                     market_id=ticker,
                     exchange="kalshi",
@@ -882,6 +896,7 @@ class KalshiClient:
                     order_type=OrderType.LIMIT,
                     dry_run=False,
                     created_at=created,
+                    decision_id=decision_id,
                 )
                 count += 1
             except (TypeError, ValueError) as e:

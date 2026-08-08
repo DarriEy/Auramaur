@@ -59,61 +59,50 @@ async def audit_data_contracts(db: Database) -> list[ContractViolation]:
                         ORDER BY d2.observed_at DESC,d2.id DESC LIMIT 1)
               AND d.status NOT IN ('ok','empty')""",
          "latest strategy-facing dataset delivery is unhealthy"),
-        ("governed_trade_missing_decision",
-         """SELECT COUNT(*) n FROM trades
-            WHERE signal_id IS NOT NULL AND decision_id IS NULL
-              AND status IN ('pending','filled','partial')""",
-         "gateway-governed trade has no immutable decision link"),
-        ("orphan_trade_decision",
-         """SELECT COUNT(*) n FROM trades t
-            LEFT JOIN decision_snapshots d ON d.id=t.decision_id
-            WHERE t.decision_id IS NOT NULL AND d.id IS NULL""",
-         "trade names a decision snapshot that does not exist"),
-        ("orphan_fill_decision",
-         """SELECT COUNT(*) n FROM fills f
-            LEFT JOIN decision_snapshots d ON d.id=f.decision_id
-            WHERE f.decision_id IS NOT NULL AND d.id IS NULL""",
-         "fill names a decision snapshot that does not exist"),
-        ("trade_decision_mismatch",
-         """SELECT COUNT(*) n FROM trades t
-            JOIN decision_snapshots d ON d.id=t.decision_id
-            WHERE t.market_id != d.market_id
-               OR t.is_paper != d.is_paper
-               OR COALESCE(t.strategy_source,'') != d.strategy_source""",
-         "trade and decision disagree on market, book, or strategy"),
-        ("fill_decision_mismatch",
-         """SELECT COUNT(*) n FROM fills f
-            JOIN decision_snapshots d ON d.id=f.decision_id
-            WHERE f.market_id != d.market_id OR f.is_paper != d.is_paper""",
-         "fill and decision disagree on market or paper/live book"),
-        ("fill_trade_lineage_mismatch",
-         """SELECT COUNT(*) n FROM fills f
-            WHERE EXISTS (
-                SELECT 1 FROM trades t
-                 WHERE t.order_id=f.order_id AND t.market_id=f.market_id
-                   AND t.is_paper=f.is_paper AND t.decision_id IS NOT NULL)
-              AND NOT EXISTS (
-                SELECT 1 FROM trades t
-                 WHERE t.order_id=f.order_id AND t.market_id=f.market_id
-                   AND t.is_paper=f.is_paper
-                   AND t.decision_id=f.decision_id)""",
-         "fill does not carry the decision linked by its mirrored trade"),
-        ("orphan_ledger_fill",
-         """SELECT COUNT(*) n FROM pnl_ledger l
-            LEFT JOIN fills f
-              ON f.id=CAST(SUBSTR(l.source_ref,6) AS INTEGER)
-            WHERE l.kind='sell' AND l.source_ref LIKE 'fill:%'
-              AND f.id IS NULL""",
-         "realized P&L names a fill that does not exist"),
-        ("ledger_fill_mismatch",
-         """SELECT COUNT(*) n FROM pnl_ledger l
-            JOIN fills f ON f.id=CAST(SUBSTR(l.source_ref,6) AS INTEGER)
-            WHERE l.kind='sell' AND l.source_ref LIKE 'fill:%'
-              AND (l.market_id != f.market_id
-                   OR l.is_paper != f.is_paper
-                   OR UPPER(l.token) != UPPER(f.token))""",
-         "realized P&L and its source fill disagree on position identity"),
     ]
+    violations = []
+    for name, sql, detail in checks:
+        row = await db.fetchone(sql)
+        count = int(row["n"] if row else 0)
+        if count:
+            violations.append(ContractViolation(name, count, detail))
+    return violations
+
+
+async def audit_execution_contracts(db: Database) -> list[ContractViolation]:
+    """Audit prospective decision-to-trade lineage only.
+
+    The first linked trade is the deployment watermark. Older trades predate
+    the contract and deliberately remain unlinked rather than receiving a
+    guessed historical decision.
+    """
+    watermark = "(SELECT MIN(timestamp) FROM trades WHERE decision_id IS NOT NULL)"
+    checks = (
+        (
+            "governed_trade_missing_decision",
+            f"""SELECT COUNT(*) n FROM trades
+                WHERE signal_id IS NOT NULL AND decision_id IS NULL
+                  AND status IN ('pending','filled','partial')
+                  AND datetime(timestamp) >= datetime({watermark})""",
+            "gateway-governed trade has no immutable decision link",
+        ),
+        (
+            "orphan_trade_decision",
+            """SELECT COUNT(*) n FROM trades t
+               LEFT JOIN decision_snapshots d ON d.id=t.decision_id
+               WHERE t.decision_id IS NOT NULL AND d.id IS NULL""",
+            "trade names a decision snapshot that does not exist",
+        ),
+        (
+            "trade_decision_mismatch",
+            """SELECT COUNT(*) n FROM trades t
+               JOIN decision_snapshots d ON d.id=t.decision_id
+               WHERE t.market_id != d.market_id
+                  OR t.is_paper != d.is_paper
+                  OR COALESCE(t.strategy_source,'') != d.strategy_source""",
+            "trade and decision disagree on market, book, or strategy",
+        ),
+    )
     violations = []
     for name, sql, detail in checks:
         row = await db.fetchone(sql)

@@ -362,7 +362,6 @@ class Fill(BaseModel):
     """A single execution fill from the CLOB or paper trader."""
 
     order_id: str
-    decision_id: int | None = None
     market_id: str
     token_id: str = ""
     side: OrderSide
