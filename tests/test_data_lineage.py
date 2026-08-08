@@ -99,6 +99,80 @@ async def test_data_contract_audit_reports_stuck_ingestion():
     await db.close()
 
 
+@pytest.mark.asyncio
+async def test_execution_lineage_contract_detects_broken_chain():
+    db = Database(":memory:")
+    await db.connect()
+    cursor = await db.execute(
+        """INSERT INTO decision_snapshots
+           (market_id,strategy_source,signal_id,side,fair_probability,
+            reference_price,requested_size,venue,is_paper)
+           VALUES ('m1','llm',7,'BUY',0.7,0.5,10,'polymarket',1)""")
+    decision_id = cursor.lastrowid
+    await db.execute(
+        """INSERT INTO trades
+           (market_id,signal_id,decision_id,side,size,price,is_paper,order_id,
+            status,exchange,strategy_source)
+           VALUES ('m1',7,?,'BUY',10,0.5,1,'o1','filled','polymarket','llm')""",
+        (decision_id,),
+    )
+    await db.execute(
+        """INSERT INTO fills
+           (order_id,decision_id,market_id,side,size,price,is_paper)
+           VALUES ('o1',?,'m1','BUY',10,0.5,1)""",
+        (decision_id,),
+    )
+    await db.commit()
+    assert await audit_data_contracts(db) == []
+
+    await db.execute("UPDATE fills SET decision_id=NULL WHERE order_id='o1'")
+    await db.commit()
+    violations = {v.contract: v.count for v in await audit_data_contracts(db)}
+    assert violations == {"fill_trade_lineage_mismatch": 1}
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_execution_lineage_contract_allows_external_unlinked_fill():
+    db = Database(":memory:")
+    await db.connect()
+    await db.execute(
+        """INSERT INTO fills
+           (order_id,market_id,side,size,price,is_paper)
+           VALUES ('manual-1','m1','SELL',2,0.8,0)""",
+    )
+    await db.commit()
+    assert await audit_data_contracts(db) == []
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_execution_lineage_contract_checks_realized_pnl_source_fill():
+    db = Database(":memory:")
+    await db.connect()
+    cursor = await db.execute(
+        """INSERT INTO fills
+           (order_id,market_id,side,token,size,price,is_paper)
+           VALUES ('o1','m1','SELL','YES',2,0.8,1)""")
+    fill_id = cursor.lastrowid
+    await db.execute(
+        """INSERT INTO pnl_ledger
+           (market_id,kind,token,qty,pnl,is_paper,source_ref)
+           VALUES ('m1','sell','YES',2,0.6,1,?)""",
+        (f"fill:{fill_id}",),
+    )
+    await db.commit()
+    assert await audit_data_contracts(db) == []
+
+    await db.execute(
+        "UPDATE pnl_ledger SET market_id='wrong' WHERE source_ref=?",
+        (f"fill:{fill_id}",),
+    )
+    await db.commit()
+    violations = {v.contract: v.count for v in await audit_data_contracts(db)}
+    assert violations == {"ledger_fill_mismatch": 1}
+    await db.close()
+
 class Analyzer:
     _model = "integration-model"
 

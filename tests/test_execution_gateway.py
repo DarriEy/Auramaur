@@ -887,6 +887,13 @@ async def test_a_paper_fill_that_crosses_is_countable_evidence():
         f"{snap['fill_evidence']} is not countable evidence")
     assert snap["fill_evidence"] == "book_cross"
     assert snap["filled"] == 1
+    trade = await db.fetchone("SELECT decision_id FROM trades WHERE order_id='p1'")
+    fill = await db.fetchone("SELECT decision_id FROM fills WHERE order_id='p1'")
+    assert trade is not None
+    assert fill is not None
+    assert trade["decision_id"] == decision_id
+    assert fill["decision_id"] == decision_id
+    assert order.decision_id == decision_id
     await db.close()
 
 
