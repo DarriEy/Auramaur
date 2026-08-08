@@ -263,6 +263,7 @@ class OrderMonitorMixin:
 
                                 pending.pop(order_id, None)
                                 self._clear_exit_suppression(exchange_name, order, result.status)
+                                await self._record_exit_terminal(exchange_name, order, result.status)
                                 log.info(
                                     "order_monitor.live_terminal",
                                     exchange=exchange_name,
@@ -295,6 +296,7 @@ class OrderMonitorMixin:
                                         continue
                                     pending.pop(order_id, None)
                                     self._clear_exit_suppression(exchange_name, order, "ttl_cancelled")
+                                    await self._record_exit_terminal(exchange_name, order, "ttl_cancelled")
                                     # Without this status write the trades row
                                     # stays 'pending' forever even though the
                                     # collateral was released (#94).

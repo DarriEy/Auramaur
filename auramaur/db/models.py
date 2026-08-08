@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 50
+SCHEMA_VERSION = 51
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -817,6 +817,19 @@ CREATE INDEX IF NOT EXISTS idx_exit_decisions_position_time
 -- unconstrained, so SQLite has no seekable prefix and full-scans the table.
 CREATE INDEX IF NOT EXISTS idx_exit_decisions_observed_at
     ON exit_decisions(observed_at);
+
+CREATE TABLE IF NOT EXISTS exit_lifecycle (
+    exchange TEXT NOT NULL, market_id TEXT NOT NULL,
+    token TEXT NOT NULL DEFAULT 'YES', is_paper INTEGER NOT NULL DEFAULT 1,
+    state TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
+    attempt_count INTEGER NOT NULL DEFAULT 0, last_error TEXT,
+    next_retry_at TEXT, requested_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (exchange, market_id, token, is_paper)
+);
+CREATE INDEX IF NOT EXISTS idx_exit_lifecycle_state_retry
+    ON exit_lifecycle(state, next_retry_at);
+
 
 CREATE TABLE IF NOT EXISTS rebalance_blocks (
     event_key TEXT PRIMARY KEY,

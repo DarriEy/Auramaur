@@ -33,6 +33,12 @@ from auramaur.nlp.cache import NLPCache
 from auramaur.nlp.calibration import CalibrationTracker
 from auramaur.risk.manager import RiskManager
 from auramaur.risk.portfolio import PortfolioTracker
+from auramaur.risk.exit_lifecycle import (
+    ExitAttempt,
+    ExitState,
+    position_key,
+    record_exit_state,
+)
 from auramaur.strategy.engine import TradingEngine
 from auramaur.strategy.market_maker import MarketMaker
 from auramaur.strategy.news_reactor import NewsReactor
@@ -499,10 +505,11 @@ class AuramaurBot(
                             # per (market, token, mode), and a sub-minimum dust leg
                             # can never sell — a market-wide key let that dust pin
                             # its sibling legs (2026-07-25: a 1.49-share leg pinned
-                            # $322 of exposure in the same market).
-                            exit_key = (f"exit:{name}:{pos.market_id}:"
-                                        f"{getattr(pos.token, 'value', pos.token)}:"
-                                        f"{int(bool(pos.is_paper))}")
+                            # $322 of exposure in the same market). The suppression
+                            # key and the lifecycle row share ONE identity encoding
+                            # so they can never name different positions.
+                            key = position_key(pos, name)
+                            exit_key = "exit:" + ":".join(str(part) for part in key)
                             if exit_key in self._exit_pending:
                                 continue
                             retry_at = self._exit_failures.get(exit_key)
@@ -515,27 +522,55 @@ class AuramaurBot(
                                 reason=reason.value,
                                 pnl=pos.unrealized_pnl,
                             )
+                            # ONE lifecycle write, AFTER the attempt: nothing
+                            # sits between the exit trigger and the venue call
+                            # that could wait on the DB serializer, and the
+                            # disposition comes from the executor, which is
+                            # the code that actually knows why a sell failed.
+                            err: str | None = None
                             try:
                                 if name == "polymarket":
-                                    ok = await self._execute_poly_exit(pos, reason, discovery, exchange_client, alerts)
+                                    attempt = await self._execute_poly_exit(pos, reason, discovery, exchange_client, alerts)
                                 elif name == "kalshi":
-                                    ok = await self._execute_kalshi_exit(pos, reason, discovery, exchange_client, alerts)
+                                    attempt = await self._execute_kalshi_exit(pos, reason, discovery, exchange_client, alerts)
                                 elif name == "ibkr":
-                                    ok = await self._execute_ibkr_exit(pos, reason, discovery, exchange_client, alerts)
+                                    attempt = await self._execute_ibkr_exit(pos, reason, discovery, exchange_client, alerts)
                                 else:
-                                    ok = False
+                                    attempt = ExitAttempt(False, None, "unknown_exchange")
                             except Exception as e:
                                 log.warning("exit.execute_error", exchange=name, market_id=pos.market_id, error=str(e))
-                                ok = False
-                            if ok:
+                                err = str(e)
+                                attempt = ExitAttempt(False, ExitState.RETRYABLE, "execute_error")
+                            if attempt.ok:
                                 self._exit_pending.add(exit_key)
                                 self._exit_failures.pop(exit_key, None)
+                                await record_exit_state(
+                                    self._components.db, key, ExitState.ORDER_WORKING,
+                                    reason=reason.value, increment_attempt=True,
+                                )
                             else:
                                 self._exit_failures[exit_key] = (
                                     time.monotonic() + _EXIT_RETRY_BACKOFF_SECONDS)
+                                disposition = attempt.disposition or ExitState.RETRYABLE
+                                # The wall is recorded for dust too: the
+                                # in-memory gate above retries EVERY failure
+                                # class on the same backoff, and the durable
+                                # record must describe what the bot actually
+                                # does, not an aspiration. CLOSED (position
+                                # pruned mid-attempt) carries no wall.
+                                await record_exit_state(
+                                    self._components.db, key, disposition,
+                                    reason=reason.value,
+                                    error=err or attempt.detail or None,
+                                    retry_after_seconds=(
+                                        None if disposition is ExitState.CLOSED
+                                        else _EXIT_RETRY_BACKOFF_SECONDS),
+                                    increment_attempt=True,
+                                )
                                 log.warning(
                                     "exit.suppressed_until_retry", exchange=name,
                                     market_id=pos.market_id, reason=reason.value,
+                                    detail=attempt.detail,
                                     backoff_seconds=_EXIT_RETRY_BACKOFF_SECONDS)
                         except Exception as e:
                             log.error(

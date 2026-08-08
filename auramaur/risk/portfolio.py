@@ -9,6 +9,7 @@ import structlog
 
 from auramaur.db.database import Database
 from auramaur.exchange.models import ExitReason, OrderSide, Position, TokenType
+from auramaur.risk.exit_lifecycle import ExitState, position_key, record_exit_state
 from auramaur.risk.exit_policy import (
     binary_exit_economics,
     lifecycle_profit_target,
@@ -462,8 +463,17 @@ class PortfolioTracker:
                     # The position freezes here: no re-mark, no exit
                     # evaluation, and nothing ever closes it (149 paper
                     # positions rotted this way for 3 days carrying -$553
-                    # of stale marks, 2026-07-22). Surface it below.
+                    # of stale marks, 2026-07-22). Surface it below, and leave
+                    # a durable trace the doctor can count: the row is
+                    # re-upserted every tick while the market stays dark, so
+                    # the doctor keys on updated_at FRESHNESS — a recovered
+                    # market stops the writes and the row ages out of the
+                    # check on its own, with no clearing write needed.
                     unmarkable.append(pos.market_id)
+                    await record_exit_state(
+                        self.db, position_key(pos, exchange or pos.exchange),
+                        ExitState.UNMARKABLE, reason="no_market_data",
+                    )
                     continue
                 # IBKR holds options priced in premium dollars, not 0-1 resolution
                 # probabilities, and its discovery returns the *reframed* binary
@@ -734,6 +744,11 @@ class PortfolioTracker:
     _EXIT_DECISION_PRUNE = (
         "DELETE FROM exit_decisions WHERE observed_at < datetime('now', ?)")
 
+    # CLOSED-only: finished episodes age out; blocked states never do.
+    _EXIT_LIFECYCLE_PRUNE = (
+        "DELETE FROM exit_lifecycle WHERE state = 'CLOSED' "
+        "AND updated_at < datetime('now', ?)")
+
     def _exit_decision_row(
         self, pos, mode_flag: int | None, reason: str, gross_pct: float,
         net_pct: float, peak_pct: float, target_pct: float | None,
@@ -781,6 +796,13 @@ class PortfolioTracker:
                 # every cycle, while holding the write lock on the exit path.
                 await self.db.execute(
                     self._EXIT_DECISION_PRUNE, (f"-{retention_days} days",))
+                # exit_lifecycle retention rides the same batch: CLOSED rows
+                # are finished episodes kept briefly for operator inspection;
+                # without a prune the table (and any state it froze in) grows
+                # for the life of the bot. Non-CLOSED rows are never pruned —
+                # a blocked exit must stay visible until something closes it.
+                await self.db.execute(self._EXIT_LIFECYCLE_PRUNE,
+                                      (f"-{retention_days} days",))
         except Exception as exc:  # noqa: BLE001 — never compromise exits
             log.debug("exit.decision_record_failed", count=len(rows), error=str(exc))
 

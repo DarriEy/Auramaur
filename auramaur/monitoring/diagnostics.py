@@ -258,6 +258,72 @@ async def gather_doctor(settings, db, *, max_bytes: int = 8_000_000) -> dict:
     except Exception:  # noqa: BLE001
         checks.append(_chk("positions", "warn", "could not read portfolio"))
 
+    # Exit lifecycle: warn ONLY on states that are both actionable and
+    # current, or the check trains the operator to ignore it (the condition
+    # that let the 12-day exit outage go unnoticed):
+    #   - the EXISTS keeps rows whose position left the book out-of-band
+    #     (settlement, redemption, manual close) from warning forever;
+    #   - RETRYABLE warns only when its retry wall is PAST DUE beyond a
+    #     2-minute grace — a future wall is routine backoff, not a blockage;
+    #   - UNMARKABLE warns only while FRESH (check_exits re-upserts it every
+    #     tick a market stays dark; a recovered market ages out on its own);
+    #   - UNSALEABLE_DUST on a live position is a known book state with its
+    #     own remedy (close-dust / redemption), so it rides in the detail
+    #     text without degrading the verdict.
+    try:
+        lifecycle = await db.fetchall(
+            """SELECT el.state, COUNT(*) AS c
+                 FROM exit_lifecycle el
+                WHERE el.is_paper = ?
+                  AND EXISTS (SELECT 1 FROM portfolio p
+                               WHERE p.market_id = el.market_id
+                                 AND p.token = el.token
+                                 AND p.is_paper = el.is_paper
+                                 AND p.exchange = el.exchange
+                                 AND p.size > 0)
+                  AND ((el.state = 'RETRYABLE'
+                        AND el.next_retry_at IS NOT NULL
+                        AND el.next_retry_at <= datetime('now', '-120 seconds'))
+                       OR (el.state = 'UNMARKABLE'
+                           AND el.updated_at >= datetime('now', '-600 seconds'))
+                       OR el.state = 'UNSALEABLE_DUST')
+                GROUP BY el.state""",
+            (flag,),
+        )
+        counts = {r["state"]: int(r["c"]) for r in lifecycle}
+        dust = counts.pop("UNSALEABLE_DUST", 0)
+        parts = [f"{state.lower()}={count}" for state, count in sorted(counts.items())]
+        if dust:
+            parts.append(f"dust={dust} (close-dust / redemption)")
+        detail = ", ".join(parts) or "no blocked exits"
+        checks.append(_chk("exit lifecycle", "warn" if counts else "ok", detail))
+    except Exception:  # noqa: BLE001
+        checks.append(_chk("exit lifecycle", "warn", "lifecycle state unavailable"))
+
+    # P&L attribution: an empty strategy_source on a NEW row means an entry
+    # row is missing (broker/ledger.py documents that sells keep '' as
+    # exactly that signal). The window keeps known-historical cases from
+    # pinning the check at warn forever; the deliberate sentinel buckets
+    # (phantom_/venue_/legacy_unattributed) are labeled outcomes, not leaks,
+    # and stay out. datetime(realized_at) normalizes the column's two
+    # formats (space-form settlements vs ISO-T sell fills — readiness.py
+    # documents the mix); the scan is bounded and doctor is CLI-on-demand.
+    try:
+        missing = await db.fetchone(
+            """SELECT COUNT(*) AS c, COALESCE(SUM(pnl), 0) AS pnl
+                 FROM pnl_ledger
+                WHERE is_paper = ?
+                  AND TRIM(strategy_source) = ''
+                  AND datetime(realized_at) >= datetime('now', '-7 days')""",
+            (flag,),
+        )
+        count = int(missing["c"] or 0)
+        detail = (f"{count} unattributed rows (7d), "
+                  f"{float(missing['pnl'] or 0):+.2f} USD")
+        checks.append(_chk("P&L attribution", "warn" if count else "ok", detail))
+    except Exception:  # noqa: BLE001
+        checks.append(_chk("P&L attribution", "warn", "could not reconcile ledger"))
+
     verdict = max((c["status"] for c in checks), key=lambda s: _STATUS_RANK.get(s, 0))
     return {"checks": checks, "verdict": verdict, "now": now}
 

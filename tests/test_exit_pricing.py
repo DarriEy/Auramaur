@@ -76,9 +76,9 @@ async def test_exit_takes_bid_within_band():
     """Bid 2c below the snapshot, well within the band — cross to the bid."""
     bot, pos, reason, exchange, alerts = _setup(_book(0.88, 0.91), current_price=0.90)
 
-    ok = await bot._execute_poly_exit(pos, reason, AsyncMock(), exchange, alerts)
+    attempt = await bot._execute_poly_exit(pos, reason, AsyncMock(), exchange, alerts)
 
-    assert ok is True
+    assert attempt.ok is True
     order = exchange.place_order.await_args.args[0]
     assert order.price == 0.88  # the real bid, marketable
 
@@ -89,9 +89,9 @@ async def test_exit_crosses_to_bid_not_a_resting_floor():
     — never at a 'budget floor' (0.87) that would only rest above the bid."""
     bot, pos, reason, exchange, alerts = _setup(_book(0.85, 0.95), current_price=0.90)
 
-    ok = await bot._execute_poly_exit(pos, reason, AsyncMock(), exchange, alerts)
+    attempt = await bot._execute_poly_exit(pos, reason, AsyncMock(), exchange, alerts)
 
-    assert ok is True
+    assert attempt.ok is True
     order = exchange.place_order.await_args.args[0]
     assert order.price == 0.85  # crosses to the bid, not 0.87
 
@@ -102,9 +102,9 @@ async def test_exit_skips_when_bid_below_band():
     would dump well under the mark, so skip and back off (the wide-spread case)."""
     bot, pos, reason, exchange, alerts = _setup(_book(0.70, 0.95), current_price=0.90)
 
-    ok = await bot._execute_poly_exit(pos, reason, AsyncMock(), exchange, alerts)
+    attempt = await bot._execute_poly_exit(pos, reason, AsyncMock(), exchange, alerts)
 
-    assert ok is False
+    assert attempt.ok is False
     exchange.place_order.assert_not_awaited()
 
 
@@ -114,9 +114,9 @@ async def test_exit_skips_junk_bid_below_floor():
     rather than dump into a 2c buyer."""
     bot, pos, reason, exchange, alerts = _setup(_book(0.02, 0.20), current_price=0.12)
 
-    ok = await bot._execute_poly_exit(pos, reason, AsyncMock(), exchange, alerts)
+    attempt = await bot._execute_poly_exit(pos, reason, AsyncMock(), exchange, alerts)
 
-    assert ok is False
+    assert attempt.ok is False
     exchange.place_order.assert_not_awaited()
 
 
@@ -126,9 +126,9 @@ async def test_exit_skips_when_book_has_no_bid():
     at the snapshot that can only TTL-cancel."""
     bot, pos, reason, exchange, alerts = _setup(_book(None, None), current_price=0.90)
 
-    ok = await bot._execute_poly_exit(pos, reason, AsyncMock(), exchange, alerts)
+    attempt = await bot._execute_poly_exit(pos, reason, AsyncMock(), exchange, alerts)
 
-    assert ok is False
+    assert attempt.ok is False
     exchange.place_order.assert_not_awaited()
 
 
@@ -139,9 +139,9 @@ async def test_exit_best_effort_when_book_fetch_errors():
     bot, pos, reason, exchange, alerts = _setup(_book(0.88, 0.91), current_price=0.90)
     exchange.get_order_book = AsyncMock(side_effect=RuntimeError("clob timeout"))
 
-    ok = await bot._execute_poly_exit(pos, reason, AsyncMock(), exchange, alerts)
+    attempt = await bot._execute_poly_exit(pos, reason, AsyncMock(), exchange, alerts)
 
-    assert ok is True
+    assert attempt.ok is True
     order = exchange.place_order.await_args.args[0]
     assert order.price == 0.90
 
@@ -152,7 +152,7 @@ async def test_exit_skips_when_mark_contradicts_book():
     (wrong-side label, stale price). Skip the order entirely."""
     bot, pos, reason, exchange, alerts = _setup(_book(0.07, 0.13), current_price=0.90)
 
-    ok = await bot._execute_poly_exit(pos, reason, AsyncMock(), exchange, alerts)
+    attempt = await bot._execute_poly_exit(pos, reason, AsyncMock(), exchange, alerts)
 
-    assert ok is False
+    assert attempt.ok is False
     exchange.place_order.assert_not_awaited()

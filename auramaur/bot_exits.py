@@ -16,6 +16,7 @@ import math
 import structlog
 
 from auramaur.exchange.models import Order, OrderSide, OrderType, TokenType
+from auramaur.risk.exit_lifecycle import ExitAttempt, ExitState, advance_terminal
 
 if TYPE_CHECKING:
     from auramaur.exchange.protocols import ExchangeClient, MarketDiscovery
@@ -53,6 +54,22 @@ class ExitExecutionMixin:
             log.info("exit.suppression_cleared", market_id=order.market_id,
                      keys=len(set(cleared)), status=status)
 
+    async def _record_exit_terminal(self, exchange_name: str, order, status: str) -> None:
+        """Durable twin of ``_clear_exit_suppression``: advance the lifecycle
+        rows for a SELL that reached a terminal state, so a filled exit's row
+        ends at CLOSED instead of ORDER_WORKING forever. Same market-level
+        granularity and SELL-only guard as the suppression clear above."""
+        if order is None or getattr(order, "side", None) != OrderSide.SELL:
+            return
+        db = self._components.db
+        if db is None:
+            return
+        await advance_terminal(
+            db, exchange_name, order.market_id,
+            int(bool(getattr(order, "dry_run", False))),
+            filled=(status == "filled"), status=status,
+        )
+
     @property
     def _exit_gateway(self):
         """Lazily build the ExecutionGateway used for exits.
@@ -81,11 +98,13 @@ class ExitExecutionMixin:
         discovery: MarketDiscovery,
         exchange: ExchangeClient,
         alerts: AlertManager,
-    ) -> bool:
+    ) -> ExitAttempt:
         """Execute an exit for a Polymarket position.
 
-        Returns True if the sell was accepted (or a retry is worth attempting
-        next cycle), False if we should stop retrying this position.
+        Returns an :class:`ExitAttempt`. The disposition is decided HERE, at
+        the point of knowledge: dust is judged against the ON-CHAIN-adjusted
+        sell size (not the DB row), and book/venue rebuffs are RETRYABLE —
+        the portfolio monitor's 15-minute backoff does re-attempt them.
         """
         # Resolve the real token_id: reconciler → cost_basis → Gamma
         token_id = ""
@@ -124,7 +143,7 @@ class ExitExecutionMixin:
 
         if not token_id:
             log.warning("exit.no_token", market_id=pos.market_id)
-            return False
+            return ExitAttempt(False, ExitState.RETRYABLE, "no_token")
 
         # Cancel stale sell orders so balance is free
         if hasattr(exchange, "cancel_open_orders_for_token"):
@@ -157,12 +176,18 @@ class ExitExecutionMixin:
 
         if sell_size < 5:
             if self.settings.is_live and sell_size <= 0.01:
+                # The position rows were just deleted; the episode is over,
+                # not blocked — CLOSED keeps the lifecycle row from surviving
+                # as an orphan "blocked exit" for a position that no longer
+                # exists.
                 await self._prune_zero_onchain_poly_position(pos.market_id)
+                log.warning("exit.too_small", market_id=pos.market_id, size=sell_size)
+                return ExitAttempt(False, ExitState.CLOSED, "pruned_zero_onchain")
             log.warning("exit.too_small", market_id=pos.market_id, size=sell_size)
-            return False
+            return ExitAttempt(False, ExitState.UNSALEABLE_DUST, "too_small")
         if pos.current_price < 0.01:
             log.warning("exit.near_zero", market_id=pos.market_id, price=pos.current_price)
-            return False
+            return ExitAttempt(False, ExitState.RETRYABLE, "near_zero")
 
         sell_price = max(0.01, min(0.99, round(pos.current_price, 2)))
         # Marketable exit: a SELL only fills by crossing down to the real bid.
@@ -203,13 +228,13 @@ class ExitExecutionMixin:
                     best_ask=best_ask,
                     best_bid=best_bid,
                 )
-                return False
+                return ExitAttempt(False, ExitState.RETRYABLE, "mark_book_divergence")
             # No buyers at all — nothing to cross into; redeem at resolution.
             if best_bid is None or best_bid <= 0:
                 log.warning(
                     "exit.no_bid", market_id=pos.market_id, snapshot=sell_price,
                 )
-                return False
+                return ExitAttempt(False, ExitState.RETRYABLE, "no_bid")
             # Junk bid below the absolute floor — redeeming beats dumping.
             if best_bid < min_bid:
                 log.warning(
@@ -219,7 +244,7 @@ class ExitExecutionMixin:
                     bid=best_bid,
                     floor=min_bid,
                 )
-                return False
+                return ExitAttempt(False, ExitState.RETRYABLE, "bid_below_floor")
             # Bid too far under the mark to accept the slippage — back off.
             if best_bid < sell_price - max_slip:
                 log.warning(
@@ -229,7 +254,7 @@ class ExitExecutionMixin:
                     bid=best_bid,
                     max_slip=max_slip,
                 )
-                return False
+                return ExitAttempt(False, ExitState.RETRYABLE, "bid_too_thin")
             # Cross to the bid: a marketable SELL that actually fills.
             # FLOOR to the tick, never round: round(0.066)=0.07 and
             # round(0.989)=0.99 lifted the limit ABOVE the bid, so the
@@ -262,14 +287,14 @@ class ExitExecutionMixin:
             sell_order, exchange=exchange, exchange_name="polymarket")
         if res.status == "rejected":
             log.warning("exit.sell_failed", market_id=pos.market_id)
-            return False
+            return ExitAttempt(False, ExitState.RETRYABLE, "sell_rejected")
 
         await alerts.send(
             f"Exit {reason.value} (poly): {pos.market_id[:12]} "
             f"size={pos.size:.2f} pnl={pos.unrealized_pnl:+.2f}",
             level="warning",
         )
-        return True
+        return ExitAttempt(True)
 
     async def _prune_zero_onchain_poly_position(self, market_id: str) -> None:
         """Remove stale live Polymarket rows after an on-chain zero balance check."""
@@ -309,19 +334,21 @@ class ExitExecutionMixin:
         discovery: MarketDiscovery,
         exchange: ExchangeClient,
         alerts: AlertManager,
-    ) -> bool:
+    ) -> ExitAttempt:
         """Execute an exit for a Kalshi position.
 
         Kalshi is ticker-based with direct YES/NO sells, so we just build a
         SELL signal with ``exit_token`` set and let the exchange's
-        ``prepare_order`` do the rest.
+        ``prepare_order`` do the rest. Dust is judged against the venue's
+        REAL minimum (0.01 on fractional-enabled markets), never a caller-side
+        approximation.
         """
         from auramaur.exchange.models import Confidence, Signal
 
         market = await discovery.get_market(pos.market_id)
         if market is None:
             log.debug("exit.no_market", market_id=pos.market_id)
-            return False
+            return ExitAttempt(False, ExitState.RETRYABLE, "no_market")
 
         exit_signal = Signal(
             market_id=pos.market_id,
@@ -339,7 +366,7 @@ class ExitExecutionMixin:
         notional = pos.size * max(pos.current_price, 0.01)
         order = exchange.prepare_order(exit_signal, market, notional, self.settings.is_live)
         if order is None:
-            return False
+            return ExitAttempt(False, ExitState.RETRYABLE, "no_order")
 
         # Never sell more than we hold
         order.size = min(order.size, pos.size)
@@ -349,22 +376,22 @@ class ExitExecutionMixin:
             order.size = float(int(order.size))
         minimum = 0.01 if market.fractional_trading_enabled else 1.0
         if order.size < minimum:
-            return False
+            return ExitAttempt(False, ExitState.UNSALEABLE_DUST, "below_venue_minimum")
 
         order.source = "exit"
         res = await self._exit_gateway.submit_exit(
             order, exchange=exchange, exchange_name="kalshi")
         if res.status == "rejected":
-            return False
+            return ExitAttempt(False, ExitState.RETRYABLE, "sell_rejected")
 
         await alerts.send(
             f"Exit {reason.value} (kalshi): {pos.market_id} "
             f"size={pos.size:.0f} pnl={pos.unrealized_pnl:+.2f}",
             level="warning",
         )
-        return True
+        return ExitAttempt(True)
 
-    async def _execute_ibkr_exit(self, pos, reason, discovery, exchange, alerts) -> bool:
+    async def _execute_ibkr_exit(self, pos, reason, discovery, exchange, alerts) -> ExitAttempt:
         """Close a held IBKR option position by selling the exact contract.
 
         Unlike the prediction-venue exits (which reframe a fresh SELL signal), an
@@ -375,11 +402,14 @@ class ExitExecutionMixin:
         """
         from auramaur.exchange.models import Order, OrderType
 
+        # Not literally dust, but the same operational meaning as
+        # UNSALEABLE_DUST: this path can never sell it (no contract identity /
+        # below one contract), so it needs out-of-band handling, not retries.
         if not pos.token_id or pos.token_id.count(":") < 4:
             log.debug("exit.ibkr.no_contract", market_id=pos.market_id)
-            return False
+            return ExitAttempt(False, ExitState.UNSALEABLE_DUST, "no_contract")
         if pos.size < 1:
-            return False
+            return ExitAttempt(False, ExitState.UNSALEABLE_DUST, "sub_contract_size")
 
         order = Order(
             market_id=pos.market_id,
@@ -407,11 +437,11 @@ class ExitExecutionMixin:
             market_id=pos.market_id,
         )
         if result.status == "rejected":
-            return False
+            return ExitAttempt(False, ExitState.RETRYABLE, "sell_rejected")
         await alerts.send(
             f"Exit {reason.value} (ibkr): {pos.market_id} "
             f"contracts={pos.size:.0f} pnl={pos.unrealized_pnl:+.2f}",
             level="warning",
         )
-        return True
+        return ExitAttempt(True)
 
