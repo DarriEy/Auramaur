@@ -1,13 +1,13 @@
-"""Holdout-safe replay of earlier-banking exit policies."""
+"""Holdout-safe replay of earlier profit-target policies."""
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import Iterable, Mapping
 
+from auramaur.backtest.ibkr_replay import mean_lcb
 
-TERMINAL_ACTIONS = frozenset({"PROFIT_TARGET", "TRAILING_STOP"})
+NONTERMINAL_ACTIONS = frozenset({"EPISODE_START", "HOLD"})
 
 
 @dataclass(frozen=True)
@@ -30,6 +30,10 @@ class ExitObservation:
         return (self.exchange, self.market_id, self.token, self.is_paper)
 
     @property
+    def episode_key(self) -> tuple[str, str, str, int, float, float]:
+        return (*self.position_key, self.entry_price, self.size)
+
+    @property
     def estimated_net_usd(self) -> float:
         return self.entry_price * self.size * self.net_pnl_pct / 100.0
 
@@ -38,8 +42,6 @@ class ExitObservation:
 class ExitCandidate:
     name: str
     target_scale: float
-    trailing_activation_pct: float
-    trailing_giveback_fraction: float
 
 
 @dataclass(frozen=True)
@@ -68,121 +70,118 @@ def observation(row: Mapping) -> ExitObservation:
     return ExitObservation(
         observed_at=str(row["observed_at"]),
         exchange=str(row["exchange"] or ""),
-        market_id=str(row["market_id"]), token=str(row["token"]),
-        is_paper=int(row["is_paper"]), policy_action=str(row["policy_action"]),
+        market_id=str(row["market_id"]),
+        token=str(row["token"]),
+        is_paper=int(row["is_paper"]),
+        policy_action=str(row["policy_action"]),
         net_pnl_pct=float(row["net_pnl_pct"]),
         gross_pnl_pct=float(row["gross_pnl_pct"]),
         peak_pnl_pct=float(row["peak_pnl_pct"]),
-        target_pct=(None if row["target_pct"] is None else float(row["target_pct"])),
-        entry_price=float(row["entry_price"]), size=float(row["size"]),
+        target_pct=None if row["target_pct"] is None else float(row["target_pct"]),
+        entry_price=float(row["entry_price"]),
+        size=float(row["size"]),
     )
 
 
 def completed_episodes(
     observations: Iterable[ExitObservation],
 ) -> list[list[ExitObservation]]:
-    """Split each position stream at a recorded target/trailing exit.
+    """Return complete, inventory-coherent episodes.
 
-    Open episodes are right-censored and excluded: scoring a policy after the
-    last observed mark would invent a price path. Re-entry starts a new episode.
+    Any non-HOLD action is terminal. A changed entry price or size starts a new
+    inventory cohort and censors the older path instead of mixing scale-ins.
     """
     active: dict[tuple[str, str, str, int], list[ExitObservation]] = {}
     completed: list[list[ExitObservation]] = []
     for item in observations:
-        episode = active.setdefault(item.position_key, [])
-        episode.append(item)
-        if item.policy_action in TERMINAL_ACTIONS:
-            completed.append(episode)
+        prior = active.get(item.position_key)
+        if prior is not None and prior[-1].episode_key != item.episode_key:
+            active.pop(item.position_key, None)
+            prior = None
+        if prior is None:
+            if item.policy_action != "EPISODE_START":
+                continue
+            prior = []
+            active[item.position_key] = prior
+        prior.append(item)
+        if item.policy_action not in NONTERMINAL_ACTIONS:
+            completed.append(prior)
             active.pop(item.position_key, None)
     return completed
 
 
 def candidate_exit(
     episode: list[ExitObservation], candidate: ExitCandidate,
-) -> ExitObservation | None:
+) -> ExitObservation:
+    """Replay an earlier target; otherwise use the actually observed terminal."""
     for item in episode:
-        trailing = (
-            candidate.trailing_activation_pct > 0
-            and candidate.trailing_giveback_fraction > 0
-            and item.peak_pnl_pct >= candidate.trailing_activation_pct
-            and item.gross_pnl_pct <= item.peak_pnl_pct
-            * (1.0 - candidate.trailing_giveback_fraction)
-        )
-        target = (item.target_pct is not None
-                  and item.net_pnl_pct >= item.target_pct * candidate.target_scale)
-        if trailing or target:
+        if (
+            item.policy_action in NONTERMINAL_ACTIONS
+            and item.target_pct is not None
+            and item.net_pnl_pct >= item.target_pct * candidate.target_scale
+        ):
             return item
-    return None
+        if item.policy_action not in NONTERMINAL_ACTIONS:
+            return item
+    raise ValueError("candidate_exit requires a completed episode")
 
 
 def _paired_score(
-    candidate: ExitCandidate, baseline: ExitCandidate,
-    episodes: list[list[ExitObservation]],
+    candidate: ExitCandidate, episodes: list[list[ExitObservation]],
 ) -> CandidateScore:
-    outcomes: list[float] = []
-    deltas: list[float] = []
+    # Re-entries in one market share resolution risk. Average them into one
+    # cluster before computing the evidence bound.
+    clustered: dict[tuple[str, str, str, int], list[tuple[float, float]]] = {}
     for episode in episodes:
         proposed = candidate_exit(episode, candidate)
-        deployed = candidate_exit(episode, baseline)
-        if proposed is None or deployed is None:
-            continue
-        outcomes.append(proposed.estimated_net_usd)
-        deltas.append(proposed.estimated_net_usd - deployed.estimated_net_usd)
+        deployed = episode[-1]
+        clustered.setdefault(episode[0].position_key, []).append(
+            (proposed.estimated_net_usd, proposed.estimated_net_usd - deployed.estimated_net_usd)
+        )
+    outcomes = [sum(v[0] for v in values) / len(values) for values in clustered.values()]
+    deltas = [sum(v[1] for v in values) / len(values) for values in clustered.values()]
     n = len(deltas)
     mean = sum(outcomes) / n if n else 0.0
     delta = sum(deltas) / n if n else 0.0
-    if n < 2:
-        lcb = float("-inf")
-    else:
-        variance = sum((value - delta) ** 2 for value in deltas) / (n - 1)
-        lcb = delta - 1.96 * math.sqrt(variance / n)
-    return CandidateScore(candidate, n, mean, sum(outcomes), delta, lcb)
+    return CandidateScore(
+        candidate, n, mean, sum(outcomes), delta, mean_lcb(deltas))
 
 
 def calibrate(
     episodes: list[list[ExitObservation]], candidates: list[ExitCandidate],
-    baseline: ExitCandidate, *, min_train: int = 30, min_holdout: int = 15,
+    *, min_train: int = 30, min_holdout: int = 15,
 ) -> CalibrationReport:
-    """Select on the oldest 70%; validate the winner once on newest 30%."""
-    # Re-entries in one market share resolution risk and are not independent
-    # evidence. Keep the first completed episode per position identity.
-    independent: list[list[ExitObservation]] = []
-    seen: set[tuple[str, str, str, int]] = set()
+    """Select on oldest market clusters; validate once on newest clusters."""
+    clusters: dict[tuple[str, str, str, int], list[list[ExitObservation]]] = {}
     for episode in episodes:
-        if episode[0].position_key not in seen:
-            independent.append(episode)
-            seen.add(episode[0].position_key)
-    episodes = independent
-    cut = int(len(episodes) * 0.7)
-    train, holdout = episodes[:cut], episodes[cut:]
-    train_scores = tuple(
-        _paired_score(candidate, baseline, train) for candidate in candidates)
-    if len(train) < min_train or len(holdout) < min_holdout:
+        clusters.setdefault(episode[0].position_key, []).append(episode)
+    ordered = list(clusters.values())
+    cut = int(len(ordered) * 0.7)
+    train = [episode for group in ordered[:cut] for episode in group]
+    holdout = [episode for group in ordered[cut:] for episode in group]
+    train_scores = tuple(_paired_score(candidate, train) for candidate in candidates)
+    if cut < min_train or len(ordered) - cut < min_holdout:
         return CalibrationReport(
-            len(episodes), len(train), len(holdout), train_scores, None, None,
-            None, "insufficient completed episodes")
-    eligible = [score for score in train_scores
-                if score.n >= min_train and score.candidate != baseline]
+            len(episodes), cut, len(ordered) - cut, train_scores, None, None,
+            None, "insufficient independent completed position clusters")
+    eligible = [score for score in train_scores if score.n >= min_train]
     if not eligible:
         return CalibrationReport(
-            len(episodes), len(train), len(holdout), train_scores, None, None,
+            len(episodes), cut, len(ordered) - cut, train_scores, None, None,
             None, "no candidate has enough paired training observations")
     winner = max(eligible, key=lambda score: score.delta_lcb95_usd)
     if winner.delta_lcb95_usd <= 0:
         return CalibrationReport(
-            len(episodes), len(train), len(holdout), train_scores, None, None,
-            None, "no candidate improves the deployed policy in training")
-    holdout_score = _paired_score(winner.candidate, baseline, holdout)
+            len(episodes), cut, len(ordered) - cut, train_scores, None, None,
+            None, "no candidate improves deployed exits in training")
+    holdout_score = _paired_score(winner.candidate, holdout)
     if holdout_score.n < min_holdout or holdout_score.delta_lcb95_usd <= 0:
         return CalibrationReport(
-            len(episodes), len(train), len(holdout), train_scores,
+            len(episodes), cut, len(ordered) - cut, train_scores,
             holdout_score, winner.candidate, None,
             "train winner did not clear the paired holdout lower bound")
-    recommendation = (
-        f"target_scale={winner.candidate.target_scale:g}, "
-        f"trailing_giveback_fraction="
-        f"{winner.candidate.trailing_giveback_fraction:g}")
+    recommendation = f"target_scale={winner.candidate.target_scale:g}"
     return CalibrationReport(
-        len(episodes), len(train), len(holdout), train_scores,
+        len(episodes), cut, len(ordered) - cut, train_scores,
         holdout_score, winner.candidate, recommendation,
         "paired holdout lower bound is positive")

@@ -392,7 +392,7 @@ async def test_exit_decision_write_is_one_atomic_span(tmp_path):
 
         db.transaction = _spy
         rows = [(
-            "2026-08-06 00:00:00", "m1", "polymarket", "YES", 1, "HOLD",
+            "m1", "polymarket", "YES", 1, "HOLD",
             10.0, 9.0, 12.0, 50.0, 0.1, 0.6, 0.5, 10.0,
         )]
         await tracker._record_exit_decisions(rows, 3)

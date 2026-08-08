@@ -50,9 +50,9 @@ non-negative peak, and a zero giveback reduces the test to `peak > current`, so
 
 ## Decision telemetry
 
-Every terminal profit-target or trailing-stop evaluation contributes an
-`exit_decisions` observation. HOLD counterfactuals are sampled at most hourly
-per position; terminal observations are never sampled away.
+Every completed exit reason contributes one `exit_decisions` terminal
+observation per active inventory cohort. HOLD counterfactuals are sampled at
+most hourly; a decided-but-stuck exit does not write repeatedly.
 
 The observations are accumulated during the cycle and written **after** every
 exit has been decided, as a single `executemany`. Writing inline took the shared
@@ -64,14 +64,14 @@ Rows are pruned to `execution.exit_decision_retention_days` (default 30) by a
 bounded per-cycle delete on the indexed time column, following the same pattern
 as `candidate_dispositions`. HOLD rows are the counterfactual: a calibration
 that sees only exits cannot say what an earlier threshold would have done.
-Hourly sampling plus 30-day retention stores roughly one-sixth as many HOLD
-rows as three days at the 60-second cadence while preserving a useful path.
+Sampling state is scoped by venue, book, token, entry price, and size, and is
+discarded after the position disappears so re-entry begins a fresh episode.
 
 These records are measurement data, not permission to tune against the same
-sample. Run `python scripts/calibrate_exit_policy.py auramaur.db`; it uses an
-oldest-70% training/newest-30% holdout split over completed target/trailing
-episodes. It selects one earlier-banking candidate on training and scores that
-winner exactly once on holdout. A recommendation requires a positive paired
+sample. Run `python scripts/calibrate_exit_policy.py auramaur.db --exchange polymarket --book live`; venue and paper/live books are never pooled. It uses an
+oldest-70% training/newest-30% holdout split over complete position clusters.
+It replays only earlier profit targets, falling back to the actual fee-net
+terminal outcome, then scores the training winner exactly once on holdout. A recommendation requires a positive paired
 95% lower bound in both periods; open/right-censored episodes are excluded
 rather than assigned invented future prices. The estimate uses the fee-net
 decision mark and position cost, not a sum of every later ledger row (which
