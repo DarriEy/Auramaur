@@ -456,7 +456,7 @@ def test_live_cell_gap_beats_higher_gap_paper_cell_for_the_slot():
             settings = _settings(paper=False, max_entries_per_cycle=1)
             risk = _risk()
 
-            async def _decide(strategy, category):   # weather trades live; rest paper
+            async def _decide(strategy, category, venue):  # weather live; rest paper
                 return SimpleNamespace(force_paper=(category != "weather"))
             risk.graduation = SimpleNamespace(decide=_decide)
 

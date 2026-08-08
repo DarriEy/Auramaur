@@ -603,14 +603,18 @@ class ResolutionLensPillar:
         # Which categories among the known gaps currently trade live for this
         # cell? Only those put real money to work; everything else is paper
         # exploration and must not pre-empt it.
-        live_cats: set[str] = set()
+        live_cells: set[tuple[str, str]] = set()
         grad = getattr(self._risk, "graduation", None)
         if grad is not None and not cfg.paper:
-            for cat in {m.category for m in markets if m.id in known}:
+            cells = {
+                (m.category or "", (m.exchange or "").lower())
+                for m in markets if m.id in known
+            }
+            for cat, venue in cells:
                 try:
-                    cell = await grad.decide(self._source_tag, cat or "")
+                    cell = await grad.decide(self._source_tag, cat, venue)
                     if not getattr(cell, "force_paper", True):
-                        live_cats.add(cat)
+                        live_cells.add((cat, venue))
                 except Exception:
                     pass
 
@@ -618,12 +622,13 @@ class ResolutionLensPillar:
             g = known.get(m.id)
             if g is None:
                 return (0, 0.0)                       # fresh discovery -> last
-            tier = 2 if m.category in live_cats else 1  # live gaps over paper gaps
+            key = (m.category or "", (m.exchange or "").lower())
+            tier = 2 if key in live_cells else 1      # live gaps over paper gaps
             return (tier, g)
 
         markets.sort(key=_rank, reverse=True)
         log.info("lens.prioritized_known_gaps", known_gaps=len(known),
-                 live_gap_cells=len(live_cats), scanned=len(markets))
+                 live_gap_cells=len(live_cells), scanned=len(markets))
         return markets
 
     async def _close_window_candidates(self) -> list[Market]:

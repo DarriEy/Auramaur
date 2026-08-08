@@ -489,10 +489,26 @@ class RiskManager:
 
         if all_passed and cell.max_stake_usd is not None:
             position_size = min(position_size, cell.max_stake_usd)
+            venue = (market.exchange or "polymarket").lower()
+            unit_price = max(
+                float(market.outcome_yes_price or 0),
+                float(market.outcome_no_price or 0),
+            )
+            venue_minimum = (
+                unit_price if venue == "kalshi"
+                else max(1.0, 5.0 * unit_price)
+            )
+            if position_size + 1e-9 < venue_minimum:
+                all_passed = False
+                reason = (
+                    f"live-authority cap ${cell.max_stake_usd:.2f} is below "
+                    f"{venue} minimum order notional ${venue_minimum:.2f}"
+                )
             log.info(
                 "risk.live_authority_cap", strategy=signal.strategy_source,
                 market_id=signal.market_id, authority=cell.authority,
                 max_stake_usd=cell.max_stake_usd, position_size=position_size,
+                venue_minimum=venue_minimum, approved=all_passed,
             )
         decision = RiskDecision(
             approved=all_passed,

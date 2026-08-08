@@ -84,6 +84,7 @@ class GraduationLadder:
         self._db = db
         self._settings = settings
         self._cache: dict[tuple[str, str], tuple[float, CellDecision]] = {}
+        self._grant_cache: dict[tuple, tuple[float, object]] = {}
         self._breadth: tuple[float, int] | None = None  # (monotonic_ts, count)
 
     # ------------------------------------------------------------------
@@ -91,22 +92,29 @@ class GraduationLadder:
     async def decide(self, strategy_source: str, category: str,
                      venue: str = "") -> CellDecision:
         cfg = self._settings.graduation
-        if cfg.mode == "off":
-            return _LIVE_FULL
         strategy = strategy_source or "llm"
-        grant = await self._grant_decision(strategy, category, venue)
-        if grant is not None:
-            return grant
-        if strategy in set(cfg.exempt_strategies):
+        category = (category or "").strip().lower()
+        venue = (venue or "").strip().lower()
+
+        # Observe mode is behavior-neutral by contract: report the evidence
+        # ladder only, without applying operator grants or their caps.
+        if cfg.mode != "observe":
+            grants = cfg.live_authority.get(strategy, [])
+            if grants and not venue:
+                return CellDecision(
+                    True, 1.0, "grant_venue_required",
+                    "venue is required for a strategy with live-authority grants",
+                    authority="operator_grant",
+                )
+            grant = await self._grant_decision(strategy, category, venue)
+            if grant is not None:
+                return grant
             if strategy in _STRUCTURAL_EXEMPT_STRATEGIES:
                 return _EXEMPT
-            log.error(
-                "graduation.directional_exemption_ignored",
-                strategy=strategy,
-                reason="directional authority requires an explicit live_authority grant",
-            )
-
-        category = category or ""
+            if cfg.mode == "off":
+                return _LIVE_FULL
+        elif cfg.mode == "off":
+            return _LIVE_FULL
 
         key = (strategy, category)
         now = time.monotonic()
@@ -129,7 +137,6 @@ class GraduationLadder:
         self, strategy: str, category: str, venue: str,
     ) -> CellDecision | None:
         grants = self._settings.graduation.live_authority.get(strategy, [])
-        venue = (venue or "").lower()
         grant = next((
             item for item in grants
             if venue in item.venues and category in item.categories
@@ -147,43 +154,119 @@ class GraduationLadder:
                 authority="operator_grant", max_stake_usd=grant.max_stake_usd,
             )
 
+        evidence_key = (strategy, venue, category, grant.granted_at.isoformat())
+        now = time.monotonic()
+        cached = self._grant_cache.get(evidence_key)
+        evidence = None
+        if cached and now - cached[0] < self._settings.graduation.cache_seconds:
+            evidence = cached[1]
+        if evidence is None:
+            try:
+                evidence = await self._db.fetchone(
+                    """SELECT COALESCE(SUM(pnl), 0) AS pnl,
+                              COUNT(DISTINCT CASE
+                                WHEN kind IN ('sell','settlement') THEN market_id
+                              END) AS realizations
+                         FROM pnl_ledger
+                        WHERE strategy_source=? AND venue=?
+                          AND (category=? OR category='')
+                          AND is_paper=0 AND realized_at >= ?""",
+                    (strategy, venue, category, grant.granted_at.isoformat()),
+                )
+                self._grant_cache[evidence_key] = (now, evidence)
+            except Exception:
+                if cached is not None:
+                    evidence = cached[1]
+                    log.warning(
+                        "graduation.grant_evidence_stale",
+                        strategy=strategy, venue=venue, category=category)
+                else:
+                    log.exception(
+                        "graduation.grant_evidence_unavailable",
+                        strategy=strategy, venue=venue, category=category)
+                    return CellDecision(
+                        True, 1.0, "grant_evidence_unavailable", reason,
+                        authority="operator_grant",
+                        max_stake_usd=grant.max_stake_usd,
+                    )
+
         try:
-            row = await self._db.fetchone(
-                """SELECT COALESCE(SUM(pnl), 0) AS pnl,
-                          COUNT(DISTINCT CASE WHEN kind='settlement'
-                                             THEN market_id END) AS settlements
-                     FROM pnl_ledger
-                    WHERE strategy_source=? AND venue=? AND category=?
-                      AND is_paper=0 AND realized_at >= ?""",
-                (strategy, venue, category, grant.granted_at.isoformat()),
+            exposure = await self._db.fetchone(
+                """SELECT COUNT(*) AS positions,
+                          COALESCE(SUM(p.size * p.avg_price), 0) AS notional
+                     FROM portfolio p
+                    WHERE p.exchange=? AND p.category=? AND p.is_paper=0
+                      AND EXISTS (
+                          SELECT 1 FROM trades t
+                           WHERE t.market_id=p.market_id
+                             AND t.exchange=p.exchange
+                             AND t.is_paper=0
+                             AND t.strategy_source=?
+                             AND t.timestamp >= ?
+                      )""",
+                (venue, category, strategy, grant.granted_at.isoformat()),
             )
         except Exception:
             log.exception(
-                "graduation.grant_evidence_unavailable",
-                strategy=strategy, venue=venue, category=category,
-            )
+                "graduation.grant_exposure_unavailable",
+                strategy=strategy, venue=venue, category=category)
             return CellDecision(
-                True, 1.0, "grant_evidence_unavailable", reason,
-                authority="operator_grant", max_stake_usd=grant.max_stake_usd,
+                True, 1.0, "grant_exposure_unavailable", reason,
+                authority="operator_grant", max_stake_usd=0.0,
             )
-        pnl = float(row["pnl"] or 0) if row else 0.0
-        settlements = int(row["settlements"] or 0) if row else 0
+
+        pnl = float(evidence["pnl"] or 0) if evidence else 0.0
+        realizations = int(evidence["realizations"] or 0) if evidence else 0
+        open_notional = float(exposure["notional"] or 0) if exposure else 0.0
+        remaining = max(0.0, grant.max_open_notional_usd - open_notional)
+        stake_cap = min(grant.max_stake_usd, remaining)
         if pnl <= -grant.stop_loss_usd:
+            status = "grant_loss_limit"
+        elif realizations >= grant.review_after_settlements:
+            status = "grant_review_due"
+        elif remaining <= 0:
+            status = "grant_open_limit"
+        else:
             return CellDecision(
-                True, 1.0, "grant_loss_limit", reason,
-                authority="operator_grant", max_stake_usd=grant.max_stake_usd,
-            )
-        if settlements >= grant.review_after_settlements:
-            return CellDecision(
-                True, 1.0, "grant_review_due", reason,
-                authority="operator_grant", max_stake_usd=grant.max_stake_usd,
+                False, 1.0, "operator_grant", reason,
+                authority="operator_grant", max_stake_usd=stake_cap,
             )
         return CellDecision(
-            False, 1.0, "operator_grant", reason,
-            authority="operator_grant", max_stake_usd=grant.max_stake_usd,
+            True, 1.0, status, reason,
+            authority="operator_grant", max_stake_usd=stake_cap,
         )
 
-
+    def authority_crosscheck(self) -> list[str]:
+        """Return startup-blocking mismatches in configured live authority."""
+        cfg = self._settings.graduation
+        risk = self._settings.risk
+        issues: list[str] = []
+        known = set(cfg.min_markets_overrides) | set(cfg.strategy_level_strategies)
+        known |= set(getattr(risk, "live_categories_only", {}))
+        known |= set(getattr(risk, "live_venues_only", {}))
+        known |= set(getattr(risk, "allowed_categories_live_extra", {}))
+        known |= {"interim_manager"}
+        for strategy, grants in cfg.live_authority.items():
+            if strategy not in known:
+                issues.append(f"unknown grant strategy {strategy}")
+            allowed_categories = set(getattr(risk, "live_categories_only", {}).get(
+                strategy, getattr(risk, "allowed_categories_live", [])))
+            allowed_categories |= set(
+                getattr(risk, "allowed_categories_live_extra", {}).get(strategy, []))
+            allowed_venues = set(getattr(risk, "live_venues_only", {}).get(
+                strategy, ("polymarket", "kalshi")))
+            for grant in grants:
+                unknown_categories = set(grant.categories) - allowed_categories
+                unknown_venues = set(grant.venues) - allowed_venues
+                if unknown_categories:
+                    issues.append(
+                        f"{strategy} grant categories are not live-eligible: "
+                        f"{sorted(unknown_categories)}")
+                if unknown_venues:
+                    issues.append(
+                        f"{strategy} grant venues are not live-eligible: "
+                        f"{sorted(unknown_venues)}")
+        return issues
     # ------------------------------------------------------------------
 
     async def _cell_stats(self, strategy: str, category: str) -> dict:

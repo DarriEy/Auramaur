@@ -37,7 +37,7 @@ from auramaur.strategy.protocols import ExecutionMode
 
 log = structlog.get_logger()
 
-_GRADUATED = {"live", "probation"}
+_GRADUATED = {"live", "probation", "operator_grant"}
 
 
 class InterimManagerPillar:
@@ -105,14 +105,14 @@ class InterimManagerPillar:
         """(strategy, category) pairs holding live/probation cells, excluding
         exempt strategies and the manager itself."""
         exempt = set(self._settings.graduation.exempt_strategies) | {self.name}
-        cells = []
+        cells: set[tuple[str, str]] = set()
         for cell in await self._ladder.report():
             status = str(cell.get("status", ""))
             # observe-mode statuses look like "observe:<status>".
             status = status.split(":", 1)[-1] if ":" in status else status
             if status in _GRADUATED and cell.get("strategy") not in exempt:
-                cells.append((cell["strategy"], cell.get("category") or ""))
-        return cells
+                cells.add((cell["strategy"], cell.get("category") or ""))
+        return sorted(cells)
 
     # ------------------------------------------------------------------
 

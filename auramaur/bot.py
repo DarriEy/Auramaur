@@ -1682,6 +1682,20 @@ class AuramaurBot(
             log.info("bot.build", sha=STARTUP_SHA, mode=mode)
 
         await self._init_components()
+        if self.settings.is_live:
+            issues = self._components.risk.graduation.authority_crosscheck()
+            if issues:
+                for issue in issues:
+                    log.critical("startup.live_authority_mismatch", issue=issue)
+                    console.print(f"  [bold red]LIVE AUTHORITY BLOCKED:[/] {issue}")
+                raise RuntimeError(
+                    "live-authority startup cross-check failed; refusing live startup")
+            grant_count = sum(
+                len(grants)
+                for grants in self.settings.graduation.live_authority.values())
+            log.info("startup.live_authority_verified", grants=grant_count)
+            console.print(
+                f"  [green]Live authority:[/] {grant_count} scoped grants verified")
         self._running = True
 
         db_path = self._components.db.db_path

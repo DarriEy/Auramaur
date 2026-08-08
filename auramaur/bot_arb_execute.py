@@ -114,7 +114,8 @@ class ArbTradeExecutionMixin:
         if len(self._arb_attempts) > 200:
             self._arb_attempts = {k: v for k, v in self._arb_attempts.items() if v > now_ts}
 
-        is_live = self.settings.is_live
+        is_live = self.settings.is_live and all(
+            not getattr(decision, "force_paper", False) for _, decision in decisions)
         exchange_client = engine.exchange
         orders = [
             Order(
@@ -221,6 +222,7 @@ class ArbTradeExecutionMixin:
             edge=edge_pct,
             evidence_summary=f"Internal arb: YES+NO={opp.price_a + opp.price_b:.3f}",
             recommended_side=OrderSide.BUY,
+            strategy_source="arbitrage",
         )
 
         # Build a synthetic signal for the NO leg (buy NO)
@@ -233,6 +235,7 @@ class ArbTradeExecutionMixin:
             edge=edge_pct,
             evidence_summary=f"Internal arb: YES+NO={opp.price_a + opp.price_b:.3f}",
             recommended_side=OrderSide.BUY,
+            strategy_source="arbitrage",
         )
 
         # Run risk checks on both legs
@@ -285,6 +288,10 @@ class ArbTradeExecutionMixin:
         if qty < 1:
             return
 
+        arb_live = self.settings.is_live and not (
+            getattr(yes_decision, "force_paper", False) or
+            getattr(no_decision, "force_paper", False))
+
         # YES leg
         yes_order = Order(
             market_id=market.id,
@@ -294,7 +301,7 @@ class ArbTradeExecutionMixin:
             token=TokenType.YES,
             size=qty,
             price=yes_px,
-            dry_run=not self.settings.is_live,
+            dry_run=not arb_live,
         )
 
         # NO leg. token= is REQUIRED, not decorative: Order.token defaults to
@@ -311,7 +318,7 @@ class ArbTradeExecutionMixin:
             token=TokenType.NO,
             size=qty,
             price=no_px,
-            dry_run=not self.settings.is_live,
+            dry_run=not arb_live,
         )
 
         try:
@@ -421,6 +428,7 @@ class ArbTradeExecutionMixin:
             edge=edge_pct,
             evidence_summary=evidence,
             recommended_side=OrderSide.BUY,
+            strategy_source="arbitrage",
         )
         # SELL signal → each exchange's prepare_order produces a BUY NO
         # (Polymarket token-swap, Kalshi new-bearish-position branch).
@@ -433,6 +441,7 @@ class ArbTradeExecutionMixin:
             edge=edge_pct,
             evidence_summary=evidence,
             recommended_side=OrderSide.SELL,
+            strategy_source="arbitrage",
         )
 
         # Risk checks on both legs using exchange-local cash for sizing.
@@ -472,7 +481,9 @@ class ArbTradeExecutionMixin:
 
         cheap_client = engine_cheap.exchange
         expensive_client = engine_expensive.exchange
-        is_live = self.settings.is_live
+        is_live = self.settings.is_live and not (
+            getattr(yes_decision, "force_paper", False) or
+            getattr(no_decision, "force_paper", False))
 
         yes_order = cheap_client.prepare_order(yes_signal, cheap_market, position_size, is_live)
         no_order = expensive_client.prepare_order(no_signal, expensive_market, position_size, is_live)

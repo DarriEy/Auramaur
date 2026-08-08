@@ -229,8 +229,9 @@ graduation:
   # Example local override:
   # live_authority:
   #   llm: [{venues: [polymarket], categories: [tech], max_stake_usd: 10,
-  #          granted_at: 2026-08-07, review_by: 2026-09-07,
-  #          evidence_basis: "approved bounded trial", stop_loss_usd: 30}]
+  #          max_open_notional_usd: 50, granted_at: "2026-08-07T12:00:00Z",
+  #          review_by: 2026-09-07, evidence_basis: "approved bounded trial",
+  #          stop_loss_usd: 30, review_after_settlements: 25}]
   live_authority: {}
   # Disabled: one high-volume book must not starve unrelated experiments.
   # Pillar and portfolio/risk ceilings remain enforced.
