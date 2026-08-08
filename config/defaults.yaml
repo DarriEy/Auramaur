@@ -224,6 +224,14 @@ graduation:
   cache_seconds: 300
   # Structural/two-sided strategies bypass the ladder.
   exempt_strategies: ["arbitrage", "market_maker", "order_monitor"]
+  # Directional live authority must be explicit and bounded by strategy,
+  # venue, category, stake, dates, evidence, settlements, and cumulative loss.
+  # Example local override:
+  # live_authority:
+  #   llm: [{venues: [polymarket], categories: [tech], max_stake_usd: 10,
+  #          granted_at: 2026-08-07, review_by: 2026-09-07,
+  #          evidence_basis: "approved bounded trial", stop_loss_usd: 30}]
+  live_authority: {}
   # Disabled: one high-volume book must not starve unrelated experiments.
   # Pillar and portfolio/risk ceilings remain enforced.
   max_unproven_positions: 0

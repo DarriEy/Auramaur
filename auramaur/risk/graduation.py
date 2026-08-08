@@ -66,10 +66,15 @@ class CellDecision:
     size_multiplier: float
     status: str          # live | probation | demoted | paper_negative | unproven | exempt | observe:<...>
     reason: str
+    authority: str = "evidence"
+    max_stake_usd: float | None = None
 
 
 _LIVE_FULL = CellDecision(False, 1.0, "live", "live evidence lower bound positive")
 _EXEMPT = CellDecision(False, 1.0, "exempt", "strategy exempt from graduation")
+_STRUCTURAL_EXEMPT_STRATEGIES = frozenset({
+    "arbitrage", "market_maker", "order_monitor",
+})
 
 
 class GraduationLadder:
@@ -83,13 +88,24 @@ class GraduationLadder:
 
     # ------------------------------------------------------------------
 
-    async def decide(self, strategy_source: str, category: str) -> CellDecision:
+    async def decide(self, strategy_source: str, category: str,
+                     venue: str = "") -> CellDecision:
         cfg = self._settings.graduation
         if cfg.mode == "off":
             return _LIVE_FULL
         strategy = strategy_source or "llm"
+        grant = await self._grant_decision(strategy, category, venue)
+        if grant is not None:
+            return grant
         if strategy in set(cfg.exempt_strategies):
-            return _EXEMPT
+            if strategy in _STRUCTURAL_EXEMPT_STRATEGIES:
+                return _EXEMPT
+            log.error(
+                "graduation.directional_exemption_ignored",
+                strategy=strategy,
+                reason="directional authority requires an explicit live_authority grant",
+            )
+
         category = category or ""
 
         key = (strategy, category)
@@ -108,6 +124,65 @@ class GraduationLadder:
                 False, 1.0, f"observe:{decision.status}", decision.reason)
         self._cache[key] = (now, decision)
         return decision
+
+    async def _grant_decision(
+        self, strategy: str, category: str, venue: str,
+    ) -> CellDecision | None:
+        grants = self._settings.graduation.live_authority.get(strategy, [])
+        venue = (venue or "").lower()
+        grant = next((
+            item for item in grants
+            if venue in item.venues and category in item.categories
+        ), None)
+        if grant is None:
+            return None
+
+        reason = (
+            f"operator grant: {grant.evidence_basis}; review by "
+            f"{grant.review_by.isoformat()}"
+        )
+        if datetime.now().date() >= grant.review_by:
+            return CellDecision(
+                True, 1.0, "grant_expired", reason,
+                authority="operator_grant", max_stake_usd=grant.max_stake_usd,
+            )
+
+        try:
+            row = await self._db.fetchone(
+                """SELECT COALESCE(SUM(pnl), 0) AS pnl,
+                          COUNT(DISTINCT CASE WHEN kind='settlement'
+                                             THEN market_id END) AS settlements
+                     FROM pnl_ledger
+                    WHERE strategy_source=? AND venue=? AND category=?
+                      AND is_paper=0 AND realized_at >= ?""",
+                (strategy, venue, category, grant.granted_at.isoformat()),
+            )
+        except Exception:
+            log.exception(
+                "graduation.grant_evidence_unavailable",
+                strategy=strategy, venue=venue, category=category,
+            )
+            return CellDecision(
+                True, 1.0, "grant_evidence_unavailable", reason,
+                authority="operator_grant", max_stake_usd=grant.max_stake_usd,
+            )
+        pnl = float(row["pnl"] or 0) if row else 0.0
+        settlements = int(row["settlements"] or 0) if row else 0
+        if pnl <= -grant.stop_loss_usd:
+            return CellDecision(
+                True, 1.0, "grant_loss_limit", reason,
+                authority="operator_grant", max_stake_usd=grant.max_stake_usd,
+            )
+        if settlements >= grant.review_after_settlements:
+            return CellDecision(
+                True, 1.0, "grant_review_due", reason,
+                authority="operator_grant", max_stake_usd=grant.max_stake_usd,
+            )
+        return CellDecision(
+            False, 1.0, "operator_grant", reason,
+            authority="operator_grant", max_stake_usd=grant.max_stake_usd,
+        )
+
 
     # ------------------------------------------------------------------
 
@@ -305,7 +380,7 @@ class GraduationLadder:
         """Every cell with ledger history in the window + its decision."""
         cfg = self._settings.graduation
         rows = await self._db.fetchall(
-            """SELECT strategy_source AS strategy, category,
+            """SELECT strategy_source AS strategy, category, venue,
                  SUM(CASE WHEN is_paper = 0 THEN 1 ELSE 0 END) AS live_n,
                  -- pnl only; already net of fees (module docstring).
                  COALESCE(SUM(CASE WHEN is_paper = 0 THEN pnl ELSE 0 END), 0) AS live_pnl,
@@ -313,17 +388,18 @@ class GraduationLadder:
                  COALESCE(SUM(CASE WHEN is_paper = 1 THEN pnl ELSE 0 END), 0) AS paper_pnl
                FROM pnl_ledger
                WHERE realized_at >= datetime('now', ?)
-               GROUP BY 1, 2 ORDER BY 1, 2""",
+               GROUP BY 1, 2, 3 ORDER BY 1, 2, 3""",
             (f"-{int(cfg.window_days)} days",),
         )
         out = []
         for r in rows or []:
-            d = await self._compute(r["strategy"] or "llm", r["category"] or "")
-            if (r["strategy"] or "llm") in set(cfg.exempt_strategies):
-                d = _EXEMPT
+            d = await self.decide(
+                r["strategy"] or "llm", r["category"] or "",
+                r["venue"] or "")
             out.append({
                 "strategy": r["strategy"] or "(none)",
                 "category": r["category"] or "(none)",
+                "venue": r["venue"] or "(none)",
                 "live_n": int(r["live_n"] or 0),
                 "live_pnl": float(r["live_pnl"] or 0.0),
                 "paper_n": int(r["paper_n"] or 0),

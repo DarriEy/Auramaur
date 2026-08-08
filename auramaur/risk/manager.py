@@ -198,7 +198,7 @@ class RiskManager:
             market.question or "", market.description or "",
             market.category or "")
         cell = await self.graduation.decide(
-            signal.strategy_source, cell_category)
+            signal.strategy_source, cell_category, market.exchange or "")
         # Extreme model-vs-market disagreement routes to paper. Evaluated HERE,
         # before is_paper_entry, for two reasons: it must be able to restrict
         # that flag, and several checks below are scoped by it (the adverse
@@ -487,6 +487,13 @@ class RiskManager:
                 all_passed = False
                 reason = cell.reason
 
+        if all_passed and cell.max_stake_usd is not None:
+            position_size = min(position_size, cell.max_stake_usd)
+            log.info(
+                "risk.live_authority_cap", strategy=signal.strategy_source,
+                market_id=signal.market_id, authority=cell.authority,
+                max_stake_usd=cell.max_stake_usd, position_size=position_size,
+            )
         decision = RiskDecision(
             approved=all_passed,
             checks=checks,

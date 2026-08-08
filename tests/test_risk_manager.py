@@ -706,6 +706,33 @@ async def test_force_paper_is_restriction_only(mock_kill):
 
 @pytest.mark.asyncio
 @patch("auramaur.risk.manager.check_kill_switch")
+async def test_live_authority_caps_final_position_size(mock_kill):
+    from auramaur.risk.checks import CheckResult
+    mock_kill.return_value = CheckResult(
+        name="kill_switch", passed=True, reason="", value=False)
+
+    settings = _make_settings(
+        is_live=True, min_edge_pct=2.5,
+        allowed_categories_live=["politics"],
+    )
+    db = MagicMock()
+    db.fetchone = AsyncMock(return_value=None)
+    manager = RiskManager(settings, db)
+    manager.portfolio = _mock_portfolio()
+    manager.graduation.decide = AsyncMock(return_value=CellDecision(
+        False, 1.0, "operator_grant", "bounded trial",
+        authority="operator_grant", max_stake_usd=7.0,
+    ))
+
+    signal = _make_signal(edge=10.0, claude_prob=0.60, market_prob=0.50)
+    decision = await manager.evaluate(
+        signal, _make_market(), available_cash=500.0)
+    assert decision.approved is True
+    assert decision.position_size == 7.0
+
+
+@pytest.mark.asyncio
+@patch("auramaur.risk.manager.check_kill_switch")
 async def test_ladder_exemption_does_not_disable_venue_containment(mock_kill):
     """The 2026-07-29 breach: `llm` is graduation-exempt, and that exemption
     used to switch off the category block — which is where live_venues_only is

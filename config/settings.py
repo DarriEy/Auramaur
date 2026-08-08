@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import date
 from pathlib import Path
 from typing import Literal
 
@@ -1313,6 +1314,30 @@ class ResolutionLensConfig(BaseModel):
     kalshi_min_liquidity: float = 50.0
 
 
+class LiveAuthorityGrant(BaseModel):
+    """Bounded, reviewable authority for one directional strategy surface."""
+
+    venues: list[str] = Field(min_length=1)
+    categories: list[str] = Field(min_length=1)
+    max_stake_usd: float = Field(gt=0)
+    granted_at: date
+    review_by: date
+    evidence_basis: str = Field(min_length=3)
+    stop_loss_usd: float = Field(gt=0)
+    review_after_settlements: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _review_follows_grant(self):
+        if self.review_by <= self.granted_at:
+            raise ValueError("live-authority review_by must follow granted_at")
+        self.venues = sorted({venue.strip().lower() for venue in self.venues if venue.strip()})
+        self.categories = sorted({category.strip() for category in self.categories
+                                  if category.strip()})
+        if not self.venues or not self.categories:
+            raise ValueError("live-authority venues and categories cannot be empty")
+        return self
+
+
 class GraduationConfig(BaseModel):
     """Graduation ladder (risk/graduation.py) — capital earned per
     (strategy × category) cell from the pnl_ledger record.
@@ -1374,6 +1399,12 @@ class GraduationConfig(BaseModel):
     # only — it never upsizes, never touches proven/probation/exempt cells, and
     # never affects exits. 0 disables.
     max_unproven_positions: int = 100
+
+    # Directional strategies never belong in exempt_strategies. A grant is
+    # matched on strategy + venue + category and expires/fails closed when its
+    # pre-registered review or loss boundary is reached.
+    live_authority: dict[str, list[LiveAuthorityGrant]] = Field(
+        default_factory=dict)
 
 
 class InformationGraduationConfig(BaseModel):
