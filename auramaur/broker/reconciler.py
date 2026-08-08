@@ -113,15 +113,17 @@ class PositionReconciler:
         for item in held:
             market_id = await self._find_market_id(
                 item.condition_id, item.title, item.slug)
-            if not market_id:
+            stub_id = item.condition_id[:16]
+            if not market_id or market_id == stub_id:
                 # Self-heal before stubbing: ingest the market from Gamma by
                 # CLOB token id. The silent condition-prefix stub fallback
                 # accumulated 154 stub market rows and left venue positions
                 # untracked (found 2026-07-21 via the venue-drift panel — a
                 # near-resolved $10 winner among them).
-                market_id = await self._ingest_market_from_gamma(item)
+                recovered_id = await self._ingest_market_from_gamma(item)
+                market_id = recovered_id or market_id
             if not market_id:
-                market_id = item.condition_id[:16]
+                market_id = stub_id
                 log.warning("reconciler.stub_market",
                             condition_id=item.condition_id[:20],
                             title=item.title[:60], asset_id=item.asset_id[:24])
