@@ -284,6 +284,8 @@ class Database:
         await self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_manager_proposals_class "
             "ON manager_proposals(thesis_class, status)")
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trades_order ON trades(order_id)")
         await self._db.commit()
 
     async def _run_migrations(self, from_version: int) -> None:
@@ -388,6 +390,23 @@ class Database:
             await self._migrate_v49_to_v50()
         if from_version < 51:
             await self._migrate_v50_to_v51()
+        if from_version < 52:
+            await self._migrate_v51_to_v52()
+
+    async def _migrate_v51_to_v52(self) -> None:
+        """Start prospective trade-to-decision lineage.
+
+        Legacy rows remain NULL deliberately: signal/source matching is not a
+        sufficiently strong identity to mint historical lineage.
+        """
+        cursor = await self._db.execute("PRAGMA table_info(trades)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        if "decision_id" not in columns:
+            await self._db.execute(
+                "ALTER TABLE trades ADD COLUMN decision_id INTEGER")
+        await self._db.execute("UPDATE schema_version SET version = 52")
+        await self._db.commit()
+        log.info("database.migrated", from_version=51, to_version=52)
 
     async def _migrate_v50_to_v51(self) -> None:
         """Persist position-scoped exit disposition and retry state."""

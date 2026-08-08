@@ -8,7 +8,7 @@ from auramaur.data_sources.aggregator import Aggregator
 from auramaur.data_sources.base import NewsItem
 from auramaur.db.database import Database
 from auramaur.db.models import SCHEMA_VERSION
-from auramaur.data_quality import audit_data_contracts
+from auramaur.data_quality import audit_data_contracts, audit_execution_contracts
 from auramaur.exchange.models import Market
 from auramaur.lineage_observer import LineageObserver
 from auramaur.nlp.analyzer import AnalysisResult
@@ -96,6 +96,84 @@ async def test_data_contract_audit_reports_stuck_ingestion():
     await db.commit()
     violations = await audit_data_contracts(db)
     assert [(v.contract, v.count) for v in violations] == [("incomplete_ingestion", 1)]
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_v52_migration_adds_trade_lineage_without_guessing_legacy_links(tmp_path):
+    db = Database(str(tmp_path / "migration.db"))
+    await db.connect()
+    try:
+        await db.execute("DROP TABLE trades")
+        await db.execute(
+            """CREATE TABLE trades (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   market_id TEXT NOT NULL,
+                   signal_id INTEGER,
+                   timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+                   side TEXT NOT NULL,
+                   size REAL NOT NULL,
+                   price REAL NOT NULL,
+                   is_paper INTEGER NOT NULL DEFAULT 1,
+                   order_id TEXT,
+                   status TEXT,
+                   strategy_source TEXT
+               )"""
+        )
+        await db.execute(
+            """INSERT INTO trades
+               (market_id,signal_id,side,size,price,order_id,status,strategy_source)
+               VALUES ('legacy',7,'BUY',1,0.5,'old','filled','llm')"""
+        )
+        await db.execute("UPDATE schema_version SET version=51")
+
+        await db._migrate_v51_to_v52()
+
+        columns = {row["name"] for row in await db.fetchall("PRAGMA table_info(trades)")}
+        legacy = await db.fetchone("SELECT decision_id FROM trades WHERE order_id='old'")
+        version = await db.fetchone("SELECT version FROM schema_version")
+        assert "decision_id" in columns
+        assert legacy["decision_id"] is None
+        assert version["version"] == 52
+        await db._migrate_v51_to_v52()
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_execution_audit_is_epoch_bounded_and_detects_new_breaks():
+    db = Database(":memory:")
+    await db.connect()
+    await db.execute(
+        """INSERT INTO trades
+           (market_id,signal_id,side,size,price,is_paper,order_id,status,strategy_source,
+            timestamp)
+           VALUES ('legacy',1,'BUY',1,0.4,1,'old','filled','llm','2026-01-01')"""
+    )
+    cursor = await db.execute(
+        """INSERT INTO decision_snapshots
+           (market_id,strategy_source,side,fair_probability,reference_price,
+            requested_size,venue,is_paper)
+           VALUES ('m1','llm','BUY',0.7,0.5,1,'polymarket',1)"""
+    )
+    await db.execute(
+        """INSERT INTO trades
+           (market_id,signal_id,decision_id,side,size,price,is_paper,order_id,
+            status,strategy_source,timestamp)
+           VALUES ('m1',2,?,'BUY',1,0.5,1,'linked','filled','llm','2026-08-08')""",
+        (cursor.lastrowid,),
+    )
+    await db.execute(
+        """INSERT INTO trades
+           (market_id,signal_id,side,size,price,is_paper,order_id,status,
+            strategy_source,timestamp)
+           VALUES ('m2',3,'BUY',1,0.5,1,'broken','filled','llm','2026-08-09')"""
+    )
+    await db.commit()
+    violations = await audit_execution_contracts(db)
+    assert [(v.contract, v.count) for v in violations] == [
+        ("governed_trade_missing_decision", 1)
+    ]
     await db.close()
 
 

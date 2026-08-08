@@ -67,3 +67,46 @@ async def audit_data_contracts(db: Database) -> list[ContractViolation]:
         if count:
             violations.append(ContractViolation(name, count, detail))
     return violations
+
+
+async def audit_execution_contracts(db: Database) -> list[ContractViolation]:
+    """Audit prospective decision-to-trade lineage only.
+
+    The first linked trade is the deployment watermark. Older trades predate
+    the contract and deliberately remain unlinked rather than receiving a
+    guessed historical decision.
+    """
+    watermark = "(SELECT MIN(timestamp) FROM trades WHERE decision_id IS NOT NULL)"
+    checks = (
+        (
+            "governed_trade_missing_decision",
+            f"""SELECT COUNT(*) n FROM trades
+                WHERE signal_id IS NOT NULL AND decision_id IS NULL
+                  AND status IN ('pending','filled','partial')
+                  AND datetime(timestamp) >= datetime({watermark})""",
+            "gateway-governed trade has no immutable decision link",
+        ),
+        (
+            "orphan_trade_decision",
+            """SELECT COUNT(*) n FROM trades t
+               LEFT JOIN decision_snapshots d ON d.id=t.decision_id
+               WHERE t.decision_id IS NOT NULL AND d.id IS NULL""",
+            "trade names a decision snapshot that does not exist",
+        ),
+        (
+            "trade_decision_mismatch",
+            """SELECT COUNT(*) n FROM trades t
+               JOIN decision_snapshots d ON d.id=t.decision_id
+               WHERE t.market_id != d.market_id
+                  OR t.is_paper != d.is_paper
+                  OR COALESCE(t.strategy_source,'') != d.strategy_source""",
+            "trade and decision disagree on market, book, or strategy",
+        ),
+    )
+    violations = []
+    for name, sql, detail in checks:
+        row = await db.fetchone(sql)
+        count = int(row["n"] if row else 0)
+        if count:
+            violations.append(ContractViolation(name, count, detail))
+    return violations

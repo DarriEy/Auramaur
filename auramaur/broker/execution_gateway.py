@@ -1115,12 +1115,14 @@ class ExecutionGateway:
                 trade_status = "filled" if result.status == "paper" else result.status
                 await self._serialized_write(
                     """INSERT INTO trades
-                       (market_id, signal_id, side, size, price, is_paper,
-                        order_id, status, kelly_fraction, exchange, strategy_source)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       (market_id, signal_id, decision_id, side, size, price,
+                        is_paper, order_id, status, kelly_fraction, exchange,
+                        strategy_source)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         order.market_id,
                         signal_id,
+                        order.decision_id,
                         order.side.value,
                         fill_size,
                         fill_price,

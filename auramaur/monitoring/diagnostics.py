@@ -324,6 +324,19 @@ async def gather_doctor(settings, db, *, max_bytes: int = 8_000_000) -> dict:
     except Exception:  # noqa: BLE001
         checks.append(_chk("P&L attribution", "warn", "could not reconcile ledger"))
 
+    try:
+        from auramaur.data_quality import audit_execution_contracts
+        violations = await audit_execution_contracts(db)
+        detail = (", ".join(f"{v.contract}={v.count}" for v in violations)
+                  if violations else "decision → trade lineage intact")
+        checks.append(_chk(
+            "execution lineage", "warn" if violations else "ok", detail))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("doctor.execution_lineage_audit_failed", error=str(exc))
+        checks.append(_chk(
+            "execution lineage", "warn", "could not audit lineage"))
+
+
     verdict = max((c["status"] for c in checks), key=lambda s: _STATUS_RANK.get(s, 0))
     return {"checks": checks, "verdict": verdict, "now": now}
 
