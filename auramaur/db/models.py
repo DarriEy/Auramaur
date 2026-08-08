@@ -1,6 +1,6 @@
 """SQLite table schemas as SQL strings."""
 
-SCHEMA_VERSION = 51
+SCHEMA_VERSION = 52
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS trades (
     market_id TEXT NOT NULL,
     exchange TEXT DEFAULT 'polymarket',
     signal_id INTEGER,
+    decision_id INTEGER,
     timestamp TEXT NOT NULL DEFAULT (datetime('now')),
     side TEXT NOT NULL,
     size REAL NOT NULL,
@@ -96,7 +97,8 @@ CREATE TABLE IF NOT EXISTS trades (
     risk_checks_passed TEXT,
     strategy_source TEXT DEFAULT 'llm',
     FOREIGN KEY (market_id) REFERENCES markets(id),
-    FOREIGN KEY (signal_id) REFERENCES signals(id)
+    FOREIGN KEY (signal_id) REFERENCES signals(id),
+    FOREIGN KEY (decision_id) REFERENCES decision_snapshots(id)
 );
 
 CREATE TABLE IF NOT EXISTS portfolio (
@@ -322,6 +324,7 @@ CREATE TABLE IF NOT EXISTS price_history (
 CREATE TABLE IF NOT EXISTS fills (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     order_id TEXT NOT NULL,
+    decision_id INTEGER,
     market_id TEXT NOT NULL,
     token_id TEXT DEFAULT '',
     side TEXT NOT NULL,
@@ -330,7 +333,8 @@ CREATE TABLE IF NOT EXISTS fills (
     price REAL NOT NULL,
     fee REAL DEFAULT 0,
     is_paper INTEGER NOT NULL DEFAULT 1,
-    timestamp TEXT NOT NULL DEFAULT (datetime('now'))
+    timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (decision_id) REFERENCES decision_snapshots(id)
 );
 
 CREATE TABLE IF NOT EXISTS cost_basis (

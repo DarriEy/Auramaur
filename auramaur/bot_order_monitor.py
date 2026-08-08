@@ -62,6 +62,7 @@ class OrderMonitorMixin:
                 if tracker is not None:
                     await tracker.record_fill(Fill(
                         market_id=order.market_id, token=order.token.value,
+                        decision_id=order.decision_id,
                         token_id=order.token_id, side=order.side,
                         size=result.filled_size, price=result.filled_price,
                         fee=0.0, is_paper=True, order_id=result.order_id))
@@ -182,6 +183,7 @@ class OrderMonitorMixin:
                                     try:
                                         fill = Fill(
                                             order_id=order_id,
+                                            decision_id=order.decision_id,
                                             market_id=order.market_id,
                                             token_id=order.token_id,
                                             side=order.side,

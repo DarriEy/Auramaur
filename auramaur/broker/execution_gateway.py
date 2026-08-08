@@ -879,6 +879,7 @@ class ExecutionGateway:
         """Place a built order, then log slippage, record the fill, and mirror
         to ``trades``. Shared by the single-leg, paired, and exit paths.
         """
+        order.decision_id = decision_id
         result = await exchange.place_order(order)
         show_order(result.status, result.order_id, order.side.value, order.size, order.price, result.is_paper, exchange=exchange_name, error_message=result.error_message, market_id=order.market_id)
         if decision_id is not None and booked_as_position(result):
@@ -901,7 +902,8 @@ class ExecutionGateway:
                 evidence=evidence)
         return await self._record_result(
             order, result, strategy_source=strategy_source,
-            signal_id=signal_id, exchange_name=exchange_name)
+            signal_id=signal_id, exchange_name=exchange_name,
+            decision_id=decision_id)
 
     async def record_external_fill(
         self, order: Order, result: OrderResult, *,
@@ -1024,6 +1026,7 @@ class ExecutionGateway:
     async def _record_result(
         self, order: Order, result: OrderResult, *,
         strategy_source: str, signal_id, exchange_name: str,
+        decision_id: int | None = None,
     ) -> ExecutionResult:
         """Post-placement recording shared by _place_and_record (single-leg /
         paired / exit) and record_external_fill (the concurrently-placed arb
@@ -1067,6 +1070,7 @@ class ExecutionGateway:
         if booked_as_position(result):
             fill = Fill(
                 order_id=result.order_id,
+                decision_id=decision_id,
                 market_id=order.market_id,
                 token_id=order.token_id,
                 side=order.side,
@@ -1115,12 +1119,13 @@ class ExecutionGateway:
                 trade_status = "filled" if result.status == "paper" else result.status
                 await self._serialized_write(
                     """INSERT INTO trades
-                       (market_id, signal_id, side, size, price, is_paper,
-                        order_id, status, kelly_fraction, exchange, strategy_source)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       (market_id, signal_id, decision_id, side, size, price,
+                        is_paper, order_id, status, kelly_fraction, exchange, strategy_source)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         order.market_id,
                         signal_id,
+                        decision_id,
                         order.side.value,
                         fill_size,
                         fill_price,
