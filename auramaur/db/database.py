@@ -18,6 +18,7 @@ log = structlog.get_logger()
 class Database:
     def __init__(self, db_path: str | None = None):
         self.db_path = str(runtime_db_path()) if db_path is None else db_path
+        self._read_db: aiosqlite.Connection | None = None
         self._db: aiosqlite.Connection | None = None
         self._txn_lock = asyncio.Lock()
         self._txn_task: asyncio.Task | None = None
@@ -86,6 +87,15 @@ class Database:
         await self._db.execute("PRAGMA synchronous=NORMAL")
         if ensure_schema or not await self._schema_is_current():
             await self._init_schema()
+        if self.db_path != ":memory:":
+            # WAL permits readers on a companion connection while the single
+            # writer is active. Keeping SELECTs off _txn_lock prevents long
+            # diagnostics/strategy reads from head-of-line blocking execution.
+            self._read_db = await aiosqlite.connect(
+                self.db_path, isolation_level=None)
+            self._read_db.row_factory = aiosqlite.Row
+            await self._read_db.execute("PRAGMA query_only=ON")
+            await self._read_db.execute("PRAGMA busy_timeout=30000")
         log.info("database.connected", path=self.db_path)
 
     async def _schema_is_current(self) -> bool:
@@ -257,9 +267,12 @@ class Database:
                         task=asyncio.current_task().get_name(),
                     )
     async def close(self) -> None:
-        if self._db is None:
+        if self._db is None and self._read_db is None:
             return
         self._closing = True
+        if self._read_db is not None:
+            await self._read_db.close()
+            self._read_db = None
         async with self._serialized_slot():
             if self._db is not None:
                 await self._db.close()
@@ -1598,6 +1611,9 @@ class Database:
         if self._txn_task is asyncio.current_task():
             cursor = await self.db.execute(sql, params)
             return await cursor.fetchone()
+        if self._read_db is not None:
+            cursor = await self._read_db.execute(sql, params)
+            return await cursor.fetchone()
         async with self._serialized_slot():
             cursor = await self.db.execute(sql, params)
             return await cursor.fetchone()
@@ -1605,6 +1621,9 @@ class Database:
     async def fetchall(self, sql: str, params: tuple = ()) -> list[aiosqlite.Row]:
         if self._txn_task is asyncio.current_task():
             cursor = await self.db.execute(sql, params)
+            return await cursor.fetchall()
+        if self._read_db is not None:
+            cursor = await self._read_db.execute(sql, params)
             return await cursor.fetchall()
         async with self._serialized_slot():
             cursor = await self.db.execute(sql, params)

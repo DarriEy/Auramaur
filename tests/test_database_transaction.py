@@ -312,8 +312,8 @@ async def test_legacy_write_survives_concurrent_adopter_rollback(tmp_path):
     assert [row["k"] for row in rows] == ["legacy"]
     await db.close()
 @pytest.mark.asyncio
-async def test_read_waits_out_other_tasks_uncommitted_transaction(tmp_path):
-    """Other tasks cannot observe an adopter's uncommitted rows."""
+async def test_wal_read_sees_committed_snapshot_not_uncommitted_rows(tmp_path):
+    """Other tasks read immediately but cannot observe uncommitted rows."""
     db = await _fresh_db(tmp_path)
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -335,10 +335,12 @@ async def test_read_waits_out_other_tasks_uncommitted_transaction(tmp_path):
     reader_task = asyncio.create_task(reader())
     await entered.wait()
     await asyncio.sleep(0.02)
-    assert not read_finished.is_set()
+    assert read_finished.is_set()
+    row = await reader_task
+    assert row is None
     release.set()
     await adopter_task
-    row = await reader_task
+    row = await db.fetchone("SELECT v FROM t WHERE k='private'")
     assert row["v"] == 1
     await db.close()
 @pytest.mark.asyncio
@@ -371,7 +373,7 @@ async def test_cancelled_waiters_do_not_leak_waiter_count(tmp_path):
         asyncio.create_task(db.fetchone("SELECT 1")),
     ]
     await asyncio.sleep(0.02)
-    assert db._write_waiters == 2
+    assert db._write_waiters == 1  # SELECT uses the independent WAL read lane
     for task in waiters:
         task.cancel()
     await asyncio.gather(*waiters, return_exceptions=True)
