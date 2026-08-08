@@ -73,7 +73,7 @@ class BlueskySource:
                 raise BlueskyFetchError("createSession returned no accessJwt")
 
     async def _search(self, session: aiohttp.ClientSession, params: dict,
-                      *, retried: bool = False) -> dict:
+                      *, retried: bool = False, relaxed: bool = False) -> dict:
         if self._authed:
             if not self._jwt:
                 await self._create_session(session)
@@ -86,9 +86,18 @@ class BlueskySource:
             if resp.status in (401, 403) and self._authed and not retried:
                 # Expired/invalidated token: recreate the session once.
                 self._jwt = ""
-                return await self._search(session, params, retried=True)
+                return await self._search(
+                    session, params, retried=True, relaxed=relaxed)
+            if resp.status == 400 and not relaxed and "since" in params:
+                # Some AppView deployments reject the optional freshness
+                # cursor. Keep search available by retrying once with only the
+                # core, universally supported query parameters.
+                return await self._search(
+                    session, {k: v for k, v in params.items() if k != "since"},
+                    retried=retried, relaxed=True)
             if resp.status != 200:
-                raise BlueskyFetchError(f"search returned {resp.status}")
+                detail = (await resp.text())[:160]
+                raise BlueskyFetchError(f"search returned {resp.status}: {detail}")
             return await resp.json()
 
     async def fetch(self, query: str, limit: int = 20) -> list[NewsItem]:

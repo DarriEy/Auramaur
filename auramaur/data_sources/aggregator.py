@@ -35,11 +35,17 @@ class Aggregator:
     def __init__(self, sources: list[DataSource],
                  observer: LineageObserver | None = None,
                  source_timeout_seconds: float = 20.0,
-                 cache_ttl_seconds: float = 60.0) -> None:
+                 cache_ttl_seconds: float = 60.0,
+                 circuit_failure_threshold: int = 3,
+                 circuit_cooldown_seconds: float = 300.0) -> None:
         self._sources = sources
         self.observer = observer
         self._source_timeout_seconds = source_timeout_seconds
         self._cache_ttl_seconds = max(0.0, cache_ttl_seconds)
+        self._circuit_failure_threshold = max(1, circuit_failure_threshold)
+        self._circuit_cooldown_seconds = max(0.0, circuit_cooldown_seconds)
+        # source -> (consecutive failures, monotonic open-until timestamp)
+        self._source_circuits: dict[str, tuple[int, float]] = {}
         self._cache: dict[tuple[str, int, str | None], tuple[float, list[NewsItem]]] = {}
 
     @staticmethod
@@ -102,9 +108,21 @@ class Aggregator:
         async def _safe_fetch(source: DataSource) -> list[NewsItem]:
             source_name = getattr(source, "source_name", str(source))
             before = time.monotonic()
+            failures, open_until = self._source_circuits.get(source_name, (0, 0.0))
+            if open_until > before:
+                fetch_rows.append((
+                    run_id, source_name, "circuit_open", 0, 0,
+                    f"retry in {round(open_until - before, 1)}s",
+                    datetime.now(tz=timezone.utc).isoformat(),
+                    getattr(source, "information_mode", "production"),
+                ))
+                logger.warning("aggregator_source_circuit_open", source=source_name,
+                               retry_seconds=round(open_until - before, 1))
+                return []
             try:
                 async with asyncio.timeout(self._source_timeout_seconds):
                     items = await source.fetch(query, limit=limit_per_source)
+                self._source_circuits.pop(source_name, None)
                 mode = getattr(source, "information_mode", "production")
                 for item in items:
                     item.information_mode = mode
@@ -126,6 +144,10 @@ class Aggregator:
                                    getattr(source, "information_mode", "production")))
                 logger.warning("aggregator_source_timeout", source=source_name,
                                timeout_seconds=self._source_timeout_seconds)
+                failures += 1
+                open_until = (time.monotonic() + self._circuit_cooldown_seconds
+                              if failures >= self._circuit_failure_threshold else 0.0)
+                self._source_circuits[source_name] = (failures, open_until)
                 return []
             except Exception as exc:
                 fetch_rows.append((run_id, source_name, "error", 0,
@@ -137,6 +159,10 @@ class Aggregator:
                     "aggregator_source_failed",
                     source=source_name,
                 )
+                failures += 1
+                open_until = (time.monotonic() + self._circuit_cooldown_seconds
+                              if failures >= self._circuit_failure_threshold else 0.0)
+                self._source_circuits[source_name] = (failures, open_until)
                 return []
 
         active_sources = [s for s in self._sources if self._source_matches_category(s, category)]
