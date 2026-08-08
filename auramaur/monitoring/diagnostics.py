@@ -15,10 +15,13 @@ import os
 from collections import Counter
 from datetime import datetime, timezone
 
+import structlog
 from rich.console import Group
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+
+log = structlog.get_logger()
 
 # Log levels treated as problems worth surfacing.
 _PROBLEM_LEVELS = ("warning", "error", "critical")
