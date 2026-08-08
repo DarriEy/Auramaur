@@ -192,8 +192,8 @@ class ExecutionConfig(BaseModel):
     trailing_stop_activation_pct: float = Field(default=12.0, ge=0)
     trailing_stop_giveback_fraction: float = Field(default=0.45, ge=0, le=1)
     # HOLD observations power offline counterfactual replay. Sample them rather
-    # than writing every portfolio tick; terminal exits are never sampled away.
-    # Thirty hourly days are smaller than three unsampled days.
+    # than writing every portfolio tick; each active inventory cohort emits at
+    # most one terminal row even when an exit remains stuck.
     exit_hold_sample_seconds: int = Field(default=3600, ge=60, le=86400)
     exit_decision_retention_days: int = Field(default=30, ge=1, le=365)
     edge_erosion_min_pct: float = 2.0
