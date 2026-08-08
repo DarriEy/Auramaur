@@ -324,7 +324,6 @@ CREATE TABLE IF NOT EXISTS price_history (
 CREATE TABLE IF NOT EXISTS fills (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     order_id TEXT NOT NULL,
-    decision_id INTEGER,
     market_id TEXT NOT NULL,
     token_id TEXT DEFAULT '',
     side TEXT NOT NULL,
@@ -333,8 +332,7 @@ CREATE TABLE IF NOT EXISTS fills (
     price REAL NOT NULL,
     fee REAL DEFAULT 0,
     is_paper INTEGER NOT NULL DEFAULT 1,
-    timestamp TEXT NOT NULL DEFAULT (datetime('now')),
-    FOREIGN KEY (decision_id) REFERENCES decision_snapshots(id)
+    timestamp TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS cost_basis (

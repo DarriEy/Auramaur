@@ -80,11 +80,10 @@ class PnLTracker:
         # 1. Persist the fill
         cursor = await self._db.execute(
             """INSERT INTO fills
-               (order_id, decision_id, market_id, token_id, side, token, size, price, fee, is_paper, timestamp)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (order_id, market_id, token_id, side, token, size, price, fee, is_paper, timestamp)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 fill.order_id,
-                fill.decision_id,
                 fill.market_id,
                 fill.token_id,
                 fill.side.value,

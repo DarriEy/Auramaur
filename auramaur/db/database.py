@@ -285,9 +285,7 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_manager_proposals_class "
             "ON manager_proposals(thesis_class, status)")
         await self._db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_trades_decision ON trades(decision_id)")
-        await self._db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_fills_decision ON fills(decision_id)")
+            "CREATE INDEX IF NOT EXISTS idx_trades_order ON trades(order_id)")
         await self._db.commit()
 
     async def _run_migrations(self, from_version: int) -> None:
@@ -396,32 +394,17 @@ class Database:
             await self._migrate_v51_to_v52()
 
     async def _migrate_v51_to_v52(self) -> None:
-        """Persist decision lineage through trades and fills."""
-        for table in ("trades", "fills"):
-            cursor = await self._db.execute(f"PRAGMA table_info({table})")
-            columns = {row[1] for row in await cursor.fetchall()}
-            if "decision_id" not in columns:
-                await self._db.execute(
-                    f"ALTER TABLE {table} ADD COLUMN decision_id INTEGER")
-        await self._db.executescript("""
-            UPDATE trades
-               SET decision_id=(
-                   SELECT d.id FROM decision_snapshots d
-                    WHERE d.signal_id=trades.signal_id
-                      AND d.strategy_source=trades.strategy_source
-                    LIMIT 1)
-             WHERE signal_id IS NOT NULL AND decision_id IS NULL;
-            UPDATE fills
-               SET decision_id=(
-                   SELECT t.decision_id FROM trades t
-                    WHERE t.order_id=fills.order_id
-                      AND t.market_id=fills.market_id
-                      AND t.is_paper=fills.is_paper
-                      AND t.decision_id IS NOT NULL
-                    ORDER BY t.id DESC LIMIT 1)
-             WHERE decision_id IS NULL;
-            UPDATE schema_version SET version = 52;
-        """)
+        """Start prospective trade-to-decision lineage.
+
+        Legacy rows remain NULL deliberately: signal/source matching is not a
+        sufficiently strong identity to mint historical lineage.
+        """
+        cursor = await self._db.execute("PRAGMA table_info(trades)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        if "decision_id" not in columns:
+            await self._db.execute(
+                "ALTER TABLE trades ADD COLUMN decision_id INTEGER")
+        await self._db.execute("UPDATE schema_version SET version = 52")
         await self._db.commit()
         log.info("database.migrated", from_version=51, to_version=52)
 
