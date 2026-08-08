@@ -37,13 +37,10 @@ execution:
   # Set either to 0 to disable the trailing tier entirely.
   trailing_stop_activation_pct: 12.0
   trailing_stop_giveback_fraction: 0.45
-  # 2026-08-06: 14 -> 3. One row per open position per tick outgrows
-  # candidate_dispositions (the table this was modelled on) ~5.6x and carries
-  # two indexes; 14 days costs roughly the size of the whole trading DB for
-  # rows nothing reads. calibrate_exit_policy.py filters HOLD out and gates on
-  # non-HOLD counts, so this does not affect it. Raise only with a consumer
-  # that actually reads HOLD rows.
-  exit_decision_retention_days: 3
+  # Hourly HOLD samples + every terminal exit; 30 days supports holdout replay
+  # at roughly one-sixth the rows of three days at the 60-second tick rate.
+  exit_hold_sample_seconds: 3600
+  exit_decision_retention_days: 30
   edge_erosion_min_pct: 2.0
   time_decay_hours: 12.0
   # Free capital from near-certain winners far from resolution (sell early to

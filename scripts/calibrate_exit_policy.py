@@ -1,4 +1,4 @@
-"""Chronological exit-policy audit; never mutates config or the database.
+"""Paired chronological exit-policy calibration; never mutates anything.
 
 Usage: python scripts/calibrate_exit_policy.py auramaur.db
 """
@@ -7,62 +7,84 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
-from collections import defaultdict
 from pathlib import Path
+
+from auramaur.risk.exit_calibration import (
+    ExitCandidate, calibrate, completed_episodes, observation,
+)
 
 
 MIN_TRAIN_EXITS = 30
 MIN_TEST_EXITS = 15
 
 
-def load(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    return conn.execute("""
-        SELECT d.observed_at, d.exchange, d.policy_action, d.net_pnl_pct,
-               d.peak_pnl_pct, d.target_pct, d.market_id, d.token, d.is_paper,
-               COALESCE((SELECT SUM(l.pnl) FROM pnl_ledger l
-                         WHERE l.market_id=d.market_id AND l.token=d.token
-                           AND l.is_paper=d.is_paper
-                           AND l.realized_at >= d.observed_at), 0) AS realized_pnl
-          FROM exit_decisions d
-         WHERE d.policy_action <> 'HOLD'
-         ORDER BY d.observed_at, d.id
-    """).fetchall()
+def load(
+    conn: sqlite3.Connection, *, exchange: str, is_paper: bool,
+) -> list[sqlite3.Row]:
+    return conn.execute(
+        """SELECT observed_at, exchange, policy_action, gross_pnl_pct,
+                  net_pnl_pct, peak_pnl_pct, target_pct, market_id, token,
+                  is_paper, entry_price, size
+             FROM exit_decisions
+            WHERE exchange=? AND is_paper=?
+            ORDER BY observed_at, id""",
+        (exchange, int(is_paper)),
+    ).fetchall()
 
 
-def summarize(label: str, rows: list[sqlite3.Row]) -> None:
-    groups: dict[tuple[str, str], list[sqlite3.Row]] = defaultdict(list)
-    for row in rows:
-        groups[(row["exchange"], row["policy_action"])].append(row)
-    print(f"\n{label}: {len(rows)} exits")
-    for (venue, reason), values in sorted(groups.items()):
-        pnl = sum(float(v["realized_pnl"]) for v in values)
-        net = sum(float(v["net_pnl_pct"]) for v in values) / len(values)
-        print(f"  {venue or 'unknown':14} {reason:16} n={len(values):4} "
-              f"mean_net_at_decision={net:+7.2f}% realized=${pnl:+9.2f}")
+def candidates() -> list[ExitCandidate]:
+    return [
+        ExitCandidate("bank_earlier", 0.75),
+        ExitCandidate("bank_fast", 0.50),
+    ]
+
+
+def print_scores(label, scores) -> None:
+    print(f"\n{label}")
+    for score in scores:
+        lcb = ("-inf" if score.delta_lcb95_usd == float("-inf")
+               else f"${score.delta_lcb95_usd:+.3f}")
+        print(f"  {score.candidate.name:14} n={score.n:4} "
+              f"mean=${score.mean_usd:+8.3f} total=${score.total_usd:+9.2f} "
+              f"paired_delta=${score.mean_delta_usd:+7.3f} LCB95={lcb}")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("database", type=Path)
+    parser.add_argument(
+        "--exchange", required=True, choices=("polymarket", "kalshi"))
+    parser.add_argument(
+        "--book", choices=("live", "paper"), default="live")
     args = parser.parse_args()
     uri = f"file:{args.database.resolve().as_posix()}?mode=ro"
     with sqlite3.connect(uri, uri=True) as conn:
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=5000")
         try:
-            rows = load(conn)
+            rows = load(
+                conn, exchange=args.exchange, is_paper=args.book == "paper")
         except sqlite3.OperationalError as exc:
             print(f"No exit telemetry yet: {exc}")
             return 2
-    cut = int(len(rows) * 0.7)
-    train, test = rows[:cut], rows[cut:]
-    summarize("TRAIN (oldest 70%)", train)
-    summarize("HOLDOUT (newest 30%)", test)
-    if len(train) < MIN_TRAIN_EXITS or len(test) < MIN_TEST_EXITS:
-        print("\nNO RECOMMENDATION: insufficient chronological evidence "
-              f"(need {MIN_TRAIN_EXITS} train and {MIN_TEST_EXITS} holdout exits).")
+    episodes = completed_episodes(observation(row) for row in rows)
+    report = calibrate(
+        episodes, candidates(),
+        min_train=MIN_TRAIN_EXITS, min_holdout=MIN_TEST_EXITS)
+    print(f"Completed {args.exchange}/{args.book} episodes: {report.episodes} "
+          f"(train={report.train_n}, holdout={report.holdout_n}); "
+          "open/right-censored episodes are excluded.")
+    print_scores("TRAIN (oldest 70%; candidate selected here)",
+                 report.train_scores)
+    if report.holdout_score is not None:
+        print_scores("HOLDOUT (newest 30%; winner scored once)",
+                     (report.holdout_score,))
+    if report.recommendation is None:
+        print(f"\nNO RECOMMENDATION: {report.reason}.")
         return 2
-    print("\nEvidence threshold met. Compare policy candidates in TRAIN, then accept "
-          "only candidates whose direction and net result persist in HOLDOUT.")
+    print(f"\nREVIEW CANDIDATE: {report.recommendation}")
+    print("Evidence only: configuration was NOT changed. Convert target_scale "
+          "into the lifecycle target settings and review manually.")
     return 0
 
 

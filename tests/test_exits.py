@@ -250,7 +250,7 @@ async def test_decision_telemetry_costs_one_write_per_cycle(mock_db, settings):
     assert mock_db.executemany.await_count == 1
     rows = mock_db.executemany.await_args.args[1]
     assert len(rows) == 12, "one observation per evaluated position"
-    assert {row[4] for row in rows} == {"HOLD"}
+    assert {row[4] for row in rows} == {"EPISODE_START"}
 
 
 @pytest.mark.asyncio

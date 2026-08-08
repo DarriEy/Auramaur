@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from datetime import datetime, timezone
+from time import monotonic
 
 import structlog
 
@@ -23,7 +24,7 @@ log = structlog.get_logger()
 # settings object cannot supply a usable value (tests, degraded config).
 # Keep in lockstep with that field — a degraded config must not silently
 # retain longer than the tracked default (test_exit_policy pins the pair).
-_DEFAULT_RETENTION_DAYS = 3
+_DEFAULT_RETENTION_DAYS = 30
 
 
 class PortfolioTracker:
@@ -34,6 +35,8 @@ class PortfolioTracker:
         self.db = db
         self.settings = settings
         self._equity_window: deque[float] = deque(maxlen=self._PEAK_CONFIRM_TICKS)
+        self._exit_hold_samples: dict[tuple[str, str, int], float] = {}
+        self._exit_terminal_samples: set[tuple] = set()
 
     def _mode_flag(self, is_paper: bool | None = None) -> int | None:
         """Return the paper/live DB flag, or None for legacy unscoped reads."""
@@ -446,6 +449,20 @@ class PortfolioTracker:
         positions = await self.get_positions(exchange=exchange, is_paper=is_paper)
         exits: list[tuple[Position, ExitReason]] = []
         mode_flag = self._mode_flag(is_paper)
+        # Forget sampling state only after a position disappears. A decided but
+        # stuck exit remains active and must not emit another terminal row.
+        active_sample_keys = {self._hold_sample_key(pos, mode_flag)
+                              for pos in positions}
+        self._exit_hold_samples = {
+            key: stamp for key, stamp in self._exit_hold_samples.items()
+            if (exchange is not None and key[0] != exchange)
+            or key in active_sample_keys
+        }
+        self._exit_terminal_samples = {
+            key for key in self._exit_terminal_samples
+            if (exchange is not None and key[0] != exchange)
+            or key in active_sample_keys
+        }
 
         # Load peak prices for trailing stop calculation
         peak_prices = await self._get_peak_prices()
@@ -538,8 +555,37 @@ class PortfolioTracker:
             if stored_peak is None or pnl_pct > stored_peak:
                 await self._update_peak_price(peak_key, pnl_pct)
 
+            binary_venue = exchange in (
+                None, "polymarket", "kalshi", "cryptodotcom")
+            net_pnl_pct = pnl_pct
+            estimated_fees = 0.0
+            if binary_venue:
+                actual_fee_rate = getattr(market, "fee_rate", None)
+                if not isinstance(actual_fee_rate, (int, float)):
+                    actual_fee_rate = None
+                fees_enabled = getattr(market, "fees_enabled", None)
+                if not isinstance(fees_enabled, bool):
+                    fees_enabled = None
+                fee_coefficient = taker_fee_rate(
+                    exchange or pos.exchange, pos.category,
+                    settings.arbitrage.exchange_fees,
+                    actual_fee_rate=actual_fee_rate,
+                    fees_enabled=fees_enabled,
+                )
+                economics = binary_exit_economics(
+                    entry_price=pos.avg_price, exit_price=pos.current_price,
+                    size=pos.size, fee_coefficient=fee_coefficient,
+                    is_long=pos.side == OrderSide.BUY,
+                )
+                net_pnl_pct = economics.net_pnl_pct
+                estimated_fees = economics.estimated_fees
+
+
             # 1. Stop-loss — hard floor
             if pnl_pct <= -settings.execution.stop_loss_pct:
+                self._record_terminal_once(
+                    decisions, pos, mode_flag, ExitReason.STOP_LOSS.value,
+                    pnl_pct, net_pnl_pct, peak_pnl_pct, None, estimated_fees)
                 exits.append((pos, ExitReason.STOP_LOSS))
                 continue
 
@@ -551,9 +597,9 @@ class PortfolioTracker:
                 activation_pct=settings.execution.trailing_stop_activation_pct,
                 giveback_fraction=settings.execution.trailing_stop_giveback_fraction,
             ):
-                decisions.append(self._exit_decision_row(
-                    pos, mode_flag, ExitReason.TRAILING_STOP.value,
-                    pnl_pct, pnl_pct, peak_pnl_pct, None, 0.0))
+                self._record_terminal_once(
+                    decisions, pos, mode_flag, ExitReason.TRAILING_STOP.value,
+                    pnl_pct, net_pnl_pct, peak_pnl_pct, None, estimated_fees)
                 log.info(
                     "exit.trailing_stop",
                     market_id=pos.market_id,
@@ -593,35 +639,11 @@ class PortfolioTracker:
                 late_fraction=settings.execution.profit_target_late_fraction_remaining,
             )
 
-            binary_venue = exchange in (None, "polymarket", "kalshi", "cryptodotcom")
-            net_pnl_pct = pnl_pct
-            estimated_fees = 0.0
-            if binary_venue:
-                actual_fee_rate = getattr(market, "fee_rate", None)
-                if not isinstance(actual_fee_rate, (int, float)):
-                    actual_fee_rate = None
-                fees_enabled = getattr(market, "fees_enabled", None)
-                if not isinstance(fees_enabled, bool):
-                    fees_enabled = None
-                fee_coefficient = taker_fee_rate(
-                    exchange or pos.exchange, pos.category,
-                    settings.arbitrage.exchange_fees,
-                    actual_fee_rate=actual_fee_rate,
-                    fees_enabled=fees_enabled,
-                )
-                economics = binary_exit_economics(
-                    entry_price=pos.avg_price, exit_price=pos.current_price,
-                    size=pos.size, fee_coefficient=fee_coefficient,
-                    is_long=pos.side == OrderSide.BUY,
-                )
-                net_pnl_pct = economics.net_pnl_pct
-                estimated_fees = economics.estimated_fees
-
             if net_pnl_pct >= profit_target:
-                decisions.append(self._exit_decision_row(
-                    pos, mode_flag, ExitReason.PROFIT_TARGET.value,
+                self._record_terminal_once(
+                    decisions, pos, mode_flag, ExitReason.PROFIT_TARGET.value,
                     pnl_pct, net_pnl_pct, peak_pnl_pct, profit_target,
-                    estimated_fees))
+                    estimated_fees)
                 log.info("exit.profit_target", market_id=pos.market_id,
                          gross_pnl_pct=round(pnl_pct, 2),
                          net_pnl_pct=round(net_pnl_pct, 2),
@@ -630,9 +652,19 @@ class PortfolioTracker:
                 exits.append((pos, ExitReason.PROFIT_TARGET))
                 continue
 
-            decisions.append(self._exit_decision_row(
-                pos, mode_flag, "HOLD", pnl_pct, net_pnl_pct, peak_pnl_pct,
-                profit_target, estimated_fees))
+            sample_seconds = getattr(
+                settings.execution, "exit_hold_sample_seconds", 3600)
+            if (not isinstance(sample_seconds, int)
+                    or isinstance(sample_seconds, bool) or sample_seconds < 60):
+                sample_seconds = 3600
+            sample_key = self._hold_sample_key(pos, mode_flag)
+            sample_action = (
+                "EPISODE_START" if sample_key not in self._exit_hold_samples
+                else "HOLD")
+            if self._should_sample_hold(pos, mode_flag, sample_seconds):
+                decisions.append(self._exit_decision_row(
+                    pos, mode_flag, sample_action, pnl_pct, net_pnl_pct,
+                    peak_pnl_pct, profit_target, estimated_fees))
 
             # Edge-erosion / capital-efficiency / time-decay assume binary 0-1
             # resolution semantics (price converges to $0 or $1). They're
@@ -652,6 +684,10 @@ class PortfolioTracker:
 
                 # Exit if remaining upside is tiny (near resolution boundary)
                 if remaining_upside < settings.execution.edge_erosion_min_pct:
+                    self._record_terminal_once(
+                        decisions, pos, mode_flag, ExitReason.EDGE_EROSION.value,
+                        pnl_pct, net_pnl_pct, peak_pnl_pct, profit_target,
+                        estimated_fees)
                     exits.append((pos, ExitReason.EDGE_EROSION))
                     continue
 
@@ -674,6 +710,11 @@ class PortfolioTracker:
                             remaining_upside_pct=round(remaining_upside, 2),
                             hours_left=round(hours_left, 1),
                         )
+                        self._record_terminal_once(
+                            decisions, pos, mode_flag,
+                            ExitReason.CAPITAL_EFFICIENCY.value, pnl_pct,
+                            net_pnl_pct, peak_pnl_pct, profit_target,
+                            estimated_fees)
                         exits.append((pos, ExitReason.CAPITAL_EFFICIENCY))
                         continue
 
@@ -683,6 +724,10 @@ class PortfolioTracker:
                     hours_left = (end - datetime.now(timezone.utc)).total_seconds() / 3600.0
                     if hours_left <= settings.execution.time_decay_hours and remaining_upside < 5.0:
                         exits.append((pos, ExitReason.TIME_DECAY))
+                        self._record_terminal_once(
+                            decisions, pos, mode_flag, ExitReason.TIME_DECAY.value,
+                            pnl_pct, net_pnl_pct, peak_pnl_pct, profit_target,
+                            estimated_fees)
                         continue
 
             # 6. Dust cleanup (lowest priority — real exit reasons win first).
@@ -708,6 +753,10 @@ class PortfolioTracker:
                         size=pos.size,
                     )
                     exits.append((pos, ExitReason.DUST_CLEANUP))
+                    self._record_terminal_once(
+                        decisions, pos, mode_flag, ExitReason.DUST_CLEANUP.value,
+                        pnl_pct, net_pnl_pct, peak_pnl_pct, profit_target,
+                        estimated_fees)
                     continue
 
         if unmarkable:
@@ -731,6 +780,38 @@ class PortfolioTracker:
     def _as_utc(value: str) -> datetime:
         parsed = datetime.fromisoformat(value)
         return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+    def _hold_sample_key(self, pos, mode_flag: int | None) -> tuple:
+        mode = self._position_mode(pos, mode_flag)
+        return (
+            pos.exchange, pos.market_id, getattr(pos.token, "value", pos.token),
+            -1 if mode is None else mode, float(pos.avg_price), float(pos.size),
+        )
+
+    def _should_sample_hold(
+        self, pos, mode_flag: int | None, interval_seconds: int,
+    ) -> bool:
+        """Keep the first HOLD and at most one per interval per inventory cohort."""
+        key = self._hold_sample_key(pos, mode_flag)
+        now = monotonic()
+        previous = self._exit_hold_samples.get(key)
+        if previous is not None and now - previous < interval_seconds:
+            return False
+        self._exit_hold_samples[key] = now
+        return True
+
+    def _record_terminal_once(
+        self, decisions: list[tuple], pos, mode_flag: int | None,
+        reason: str, gross_pct: float, net_pct: float, peak_pct: float,
+        target_pct: float | None, estimated_fees: float,
+    ) -> None:
+        key = self._hold_sample_key(pos, mode_flag)
+        if key in self._exit_terminal_samples:
+            return
+        self._exit_terminal_samples.add(key)
+        decisions.append(self._exit_decision_row(
+            pos, mode_flag, reason, gross_pct, net_pct, peak_pct,
+            target_pct, estimated_fees))
 
     _EXIT_DECISION_INSERT = """INSERT INTO exit_decisions
         (market_id, exchange, token, is_paper, policy_action,
