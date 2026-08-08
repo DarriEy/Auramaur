@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from datetime import datetime, timezone
+from time import monotonic
 
 import structlog
 
@@ -23,7 +24,7 @@ log = structlog.get_logger()
 # settings object cannot supply a usable value (tests, degraded config).
 # Keep in lockstep with that field — a degraded config must not silently
 # retain longer than the tracked default (test_exit_policy pins the pair).
-_DEFAULT_RETENTION_DAYS = 3
+_DEFAULT_RETENTION_DAYS = 30
 
 
 class PortfolioTracker:
@@ -34,6 +35,7 @@ class PortfolioTracker:
         self.db = db
         self.settings = settings
         self._equity_window: deque[float] = deque(maxlen=self._PEAK_CONFIRM_TICKS)
+        self._exit_hold_samples: dict[tuple[str, str, int], float] = {}
 
     def _mode_flag(self, is_paper: bool | None = None) -> int | None:
         """Return the paper/live DB flag, or None for legacy unscoped reads."""
@@ -551,6 +553,7 @@ class PortfolioTracker:
                 activation_pct=settings.execution.trailing_stop_activation_pct,
                 giveback_fraction=settings.execution.trailing_stop_giveback_fraction,
             ):
+                self._forget_hold_sample(pos, mode_flag)
                 decisions.append(self._exit_decision_row(
                     pos, mode_flag, ExitReason.TRAILING_STOP.value,
                     pnl_pct, pnl_pct, peak_pnl_pct, None, 0.0))
@@ -618,6 +621,7 @@ class PortfolioTracker:
                 estimated_fees = economics.estimated_fees
 
             if net_pnl_pct >= profit_target:
+                self._forget_hold_sample(pos, mode_flag)
                 decisions.append(self._exit_decision_row(
                     pos, mode_flag, ExitReason.PROFIT_TARGET.value,
                     pnl_pct, net_pnl_pct, peak_pnl_pct, profit_target,
@@ -630,9 +634,11 @@ class PortfolioTracker:
                 exits.append((pos, ExitReason.PROFIT_TARGET))
                 continue
 
-            decisions.append(self._exit_decision_row(
-                pos, mode_flag, "HOLD", pnl_pct, net_pnl_pct, peak_pnl_pct,
-                profit_target, estimated_fees))
+            sample_seconds = settings.execution.exit_hold_sample_seconds
+            if self._should_sample_hold(pos, mode_flag, sample_seconds):
+                decisions.append(self._exit_decision_row(
+                    pos, mode_flag, "HOLD", pnl_pct, net_pnl_pct, peak_pnl_pct,
+                    profit_target, estimated_fees))
 
             # Edge-erosion / capital-efficiency / time-decay assume binary 0-1
             # resolution semantics (price converges to $0 or $1). They're
@@ -723,6 +729,10 @@ class PortfolioTracker:
             settings.execution, "exit_decision_retention_days", _DEFAULT_RETENTION_DAYS)
         if not isinstance(retention, int) or isinstance(retention, bool) or retention < 1:
             retention = _DEFAULT_RETENTION_DAYS
+        # Every exit ends the sampling episode, including capital-efficiency,
+        # time-decay, stop-loss, and dust exits recorded outside this policy.
+        for exited_position, _reason in exits:
+            self._forget_hold_sample(exited_position, mode_flag)
         await self._record_exit_decisions(decisions, retention)
 
         return exits
@@ -731,6 +741,27 @@ class PortfolioTracker:
     def _as_utc(value: str) -> datetime:
         parsed = datetime.fromisoformat(value)
         return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+    def _hold_sample_key(self, pos, mode_flag: int | None) -> tuple[str, str, int]:
+        mode = self._position_mode(pos, mode_flag)
+        return (pos.market_id, getattr(pos.token, "value", pos.token),
+                1 if mode is None else mode)
+
+    def _should_sample_hold(
+        self, pos, mode_flag: int | None, interval_seconds: int,
+    ) -> bool:
+        """Keep the first HOLD and at most one per interval per position."""
+        key = self._hold_sample_key(pos, mode_flag)
+        now = monotonic()
+        previous = self._exit_hold_samples.get(key)
+        if previous is not None and now - previous < interval_seconds:
+            return False
+        self._exit_hold_samples[key] = now
+        return True
+
+    def _forget_hold_sample(self, pos, mode_flag: int | None) -> None:
+        """A terminal policy action ends the episode; a re-entry samples anew."""
+        self._exit_hold_samples.pop(self._hold_sample_key(pos, mode_flag), None)
 
     _EXIT_DECISION_INSERT = """INSERT INTO exit_decisions
         (market_id, exchange, token, is_paper, policy_action,
