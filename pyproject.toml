@@ -42,7 +42,7 @@ embeddings = ["sentence-transformers>=5.6.1"]
 # Hermes agent-trader bridge: exposes Auramaur's read/paper plumbing as an MCP
 # server (auramaur.agentmcp.server) that the Hermes agent consumes over stdio.
 # Kept out of the live bot's runtime deps on purpose — the bot never imports it.
-agent = ["fastmcp>=3.4.5"]
+agent = ["fastmcp>=3.4.6"]
 # Read-only web dashboard (auramaur.web / `auramaur web`). Like `agent`, kept
 # out of the bot's runtime deps — the bot never imports it.
 web = [
